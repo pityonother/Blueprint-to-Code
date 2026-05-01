@@ -7,10 +7,11 @@ This project is an ARK DevKit / Unreal Blueprint clipboard-text analyzer, not a 
 When reviewing a captured Blueprint asset output directory, read these files first:
 
 1. `next_actions.md` - the main action list for missing graph pages, defaults, components, and rerun commands.
-2. `capture_quality_report.md` - copy-completeness and likely missing Blueprint graph checks.
-3. `diagnostics_report.md` - unresolved links, unknown sources, disconnected nodes, and confidence details.
-4. `asset_report.md` - full audit report, useful after the first three files identify where to focus.
-5. `graph_reports/<graph>_report.md` - only read the specific graph reports named by `next_actions.md` or `capture_quality_report.md`.
+2. `behavior_summary.md` - behavior-area overview grouped by ARK concerns such as Glide, Sliding, Nursing, MultiUse, Damage, and Replication.
+3. `capture_quality_report.md` - copy-completeness and likely missing Blueprint graph checks.
+4. `diagnostics_report.md` - unresolved links, unknown sources, disconnected nodes, and confidence details.
+5. `asset_report.md` - full audit report, useful after the first four files identify where to focus.
+6. `graph_reports/<graph>_report.md` - only read the specific graph reports named by `next_actions.md` or `capture_quality_report.md`.
 
 ## Files Usually Safe To Ignore
 
@@ -30,7 +31,7 @@ The default asset report level should avoid writing those large or redundant fil
 ## Output Levels
 
 - `--report-level compact`: writes only the main human reports.
-- `--report-level standard`: default; writes the useful human reports, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
+- `--report-level standard`: default; writes the useful human reports, `asset_report.md`, `behavior_summary.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
 - `--report-level debug`: writes full JSON payloads, complete call graph, glossary, and all per-graph debug artifacts.
 
 Asset output generation cleans known stale generated files by default so old debug artifacts do not linger after a standard run. Use `--keep-stale-output` only when intentionally comparing generated artifacts by hand.

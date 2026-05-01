@@ -54,7 +54,7 @@ Asset reports also write `next_actions.md`, `defaults_suggestions.json`, and `co
 Asset report output is tiered:
 
 - `--report-level compact`: write only the main human reports.
-- `--report-level standard`: default; write `next_actions.md`, `capture_quality_report.md`, `diagnostics_report.md`, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
+- `--report-level standard`: default; write `next_actions.md`, `behavior_summary.md`, `capture_quality_report.md`, `diagnostics_report.md`, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
 - `--report-level debug`: write full parser payloads such as `asset.json`, `call_graph.md`, `capture_quality.json`, `diagnostics.json`, and all per-graph JSON/diagnostic files.
 
 Known generated asset outputs are cleaned before each asset report run, so stale debug files do not remain after returning to standard output. Pass `--keep-stale-output` only when intentionally comparing old generated files.
@@ -80,6 +80,7 @@ py exec(open(r"C:\Users\ac\Documents\project gaming\Blueprint to Code\scripts\de
 The exporter also still tries the currently opened/selected Blueprint, the saved GUI request, clipboard text, and an in-DevKit paste dialog when available. It writes `defaults.json`, `components.json`, `devkit_export_report.md`, and `devkit_export_log.json` under `captures/<BlueprintName>/`. Then rerun the asset analyzer:
 
 Component export runs in crash-safe mode by default: it writes analysis candidates rather than recursively reflecting live Unreal component objects, which can crash some ARK DevKit Python builds.
+Crash-safe mode now also attempts a shallow SimpleConstructionScript/component-template scan for component names, classes, and paths; it still avoids recursive component default reflection.
 
 ```powershell
 python scripts\bp_clipboard_to_prompt.py --asset-dir captures\<BlueprintName>

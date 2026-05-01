@@ -1204,6 +1204,100 @@ def collect_cdo_components(cdo, components_by_key):
                 STATE.skip("class_default_object", prop_name, str(exc))
 
 
+def safe_iter_scs_nodes(scs):
+    nodes = []
+    for method_name in ("get_all_nodes", "get_root_nodes"):
+        method = getattr(scs, method_name, None)
+        if callable(method):
+            try:
+                nodes.extend(method() or [])
+            except Exception as exc:
+                STATE.skip("safe_simple_construction_script", method_name, str(exc))
+    for prop_name in ("all_nodes", "root_nodes"):
+        raw = get_prop(scs, prop_name)
+        if raw:
+            try:
+                nodes.extend(raw)
+            except Exception as exc:
+                STATE.skip("safe_simple_construction_script", prop_name, str(exc))
+    result = []
+    seen = set()
+    for node in nodes:
+        marker = id(node)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(node)
+    return result
+
+
+def add_component_node_placeholder(components_by_key, node, source):
+    name = ""
+    for prop_name in ("variable_name", "VariableName", "internal_variable_name", "InternalVariableName"):
+        value = get_prop(node, prop_name)
+        if value:
+            name = str(value)
+            break
+    if not name:
+        name = object_name(node)
+    if not name:
+        return
+    key = source + ":" + name.lower()
+    if key in components_by_key:
+        return
+    components_by_key[key] = {
+        "name": name,
+        "class": "",
+        "path": object_path(node),
+        "defaults": {},
+        "purpose": "",
+        "source": source,
+        "_todo": "SCS node was found, but its component template was not safely readable. Confirm class/defaults in ARK DevKit.",
+    }
+
+
+def collect_scs_components_safe(objects, components_by_key):
+    scs, source = get_object_property_any(
+        objects,
+        ("simple_construction_script", "SimpleConstructionScript"),
+    )
+    if not scs:
+        return
+    count_before = len(components_by_key)
+    for node in safe_iter_scs_nodes(scs):
+        component, component_source = get_object_property_any(
+            ((node, "scs_node"),),
+            ("component_template", "ComponentTemplate", "template", "Template"),
+        )
+        if component is not None:
+            add_component(components_by_key, component, component_source or "safe_simple_construction_script")
+        else:
+            add_component_node_placeholder(components_by_key, node, source or "safe_simple_construction_script")
+    if len(components_by_key) > count_before:
+        STATE.info("Safe SCS scan collected {} component templates/placeholders.".format(len(components_by_key) - count_before))
+
+
+def collect_component_templates_safe(objects, components_by_key):
+    count_before = len(components_by_key)
+    for obj, label in objects:
+        if obj is None:
+            continue
+        for prop_name in ("component_templates", "ComponentTemplates"):
+            ok, raw, method = raw_property_value(obj, prop_name)
+            if not ok:
+                raw = get_prop(obj, prop_name)
+                method = "get_prop"
+            if not raw:
+                continue
+            if is_component_like_object(raw):
+                add_component(components_by_key, raw, "safe_{}.{} via {}".format(label, prop_name, method))
+            for component in iter_unreal_collection(raw):
+                if is_component_like_object(component):
+                    add_component(components_by_key, component, "safe_{}.{} via {}".format(label, prop_name, method))
+    if len(components_by_key) > count_before:
+        STATE.info("Safe component template scan collected {} component templates.".format(len(components_by_key) - count_before))
+
+
 def read_components_suggestions(asset_dir):
     path = os.path.join(asset_dir, "output", "components_suggestions.json")
     if not os.path.isfile(path):
@@ -1273,7 +1367,13 @@ def collect_components(blueprint, cdo, generated_class=None, asset_dir=None):
         return []
     components_by_key = {}
     if SAFE_COMPONENT_EXPORT or not ENABLE_UNSAFE_COMPONENT_REFLECTION:
-        STATE.info("Safe component export enabled: skipping live Unreal component reflection and writing analysis candidates only.")
+        STATE.info("Safe component export enabled: using shallow SCS/component-template scan and skipping recursive live component reflection.")
+        objects = (
+            (blueprint, "blueprint_asset"),
+            (generated_class, "generated_class"),
+        )
+        collect_scs_components_safe(objects, components_by_key)
+        collect_component_templates_safe(objects, components_by_key)
     else:
         objects = (
             (blueprint, "blueprint_asset"),

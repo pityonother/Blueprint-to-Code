@@ -81,6 +81,13 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(bp.classify_function_call("Multiply_DoubleDouble"), "kismet_math_or_data")
         self.assertEqual(bp.classify_function_call("K2_SetTimer"), "engine_timer")
         self.assertEqual(bp.classify_function_call("SetActive"), "component_or_presentation")
+        self.assertEqual(bp.classify_function_call("Delay"), "unreal_engine")
+        self.assertEqual(bp.classify_function_call("GetActorRightVector"), "unreal_engine")
+        self.assertEqual(bp.classify_function_call("FormatAsTime"), "unreal_engine")
+        self.assertEqual(bp.classify_function_call("HideBoneByName"), "component_or_presentation")
+        self.assertEqual(bp.classify_function_call("InputRunPressed"), "ark_parent_or_rpc")
+        self.assertEqual(bp.classify_function_call("IsRunningOnServer"), "ark_parent_or_rpc")
+        self.assertEqual(bp.classify_function_call("BlueprintCanRiderAttack"), "ark_parent_or_rpc")
         self.assertEqual(bp.classify_function_call("UpdateJumpRotation"), "blueprint_graph_candidate")
 
     def test_suggestions_are_structured_for_sidecars(self):

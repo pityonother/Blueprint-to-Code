@@ -15,6 +15,7 @@ from .core import parse_blueprint_text
 from .diagnostics import build_diagnostic_findings, diagnostic_counts, diagnostic_finding, render_diagnostics_report
 from .output import resolve_output_paths, write_glossary
 from .quality import (
+    behavior_area,
     build_components_suggestions,
     build_defaults_suggestions,
     classify_function_call,
@@ -36,6 +37,7 @@ ASSET_OUTPUT_FILE_KEYS = (
     "call_graph_summary",
     "capture_quality_report",
     "capture_quality_json",
+    "behavior_summary",
     "defaults_suggestions",
     "components_suggestions",
     "next_actions",
@@ -572,6 +574,113 @@ def render_call_graph_summary(asset_payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def graph_variable_counters(graph: dict[str, object]) -> tuple[dict[str, int], dict[str, int]]:
+    payload = graph.get("payload", {}) if isinstance(graph.get("payload", {}), dict) else {}
+    reads: dict[str, int] = {}
+    writes: dict[str, int] = {}
+    for item in payload.get("variable_gets", []):
+        if isinstance(item, dict):
+            name = str(item.get("variable") or item.get("label") or "")
+            if name:
+                reads[name] = reads.get(name, 0) + 1
+    for item in payload.get("variable_sets", []):
+        if isinstance(item, dict):
+            name = str(item.get("variable") or item.get("label") or "")
+            if name:
+                writes[name] = writes.get(name, 0) + 1
+    return reads, writes
+
+
+def top_counter_items(counter: dict[str, int], limit: int = 10) -> str:
+    items = sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    return ", ".join(f"{name}({count})" for name, count in items) if items else "-"
+
+
+def render_behavior_summary(asset_payload: dict[str, object]) -> str:
+    metadata = asset_payload.get("metadata", {}) if isinstance(asset_payload.get("metadata", {}), dict) else {}
+    graphs = [graph for graph in asset_payload.get("graphs", []) if isinstance(graph, dict)]
+    call_graph = asset_payload.get("call_graph", {}) if isinstance(asset_payload.get("call_graph", {}), dict) else {}
+    calls = [item for item in call_graph.get("calls", []) if isinstance(item, dict)]
+    quality = collect_asset_quality(asset_payload)
+    area_graphs: dict[str, list[dict[str, object]]] = {}
+    for graph in graphs:
+        area = behavior_area(str(graph.get("graph_name", "")))
+        area_graphs.setdefault(area, []).append(graph)
+
+    lines = [
+        "# Blueprint Behavior Summary",
+        "",
+        "## Summary",
+        "",
+        f"- Asset: {metadata.get('asset_name', '-')}",
+        f"- Graphs: {metadata.get('graph_count', 0)}",
+        f"- Nodes: {metadata.get('node_count', 0)}",
+        f"- Confidence: {asset_payload.get('diagnostics', {}).get('confidence_level', '-') if isinstance(asset_payload.get('diagnostics', {}), dict) else '-'}",
+        "",
+        "## Behavior Areas",
+        "",
+    ]
+    lines.append(table_row(["Area", "Graphs", "Nodes", "Key Graphs"]))
+    lines.append(table_row(["---", "---", "---", "---"]))
+    for area, area_items in sorted(area_graphs.items(), key=lambda item: (item[0] == "Other", item[0])):
+        key_graphs = ", ".join(str(graph.get("graph_name", "")) for graph in area_items[:5])
+        nodes = sum(int(graph.get("node_count") or 0) for graph in area_items)
+        lines.append(table_row([area, len(area_items), nodes, key_graphs]))
+
+    known_defaults = set()
+    defaults = asset_payload.get("class_defaults", {})
+    if isinstance(defaults, dict):
+        variables = defaults.get("variables", {})
+        if isinstance(variables, dict):
+            known_defaults.update(str(name) for name in variables)
+    known_components = set()
+    components = asset_payload.get("component_defaults", {})
+    if isinstance(components, dict):
+        for component in components.get("components", []):
+            if isinstance(component, dict) and component.get("name"):
+                known_components.add(str(component.get("name")))
+
+    lines.extend(["", "## Area Details", ""])
+    for area, area_items in sorted(area_graphs.items(), key=lambda item: (item[0] == "Other", item[0])):
+        graph_names = {str(graph.get("graph_name", "")) for graph in area_items}
+        area_reads: dict[str, int] = {}
+        area_writes: dict[str, int] = {}
+        for graph in area_items:
+            reads, writes = graph_variable_counters(graph)
+            for name, count in reads.items():
+                area_reads[name] = area_reads.get(name, 0) + count
+            for name, count in writes.items():
+                area_writes[name] = area_writes.get(name, 0) + count
+        local_calls = unique_call_rows(
+            [item for item in calls if str(item.get("source_graph", "")) in graph_names and item.get("call_kind") == "local_blueprint_graph"],
+            ("source_graph", "function", "target_graph"),
+        )
+        missing_calls = unique_call_rows(
+            [item for item in quality.get("blueprint_missing_candidates", []) if isinstance(item, dict) and str(item.get("source_graph", "")) in graph_names],
+            ("source_graph", "function"),
+        )
+        referenced_defaults = {name: area_reads.get(name, 0) + area_writes.get(name, 0) for name in set(area_reads) | set(area_writes) if name in known_defaults}
+        referenced_components = {name: area_reads.get(name, 0) + area_writes.get(name, 0) for name in set(area_reads) | set(area_writes) if name in known_components}
+        lines.extend([f"### {area}", ""])
+        lines.append(f"- Graphs: {', '.join(sorted(graph_names))}")
+        lines.append(f"- Top reads: {top_counter_items(area_reads)}")
+        lines.append(f"- Top writes: {top_counter_items(area_writes)}")
+        lines.append(f"- Class defaults referenced: {top_counter_items(referenced_defaults)}")
+        lines.append(f"- Components referenced: {top_counter_items(referenced_components)}")
+        if local_calls:
+            call_text = ", ".join(f"{item.get('source_graph')} -> {item.get('target_graph')}" for item in local_calls[:12])
+            lines.append(f"- Local graph calls: {call_text}")
+        else:
+            lines.append("- Local graph calls: -")
+        if missing_calls:
+            missing_text = ", ".join(f"{item.get('source_graph')} -> {item.get('function')}" for item in missing_calls[:12])
+            lines.append(f"- Still unresolved graph-like calls: {missing_text}")
+        else:
+            lines.append("- Still unresolved graph-like calls: -")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def collect_asset_missing_link_rows(asset_payload: dict[str, object]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for graph in asset_payload.get("graphs", []):
@@ -881,6 +990,7 @@ def run_asset_translate(args: argparse.Namespace) -> int:
 
     write_output("diagnostics_report", render_asset_diagnostics_report(asset_payload))
     write_output("capture_quality_report", render_capture_quality_report(asset_payload))
+    write_output("behavior_summary", render_behavior_summary(asset_payload))
     write_output("next_actions", render_next_actions(asset_payload), encoding="utf-8-sig")
 
     asset_report_text = ""
