@@ -7,6 +7,7 @@ import datetime as _dt
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 from .context import context_from_args, parse_components_context, parse_defaults_context
@@ -24,6 +25,21 @@ from .quality import (
 )
 from .renderers import format_component_refs, format_default_refs, render_report
 from .utils import profile_keywords, safe_filename, split_csvish, table_row
+
+ASSET_OUTPUT_FILE_KEYS = (
+    "asset_report",
+    "report",
+    "asset_json",
+    "diagnostics_report",
+    "diagnostics_json",
+    "call_graph",
+    "call_graph_summary",
+    "capture_quality_report",
+    "capture_quality_json",
+    "defaults_suggestions",
+    "components_suggestions",
+    "next_actions",
+)
 
 def load_manifest(asset_dir: Path) -> dict[str, object]:
     manifest_path = asset_dir / "manifest.json"
@@ -477,6 +493,85 @@ def render_call_graph(asset_payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def unique_call_rows(items: Iterable[dict[str, object]], fields: tuple[str, ...]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[str, ...]] = set()
+    for item in items:
+        marker = tuple(str(item.get(field, "")) for field in fields)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        rows.append(item)
+    return rows
+
+
+def render_call_graph_summary(asset_payload: dict[str, object]) -> str:
+    call_graph = asset_payload.get("call_graph", {})
+    if not isinstance(call_graph, dict):
+        call_graph = {}
+    quality = collect_asset_quality(asset_payload)
+    calls = [item for item in call_graph.get("calls", []) if isinstance(item, dict)]
+    local_calls = unique_call_rows(
+        [item for item in calls if item.get("call_kind") == "local_blueprint_graph"],
+        ("source_graph", "function", "target_graph"),
+    )
+    missing = unique_call_rows(
+        [item for item in quality.get("blueprint_missing_candidates", []) if isinstance(item, dict)],
+        ("source_graph", "function"),
+    )
+    delegate_bindings = [item for item in call_graph.get("delegate_bindings", []) if isinstance(item, dict)]
+    missing_macro_links = [item for item in call_graph.get("missing_macro_links", []) if isinstance(item, dict)]
+
+    lines = ["# Blueprint Asset Call Graph Summary", "", "## Classification Counts", ""]
+    counts = quality.get("call_classification_counts", {})
+    if isinstance(counts, dict) and counts:
+        lines.append(table_row(["Classification", "Count"]))
+        lines.append(table_row(["---", "---"]))
+        for name, count in sorted(counts.items()):
+            lines.append(table_row([name, count]))
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Local Blueprint Calls", ""])
+    if local_calls:
+        lines.append(table_row(["Source Graph", "Function", "Target Graph"]))
+        lines.append(table_row(["---", "---", "---"]))
+        for item in local_calls[:120]:
+            lines.append(table_row([item.get("source_graph"), item.get("function"), item.get("target_graph")]))
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Likely Missing Blueprint Graphs", ""])
+    if missing:
+        lines.append(table_row(["Source Graph", "Function"]))
+        lines.append(table_row(["---", "---"]))
+        for item in missing[:80]:
+            lines.append(table_row([item.get("source_graph"), item.get("function")]))
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Delegate Bindings", ""])
+    if delegate_bindings:
+        lines.append(table_row(["Source Graph", "Delegate", "Handler"]))
+        lines.append(table_row(["---", "---", "---"]))
+        for item in delegate_bindings[:80]:
+            lines.append(table_row([item.get("source_graph"), item.get("delegate"), item.get("handler")]))
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Missing Macro Links", ""])
+    if missing_macro_links:
+        lines.append(table_row(["Source Graph", "Macro Node", "Missing Node"]))
+        lines.append(table_row(["---", "---", "---"]))
+        for item in missing_macro_links[:80]:
+            lines.append(table_row([item.get("source_graph"), item.get("referenced_from"), item.get("missing_macro_node")]))
+    else:
+        lines.append("- none")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def collect_asset_missing_link_rows(asset_payload: dict[str, object]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for graph in asset_payload.get("graphs", []):
@@ -694,11 +789,32 @@ def render_graph_payload_report(graph: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def write_asset_graph_outputs(asset_payload: dict[str, object], graph_reports_dir: Path) -> None:
+def attention_graph_names(asset_payload: dict[str, object]) -> set[str]:
+    quality = collect_asset_quality(asset_payload)
+    names: set[str] = set()
+    for item in quality.get("attention_graphs", []):
+        if isinstance(item, dict):
+            names.add(str(item.get("graph", "")))
+    return names
+
+
+def write_asset_graph_outputs(
+    asset_payload: dict[str, object],
+    graph_reports_dir: Path,
+    *,
+    mode: str = "attention",
+    include_json: bool = False,
+    include_diagnostics: bool = False,
+) -> None:
     graph_reports_dir.mkdir(parents=True, exist_ok=True)
     index_lines = ["# Blueprint Asset Graph Reports", ""]
+    selected_names = attention_graph_names(asset_payload) if mode == "attention" else set()
+    written = 0
     for index, graph in enumerate(asset_payload.get("graphs", []), start=1):
         if not isinstance(graph, dict):
+            continue
+        graph_name = str(graph.get("graph_name", ""))
+        if mode == "attention" and graph_name not in selected_names:
             continue
         base = f"{index:02d}_{safe_filename(str(graph.get('graph_name', '')), 'graph')}"
         report_path = graph_reports_dir / f"{base}_report.md"
@@ -706,10 +822,37 @@ def write_asset_graph_outputs(asset_payload: dict[str, object], graph_reports_di
         diagnostics_path = graph_reports_dir / f"{base}_diagnostics.md"
         payload = graph.get("payload", {}) if isinstance(graph.get("payload", {}), dict) else {}
         report_path.write_text(render_graph_payload_report(graph), encoding="utf-8")
-        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        diagnostics_path.write_text(render_diagnostics_report(payload), encoding="utf-8")
+        if include_json:
+            json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if include_diagnostics:
+            diagnostics_path.write_text(render_diagnostics_report(payload), encoding="utf-8")
         index_lines.append(f"- [{graph.get('graph_name', base)}]({report_path.name})")
+        written += 1
+    if written == 0:
+        index_lines.append("- No graph-level reports were written for this report level.")
     (graph_reports_dir / "index.md").write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+
+
+def clean_asset_outputs(paths: dict[str, Path]) -> None:
+    for key in ASSET_OUTPUT_FILE_KEYS:
+        path = paths.get(key)
+        if path and path.exists() and path.is_file():
+            path.unlink()
+    glossary_path = paths["dir"] / "ark_glossary.json"
+    if glossary_path.exists() and glossary_path.is_file():
+        glossary_path.unlink()
+    graph_reports = paths.get("graph_reports")
+    if graph_reports and graph_reports.exists() and graph_reports.is_dir():
+        shutil.rmtree(graph_reports)
+
+
+def suggestion_has_items(suggestions: dict[str, object], key: str) -> bool:
+    value = suggestions.get(key)
+    if isinstance(value, dict):
+        return bool(value)
+    if isinstance(value, list):
+        return bool(value)
+    return False
 
 
 def run_asset_translate(args: argparse.Namespace) -> int:
@@ -726,35 +869,57 @@ def run_asset_translate(args: argparse.Namespace) -> int:
     keywords = profile_keywords(args.profile, args.keyword)
     context = asset_context_from_args(args, asset_dir, manifest)
     asset_payload = build_asset_payload(args, asset_dir, manifest, graph_records, context, keywords)
-    paths["asset_report"].write_text(render_asset_report(asset_payload), encoding="utf-8")
-    paths["report"].write_text(render_asset_report(asset_payload), encoding="utf-8")
-    paths["asset_json"].write_text(json.dumps(asset_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    paths["diagnostics_report"].write_text(render_asset_diagnostics_report(asset_payload), encoding="utf-8")
-    paths["diagnostics_json"].write_text(json.dumps({"metadata": asset_payload.get("metadata", {}), "diagnostics": asset_payload.get("diagnostics", {})}, ensure_ascii=False, indent=2), encoding="utf-8")
-    paths["call_graph"].write_text(render_call_graph(asset_payload), encoding="utf-8")
-    paths["capture_quality_report"].write_text(render_capture_quality_report(asset_payload), encoding="utf-8")
-    paths["capture_quality_json"].write_text(json.dumps(collect_asset_quality(asset_payload), ensure_ascii=False, indent=2), encoding="utf-8")
-    paths["defaults_suggestions"].write_text(json.dumps(build_defaults_suggestions(asset_payload), ensure_ascii=False, indent=2), encoding="utf-8")
-    paths["components_suggestions"].write_text(json.dumps(build_components_suggestions(asset_payload), ensure_ascii=False, indent=2), encoding="utf-8")
-    paths["next_actions"].write_text(render_next_actions(asset_payload), encoding="utf-8-sig")
-    write_asset_graph_outputs(asset_payload, paths["graph_reports"])
-    write_glossary(paths["dir"])
+    report_level = getattr(args, "report_level", "standard")
+    if not getattr(args, "keep_stale_output", False):
+        clean_asset_outputs(paths)
+
+    written: list[str] = []
+
+    def write_output(label: str, text: str, *, encoding: str = "utf-8") -> None:
+        paths[label].write_text(text, encoding=encoding)
+        written.append(label)
+
+    write_output("diagnostics_report", render_asset_diagnostics_report(asset_payload))
+    write_output("capture_quality_report", render_capture_quality_report(asset_payload))
+    write_output("next_actions", render_next_actions(asset_payload), encoding="utf-8-sig")
+
+    asset_report_text = ""
+    legacy_output = bool(getattr(args, "output", None))
+    if report_level in {"standard", "debug"} or legacy_output:
+        asset_report_text = render_asset_report(asset_payload)
+    if report_level in {"standard", "debug"}:
+        write_output("asset_report", asset_report_text)
+        write_output("call_graph_summary", render_call_graph_summary(asset_payload))
+        defaults_suggestions = build_defaults_suggestions(asset_payload)
+        components_suggestions = build_components_suggestions(asset_payload)
+        if report_level == "debug" or suggestion_has_items(defaults_suggestions, "variables"):
+            write_output("defaults_suggestions", json.dumps(defaults_suggestions, ensure_ascii=False, indent=2))
+        if report_level == "debug" or suggestion_has_items(components_suggestions, "components"):
+            write_output("components_suggestions", json.dumps(components_suggestions, ensure_ascii=False, indent=2))
+        write_asset_graph_outputs(
+            asset_payload,
+            paths["graph_reports"],
+            mode="all" if report_level == "debug" else "attention",
+            include_json=report_level == "debug",
+            include_diagnostics=report_level == "debug",
+        )
+        written.append("graph_reports")
+    if legacy_output:
+        write_output("report", asset_report_text or render_asset_report(asset_payload))
+    if report_level == "debug":
+        write_output("asset_json", json.dumps(asset_payload, ensure_ascii=False, indent=2))
+        write_output("diagnostics_json", json.dumps({"metadata": asset_payload.get("metadata", {}), "diagnostics": asset_payload.get("diagnostics", {})}, ensure_ascii=False, indent=2))
+        write_output("call_graph", render_call_graph(asset_payload))
+        write_output("capture_quality_json", json.dumps(collect_asset_quality(asset_payload), ensure_ascii=False, indent=2))
+        write_glossary(paths["dir"])
+        written.append("ark_glossary")
     print(f"Wrote asset output directory: {paths['dir']}")
-    for label in (
-        "asset_report",
-        "report",
-        "asset_json",
-        "diagnostics_report",
-        "diagnostics_json",
-        "call_graph",
-        "capture_quality_report",
-        "capture_quality_json",
-        "defaults_suggestions",
-        "components_suggestions",
-        "next_actions",
-    ):
-        print(f"- {label}: {paths[label]}")
-    print(f"- graph_reports: {paths['graph_reports']}")
+    print(f"Report level: {report_level}")
+    for label in written:
+        if label == "ark_glossary":
+            print(f"- {label}: {paths['dir'] / 'ark_glossary.json'}")
+        else:
+            print(f"- {label}: {paths[label]}")
     print(f"Parsed graphs: {asset_payload['metadata']['graph_count']}")
     print(f"Parsed nodes: {asset_payload['metadata']['node_count']}")
     print(f"Confidence: {asset_payload['diagnostics']['confidence_level']}")

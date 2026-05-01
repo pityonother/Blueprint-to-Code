@@ -53,6 +53,8 @@ class AssetDirTests(unittest.TestCase):
                     str(asset_dir),
                     "--output-dir",
                     str(out_dir),
+                    "--report-level",
+                    "debug",
                 ],
                 cwd=ROOT,
                 text=True,
@@ -73,6 +75,7 @@ class AssetDirTests(unittest.TestCase):
             self.assertTrue((out_dir / "asset_report.md").exists())
             self.assertTrue((out_dir / "diagnostics_report.md").exists())
             self.assertTrue((out_dir / "call_graph.md").exists())
+            self.assertTrue((out_dir / "call_graph_summary.md").exists())
             self.assertTrue((out_dir / "capture_quality_report.md").exists())
             self.assertTrue((out_dir / "capture_quality.json").exists())
             self.assertTrue((out_dir / "defaults_suggestions.json").exists())
@@ -94,6 +97,59 @@ class AssetDirTests(unittest.TestCase):
             self.assertIn("variables", defaults_suggestions)
             self.assertIn("components", components_suggestions)
             self.assertIn("填 defaults.json", next_actions)
+
+
+    def test_standard_report_level_skips_heavy_debug_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset_dir = pathlib.Path(tmp) / "Achatina_Character_BP"
+            graphs_dir = asset_dir / "graphs"
+            out_dir = pathlib.Path(tmp) / "out"
+            graphs_dir.mkdir(parents=True)
+            (graphs_dir / "EventGraph.txt").write_text(
+                (FIXTURES / "real_ark_achatina_beginplay.txt").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            (asset_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "asset_name": "Achatina_Character_BP",
+                        "graphs": [{"name": "EventGraph", "type": "EventGraph", "path": "graphs/EventGraph.txt"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            out_dir.mkdir()
+            (out_dir / "asset.json").write_text("stale", encoding="utf-8")
+            (out_dir / "call_graph.md").write_text("stale", encoding="utf-8")
+            stale_graph_dir = out_dir / "graph_reports"
+            stale_graph_dir.mkdir()
+            (stale_graph_dir / "stale.json").write_text("stale", encoding="utf-8")
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--asset-dir",
+                    str(asset_dir),
+                    "--output-dir",
+                    str(out_dir),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            self.assertTrue((out_dir / "next_actions.md").exists())
+            self.assertTrue((out_dir / "capture_quality_report.md").exists())
+            self.assertTrue((out_dir / "diagnostics_report.md").exists())
+            self.assertTrue((out_dir / "asset_report.md").exists())
+            self.assertTrue((out_dir / "call_graph_summary.md").exists())
+            self.assertTrue((out_dir / "graph_reports" / "index.md").exists())
+            self.assertFalse((out_dir / "asset.json").exists())
+            self.assertFalse((out_dir / "call_graph.md").exists())
+            self.assertFalse((out_dir / "graph_reports" / "stale.json").exists())
+            self.assertFalse((out_dir / "report.md").exists())
 
 
 if __name__ == "__main__":

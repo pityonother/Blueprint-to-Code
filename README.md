@@ -51,6 +51,14 @@ The capture wizard creates `captures/Achatina_Character_BP/graphs/`, saves each 
 For large real assets, start with `capture_quality_report.md`; it separates likely missing Blueprint graph pages from native/Kismet/inherited call noise and lists the defaults/components worth filling first.
 Asset reports also write `next_actions.md`, `defaults_suggestions.json`, and `components_suggestions.json` so you can fill Class Defaults and component context without digging through the full report by hand.
 
+Asset report output is tiered:
+
+- `--report-level compact`: write only the main human reports.
+- `--report-level standard`: default; write `next_actions.md`, `capture_quality_report.md`, `diagnostics_report.md`, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
+- `--report-level debug`: write full parser payloads such as `asset.json`, `call_graph.md`, `capture_quality.json`, `diagnostics.json`, and all per-graph JSON/diagnostic files.
+
+Known generated asset outputs are cleaned before each asset report run, so stale debug files do not remain after returning to standard output. Pass `--keep-stale-output` only when intentionally comparing old generated files.
+
 Export Blueprint Class Defaults and component defaults from ARK DevKit:
 
 ```powershell

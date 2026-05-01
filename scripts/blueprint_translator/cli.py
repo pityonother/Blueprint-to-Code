@@ -21,6 +21,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--capture-no-report", action="store_true", help="Only save captured graph files and manifest.json; do not run the asset report after capture.")
     parser.add_argument("--output", "-o", help="Legacy report.md output path. Other files go beside it.")
     parser.add_argument("--output-dir", help="Directory for generated files.")
+    parser.add_argument("--report-level", choices=["compact", "standard", "debug"], default="standard", help="Asset report verbosity. standard avoids large debug JSON; debug writes every intermediate artifact.")
+    parser.add_argument("--keep-stale-output", action="store_true", help="Do not remove old generated asset output files before writing the selected report set.")
     parser.add_argument("--asset-name", help="Blueprint asset name/path label.")
     parser.add_argument("--graph-name", help="Graph/function/event graph label.")
     parser.add_argument("--ask", help="Question to place at the top of prompt.md.")
