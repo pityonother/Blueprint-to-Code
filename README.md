@@ -54,7 +54,7 @@ Asset reports also write `next_actions.md`, `defaults_suggestions.json`, and `co
 Asset report output is tiered:
 
 - `--report-level compact`: write only the main human reports.
-- `--report-level standard`: default; write `next_actions.md`, `behavior_summary.md`, `capture_quality_report.md`, `diagnostics_report.md`, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
+- `--report-level standard`: default; write `next_actions.md`, `notes_todo.md`, `behavior_summary.md`, `capture_quality_report.md`, `diagnostics_report.md`, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
 - `--report-level debug`: write full parser payloads such as `asset.json`, `call_graph.md`, `capture_quality.json`, `diagnostics.json`, and all per-graph JSON/diagnostic files.
 
 Known generated asset outputs are cleaned before each asset report run, so stale debug files do not remain after returning to standard output. Pass `--keep-stale-output` only when intentionally comparing old generated files.
@@ -67,6 +67,8 @@ native: Delay, FormatAsTime
 ignore missing graph: FooBar
 SomeFunction: parent - implemented by Dino_Character_BP
 ```
+
+The analyzer also writes `notes_todo.md`, which turns remaining likely-missing function graph calls into copy/paste templates for `notes.md`.
 
 Export Blueprint Class Defaults and component defaults from ARK DevKit:
 

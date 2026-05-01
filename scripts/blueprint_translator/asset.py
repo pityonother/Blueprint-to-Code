@@ -38,6 +38,7 @@ ASSET_OUTPUT_FILE_KEYS = (
     "capture_quality_report",
     "capture_quality_json",
     "behavior_summary",
+    "notes_todo",
     "defaults_suggestions",
     "components_suggestions",
     "next_actions",
@@ -620,6 +621,87 @@ def top_counter_items(counter: dict[str, int], limit: int = 10) -> str:
     return ", ".join(f"{name}({count})" for name, count in items) if items else "-"
 
 
+def behavior_area_rollup(area_items: list[dict[str, object]], calls: list[dict[str, object]], quality: dict[str, object]) -> dict[str, object]:
+    graph_names = {str(graph.get("graph_name", "")) for graph in area_items}
+    reads: dict[str, int] = {}
+    writes: dict[str, int] = {}
+    for graph in area_items:
+        graph_reads, graph_writes = graph_variable_counters(graph)
+        for name, count in graph_reads.items():
+            reads[name] = reads.get(name, 0) + count
+        for name, count in graph_writes.items():
+            writes[name] = writes.get(name, 0) + count
+    local_calls = unique_call_rows(
+        [item for item in calls if str(item.get("source_graph", "")) in graph_names and item.get("call_kind") == "local_blueprint_graph"],
+        ("source_graph", "function", "target_graph"),
+    )
+    missing_calls = unique_call_rows(
+        [item for item in quality.get("blueprint_missing_candidates", []) if isinstance(item, dict) and str(item.get("source_graph", "")) in graph_names],
+        ("source_graph", "function"),
+    )
+    return {
+        "graph_names": graph_names,
+        "reads": reads,
+        "writes": writes,
+        "local_calls": local_calls,
+        "missing_calls": missing_calls,
+    }
+
+
+def infer_behavior_lines(area: str, rollup: dict[str, object]) -> list[str]:
+    reads = rollup.get("reads", {}) if isinstance(rollup.get("reads", {}), dict) else {}
+    writes = rollup.get("writes", {}) if isinstance(rollup.get("writes", {}), dict) else {}
+    local_calls = rollup.get("local_calls", []) if isinstance(rollup.get("local_calls", []), list) else []
+    missing_calls = rollup.get("missing_calls", []) if isinstance(rollup.get("missing_calls", []), list) else []
+    graphs = sorted(str(name) for name in rollup.get("graph_names", set()))
+    graph_text = ", ".join(graphs[:5]) if graphs else "-"
+    lines: list[str] = []
+    if area == "Glide":
+        lines.append(f"- Glide logic appears to be split across {graph_text}; start/update checks are tied together through local graph calls.")
+        lines.append("- Watch speed, pitch, stamina, and parachute state variables before changing glide feel.")
+    elif area == "Sliding":
+        lines.append(f"- Sliding logic appears to manage start/clear/decay state across {graph_text}.")
+        lines.append("- Variables around slide multiplier, slope decay, replicated slide transform, and stamina are likely behavior-critical.")
+    elif area == "Nursing":
+        lines.append(f"- Nursing logic appears to combine server state, allied/team checks, trough visuals, and replicated effectiveness values.")
+        lines.append("- Check component visibility/audio/FX references before changing nursing range or visuals.")
+    elif area == "MultiUse":
+        lines.append("- MultiUse logic likely controls player interaction entries and execution branches.")
+        lines.append("- Treat menu entry conditions, team checks, saddle/rider state, and baby-passenger checks as user-facing behavior.")
+    elif area == "Damage":
+        lines.append("- Damage logic likely adjusts incoming or outgoing damage and may gate baby/passenger stealing behavior.")
+        lines.append("- Recheck target team, rider/passenger state, cooldown, and attack-index variables before edits.")
+    elif area == "Replication":
+        lines.append("- Replication/timer logic appears to coordinate server-owned state updates and client-visible movement changes.")
+        lines.append("- Server/client ownership and replicated variables should be reviewed before changing call order.")
+    elif area == "Movement":
+        lines.append("- Movement logic appears to bridge jump, movement mode, swim/fall state, and animation transitions.")
+        lines.append("- Treat movement mode branches and CharacterMovement references as high-impact.")
+    elif area == "Parachute":
+        lines.append("- Parachute logic appears to manage replicated parachute intent, animation/audio cues, and cooldown timing.")
+        lines.append("- Changes to bWantsToParachute, timers, or force duration likely affect both feel and replication.")
+    elif area == "HUD":
+        lines.append("- HUD logic appears to render status feedback from gameplay variables rather than owning core state.")
+        lines.append("- Confirm display-only changes do not hide gameplay-critical warnings or range indicators.")
+    elif area == "Passenger":
+        lines.append("- Passenger logic appears to compute seat/name-tag offsets and related passenger positioning data.")
+        lines.append("- Offset arrays and seat index functions are likely the main risk points.")
+    else:
+        lines.append(f"- This group does not match a specific ARK behavior area yet; inspect {graph_text} for shared state or parent/native calls.")
+    if reads:
+        lines.append(f"- Most-read signals: {top_counter_items(reads, 5)}")
+    if writes:
+        lines.append(f"- Most-written state: {top_counter_items(writes, 5)}")
+    if local_calls:
+        call_text = ", ".join(f"{item.get('source_graph')} -> {item.get('target_graph')}" for item in local_calls[:5])
+        lines.append(f"- Local graph dependencies: {call_text}")
+    if missing_calls:
+        missing_names = list(dict.fromkeys(str(item.get("function", "")) for item in missing_calls if item.get("function")))
+        missing_text = ", ".join(missing_names[:8])
+        lines.append(f"- Needs confirmation/capture for: {missing_text}")
+    return lines
+
+
 def render_behavior_summary(asset_payload: dict[str, object]) -> str:
     metadata = asset_payload.get("metadata", {}) if isinstance(asset_payload.get("metadata", {}), dict) else {}
     graphs = [graph for graph in asset_payload.get("graphs", []) if isinstance(graph, dict)]
@@ -665,25 +747,23 @@ def render_behavior_summary(asset_payload: dict[str, object]) -> str:
             if isinstance(component, dict) and component.get("name"):
                 known_components.add(str(component.get("name")))
 
+    sorted_area_items = sorted(area_graphs.items(), key=lambda item: (item[0] == "Other", item[0]))
+    rollups = {area: behavior_area_rollup(area_items, calls, quality) for area, area_items in sorted_area_items}
+
+    lines.extend(["", "## Inferred Behavior", ""])
+    for area, _area_items in sorted_area_items:
+        lines.extend([f"### {area}", ""])
+        lines.extend(infer_behavior_lines(area, rollups[area]))
+        lines.append("")
+
     lines.extend(["", "## Area Details", ""])
-    for area, area_items in sorted(area_graphs.items(), key=lambda item: (item[0] == "Other", item[0])):
-        graph_names = {str(graph.get("graph_name", "")) for graph in area_items}
-        area_reads: dict[str, int] = {}
-        area_writes: dict[str, int] = {}
-        for graph in area_items:
-            reads, writes = graph_variable_counters(graph)
-            for name, count in reads.items():
-                area_reads[name] = area_reads.get(name, 0) + count
-            for name, count in writes.items():
-                area_writes[name] = area_writes.get(name, 0) + count
-        local_calls = unique_call_rows(
-            [item for item in calls if str(item.get("source_graph", "")) in graph_names and item.get("call_kind") == "local_blueprint_graph"],
-            ("source_graph", "function", "target_graph"),
-        )
-        missing_calls = unique_call_rows(
-            [item for item in quality.get("blueprint_missing_candidates", []) if isinstance(item, dict) and str(item.get("source_graph", "")) in graph_names],
-            ("source_graph", "function"),
-        )
+    for area, _area_items in sorted_area_items:
+        rollup = rollups[area]
+        graph_names = rollup.get("graph_names", set()) if isinstance(rollup.get("graph_names", set()), set) else set()
+        area_reads = rollup.get("reads", {}) if isinstance(rollup.get("reads", {}), dict) else {}
+        area_writes = rollup.get("writes", {}) if isinstance(rollup.get("writes", {}), dict) else {}
+        local_calls = rollup.get("local_calls", []) if isinstance(rollup.get("local_calls", []), list) else []
+        missing_calls = rollup.get("missing_calls", []) if isinstance(rollup.get("missing_calls", []), list) else []
         referenced_defaults = {name: area_reads.get(name, 0) + area_writes.get(name, 0) for name in set(area_reads) | set(area_writes) if name in known_defaults}
         referenced_components = {name: area_reads.get(name, 0) + area_writes.get(name, 0) for name in set(area_reads) | set(area_writes) if name in known_components}
         lines.extend([f"### {area}", ""])
@@ -703,6 +783,85 @@ def render_behavior_summary(asset_payload: dict[str, object]) -> str:
         else:
             lines.append("- Still unresolved graph-like calls: -")
         lines.append("")
+    return "\n".join(lines)
+
+
+def render_notes_todo(asset_payload: dict[str, object]) -> str:
+    metadata = asset_payload.get("metadata", {}) if isinstance(asset_payload.get("metadata", {}), dict) else {}
+    quality = collect_asset_quality(asset_payload)
+    missing = [item for item in quality.get("blueprint_missing_candidates", []) if isinstance(item, dict)]
+    notes = asset_payload.get("notes", {}) if isinstance(asset_payload.get("notes", {}), dict) else {}
+    functions = notes.get("functions", {}) if isinstance(notes.get("functions", {}), dict) else {}
+    by_function: dict[str, dict[str, object]] = {}
+    for item in missing:
+        name = str(item.get("function", "")).strip()
+        if not name:
+            continue
+        row = by_function.setdefault(name, {"function": name, "sources": set(), "areas": set()})
+        source = str(item.get("source_graph", "")).strip()
+        if source:
+            row_sources = row.get("sources")
+            if isinstance(row_sources, set):
+                row_sources.add(source)
+            row_areas = row.get("areas")
+            if isinstance(row_areas, set):
+                row_areas.add(behavior_area(source))
+
+    sorted_rows = sorted(by_function.values(), key=lambda row: (-len(row.get("sources", set())), str(row.get("function", ""))))
+    function_names = [str(row.get("function", "")) for row in sorted_rows]
+    inherited_line = "inherited: " + ", ".join(function_names) if function_names else "inherited: "
+    ignore_line = "ignore missing graph: " + ", ".join(function_names) if function_names else "ignore missing graph: "
+
+    lines = [
+        "# Blueprint Notes Todo",
+        "",
+        "Use this file as a review queue. After you verify a function in ARK DevKit, copy one of the suggested lines into `notes.md`, then rerun the analyzer.",
+        "",
+        "## Summary",
+        "",
+        f"- Asset: {metadata.get('asset_name', '-')}",
+        f"- Unique missing graph functions to verify: {len(sorted_rows)}",
+        f"- Current note function overrides: {len(functions)}",
+        "",
+        "## Copy/Paste Templates",
+        "",
+        "If these functions are implemented by a parent Blueprint or native/ARK code after you verify them:",
+        "",
+        "```text",
+        inherited_line,
+        "```",
+        "",
+        "If you intentionally want to suppress them without assigning parent/native ownership:",
+        "",
+        "```text",
+        ignore_line,
+        "```",
+        "",
+        "## Candidates To Verify",
+        "",
+    ]
+    if sorted_rows:
+        lines.append(table_row(["Function", "Source Graphs", "Behavior Areas", "Suggested notes.md entry"]))
+        lines.append(table_row(["---", "---", "---", "---"]))
+        for row in sorted_rows:
+            sources = sorted(str(value) for value in row.get("sources", set()))
+            areas = sorted(str(value) for value in row.get("areas", set()))
+            function = str(row.get("function", ""))
+            lines.append(table_row([function, ", ".join(sources), ", ".join(areas), f"inherited: {function}"]))
+    else:
+        lines.append("- No unresolved graph-like calls need notes review.")
+
+    lines.extend(["", "## Existing Notes Overrides", ""])
+    if functions:
+        lines.append(table_row(["Function", "Kind", "Reason"]))
+        lines.append(table_row(["---", "---", "---"]))
+        for item in sorted(functions.values(), key=lambda value: str(value.get("name", "")) if isinstance(value, dict) else ""):
+            if not isinstance(item, dict):
+                continue
+            lines.append(table_row([item.get("name"), item.get("kind"), item.get("reason", "")]))
+    else:
+        lines.append("- none")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -1018,6 +1177,7 @@ def run_asset_translate(args: argparse.Namespace) -> int:
     write_output("capture_quality_report", render_capture_quality_report(asset_payload))
     write_output("behavior_summary", render_behavior_summary(asset_payload))
     write_output("next_actions", render_next_actions(asset_payload), encoding="utf-8-sig")
+    write_output("notes_todo", render_notes_todo(asset_payload))
 
     asset_report_text = ""
     legacy_output = bool(getattr(args, "output", None))
