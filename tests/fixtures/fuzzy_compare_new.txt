@@ -1,0 +1,10 @@
+Begin Object Class=/Script/BlueprintGraph.K2Node_Event Name="K2Node_Event_0"
+   NodeGuid=50000000000000000000000000000001
+   EventReference=(MemberParent="/Script/CoreUObject.Class'/Script/Engine.Actor'",MemberName="ReceiveBeginPlay")
+   CustomProperties Pin (PinId=50000000000000000000000000000002,PinName="then",Direction="EGPD_Output",PinType.PinCategory="exec",LinkedTo=(K2Node_CallFunction_0 50000000000000000000000000000003,),PersistentGuid=99999999999999999999999999999999)
+End Object
+Begin Object Class=/Script/BlueprintGraph.K2Node_CallFunction Name="K2Node_CallFunction_0"
+   NodeGuid=50000000000000000000000000000004
+   FunctionReference=(MemberParent="/Script/CoreUObject.Class'/Script/ShooterGame.PrimalInventoryComponent'",MemberName="InventoryRefresh")
+   CustomProperties Pin (PinId=50000000000000000000000000000003,PinName="execute",PinType.PinCategory="exec",LinkedTo=(K2Node_Event_0 50000000000000000000000000000002,),PersistentGuid=99999999999999999999999999999999)
+End Object

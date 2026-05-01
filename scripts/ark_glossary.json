@@ -1,0 +1,17 @@
+{
+  "PrimalItem": "ARK item Blueprint/class used for inventory items, consumables, resources, structures, and crafted objects.",
+  "PrimalInventory": "Inventory component/class that owns item lists, crafting, remote inventory access, and refresh behavior.",
+  "PrimalInventoryComponent": "Runtime component that stores and manages items for characters, structures, and containers.",
+  "PrimalStructure": "Base class family for placeable structures, including ownership, placement, multi-use, inventory, and network state.",
+  "PrimalDinoCharacter": "Base dino character class with tame, baby, mating, AI, targeting, food, and status behavior.",
+  "ShooterCharacter": "Player character class family used by ARK/ShooterGame.",
+  "Buff": "Status effect object that can apply timed or persistent behavior to characters, dinos, items, or structures.",
+  "StatusComponent": "Component that stores character/dino status values such as health, stamina, food, water, and torpor.",
+  "MultiUse": "ARK radial menu / interaction system for context actions on actors and structures.",
+  "Tribe": "Player group ownership and permission system.",
+  "TargetingTeam": "Team/faction identifier used for targeting, AI, tribe ownership, and friendly/hostile checks.",
+  "Stasis": "ARK optimization state where actors outside active relevance may be paused or reduced in simulation.",
+  "Octree": "Spatial indexing structure commonly used for fast nearby/range queries.",
+  "Replication": "Unreal network synchronization from server to clients.",
+  "NetDormancy": "Unreal networking mode that reduces replication frequency for actors with stable state."
+}
