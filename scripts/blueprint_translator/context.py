@@ -228,6 +228,117 @@ def parse_components_context(context: dict[str, object]) -> dict[str, object]:
     return {"components": normalize_components_data(data), "parse_error": ""}
 
 
+def normalize_note_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "", value.lower().strip())
+
+
+def note_kind_from_text(value: str) -> str:
+    lowered = value.lower().strip().replace("-", "_").replace(" ", "_")
+    if lowered in {"native", "engine", "kismet", "external", "parent", "inherited", "ark_parent", "rpc"}:
+        return "noted_native_or_inherited"
+    if lowered in {"ignore", "ignored", "ignore_missing", "ignore_missing_graph", "suppress", "suppress_missing"}:
+        return "noted_ignored"
+    return "note"
+
+
+def add_function_note(notes: dict[str, dict[str, str]], name: object, kind: str, reason: object = "") -> None:
+    text = str(name or "").strip()
+    if not text:
+        return
+    key = normalize_note_key(text)
+    if not key:
+        return
+    normalized_kind = note_kind_from_text(kind)
+    notes[key] = {
+        "name": text,
+        "kind": normalized_kind,
+        "source_kind": str(kind or "").strip(),
+        "reason": str(reason or "").strip(),
+    }
+
+
+def add_function_note_items(notes: dict[str, dict[str, str]], value: object, kind: str) -> None:
+    if isinstance(value, dict):
+        name = value.get("name") or value.get("function") or value.get("Function")
+        add_function_note(notes, name, str(value.get("kind") or kind), value.get("reason") or value.get("note") or "")
+        return
+    if isinstance(value, list):
+        for item in value:
+            add_function_note_items(notes, item, kind)
+        return
+    for item in re.split(r"[,;]", str(value or "")):
+        add_function_note(notes, item, kind)
+
+
+def parse_notes_json(data: object) -> dict[str, dict[str, str]]:
+    notes: dict[str, dict[str, str]] = {}
+    if not isinstance(data, dict):
+        return notes
+    grouped_keys = {
+        "native_or_inherited_functions": "native",
+        "nativeFunctions": "native",
+        "native_functions": "native",
+        "inheritedFunctions": "inherited",
+        "inherited_functions": "inherited",
+        "external_functions": "external",
+        "externalFunctions": "external",
+        "ignore_missing_graphs": "ignore_missing",
+        "ignoreMissingGraphs": "ignore_missing",
+        "suppress_missing_graphs": "ignore_missing",
+        "suppressMissingGraphs": "ignore_missing",
+    }
+    for key, kind in grouped_keys.items():
+        if key in data:
+            add_function_note_items(notes, data.get(key), kind)
+    functions = data.get("functions", {})
+    if isinstance(functions, dict):
+        for name, value in functions.items():
+            if isinstance(value, dict):
+                add_function_note(notes, name, str(value.get("kind") or value.get("type") or "note"), value.get("reason") or value.get("note") or "")
+            else:
+                add_function_note(notes, name, str(value))
+    elif isinstance(functions, list):
+        add_function_note_items(notes, functions, "note")
+    return notes
+
+
+def parse_notes_text_sidecar(text: str) -> dict[str, dict[str, str]]:
+    notes: dict[str, dict[str, str]] = {}
+    kind_aliases = r"native|engine|kismet|external|parent|inherited|ark_parent|rpc|ignore|ignored|ignore_missing|ignore missing graph|suppress|suppress_missing"
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("-*").strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        prefixed = re.match(rf"(?i)^(?P<kind>{kind_aliases})\s*[:=]\s*(?P<names>.+)$", stripped)
+        if prefixed:
+            add_function_note_items(notes, prefixed.group("names"), prefixed.group("kind"))
+            continue
+        reversed_match = re.match(rf"(?i)^(?P<name>[A-Za-z_][A-Za-z0-9_ ]*)\s*[:=]\s*(?P<kind>{kind_aliases})(?:\s*[-:]\s*(?P<reason>.+))?$", stripped)
+        if reversed_match:
+            add_function_note(notes, reversed_match.group("name"), reversed_match.group("kind"), reversed_match.group("reason") or "")
+    return notes
+
+
+def parse_notes_context(context: dict[str, object]) -> dict[str, object]:
+    text = str(context.get("notes_text", "")).strip()
+    if not text:
+        return {"functions": {}, "parse_error": ""}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        functions = parse_notes_text_sidecar(text)
+        return {"functions": functions, "parse_error": str(exc) if not functions else ""}
+    return {"functions": parse_notes_json(data), "parse_error": ""}
+
+
+def function_note_for_name(notes: dict[str, object], function_name: str) -> dict[str, str] | None:
+    functions = notes.get("functions", {}) if isinstance(notes, dict) else {}
+    if not isinstance(functions, dict):
+        return None
+    item = functions.get(normalize_note_key(function_name))
+    return item if isinstance(item, dict) else None
+
+
 def component_default_refs_for_pin(pin_name: str, components: dict[str, object]) -> list[dict[str, object]]:
     if not pin_name:
         return []

@@ -10,7 +10,7 @@ import re
 import shutil
 from pathlib import Path
 
-from .context import context_from_args, parse_components_context, parse_defaults_context
+from .context import context_from_args, function_note_for_name, parse_components_context, parse_defaults_context, parse_notes_context
 from .core import parse_blueprint_text
 from .diagnostics import build_diagnostic_findings, diagnostic_counts, diagnostic_finding, render_diagnostics_report
 from .output import resolve_output_paths, write_glossary
@@ -133,6 +133,7 @@ def normalize_graph_lookup(value: str) -> str:
 
 def build_asset_call_graph(asset_payload: dict[str, object]) -> dict[str, object]:
     graphs = list(asset_payload.get("graphs", []))
+    notes_context = asset_payload.get("notes", {})
     graph_by_key: dict[str, dict[str, object]] = {}
     for graph in graphs:
         graph_by_key[normalize_graph_lookup(str(graph.get("graph_name", "")))] = graph
@@ -162,6 +163,9 @@ def build_asset_call_graph(asset_payload: dict[str, object]) -> dict[str, object
                 call_kind = "local_blueprint_graph"
             else:
                 call_kind = classify_function_call(function_name)
+                note = function_note_for_name(notes_context if isinstance(notes_context, dict) else {}, function_name)
+                if note and note.get("kind") in {"noted_native_or_inherited", "noted_ignored"}:
+                    call_kind = str(note.get("kind"))
             item = {
                 "source_graph": graph.get("graph_name", ""),
                 "source_node": node.get("label") or node.get("name") or "",
@@ -169,6 +173,9 @@ def build_asset_call_graph(asset_payload: dict[str, object]) -> dict[str, object
                 "target_graph": target.get("graph_name") if target else "",
                 "call_kind": call_kind,
             }
+            note = function_note_for_name(notes_context if isinstance(notes_context, dict) else {}, function_name)
+            if note:
+                item["note"] = note
             calls.append(item)
             if not target and call_kind == "blueprint_graph_candidate":
                 missing_targets.append(item)
@@ -250,6 +257,7 @@ def worst_confidence(levels: Iterable[str]) -> str:
 def build_asset_payload(args: argparse.Namespace, asset_dir: Path, manifest: dict[str, object], graph_records: list[dict[str, str]], context: dict[str, object], keywords: list[str]) -> dict[str, object]:
     defaults_context = parse_defaults_context(context)
     components_context = parse_components_context(context)
+    notes_context = parse_notes_context(context)
     graphs: list[dict[str, object]] = []
     for record in graph_records:
         path = Path(record["path"])
@@ -294,10 +302,12 @@ def build_asset_payload(args: argparse.Namespace, asset_dir: Path, manifest: dic
             "components_present": bool(str(context.get("components_text", "")).strip()),
             "default_variable_count": len(defaults_context.get("variables", {})) if isinstance(defaults_context.get("variables", {}), dict) else 0,
             "component_count": len(components_context.get("components", [])) if isinstance(components_context.get("components", []), list) else 0,
+            "note_function_count": len(notes_context.get("functions", {})) if isinstance(notes_context.get("functions", {}), dict) else 0,
         },
         "context": context,
         "class_defaults": defaults_context,
         "component_defaults": components_context,
+        "notes": notes_context,
         "graphs": graphs,
     }
     asset_payload["call_graph"] = build_asset_call_graph(asset_payload)
@@ -523,6 +533,10 @@ def render_call_graph_summary(asset_payload: dict[str, object]) -> str:
     )
     delegate_bindings = [item for item in call_graph.get("delegate_bindings", []) if isinstance(item, dict)]
     missing_macro_links = [item for item in call_graph.get("missing_macro_links", []) if isinstance(item, dict)]
+    noted_calls = unique_call_rows(
+        [item for item in calls if isinstance(item.get("note"), dict)],
+        ("source_graph", "function", "call_kind"),
+    )
 
     lines = ["# Blueprint Asset Call Graph Summary", "", "## Classification Counts", ""]
     counts = quality.get("call_classification_counts", {})
@@ -558,6 +572,16 @@ def render_call_graph_summary(asset_payload: dict[str, object]) -> str:
         lines.append(table_row(["---", "---", "---"]))
         for item in delegate_bindings[:80]:
             lines.append(table_row([item.get("source_graph"), item.get("delegate"), item.get("handler")]))
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Notes Overrides", ""])
+    if noted_calls:
+        lines.append(table_row(["Source Graph", "Function", "Kind", "Reason"]))
+        lines.append(table_row(["---", "---", "---", "---"]))
+        for item in noted_calls[:80]:
+            note = item.get("note", {}) if isinstance(item.get("note", {}), dict) else {}
+            lines.append(table_row([item.get("source_graph"), item.get("function"), item.get("call_kind"), note.get("reason", "")]))
     else:
         lines.append("- none")
 
@@ -615,6 +639,7 @@ def render_behavior_summary(asset_payload: dict[str, object]) -> str:
         f"- Asset: {metadata.get('asset_name', '-')}",
         f"- Graphs: {metadata.get('graph_count', 0)}",
         f"- Nodes: {metadata.get('node_count', 0)}",
+        f"- Note function overrides: {metadata.get('note_function_count', 0)}",
         f"- Confidence: {asset_payload.get('diagnostics', {}).get('confidence_level', '-') if isinstance(asset_payload.get('diagnostics', {}), dict) else '-'}",
         "",
         "## Behavior Areas",
@@ -725,6 +750,7 @@ def render_asset_report(asset_payload: dict[str, object]) -> str:
         f"- Components sidecar: {'yes' if metadata.get('components_present') else 'no'}",
         f"- Parsed default variables: {metadata.get('default_variable_count', 0)}",
         f"- Parsed components: {metadata.get('component_count', 0)}",
+        f"- Parsed note function overrides: {metadata.get('note_function_count', 0)}",
         f"- Confidence: {diagnostics.get('confidence_level', '-')}",
         "",
         "## Graphs",

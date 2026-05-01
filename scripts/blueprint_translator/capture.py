@@ -154,7 +154,18 @@ def maybe_write_capture_sidecars(asset_dir: Path) -> None:
         components_path.write_text(json.dumps({"components": []}, indent=2), encoding="utf-8")
     notes_path = asset_dir / "notes.md"
     if not notes_path.exists():
-        notes_path.write_text("# Capture Notes\n\n", encoding="utf-8")
+        notes_path.write_text(
+            "# Capture Notes\n\n"
+            "Use this file to preserve things you confirm in ARK DevKit.\n\n"
+            "Examples:\n\n"
+            "```text\n"
+            "inherited: ClearJump, GetGlidingPitch\n"
+            "native: Delay, FormatAsTime\n"
+            "ignore missing graph: FooBar\n"
+            "SomeFunction: parent - implemented by Dino_Character_BP\n"
+            "```\n",
+            encoding="utf-8",
+        )
 
 
 def _read_capture_text(args: argparse.Namespace) -> tuple[str, str]:

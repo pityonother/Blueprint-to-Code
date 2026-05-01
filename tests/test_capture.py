@@ -123,5 +123,35 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("填 defaults.json", next_actions)
 
 
+    def test_notes_sidecar_suppresses_known_external_function_candidates(self):
+        bp = load_translator()
+        notes = bp.parse_notes_context({"notes_text": "inherited: UpdateJumpRotation\nignore missing graph: FooBar"})
+        self.assertEqual(bp.function_note_for_name(notes, "UpdateJumpRotation")["kind"], "noted_native_or_inherited")
+        self.assertEqual(bp.function_note_for_name(notes, "FooBar")["kind"], "noted_ignored")
+
+        asset_payload = {
+            "notes": notes,
+            "graphs": [
+                {
+                    "graph_name": "EventGraph",
+                    "payload": {
+                        "nodes": [],
+                        "function_calls": [
+                            {"node_type": "K2Node_CallFunction", "function": "UpdateJumpRotation", "label": "UpdateJumpRotation"},
+                            {"node_type": "K2Node_CallFunction", "function": "StillMissingGraph", "label": "StillMissingGraph"},
+                        ],
+                    },
+                }
+            ],
+        }
+        call_graph = bp.build_asset_call_graph(asset_payload)
+        missing = [item["function"] for item in call_graph["missing_targets"]]
+        native_or_noted = {item["function"]: item["call_kind"] for item in call_graph["native_or_inherited_calls"]}
+
+        self.assertNotIn("UpdateJumpRotation", missing)
+        self.assertIn("StillMissingGraph", missing)
+        self.assertEqual(native_or_noted["UpdateJumpRotation"], "noted_native_or_inherited")
+
+
 if __name__ == "__main__":
     unittest.main()

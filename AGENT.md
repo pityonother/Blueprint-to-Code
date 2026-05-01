@@ -35,3 +35,16 @@ The default asset report level should avoid writing those large or redundant fil
 - `--report-level debug`: writes full JSON payloads, complete call graph, glossary, and all per-graph debug artifacts.
 
 Asset output generation cleans known stale generated files by default so old debug artifacts do not linger after a standard run. Use `--keep-stale-output` only when intentionally comparing generated artifacts by hand.
+
+## Notes Sidecar
+
+`notes.md` can suppress confirmed non-local functions from missing graph reports. Recognized examples:
+
+```text
+inherited: ClearJump, GetGlidingPitch
+native: Delay, FormatAsTime
+ignore missing graph: FooBar
+SomeFunction: parent - implemented by Dino_Character_BP
+```
+
+When reviewing follow-up reports, treat noted functions as intentionally external unless new evidence shows they are implemented in the current asset.

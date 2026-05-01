@@ -59,6 +59,15 @@ Asset report output is tiered:
 
 Known generated asset outputs are cleaned before each asset report run, so stale debug files do not remain after returning to standard output. Pass `--keep-stale-output` only when intentionally comparing old generated files.
 
+Use `notes.md` to suppress known non-local function candidates after you verify them in ARK DevKit:
+
+```text
+inherited: ClearJump, GetGlidingPitch
+native: Delay, FormatAsTime
+ignore missing graph: FooBar
+SomeFunction: parent - implemented by Dino_Character_BP
+```
+
 Export Blueprint Class Defaults and component defaults from ARK DevKit:
 
 ```powershell
