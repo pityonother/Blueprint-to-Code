@@ -104,6 +104,8 @@ Export Blueprint Class Defaults and component defaults from ARK DevKit:
 
 Paste the Blueprint Object Path/reference into the GUI, click `Save Path`, then run the copied command in ARK DevKit's Python Console mode. The DevKit-side command is:
 
+ARK DevKit's Python Console is global, not tied to the currently visible graph tab. The exporter therefore prioritizes the Object Path saved by the control center request file. If you do not use the GUI request, select the target Blueprint asset in the Content Browser before running the command; the active graph page alone is not a reliable asset selector.
+
 ```python
 exec(open(r"C:\Users\ac\Documents\project gaming\Blueprint to Code\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
 ```

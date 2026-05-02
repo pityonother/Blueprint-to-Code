@@ -560,21 +560,21 @@ def find_current_blueprint():
     if is_blueprint(explicit):
         return explicit, "ASSET_PATH"
 
-    for asset in edited_assets():
-        if is_blueprint(asset):
-            return asset, "open_asset_editor"
+    requested = load_asset(read_request_asset_path())
+    if is_blueprint(requested):
+        return requested, "request_file"
 
     for asset in selected_assets():
         if is_blueprint(asset):
             return asset, "content_browser_selection"
 
-    for path, source in (
-        (read_request_asset_path(), "request_file"),
-        (clipboard_text(), "clipboard"),
-    ):
-        explicit = load_asset(path)
-        if is_blueprint(explicit):
-            return explicit, source
+    for asset in edited_assets():
+        if is_blueprint(asset):
+            return asset, "open_asset_editor"
+
+    explicit = load_asset(clipboard_text())
+    if is_blueprint(explicit):
+        return explicit, "clipboard"
 
     pasted_path = prompt_asset_path_gui(clipboard_text())
     explicit = load_asset(pasted_path)
