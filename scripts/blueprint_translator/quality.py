@@ -235,6 +235,11 @@ def infer_asset_graph_type(graph_name: str, payload: dict[str, object] | None = 
 
 def behavior_area(graph_name: str) -> str:
     lowered = graph_name.lower()
+    compact = lowered.replace(" ", "").replace("_", "")
+    if lowered in {"eventgraph", "event graph"} or compact == "shijiantubiao":
+        return "Orchestration"
+    if lowered.startswith("collapsegraph") or lowered.startswith("collapsed"):
+        return "CollapsedGraph"
     if any(term in lowered for term in ("glide", "gliding", "fallvelocity")):
         return "Glide"
     if "slid" in lowered:
@@ -251,9 +256,13 @@ def behavior_area(graph_name: str) -> str:
         return "Damage"
     if "passenger" in lowered:
         return "Passenger"
-    if any(term in lowered for term in ("movement", "jump", "run", "correction")):
+    if any(term in lowered for term in ("sleep", "levelup", "status", "conscious", "died", "death")):
+        return "Status"
+    if "animnotify" in compact or "anim notify" in lowered or "custom event" in lowered:
+        return "Animation"
+    if any(term in lowered for term in ("movement", "jump", "run", "correction", "forwardinput", "forward input", "rotate", "pitch")):
         return "Movement"
-    if "rep" in lowered or "server" in lowered or "client" in lowered:
+    if "rep" in lowered or "server" in lowered or "client" in lowered or "timer" in lowered or "non dedicated" in lowered or "nondedicated" in compact:
         return "Replication"
     return "Other"
 
@@ -638,87 +647,6 @@ def render_capture_quality_report(asset_payload: dict[str, object]) -> str:
         lines.append("- none")
     lines.append("")
     return "\n".join(lines)
-
-
-def render_next_actions(asset_payload: dict[str, object]) -> str:
-    quality = collect_asset_quality(asset_payload)
-    metadata = quality.get("metadata", {})
-    attention = list(quality.get("attention_graphs", []))
-    missing = list(quality.get("blueprint_missing_candidates", []))
-    defaults = list(quality.get("default_variable_candidates", []))
-    components = list(quality.get("component_candidates", []))
-    lines = [
-        "# Blueprint Next Actions",
-        "",
-        f"- Asset: {metadata.get('asset_name', '-')}",
-        f"- Graphs: {metadata.get('graph_count', 0)}",
-        f"- Nodes: {metadata.get('node_count', 0)}",
-        "",
-        "## 1. 先复查图页完整性",
-        "",
-    ]
-    if attention:
-        lines.append(table_row(["Graph", "Action", "Reason"]))
-        lines.append(table_row(["---", "---", "---"]))
-        for item in attention:
-            reasons = []
-            if item.get("unresolved_links"):
-                reasons.append(f"{item.get('unresolved_links')} unresolved links")
-            if item.get("missing_entry_points"):
-                reasons.append("missing entry point")
-            if item.get("confidence") == "low":
-                reasons.append("low confidence")
-            action = "重新打开该图页，Ctrl+A / Ctrl+C 后用采集向导覆盖保存。"
-            if str(item.get("graph", "")).lower().startswith("collapsegraph"):
-                action = "确认是否能进入 collapsed graph 内部；能进入就复制内部图。"
-            lines.append(table_row([item.get("graph"), action, ", ".join(reasons)]))
-    else:
-        lines.append("- 没发现明显复制不完整的图页。")
-    lines.extend(["", "## 2. 再判断是否需要补采函数图", ""])
-    if missing:
-        lines.append("这些名字更像资产自身的 Blueprint 函数/事件，而不是 Kismet/native 噪声。若 DevKit 里能找到对应图页，建议补采；如果确认来自父类或原生代码，就写进 `notes.md`。")
-        lines.append("")
-        lines.append(table_row(["Source Graph", "Function"]))
-        lines.append(table_row(["---", "---"]))
-        for item in missing[:40]:
-            lines.append(table_row([item.get("source_graph"), item.get("function")]))
-    else:
-        lines.append("- 没有明显像漏采 Blueprint 函数图的调用。")
-    lines.extend(["", "## 3. 填 defaults.json", ""])
-    lines.append("已生成 `defaults_suggestions.json`。优先填下面这些变量的真实默认值；不知道就先留空。")
-    lines.append("")
-    if defaults:
-        lines.append(table_row(["Variable", "Hint", "Reads", "Writes"]))
-        lines.append(table_row(["---", "---", "---", "---"]))
-        for item in defaults[:30]:
-            name = str(item.get("name", ""))
-            lines.append(table_row([name, variable_hint(name), item.get("reads"), item.get("writes")]))
-    else:
-        lines.append("- 暂无默认值候选。")
-    lines.extend(["", "## 4. 填 components.json", ""])
-    lines.append("已生成 `components_suggestions.json`。优先确认下面这些组件或组件样式引用的真实 class/defaults。")
-    lines.append("")
-    if components:
-        lines.append(table_row(["Component/Reference", "Class Hint", "Reads", "Writes"]))
-        lines.append(table_row(["---", "---", "---", "---"]))
-        for item in components[:30]:
-            name = str(item.get("name", ""))
-            lines.append(table_row([name, component_class_hint(name), item.get("reads"), item.get("writes")]))
-    else:
-        lines.append("- 暂无组件候选。")
-    lines.extend(
-        [
-            "",
-            "## 5. 填完后重新生成报告",
-            "",
-            "```powershell",
-            f"python scripts\\bp_clipboard_to_prompt.py --asset-dir captures\\{metadata.get('asset_name', 'YourAsset')} --output-dir captures\\{metadata.get('asset_name', 'YourAsset')}\\output",
-            "```",
-            "",
-        ]
-    )
-    return "\n".join(lines)
-
 
 def render_next_actions(asset_payload: dict[str, object]) -> str:
     quality = collect_asset_quality(asset_payload)

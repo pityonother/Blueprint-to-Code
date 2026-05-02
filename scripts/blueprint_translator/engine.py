@@ -14,6 +14,7 @@ from .cli import *  # noqa: F401,F403
 from .compare import *  # noqa: F401,F403
 from .config import *  # noqa: F401,F403
 from .context import *  # noqa: F401,F403
+from .context_review import *  # noqa: F401,F403
 from .core import *  # noqa: F401,F403
 from .diagnostics import *  # noqa: F401,F403
 from .flow import *  # noqa: F401,F403

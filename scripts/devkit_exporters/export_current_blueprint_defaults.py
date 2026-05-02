@@ -46,6 +46,8 @@ class ExportState(object):
         self.warnings = []
         self.errors = []
         self.skipped = []
+        self._skip_index = {}
+        self.skipped_attempts = 0
         self.debug = []
 
     def info(self, message):
@@ -61,7 +63,13 @@ class ExportState(object):
         log("ERROR: " + str(message))
 
     def skip(self, where, name, reason):
-        self.skipped.append({"where": str(where), "name": str(name), "reason": str(reason)})
+        self.skipped_attempts += 1
+        marker = (str(where), str(name), str(reason))
+        if marker in self._skip_index:
+            self.skipped[self._skip_index[marker]]["count"] += 1
+            return
+        self._skip_index[marker] = len(self.skipped)
+        self.skipped.append({"where": marker[0], "name": marker[1], "reason": marker[2], "count": 1})
 
 
 STATE = ExportState()
@@ -1406,16 +1414,53 @@ def read_defaults_suggestions(asset_dir):
 
 def build_suggestion_match_report(suggestions, exported_variables, exported_class_defaults):
     if not suggestions:
-        return {"suggestions_found": False, "matched": [], "missing": []}
+        return {"suggestions_found": False, "matched": [], "missing": [], "missing_details": [], "missing_groups": {}}
     exported_keys = set(exported_variables) | set(exported_class_defaults)
     matched = []
     missing = []
+    missing_details = []
+    missing_groups = {}
     for name in sorted(suggestions):
         if name in exported_keys:
             matched.append(name)
         else:
             missing.append(name)
-    return {"suggestions_found": True, "matched": matched, "missing": missing}
+            item = suggestions.get(name, {}) if isinstance(suggestions, dict) else {}
+            if not isinstance(item, dict):
+                item = {}
+            reads = int(item.get("_reads", 0) or 0)
+            writes = int(item.get("_writes", 0) or 0)
+            hint = str(item.get("_hint") or "")
+            if writes >= 2:
+                triage = "graph_written_runtime_state"
+                recommendation = "图里会多处写入，更像运行时状态；通常不用手填 Class Default。"
+            elif writes == 1:
+                triage = "graph_written_maybe_runtime_state"
+                recommendation = "图里会写入一次，先确认它是否真的是本资产默认值。"
+            elif reads >= 4:
+                triage = "likely_parent_or_inherited_state"
+                recommendation = "只读且读取频繁，更像父类/原生状态；优先在父类或原生行为里确认。"
+            else:
+                triage = "needs_manual_default_check"
+                recommendation = "仍可能是缺失默认值；改玩法前建议在 DevKit Class Defaults 里复查。"
+            missing_groups[triage] = missing_groups.get(triage, 0) + 1
+            missing_details.append(
+                {
+                    "name": name,
+                    "hint": hint,
+                    "reads": reads,
+                    "writes": writes,
+                    "triage": triage,
+                    "recommendation": recommendation,
+                }
+            )
+    return {
+        "suggestions_found": True,
+        "matched": matched,
+        "missing": missing,
+        "missing_details": missing_details,
+        "missing_groups": missing_groups,
+    }
 
 
 def render_report(asset_name, discovery_source, asset_path, generated_class, parent_class, defaults_payload, components_payload, suggestion_report):
@@ -1434,7 +1479,8 @@ def render_report(asset_name, discovery_source, asset_path, generated_class, par
         "- Components exported: {}".format(len(components_payload.get("components", []))),
         "- Warnings: {}".format(len(STATE.warnings)),
         "- Errors: {}".format(len(STATE.errors)),
-        "- Skipped properties: {}".format(len(STATE.skipped)),
+        "- Skipped unique properties: {}".format(len(STATE.skipped)),
+        "- Skipped read attempts: {}".format(STATE.skipped_attempts),
         "",
         "## Analyzer Suggestions Match",
         "",
@@ -1445,9 +1491,23 @@ def render_report(asset_name, discovery_source, asset_path, generated_class, par
         missing = suggestion_report.get("missing", [])[:80]
         if missing:
             lines.append("")
-            lines.append("Missing suggested names:")
-            for name in missing:
-                lines.append("- {}".format(name))
+            lines.append("Missing suggested defaults by triage:")
+            for name, count in sorted(suggestion_report.get("missing_groups", {}).items()):
+                lines.append("- {}: {}".format(name, count))
+            lines.append("")
+            lines.append("| Name | Hint | Reads | Writes | Triage | Recommendation |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for item in suggestion_report.get("missing_details", [])[:80]:
+                lines.append(
+                    "| {} | {} | {} | {} | {} | {} |".format(
+                        item.get("name", ""),
+                        item.get("hint", ""),
+                        item.get("reads", 0),
+                        item.get("writes", 0),
+                        item.get("triage", ""),
+                        item.get("recommendation", ""),
+                    )
+                )
     else:
         lines.append("- No existing output/defaults_suggestions.json was found for this asset.")
 
@@ -1463,10 +1523,12 @@ def render_report(asset_name, discovery_source, asset_path, generated_class, par
 
     if STATE.skipped:
         lines.extend(["", "## Skipped Properties", ""])
-        lines.append("| Where | Name | Reason |")
-        lines.append("| --- | --- | --- |")
+        lines.append("Repeated failures are grouped so this table stays readable.")
+        lines.append("")
+        lines.append("| Count | Where | Name | Reason |")
+        lines.append("| --- | --- | --- | --- |")
         for item in STATE.skipped[:300]:
-            lines.append("| {} | {} | {} |".format(item.get("where", ""), item.get("name", ""), item.get("reason", "")))
+            lines.append("| {} | {} | {} | {} |".format(item.get("count", 1), item.get("where", ""), item.get("name", ""), item.get("reason", "")))
         if len(STATE.skipped) > 300:
             lines.append("")
             lines.append("- {} additional skipped properties omitted from this report.".format(len(STATE.skipped) - 300))
@@ -1620,6 +1682,7 @@ def export_current_blueprint_defaults():
         "warnings": STATE.warnings,
         "errors": STATE.errors,
         "skipped": STATE.skipped,
+        "skipped_attempts": STATE.skipped_attempts,
         "debug": STATE.debug,
         "suggestions": suggestion_report,
     }

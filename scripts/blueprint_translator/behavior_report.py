@@ -107,6 +107,18 @@ def infer_behavior_lines(area: str, rollup: dict[str, object]) -> list[str]:
     elif area == "Passenger":
         lines.append("- Passenger logic appears to compute seat/name-tag offsets and related passenger positioning data.")
         lines.append("- Offset arrays and seat index functions are likely the main risk points.")
+    elif area == "Status":
+        lines.append("- Status/lifecycle logic appears to react to sleep, level-up, death, or consciousness state changes.")
+        lines.append("- Confirm it clears movement, nursing, parachute, and timers consistently when the dino changes state.")
+    elif area == "Animation":
+        lines.append("- Animation notify logic appears to translate montage/custom notify events into gameplay or presentation changes.")
+        lines.append("- Review notify names, montage state, and cosmetic-only branches before changing animation timing.")
+    elif area == "Orchestration":
+        lines.append("- This graph appears to be a central event/orchestration page that routes into several behavior systems.")
+        lines.append("- Treat local graph calls from here as a map of the asset's top-level behavior dependencies.")
+    elif area == "CollapsedGraph":
+        lines.append("- This is a collapsed graph or collapsed node page; the copy may not include a normal event/function entry point.")
+        lines.append("- If the report shows low confidence, open the collapsed graph body in DevKit and copy its internal nodes directly.")
     else:
         lines.append(f"- This group does not match a specific ARK behavior area yet; inspect {graph_text} for shared state or parent/native calls.")
     if reads:
@@ -153,6 +165,46 @@ BEHAVIOR_RULES: dict[str, dict[str, object]] = {
         "signals": ("Damage", "Attack", "Team", "Rider", "Passenger"),
         "components": ("Status",),
         "focus": "Confirm damage adjustment inputs, attacker/target checks, passenger or baby side effects, and return value writes.",
+    },
+    "Movement": {
+        "signals": ("MovementMode", "CurrentExtraState", "Jump", "Run", "ForwardInput", "Pitch", "CharacterMovement", "Swim", "Landed"),
+        "components": ("CharacterMovement", "Status", "Mesh"),
+        "focus": "Confirm jump/land transitions, movement-mode branches, forced input, camera correction, and CharacterMovement writes.",
+    },
+    "Parachute": {
+        "signals": ("bWantsToParachute", "Parachute", "Para", "LastParachuteStartTime", "MultiParachuteInputVector"),
+        "components": ("ParaAudio", "CharacterMovement", "Mesh"),
+        "focus": "Confirm RepNotify order, cooldown timing, input vector writes, audio cues, and slide/glide cancellation.",
+    },
+    "HUD": {
+        "signals": ("HUD", "Canvas", "NursingString", "NursingColor", "Range", "Spyglass", "TargetingTeam"),
+        "components": ("Canvas", "Status"),
+        "focus": "Confirm visible ranges, strings/colors, spyglass gates, and whether displayed values match server-owned state.",
+    },
+    "Passenger": {
+        "signals": ("Passenger", "Seat", "DinoNameTag", "Offset", "BabyPassenger"),
+        "components": ("Saddle", "Mesh", "Status"),
+        "focus": "Confirm seat index logic, passenger offset arrays, name-tag offsets, and baby/passenger grab side effects.",
+    },
+    "Status": {
+        "signals": ("Sleep", "LevelUp", "Status", "Conscious", "Death", "Died", "Nursing", "Parachute", "Sliding"),
+        "components": ("MyCharacterStatusComponent", "Status"),
+        "focus": "Confirm lifecycle events clear incompatible movement/nursing/parachute state and keep replicated status values coherent.",
+    },
+    "Animation": {
+        "signals": ("Anim", "Notify", "Montage", "CustomEvent", "JumpStartAnim", "LandedAnim"),
+        "components": ("Mesh", "Anim", "Status"),
+        "focus": "Confirm notify names, montage gates, cosmetic/server split, and any gameplay state changed from animation callbacks.",
+    },
+    "Orchestration": {
+        "signals": ("EventGraph", "BeginPlay", "Tick", "Timer", "Jump", "Glide", "Sliding", "Nursing", "Parachute"),
+        "components": ("CharacterMovement", "Status", "Inventory"),
+        "focus": "Use this as the top-level dependency map; verify each local graph call is either captured or intentionally noted as parent/native.",
+    },
+    "CollapsedGraph": {
+        "signals": ("CollapseGraph", "Collapsed", "EntryPoint", "Tunnel"),
+        "components": (),
+        "focus": "Open the collapsed graph internals and recopy if confidence is low or entry points are missing.",
     },
 }
 

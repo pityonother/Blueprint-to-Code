@@ -48,6 +48,7 @@ REPORT_TARGETS = {
     "next_actions": ("output", "next_actions.md"),
     "notes_todo": ("output", "notes_todo.md"),
     "behavior_summary": ("output", "behavior_summary.md"),
+    "context_review": ("output", "context_review.md"),
     "capture_quality_report": ("output", "capture_quality_report.md"),
     "diagnostics_report": ("output", "diagnostics_report.md"),
     "asset_report": ("output", "asset_report.md"),
@@ -355,6 +356,7 @@ def devkit_export_quality(asset_dir: Path, components_data: object | None) -> di
         errors = list(log_data.get("errors", [])) if isinstance(log_data.get("errors", []), list) else []
         skipped = list(log_data.get("skipped", [])) if isinstance(log_data.get("skipped", []), list) else []
         debug = list(log_data.get("debug", [])) if isinstance(log_data.get("debug", []), list) else []
+    skipped_attempts = int(log_data.get("skipped_attempts", len(skipped)) or len(skipped)) if isinstance(log_data, dict) else len(skipped)
     report_text = report_path.read_text(encoding="utf-8-sig", errors="replace") if report_path.is_file() else ""
     report_counts = parse_devkit_report_counts(report_text)
     sources = component_source_counts(components_data)
@@ -384,6 +386,7 @@ def devkit_export_quality(asset_dir: Path, components_data: object | None) -> di
         "warnings": len(warnings),
         "errors": len(errors),
         "skipped": len(skipped),
+        "skippedAttempts": skipped_attempts,
         "debugMessages": len(debug),
         "reportCounts": report_counts,
         "componentSourceCounts": sources,
@@ -523,6 +526,110 @@ def write_devkit_request(asset_path: str) -> None:
         "asset_path": asset_path,
     }
     DEVKIT_REQUEST_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def markdown_table_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return []
+    return [cell.strip().replace("\\|", "|") for cell in stripped.strip("|").split("|")]
+
+
+def missing_functions_from_report(asset_dir: Path) -> list[dict[str, object]]:
+    report_path = asset_dir / "output" / "context_review.md"
+    if not report_path.is_file():
+        report_path = asset_dir / "output" / "notes_todo.md"
+    if not report_path.is_file():
+        return []
+    existing = existing_note_function_names(asset_dir)
+    rows: list[dict[str, object]] = []
+    in_table = False
+    for line in report_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        cells = markdown_table_cells(line)
+        if not cells:
+            if in_table:
+                break
+            continue
+        normalized = [cell.lower() for cell in cells]
+        if normalized[:4] in (["function", "source graphs", "areas", "notes line"], ["function", "source graphs", "behavior areas", "suggested notes.md entry"]):
+            in_table = True
+            continue
+        if in_table and set(cells) == {"---"}:
+            continue
+        if not in_table or len(cells) < 4:
+            continue
+        function = cells[0].strip()
+        if not function or function == "---":
+            continue
+        function_key = re.sub(r"[^a-z0-9_]+", "", function.lower())
+        if function_key in existing:
+            continue
+        rows.append(
+            {
+                "function": function,
+                "sourceGraphs": [item.strip() for item in cells[1].split(",") if item.strip()],
+                "areas": [item.strip() for item in cells[2].split(",") if item.strip()],
+                "suggested": cells[3].strip(),
+            }
+        )
+    return rows
+
+
+def existing_note_function_names(asset_dir: Path) -> set[str]:
+    notes_path = asset_dir / "notes.md"
+    if not notes_path.is_file():
+        notes_path = asset_dir / "notes.txt"
+    if not notes_path.is_file():
+        return set()
+    text = notes_path.read_text(encoding="utf-8-sig", errors="replace").lower()
+    names: set[str] = set()
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        prefix, values = line.split(":", 1)
+        prefix_key = prefix.strip().lower()
+        value_text = values.strip().lower()
+        if prefix_key in {"inherited", "native", "parent", "external", "ignore missing graph", "ignore_missing"}:
+            names.update(re.sub(r"[^a-z0-9_]+", "", item.lower()) for item in re.split(r"[,;]", values) if item.strip())
+        elif any(marker in value_text for marker in ("parent", "native", "inherited", "external", "ignore")):
+            names.add(re.sub(r"[^a-z0-9_]+", "", prefix_key))
+    return names
+
+
+def append_notes_for_functions(asset_dir: Path, kind: str, functions: list[object], reason: str = "") -> dict[str, object]:
+    valid_kinds = {
+        "inherited": "inherited",
+        "native": "inherited",
+        "parent": "inherited",
+        "ignore": "ignore missing graph",
+        "ignore_missing": "ignore missing graph",
+    }
+    note_prefix = valid_kinds.get(kind)
+    if not note_prefix:
+        raise ValueError("Unknown notes kind.")
+    names = [str(item).strip() for item in functions if str(item).strip()]
+    if not names:
+        raise ValueError("No functions selected.")
+    existing = existing_note_function_names(asset_dir)
+    added: list[str] = []
+    skipped: list[str] = []
+    for name in names:
+        key = re.sub(r"[^a-z0-9_]+", "", name.lower())
+        if key in existing:
+            skipped.append(name)
+            continue
+        existing.add(key)
+        added.append(name)
+    notes_path = asset_dir / "notes.md"
+    if not notes_path.exists():
+        notes_path.write_text("# Capture Notes\n\n", encoding="utf-8")
+    if added:
+        stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = ["", f"## Web Review {stamp}", "", f"{note_prefix}: {', '.join(added)}"]
+        if reason.strip():
+            lines.append(f"reason: {reason.strip()}")
+        notes_path.write_text(notes_path.read_text(encoding="utf-8-sig", errors="replace").rstrip() + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
+    return {"notesPath": str(notes_path), "added": added, "skipped": skipped}
 
 
 def devkit_python_command() -> str:
@@ -789,6 +896,11 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/report":
                 self.handle_report(parsed.query)
                 return
+            if parsed.path == "/api/missing-functions":
+                values = parse_qs(parsed.query)
+                asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
+                self.send_json({"ok": True, "items": missing_functions_from_report(asset_dir)})
+                return
             if parsed.path.startswith("/api/jobs/"):
                 job_id = parsed.path.rsplit("/", 1)[-1]
                 self.send_json({"ok": True, "job": get_job(job_id)})
@@ -847,6 +959,19 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                         "outputLogCommand": devkit_output_log_command(),
                     }
                 )
+                return
+            if self.path == "/api/notes-append":
+                asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
+                functions = body.get("functions", [])
+                if not isinstance(functions, list):
+                    raise ValueError("functions must be a list.")
+                result = append_notes_for_functions(
+                    asset_dir,
+                    str(body.get("kind") or "inherited"),
+                    functions,
+                    str(body.get("reason") or ""),
+                )
+                self.send_json({"ok": True, **result, "items": missing_functions_from_report(asset_dir)})
                 return
             self.send_error_json("Unknown API endpoint.", HTTPStatus.NOT_FOUND)
         except subprocess.TimeoutExpired:

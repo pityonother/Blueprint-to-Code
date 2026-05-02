@@ -42,6 +42,8 @@ def resolve_output_paths(args: argparse.Namespace, compare: bool = False) -> dic
         "capture_quality_report": out_dir / "capture_quality_report.md",
         "capture_quality_json": out_dir / "capture_quality.json",
         "behavior_summary": out_dir / "behavior_summary.md",
+        "context_review": out_dir / "context_review.md",
+        "context_review_json": out_dir / "context_review.json",
         "notes_todo": out_dir / "notes_todo.md",
         "defaults_suggestions": out_dir / "defaults_suggestions.json",
         "components_suggestions": out_dir / "components_suggestions.json",

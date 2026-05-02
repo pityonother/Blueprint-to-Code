@@ -375,6 +375,7 @@ code {
 .devkit-panel,
 .capture-panel,
 .quality-panel,
+.notes-panel,
 .compare-panel {
   display: grid;
   gap: 12px;
@@ -443,6 +444,53 @@ code {
   color: #9aa5a0;
 }
 
+.review-list {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.review-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: #101516;
+  padding: 10px 12px;
+  color: #edf5f1;
+}
+
+.review-row:hover {
+  border-color: rgba(78, 194, 161, 0.42);
+  background: #141b1c;
+}
+
+.review-row input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  accent-color: #43b092;
+}
+
+.review-row span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.review-row strong,
+.review-row small {
+  overflow-wrap: anywhere;
+}
+
+.review-row small {
+  color: #9aa5a0;
+}
+
 .log-output {
   min-height: 160px;
   max-height: 280px;
@@ -454,6 +502,10 @@ code {
   border: 1px dashed rgba(255, 255, 255, 0.15);
   border-radius: 8px;
   padding: 14px;
+}
+
+.empty-state.compact {
+  padding: 12px;
 }
 
 .boot-screen {

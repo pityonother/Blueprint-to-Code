@@ -134,6 +134,17 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(bp.classify_function_call("BlueprintCanRiderAttack"), "ark_parent_or_rpc")
         self.assertEqual(bp.classify_function_call("UpdateJumpRotation"), "blueprint_graph_candidate")
 
+    def test_behavior_area_classifies_ark_support_graphs(self):
+        bp = load_translator()
+        self.assertEqual(bp.behavior_area("BPTimerNonDedicated"), "Replication")
+        self.assertEqual(bp.behavior_area("Tick Force ForwardInput"), "Movement")
+        self.assertEqual(bp.behavior_area("RotateToZeroPitch"), "Movement")
+        self.assertEqual(bp.behavior_area("BPCharacterSleeped"), "Status")
+        self.assertEqual(bp.behavior_area("BPNotifyLevelUp"), "Status")
+        self.assertEqual(bp.behavior_area("BlueprintAnimNotifyCustomEvent"), "Animation")
+        self.assertEqual(bp.behavior_area("shijiantubiao"), "Orchestration")
+        self.assertEqual(bp.behavior_area("CollapseGraph_1"), "CollapsedGraph")
+
     def test_suggestions_are_structured_for_sidecars(self):
         bp = load_translator()
         payload = {
@@ -200,6 +211,100 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("CharacterMovement", text)
         self.assertIn("Confirm start checks", text)
 
+    def test_behavior_summary_has_rules_for_support_areas(self):
+        bp = load_translator()
+        payload = {
+            "metadata": {"asset_name": "MilkGlider_Character_BP", "graph_count": 4, "node_count": 40},
+            "diagnostics": {"confidence_level": "medium"},
+            "graphs": [
+                {
+                    "graph_name": "Tick Force ForwardInput",
+                    "node_count": 10,
+                    "payload": {
+                        "variable_gets": [{"variable": "CharacterMovement"}, {"variable": "MovementMode"}],
+                        "variable_sets": [{"variable": "ClientWantsToRun"}],
+                    },
+                },
+                {
+                    "graph_name": "SetParachuteState",
+                    "node_count": 10,
+                    "payload": {
+                        "variable_gets": [{"variable": "bWantsToParachute"}, {"variable": "ParaAudio"}],
+                        "variable_sets": [{"variable": "LastParachuteStartTime"}],
+                    },
+                },
+                {
+                    "graph_name": "BPCharacterSleeped",
+                    "node_count": 10,
+                    "payload": {
+                        "variable_gets": [{"variable": "MyCharacterStatusComponent"}],
+                        "variable_sets": [{"variable": "bIsNursing"}],
+                    },
+                },
+                {
+                    "graph_name": "BlueprintAnimNotifyCustomEvent",
+                    "node_count": 10,
+                    "payload": {
+                        "variable_gets": [{"variable": "JumpStartAnim"}],
+                        "variable_sets": [{"variable": "LandedAnim"}],
+                    },
+                },
+            ],
+            "class_defaults": {"variables": {"bWantsToParachute": True, "JumpStartAnim": None}},
+            "component_defaults": {"components": [{"name": "CharacterMovement"}, {"name": "ParaAudio"}, {"name": "MyCharacterStatusComponent"}]},
+            "call_graph": {"calls": []},
+        }
+
+        text = bp.render_behavior_summary(payload)
+
+        self.assertIn("| Movement |", text)
+        self.assertIn("| Parachute |", text)
+        self.assertIn("| Status |", text)
+        self.assertIn("| Animation |", text)
+        self.assertIn("Confirm jump/land transitions", text)
+        self.assertIn("Confirm RepNotify order", text)
+
+    def test_context_review_triages_defaults_and_missing_functions(self):
+        bp = load_translator()
+        payload = {
+            "metadata": {"asset_name": "MilkGlider_Character_BP", "graph_count": 1, "node_count": 4},
+            "graphs": [
+                {
+                    "graph_name": "EventGraph",
+                    "payload": {
+                        "variable_gets": [
+                            {"variable": "TargetingTeam"},
+                            {"variable": "TargetingTeam"},
+                            {"variable": "TargetingTeam"},
+                            {"variable": "TargetingTeam"},
+                            {"variable": "MaxGlideHeight"},
+                        ],
+                        "variable_sets": [
+                            {"variable": "bCanGlide"},
+                            {"variable": "bCanGlide"},
+                        ],
+                    },
+                }
+            ],
+            "class_defaults": {"variables": {}},
+            "component_defaults": {"components": []},
+            "call_graph": {
+                "calls": [],
+                "missing_targets": [
+                    {"source_graph": "EventGraph", "function": "UpdateJumpRotation", "call_kind": "blueprint_graph_candidate"}
+                ],
+                "native_or_inherited_calls": [],
+            },
+        }
+
+        review = bp.build_context_review(payload)
+        text = bp.render_context_review(payload)
+        kinds = {item["name"]: item["kind"] for item in review["default_candidates"]}
+
+        self.assertEqual(kinds["bCanGlide"], "graph_written_runtime_state")
+        self.assertEqual(kinds["TargetingTeam"], "likely_parent_or_inherited_state")
+        self.assertIn("UpdateJumpRotation", text)
+        self.assertIn("Default Candidate Triage", text)
 
     def test_notes_sidecar_suppresses_known_external_function_candidates(self):
         bp = load_translator()

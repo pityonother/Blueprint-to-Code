@@ -13,6 +13,7 @@ from typing import Iterable
 
 from .behavior_report import render_behavior_summary
 from .context import context_from_args, function_note_for_name, parse_components_context, parse_defaults_context, parse_notes_context
+from .context_review import build_context_review, render_context_review
 from .core import parse_blueprint_text
 from .diagnostics import build_diagnostic_findings, diagnostic_counts, diagnostic_finding, render_diagnostics_report
 from .output import resolve_output_paths, write_glossary
@@ -40,6 +41,8 @@ ASSET_OUTPUT_FILE_KEYS = (
     "capture_quality_report",
     "capture_quality_json",
     "behavior_summary",
+    "context_review",
+    "context_review_json",
     "notes_todo",
     "defaults_suggestions",
     "components_suggestions",
@@ -991,6 +994,7 @@ def run_asset_translate(args: argparse.Namespace) -> int:
     write_output("diagnostics_report", render_asset_diagnostics_report(asset_payload))
     write_output("capture_quality_report", render_capture_quality_report(asset_payload))
     write_output("behavior_summary", render_behavior_summary(asset_payload))
+    write_output("context_review", render_context_review(asset_payload))
     write_output("next_actions", render_next_actions(asset_payload), encoding="utf-8-sig")
     write_output("notes_todo", render_notes_todo(asset_payload))
 
@@ -1022,6 +1026,7 @@ def run_asset_translate(args: argparse.Namespace) -> int:
         write_output("diagnostics_json", json.dumps({"metadata": asset_payload.get("metadata", {}), "diagnostics": asset_payload.get("diagnostics", {})}, ensure_ascii=False, indent=2))
         write_output("call_graph", render_call_graph(asset_payload))
         write_output("capture_quality_json", json.dumps(collect_asset_quality(asset_payload), ensure_ascii=False, indent=2))
+        write_output("context_review_json", json.dumps(build_context_review(asset_payload), ensure_ascii=False, indent=2, default=list))
         write_glossary(paths["dir"])
         written.append("ark_glossary")
     print(f"Wrote asset output directory: {paths['dir']}")

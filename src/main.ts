@@ -4,6 +4,7 @@ type ReportKey =
   | 'next_actions'
   | 'notes_todo'
   | 'behavior_summary'
+  | 'context_review'
   | 'capture_quality_report'
   | 'diagnostics_report'
   | 'asset_report'
@@ -28,6 +29,7 @@ interface ExportQuality {
   warnings: number;
   errors: number;
   skipped: number;
+  skippedAttempts: number;
   debugMessages: number;
   safeScsComponentCount: number;
   manualOrRestoredComponentCount: number;
@@ -83,6 +85,13 @@ interface JobInfo {
   result?: Record<string, unknown>;
 }
 
+interface MissingFunctionItem {
+  function: string;
+  sourceGraphs: string[];
+  areas: string[];
+  suggested: string;
+}
+
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
   throw new Error('Missing #app root.');
@@ -106,6 +115,7 @@ const reportLabels: Record<ReportKey, string> = {
   next_actions: '下一步',
   notes_todo: '缺失函数',
   behavior_summary: '行为说明',
+  context_review: '上下文复查',
   capture_quality_report: '采集质量',
   diagnostics_report: '诊断',
   asset_report: '完整报告',
@@ -133,6 +143,8 @@ let comparePath = '';
 let logs: string[] = ['控制中心已就绪。请选择资产、采集图页，或重新生成分析报告。'];
 let activeJobId = '';
 let activeJobLabel = '';
+let missingFunctions: MissingFunctionItem[] = [];
+let selectedMissingFunctions = new Set<string>();
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -391,7 +403,7 @@ function renderQualityPanel(asset?: AssetSummary): string {
         ${metric('导出变量', counts.blueprintVariables ?? '-')}
         ${metric('类默认值', counts.classDefaults ?? asset?.defaultsCount ?? '-')}
         ${metric('导出组件', counts.componentsExported ?? asset?.componentsCount ?? '-')}
-        ${metric('跳过属性', quality?.skipped ?? '-')}
+        ${metric('跳过属性', `${quality?.skipped ?? '-'} / ${quality?.skippedAttempts ?? quality?.skipped ?? '-'}`)}
       </div>
       <div class="source-box">
         <strong>组件来源</strong>
@@ -417,6 +429,46 @@ function renderDevkitPanel(): string {
         ${actionButton('保存路径并复制 Python 命令', 'save-devkit-request', 'primary', busy)}
         ${actionButton('复制 Python 命令', 'copy-python-command', 'secondary')}
         ${actionButton('复制 Output Log 命令', 'copy-output-command', 'secondary')}
+      </div>
+    </section>
+  `;
+}
+
+function renderNotesPanel(asset?: AssetSummary): string {
+  const rows = missingFunctions;
+  const selectedCount = selectedMissingFunctions.size;
+  const content = rows.length
+    ? rows
+        .map((item) => {
+          const checked = selectedMissingFunctions.has(item.function) ? 'checked' : '';
+          return `
+            <label class="review-row">
+              <input type="checkbox" data-missing-function="${escapeHtml(item.function)}" ${checked} />
+              <span>
+                <strong>${escapeHtml(item.function)}</strong>
+                <small>${escapeHtml(item.areas.join(', ') || '未分类')} - ${escapeHtml(item.sourceGraphs.slice(0, 4).join(', ') || '未知来源')}</small>
+              </span>
+            </label>
+          `;
+        })
+        .join('')
+    : '<div class="empty-state compact">暂无缺失函数队列。请先运行标准分析，或查看上下文复查报告。</div>';
+  return `
+    <section class="panel notes-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">notes.md 判定</p>
+          <h2>把父类/原生函数移出误报</h2>
+        </div>
+        <span class="soft-label">${asset ? `${missingFunctions.length} 个待确认，已选 ${selectedCount}` : '未选择资产'}</span>
+      </div>
+      <div class="review-list">${content}</div>
+      <div class="button-row">
+        ${actionButton('全选队列', 'select-all-missing', 'secondary', !rows.length)}
+        ${actionButton('清空选择', 'clear-missing-selection', 'ghost', !selectedCount)}
+        ${actionButton('标记为父类/原生', 'mark-missing-inherited', 'primary', !asset || !selectedCount || busy)}
+        ${actionButton('标记为忽略', 'mark-missing-ignore', 'secondary', !asset || !selectedCount || busy)}
+        ${actionButton('打开 notes.md', 'open-notes', 'ghost', !asset)}
       </div>
     </section>
   `;
@@ -534,6 +586,8 @@ function renderMain(): void {
           ${renderDevkitPanel()}
         </div>
 
+        ${renderNotesPanel(asset)}
+
         ${renderComparePanel()}
 
         <section class="panel log-panel">
@@ -591,6 +645,7 @@ function bindEvents(): void {
       reportContent = '';
       reportPath = '';
       void loadReport(selectedReport);
+      void loadMissingFunctions();
       render();
     });
   });
@@ -610,6 +665,21 @@ function bindEvents(): void {
     });
   });
 
+  document.querySelectorAll<HTMLInputElement>('[data-missing-function]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const name = input.dataset.missingFunction || '';
+      if (!name) {
+        return;
+      }
+      if (input.checked) {
+        selectedMissingFunctions.add(name);
+      } else {
+        selectedMissingFunctions.delete(name);
+      }
+      render();
+    });
+  });
+
   document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select').forEach((input) => {
     input.addEventListener('input', syncInputs);
     input.addEventListener('change', syncInputs);
@@ -617,10 +687,15 @@ function bindEvents(): void {
 }
 
 async function refreshState(keepReport = true): Promise<void> {
+  const previousSelectedPath = selectedPath;
   const payload = await api<AppState>('/api/state');
   state = payload;
   if (!selectedPath || !state.assets.some((asset) => asset.path === selectedPath)) {
     selectedPath = state.assets.find((asset) => asset.graphs > 0 && asset.hasOutput)?.path || state.assets[0]?.path || '';
+  }
+  if (previousSelectedPath && previousSelectedPath !== selectedPath) {
+    missingFunctions = [];
+    selectedMissingFunctions.clear();
   }
   if (!captureAssetName) {
     captureAssetName = selectedAsset()?.name || '';
@@ -634,9 +709,13 @@ async function refreshState(keepReport = true): Promise<void> {
   if (!compareNewPath) {
     compareNewPath = state.assets[1]?.path || state.assets[0]?.path || '';
   }
+  if (selectedPath) {
+    await loadMissingFunctions(false);
+  }
   render();
   if (keepReport && selectedPath) {
     await loadReport(selectedReport, false);
+    render();
   }
 }
 
@@ -652,7 +731,9 @@ async function loadReport(key: ReportKey, rerender = true): Promise<void> {
     return;
   }
   reportLoading = true;
-  render();
+  if (rerender) {
+    render();
+  }
   try {
     const query = new URLSearchParams({ assetPath: asset.path, target: key });
     const payload = await api<ApiResult & { content: string; path: string }>(`/api/report?${query}`);
@@ -666,6 +747,73 @@ async function loadReport(key: ReportKey, rerender = true): Promise<void> {
     if (rerender) {
       render();
     }
+  }
+}
+
+async function loadMissingFunctions(rerender = true): Promise<void> {
+  const asset = selectedAsset();
+  if (!asset || (!asset.reports.context_review && !asset.reports.notes_todo)) {
+    missingFunctions = [];
+    selectedMissingFunctions.clear();
+    if (rerender) {
+      render();
+    }
+    return;
+  }
+  try {
+    const query = new URLSearchParams({ assetPath: asset.path });
+    const payload = await api<ApiResult & { items: MissingFunctionItem[] }>(`/api/missing-functions?${query}`);
+    missingFunctions = payload.items || [];
+    const available = new Set(missingFunctions.map((item) => item.function));
+    selectedMissingFunctions = new Set([...selectedMissingFunctions].filter((name) => available.has(name)));
+  } catch (error) {
+    missingFunctions = [];
+    selectedMissingFunctions.clear();
+    appendLog(error instanceof Error ? error.message : String(error));
+  } finally {
+    if (rerender) {
+      render();
+    }
+  }
+}
+
+function selectedMissingFunctionNames(): string[] {
+  const available = new Set(missingFunctions.map((item) => item.function));
+  return [...selectedMissingFunctions].filter((name) => available.has(name));
+}
+
+async function appendMissingNotes(kind: 'inherited' | 'ignore_missing'): Promise<void> {
+  const asset = selectedAsset();
+  const functions = selectedMissingFunctionNames();
+  if (!asset || !functions.length) {
+    appendLog('请先选择要判定的缺失函数。');
+    return;
+  }
+  busy = true;
+  appendLog(`正在写入 notes.md：${functions.length} 个函数。`);
+  try {
+    const payload = await api<ApiResult & { notesPath: string; added: string[]; skipped: string[]; items: MissingFunctionItem[] }>(
+      '/api/notes-append',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          assetPath: asset.path,
+          kind,
+          functions,
+          reason: kind === 'inherited' ? '在控制中心确认属于父类/原生实现。' : '在控制中心确认暂不作为本资产漏采图页处理。',
+        }),
+      },
+    );
+    missingFunctions = payload.items || [];
+    selectedMissingFunctions.clear();
+    appendLog(`已更新 notes.md：新增 ${payload.added.length} 个，跳过重复 ${payload.skipped.length} 个。`);
+    await refreshState(false);
+    await loadReport('context_review');
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
+  } finally {
+    busy = false;
+    render();
   }
 }
 
@@ -936,6 +1084,30 @@ async function handleAction(action: string): Promise<void> {
   }
   if (action === 'open-graph-reports') {
     await openTarget('graph_reports');
+    return;
+  }
+  if (action === 'select-all-missing') {
+    selectedMissingFunctions = new Set(missingFunctions.map((item) => item.function));
+    appendLog(`已选择 ${selectedMissingFunctions.size} 个缺失函数。`);
+    render();
+    return;
+  }
+  if (action === 'clear-missing-selection') {
+    selectedMissingFunctions.clear();
+    appendLog('已清空缺失函数选择。');
+    render();
+    return;
+  }
+  if (action === 'mark-missing-inherited') {
+    await appendMissingNotes('inherited');
+    return;
+  }
+  if (action === 'mark-missing-ignore') {
+    await appendMissingNotes('ignore_missing');
+    return;
+  }
+  if (action === 'open-notes') {
+    await openTarget('notes');
     return;
   }
   if (action === 'save-devkit-request') {

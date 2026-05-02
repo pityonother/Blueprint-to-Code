@@ -8,7 +8,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from blueprint_tool_server import cancel_job, create_background_job, asset_summary, get_job, normalize_asset_path
+from blueprint_tool_server import (
+    append_notes_for_functions,
+    asset_summary,
+    cancel_job,
+    create_background_job,
+    get_job,
+    missing_functions_from_report,
+    normalize_asset_path,
+)
 
 
 def wait_for_job(job_id: str, timeout_seconds: float = 5.0) -> dict[str, object]:
@@ -81,6 +89,38 @@ class ToolServerTests(unittest.TestCase):
         final = wait_for_job(str(job["id"]))
 
         self.assertEqual(final["status"], "cancelled")
+
+    def test_missing_function_queue_filters_notes_entries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = Path(temp_dir) / "TestAsset"
+            output_dir = asset_dir / "output"
+            output_dir.mkdir(parents=True)
+            (output_dir / "context_review.md").write_text(
+                "\n".join(
+                    [
+                        "# Blueprint Context Review",
+                        "",
+                        "## Missing Function Notes Queue",
+                        "",
+                        "| Function | Source Graphs | Areas | Notes line |",
+                        "| --- | --- | --- | --- |",
+                        "| UpdateJumpRotation | EventGraph | Movement | inherited: UpdateJumpRotation |",
+                        "| StartSliding | Tick | Sliding | inherited: StartSliding |",
+                        "| ClearJump | EventGraph | Movement | inherited: ClearJump |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (asset_dir / "notes.md").write_text("ClearJump: parent - implemented by Dino_Character_BP\n", encoding="utf-8")
+
+            first = missing_functions_from_report(asset_dir)
+            result = append_notes_for_functions(asset_dir, "inherited", ["UpdateJumpRotation"])
+            second = missing_functions_from_report(asset_dir)
+
+        self.assertEqual([item["function"] for item in first], ["UpdateJumpRotation", "StartSliding"])
+        self.assertEqual(result["added"], ["UpdateJumpRotation"])
+        self.assertEqual([item["function"] for item in second], ["StartSliding"])
 
 
 if __name__ == "__main__":
