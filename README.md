@@ -135,7 +135,11 @@ Install helper:
 ```
 
 When prompted, paste an ARK DevKit `Plugins` directory that can load editor
-plugins. The script copies the plugin and sets `BLUEPRINT_TO_CODE_ROOT` to this
+plugins. The script first checks whether that DevKit build appears able to
+compile C++ source plugins; if it only has installed binaries and no usable
+engine rules/source, it aborts instead of installing a plugin that will fail at
+startup with `cannot find module BlueprintToCodeExporter`. If the check passes,
+the script copies the plugin and sets `BLUEPRINT_TO_CODE_ROOT` to this
 repository. Restart ARK DevKit afterward. First verification target:
 
 ```text
@@ -149,6 +153,11 @@ control center and continue copying graph pages in order.
 
 If ARK DevKit cannot compile or load custom C++ editor plugins, stop using this
 path and fall back to the Python exporter plus manual/candidate graph names.
+To remove a failed test install:
+
+```powershell
+.\scripts\devkit_plugins\install_blueprint_to_code_exporter.ps1 -DevKitPluginsDir "C:\Program Files\Epic Games\ARKDevkit\Engine\Plugins" -Uninstall
+```
 
 ```powershell
 python scripts\bp_clipboard_to_prompt.py --asset-dir captures\<BlueprintName>

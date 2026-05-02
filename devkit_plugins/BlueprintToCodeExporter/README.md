@@ -45,7 +45,9 @@ an ARK DevKit `Plugins` folder that supports editor plugins, then rebuild or
 let the DevKit prompt compile it if that workflow is available.
 
 From the repository root, the helper script can copy the plugin and set the
-output-root environment variable:
+output-root environment variable. It also refuses to install into ARK DevKit
+builds that can scan plugins but cannot compile C++ source plugins, because
+those builds will fail on startup with `cannot find module BlueprintToCodeExporter`.
 
 ```powershell
 .\scripts\devkit_plugins\install_blueprint_to_code_exporter.ps1

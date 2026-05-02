@@ -1,5 +1,7 @@
 param(
-    [string]$DevKitPluginsDir
+    [string]$DevKitPluginsDir,
+    [switch]$ForceSourceInstall,
+    [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +27,59 @@ if (-not $DevKitPluginsDir) {
 
 $ResolvedPluginsDir = Resolve-Path $DevKitPluginsDir -ErrorAction Stop
 $DestinationPlugin = Join-Path $ResolvedPluginsDir "BlueprintToCodeExporter"
+
+if ($Uninstall) {
+    if (Test-Path $DestinationPlugin) {
+        $ResolvedDestination = Resolve-Path $DestinationPlugin -ErrorAction Stop
+        if ($ResolvedDestination.Path -notlike "*\BlueprintToCodeExporter") {
+            throw "Refusing to remove unexpected path: $($ResolvedDestination.Path)"
+        }
+        Remove-Item -LiteralPath $ResolvedDestination.Path -Recurse -Force
+        Write-Host "Removed BlueprintToCodeExporter from:"
+        Write-Host "  $($ResolvedDestination.Path)"
+    } else {
+        Write-Host "BlueprintToCodeExporter is not installed in:"
+        Write-Host "  $ResolvedPluginsDir"
+    }
+    exit 0
+}
+
+$EngineDir = $null
+$PluginPathText = $ResolvedPluginsDir.Path.TrimEnd('\')
+if ($PluginPathText -match "\\Engine\\Plugins$") {
+    $EngineDir = Split-Path -Parent $PluginPathText
+} elseif ($PluginPathText -match "^(.*\\Engine)\\Plugins(\\.*)?$") {
+    $EngineDir = $Matches[1]
+}
+
+$HasPrecompiledBinary = Test-Path (Join-Path $SourcePlugin "Binaries")
+$CanCompileSourcePlugin = $false
+if ($EngineDir) {
+    $BuildBat = Join-Path $EngineDir "Build\BatchFiles\Build.bat"
+    $RulesDll = Join-Path $EngineDir "Intermediate\Build\BuildRules\UE5Rules.dll"
+    $RuntimeSource = Join-Path $EngineDir "Source\Runtime"
+    $CanCompileSourcePlugin = (Test-Path $BuildBat) -and ((Test-Path $RulesDll) -or (Test-Path $RuntimeSource))
+}
+
+if (-not $HasPrecompiledBinary -and -not $CanCompileSourcePlugin -and -not $ForceSourceInstall) {
+    Write-Host ""
+    Write-Host "This ARK DevKit install can scan plugins, but it does not look able to compile this C++ source plugin."
+    if ($EngineDir) {
+        Write-Host "Checked Engine directory:"
+        Write-Host "  $EngineDir"
+        Write-Host "Missing either:"
+        Write-Host "  Engine\Intermediate\Build\BuildRules\UE5Rules.dll"
+        Write-Host "or:"
+        Write-Host "  Engine\Source\Runtime"
+    }
+    Write-Host ""
+    Write-Host "Install aborted so DevKit will not show 'cannot find module BlueprintToCodeExporter' on startup."
+    Write-Host "Use the Python exporter / graph-name candidate fallback for this DevKit build."
+    Write-Host ""
+    Write-Host "If you have a separate DevKit build environment that can compile editor plugins,"
+    Write-Host "rerun with -ForceSourceInstall."
+    exit 2
+}
 
 if (Test-Path $DestinationPlugin) {
     $Backup = "$DestinationPlugin.backup.$(Get-Date -Format yyyyMMdd_HHmmss)"

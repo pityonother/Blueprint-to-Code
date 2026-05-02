@@ -22,6 +22,7 @@ Do not treat the old Phaser prototype files/assets as the product direction. The
 - Expected output: `captures/<BlueprintName>/graph_queue.txt`, `graph_pages_cpp.json`, and `cpp_export_report.md`.
 - The Python analyzer and web control center remain the reporting layer.
 - If ARK DevKit cannot compile/load custom editor plugins, use the Python exporter and graph-name candidate fallback instead of expanding the plugin prematurely.
+- On the current local ARK DevKit install, `Engine\Source\Runtime` and `Engine\Intermediate\Build\BuildRules\UE5Rules.dll` were missing, so the source plugin could be scanned but not compiled; the install helper now aborts before creating that startup error.
 
 ## Report Reading Order
 
