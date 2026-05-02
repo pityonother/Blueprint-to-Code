@@ -807,12 +807,39 @@ async function appendMissingNotes(kind: 'inherited' | 'ignore_missing'): Promise
     missingFunctions = payload.items || [];
     selectedMissingFunctions.clear();
     appendLog(`已更新 notes.md：新增 ${payload.added.length} 个，跳过重复 ${payload.skipped.length} 个。`);
+    appendLog('正在重新生成标准报告，让报告预览同步 notes.md 判定。');
+    const analysisPayload = await api<ApiResult & { job: JobInfo }>(
+      '/api/analyze',
+      {
+        method: 'POST',
+        body: JSON.stringify({ assetPath: asset.path, reportLevel: 'standard' }),
+      },
+    );
+    activeJobId = analysisPayload.job.id;
+    activeJobLabel = 'notes 后分析';
+    render();
+    const job = await waitForJob(analysisPayload.job.id, 'notes 后分析');
+    const outcome = job.status === 'succeeded' ? '完成' : `${job.status}，退出码 ${job.returnCode ?? '-'}`;
+    appendLog(`notes 后分析${outcome}，耗时 ${job.durationSeconds}s。`);
+    if (job.error) {
+      appendLog(job.error);
+    }
+    if (job.stderr) {
+      appendLog(job.stderr.trim().slice(-1200));
+    }
+    if (job.stdout) {
+      appendLog(job.stdout.trim().slice(-1200));
+    }
     await refreshState(false);
-    await loadReport('context_review');
+    if (job.status === 'succeeded') {
+      await loadReport('context_review');
+    }
   } catch (error) {
     appendLog(error instanceof Error ? error.message : String(error));
   } finally {
     busy = false;
+    activeJobId = '';
+    activeJobLabel = '';
     render();
   }
 }

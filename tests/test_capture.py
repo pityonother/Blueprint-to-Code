@@ -163,7 +163,10 @@ class CaptureTests(unittest.TestCase):
                     },
                 }
             ],
-            "class_defaults": {"variables": {}},
+            "class_defaults": {
+                "variables": {"KnownDefault": 10},
+                "variable_metadata": {"KnownDefault": {"source": "blueprint_variable", "category": "Movement"}},
+            },
             "component_defaults": {"components": []},
             "call_graph": {"calls": [], "missing_targets": [], "native_or_inherited_calls": []},
         }
@@ -286,7 +289,16 @@ class CaptureTests(unittest.TestCase):
                     },
                 }
             ],
-            "class_defaults": {"variables": {}},
+            "class_defaults": {
+                "variables": {"KnownDefault": 10},
+                "variable_metadata": {
+                    "KnownDefault": {
+                        "source": "blueprint_variable",
+                        "category": "Movement",
+                        "property_flags": ["Edit", "BlueprintVisible"],
+                    }
+                },
+            },
             "component_defaults": {"components": []},
             "call_graph": {
                 "calls": [],
@@ -303,6 +315,11 @@ class CaptureTests(unittest.TestCase):
 
         self.assertEqual(kinds["bCanGlide"], "graph_written_runtime_state")
         self.assertEqual(kinds["TargetingTeam"], "likely_parent_or_inherited_state")
+        self.assertEqual(review["known_default_source_counts"]["blueprint_variable"], 1)
+        self.assertEqual(
+            bp.default_candidate_kind({"name": "RuntimeOnly", "property_flags": ["Transient"], "reads": 1, "writes": 0})[0],
+            "exported_transient_runtime_state",
+        )
         self.assertIn("UpdateJumpRotation", text)
         self.assertIn("Default Candidate Triage", text)
 

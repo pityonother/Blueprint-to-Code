@@ -24,7 +24,7 @@ The launcher builds the UI, starts `scripts/blueprint_tool_server.py`, and opens
 - capture one Blueprint graph page from the Windows clipboard into `graphs/*.txt`
 - confirm before replacing an existing graph page; old copies are backed up under `graphs/_backups/`
 - open `next_actions.md`, `context_review.md`, `notes_todo.md`, `behavior_summary.md`, and other key reports
-- review missing function candidates and append confirmed parent/native or ignored functions directly to `notes.md`
+- review missing function candidates and append confirmed parent/native or ignored functions directly to `notes.md`; the app reruns standard analysis afterward so previews stay fresh
 - open the asset output folder or focused `graph_reports/`
 - paste a DevKit Blueprint Object Path and copy the exporter command
 - check DevKit default/component export health, warnings, skipped properties, and SCS/component-template candidates
@@ -71,12 +71,12 @@ python scripts\bp_clipboard_to_prompt.py --capture-asset Achatina_Character_BP
 The capture wizard creates `captures/Achatina_Character_BP/graphs/`, saves each copied graph page as a `.txt` file, writes `manifest.json`, creates starter `defaults.json`, `components.json`, and `notes.md`, then runs the asset report into `captures/Achatina_Character_BP/output/`.
 If a graph page already exists, the CLI refuses to overwrite it unless you pass `--capture-overwrite`; overwritten files are copied to `graphs/_backups/` first. The web control center asks for confirmation before sending the overwrite request.
 For large real assets, start with `capture_quality_report.md`; it separates likely missing Blueprint graph pages from native/Kismet/inherited call noise and lists the defaults/components worth filling first.
-Asset reports also write `next_actions.md`, `context_review.md`, `defaults_suggestions.json`, and `components_suggestions.json` so you can fill Class Defaults and component context without digging through the full report by hand. `context_review.md` is the best place to separate likely runtime state, likely inherited/parent state, and true manual default checks.
+Asset reports also write `next_actions.md`, `context_review.md`, `context_review.json`, `defaults_suggestions.json`, and `components_suggestions.json` so you can fill Class Defaults and component context without digging through the full report by hand. `context_review.md` is the best place to separate likely runtime state, likely inherited/parent state, and true manual default checks; `context_review.json` is the structured version used by the control center.
 
 Asset report output is tiered:
 
 - `--report-level compact`: write only the main human reports.
-- `--report-level standard`: default; write `next_actions.md`, `context_review.md`, `notes_todo.md`, `behavior_summary.md`, `capture_quality_report.md`, `diagnostics_report.md`, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
+- `--report-level standard`: default; write `next_actions.md`, `context_review.md`, `context_review.json`, `notes_todo.md`, `behavior_summary.md`, `capture_quality_report.md`, `diagnostics_report.md`, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
 - `--report-level debug`: write full parser payloads such as `asset.json`, `call_graph.md`, `capture_quality.json`, `context_review.json`, `diagnostics.json`, and all per-graph JSON/diagnostic files.
 
 `behavior_summary.md` includes ARK-focused rule checks for Glide, Sliding, Nursing, MultiUse, Replication, Damage, Movement, Parachute, HUD, Passenger, Status, Animation, Orchestration, and CollapsedGraph groups. These checks are still heuristic, but they are designed to point you at the defaults, components, and graph pages that matter first.
@@ -93,7 +93,7 @@ ignore missing graph: FooBar
 SomeFunction: parent - implemented by Dino_Character_BP
 ```
 
-The analyzer also writes `notes_todo.md` and `context_review.md`, which turn remaining likely-missing function graph calls into review templates for `notes.md`. In the web control center, use the `notes.md 判定` panel to select confirmed parent/native functions and write them without hand-editing the file.
+The analyzer also writes `notes_todo.md`, `context_review.md`, and `context_review.json`, which turn remaining likely-missing function graph calls into review templates for `notes.md`. In the web control center, use the `notes.md 判定` panel to select confirmed parent/native functions and write them without hand-editing the file; after saving notes, the app automatically runs a standard analysis to refresh the reports and queue.
 
 Export Blueprint Class Defaults and component defaults from ARK DevKit:
 
@@ -134,7 +134,7 @@ Compare two captured Blueprint assets:
 python scripts\bp_clipboard_to_prompt.py --compare-asset captures\OldAsset_BP captures\NewAsset_BP --output-dir captures\_compare_reports\old_to_new
 ```
 
-Asset compare writes `compare_report.md`, `compare_summary.md`, `compare.json`, and `behavior_impact_report.md`. The behavior impact report groups changes by likely ARK behavior areas such as Glide, Sliding, Nursing, MultiUse, Damage, Passenger, Movement, HUD, and Replication.
+Asset compare writes `compare_report.md`, `compare_summary.md`, `compare.json`, and `behavior_impact_report.md`. The behavior impact report groups changes by likely ARK behavior areas such as Parachute, Glide, Sliding, Nursing, MultiUse, Damage, Passenger, Movement, HUD, and Replication.
 
 Run tests:
 

@@ -129,6 +129,26 @@ class CompareTests(unittest.TestCase):
             self.assertIn("Impact areas", impact_report)
             self.assertTrue(diff["behavior_impacts"])
 
+    def test_behavior_impact_classifies_parachute_separately_from_glide(self):
+        bp = load_translator()
+        diff = {
+            "metadata": {"old_asset_name": "Old", "new_asset_name": "New"},
+            "graph_count": {"old": 1, "new": 1},
+            "node_count": {"old": 1, "new": 1},
+            "added_graphs": [],
+            "removed_graphs": [],
+            "graph_diffs": [{"graph": "SetParachuteState", "likely_logic_changes": ["execution flow changed"]}],
+            "defaults_delta": {"changed": {"bWantsToParachute": {"old": False, "new": True}}},
+            "components_delta": {},
+            "relation_deltas": {},
+        }
+
+        rows = bp.build_behavior_impact_rows(diff)
+        areas = {row["area"] for row in rows}
+
+        self.assertIn("Parachute", areas)
+        self.assertNotIn("Glide", areas)
+
 
 if __name__ == "__main__":
     unittest.main()

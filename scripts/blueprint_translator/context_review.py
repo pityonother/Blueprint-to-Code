@@ -14,6 +14,28 @@ def default_candidate_kind(item: dict[str, object]) -> tuple[str, str]:
     writes = int(item.get("writes", 0) or 0)
     hint = variable_hint(name)
     lowered = name.lower()
+    source = str(item.get("source") or "").lower()
+    category = str(item.get("category") or "").lower()
+    flags_raw = item.get("property_flags", item.get("flags", ()))
+    if isinstance(flags_raw, (list, tuple, set)):
+        flags = " ".join(str(value).lower() for value in flags_raw)
+    else:
+        flags = str(flags_raw or "").lower()
+    if any(term in flags for term in ("transient", "duplicate transient", "nontransactional")):
+        return (
+            "exported_transient_runtime_state",
+            "DevKit 元数据标记为 transient 类运行时属性；通常不要按 Class Default 手填。",
+        )
+    if "class_default_object_fallback" in source or "inherited" in source:
+        return (
+            "likely_parent_or_inherited_state",
+            "DevKit 来源显示像 CDO fallback/继承属性；优先按父类或原生状态处理。",
+        )
+    if category and any(term in category for term in ("replication", "network", "runtime", "movement")) and writes:
+        return (
+            "graph_written_runtime_state",
+            "DevKit category/source 指向运行时或同步相关属性，且图里会写入；优先按运行时状态处理。",
+        )
     if writes >= 2:
         return (
             "graph_written_runtime_state",
@@ -45,18 +67,32 @@ def build_context_review(asset_payload: dict[str, object]) -> dict[str, object]:
     defaults = [item for item in quality.get("default_variable_candidates", []) if isinstance(item, dict)]
     components = [item for item in quality.get("component_candidates", []) if isinstance(item, dict)]
     missing = [item for item in quality.get("blueprint_missing_candidates", []) if isinstance(item, dict)]
+    default_context = asset_payload.get("class_defaults", {}) if isinstance(asset_payload.get("class_defaults", {}), dict) else {}
+    default_metadata: dict[str, dict[str, object]] = {}
+    for key in ("variable_metadata", "class_default_metadata"):
+        values = default_context.get(key, {})
+        if isinstance(values, dict):
+            for name, metadata in values.items():
+                if isinstance(metadata, dict):
+                    default_metadata[str(name)] = metadata
 
     default_rows: list[dict[str, object]] = []
     default_counts: Counter = Counter()
     for item in defaults:
-        kind, recommendation = default_candidate_kind(item)
+        name = str(item.get("name", ""))
+        metadata = default_metadata.get(name, {})
+        candidate = {**metadata, **item}
+        kind, recommendation = default_candidate_kind(candidate)
         default_counts[kind] += 1
         default_rows.append(
             {
-                "name": item.get("name", ""),
-                "hint": variable_hint(str(item.get("name", ""))),
+                "name": name,
+                "hint": variable_hint(name),
                 "reads": item.get("reads", 0),
                 "writes": item.get("writes", 0),
+                "source": metadata.get("source", ""),
+                "category": metadata.get("category", ""),
+                "property_flags": metadata.get("property_flags", metadata.get("flags", "")),
                 "kind": kind,
                 "recommendation": recommendation,
             }
@@ -127,11 +163,15 @@ def build_context_review(asset_payload: dict[str, object]) -> dict[str, object]:
         for item in component_context.get("components", []):
             if isinstance(item, dict):
                 component_sources[str(item.get("source") or "manual_or_unknown")] += 1
+    default_sources: Counter = Counter()
+    for metadata in default_metadata.values():
+        default_sources[str(metadata.get("source") or "manual_or_unknown")] += 1
 
     return {
         "metadata": asset_payload.get("metadata", {}),
         "default_candidates": default_rows,
         "default_candidate_counts": dict(default_counts),
+        "known_default_source_counts": dict(default_sources),
         "missing_functions": missing_rows,
         "component_candidates": component_rows,
         "component_source_counts": dict(component_sources),
@@ -171,6 +211,15 @@ def render_context_review(asset_payload: dict[str, object]) -> str:
         lines.append("- 当前上下文没有明显待补项。")
 
     lines.extend(["", "## Default Candidate Triage", ""])
+    default_sources = review.get("known_default_source_counts", {}) if isinstance(review.get("known_default_source_counts", {}), dict) else {}
+    if default_sources:
+        lines.append("Known exported default sources:")
+        lines.append("")
+        lines.append(table_row(["Source", "Count"]))
+        lines.append(table_row(["---", "---"]))
+        for source, count in sorted(default_sources.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            lines.append(table_row([source, count]))
+        lines.append("")
     counts = review.get("default_candidate_counts", {}) if isinstance(review.get("default_candidate_counts", {}), dict) else {}
     if counts:
         lines.append(table_row(["Kind", "Count"]))

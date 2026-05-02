@@ -28,10 +28,29 @@ def parse_default_value_entry(value: object) -> object:
     return value
 
 
+def parse_default_metadata_entry(value: object, kind: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {"kind": kind}
+    metadata_keys = (
+        "type",
+        "category",
+        "source",
+        "property_flags",
+        "flags",
+        "metadata",
+        "_read_method",
+        "_warning",
+        "_todo",
+    )
+    metadata = {key: value.get(key) for key in metadata_keys if key in value}
+    metadata["kind"] = kind
+    return metadata
+
+
 def parse_defaults_context(context: dict[str, object]) -> dict[str, object]:
     text = str(context.get("defaults_text", "")).strip()
     if not text:
-        return {"variables": {}, "class_defaults": {}, "parse_error": ""}
+        return {"variables": {}, "class_defaults": {}, "variable_metadata": {}, "class_default_metadata": {}, "parse_error": ""}
 
     try:
         data = json.loads(text)
@@ -44,13 +63,21 @@ def parse_defaults_context(context: dict[str, object]) -> dict[str, object]:
             match = re.match(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(?P<value>.+)$", stripped)
             if match:
                 variables[match.group("name")] = match.group("value").strip()
-        return {"variables": variables, "class_defaults": {}, "parse_error": str(exc) if not variables else ""}
+        return {"variables": variables, "class_defaults": {}, "variable_metadata": {}, "class_default_metadata": {}, "parse_error": str(exc) if not variables else ""}
 
     variables_raw = data.get("variables", data if isinstance(data, dict) else {}) if isinstance(data, dict) else {}
     class_defaults_raw = data.get("classDefaults", data.get("class_defaults", {})) if isinstance(data, dict) else {}
     variables = {str(key): parse_default_value_entry(value) for key, value in variables_raw.items()} if isinstance(variables_raw, dict) else {}
     class_defaults = {str(key): parse_default_value_entry(value) for key, value in class_defaults_raw.items()} if isinstance(class_defaults_raw, dict) else {}
-    return {"variables": variables, "class_defaults": class_defaults, "parse_error": ""}
+    variable_metadata = {str(key): parse_default_metadata_entry(value, "variable") for key, value in variables_raw.items()} if isinstance(variables_raw, dict) else {}
+    class_default_metadata = {str(key): parse_default_metadata_entry(value, "class_default") for key, value in class_defaults_raw.items()} if isinstance(class_defaults_raw, dict) else {}
+    return {
+        "variables": variables,
+        "class_defaults": class_defaults,
+        "variable_metadata": variable_metadata,
+        "class_default_metadata": class_default_metadata,
+        "parse_error": "",
+    }
 
 
 def default_value_entries(defaults: dict[str, object]) -> dict[str, dict[str, object]]:

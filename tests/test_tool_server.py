@@ -122,6 +122,42 @@ class ToolServerTests(unittest.TestCase):
         self.assertEqual(result["added"], ["UpdateJumpRotation"])
         self.assertEqual([item["function"] for item in second], ["StartSliding"])
 
+    def test_missing_function_queue_prefers_context_review_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = Path(temp_dir) / "TestAsset"
+            output_dir = asset_dir / "output"
+            output_dir.mkdir(parents=True)
+            (output_dir / "context_review.json").write_text(
+                json.dumps(
+                    {
+                        "missing_functions": [
+                            {
+                                "function": "SetParachuteState",
+                                "source_graphs": ["EventGraph"],
+                                "areas": ["Parachute"],
+                                "notes_inherited": "inherited: SetParachuteState",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "context_review.md").write_text(
+                "\n".join(
+                    [
+                        "| Function | Source Graphs | Areas | Notes line |",
+                        "| --- | --- | --- | --- |",
+                        "| StaleMarkdownOnly | EventGraph | Glide | inherited: StaleMarkdownOnly |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            rows = missing_functions_from_report(asset_dir)
+
+        self.assertEqual([item["function"] for item in rows], ["SetParachuteState"])
+        self.assertEqual(rows[0]["areas"], ["Parachute"])
+
 
 if __name__ == "__main__":
     unittest.main()

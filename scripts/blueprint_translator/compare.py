@@ -518,8 +518,13 @@ def compare_asset_payloads(old: dict[str, object], new: dict[str, object]) -> di
 
 
 IMPACT_RULES: dict[str, dict[str, object]] = {
+    "Parachute": {
+        "keywords": ("parachute", "para", "bwantstoparachute", "lastparachutestarttime", "multiparachuteinputvector"),
+        "impact": "May change parachute input, RepNotify ordering, cooldowns, audio cues, or glide/slide cancellation.",
+        "inspect": "Inspect SetParachuteState, OnRep_bWantsToParachute, timers, and bWantsToParachute-related defaults.",
+    },
     "Glide": {
-        "keywords": ("glide", "gliding", "fallvelocity", "flyer", "wingtrail", "pullup", "parachute", "startglide"),
+        "keywords": ("glide", "gliding", "fallvelocity", "flyer", "wingtrail", "pullup", "startglide"),
         "impact": "May change glide entry conditions, air speed/pitch feel, pull-up logic, or glide visual feedback.",
         "inspect": "Inspect StartGlide, CanGlide, Client/Server Tick Gliding, BPOverrideCharacterNewFallVelocity, and related defaults.",
     },
@@ -563,11 +568,34 @@ IMPACT_RULES: dict[str, dict[str, object]] = {
         "impact": "May change jump, run, movement mode, server correction, or animation-state transitions.",
         "inspect": "Inspect ExecuteJump, BPOnMovementModeChangedNotify, and BPAcknowledgeServerCorrection.",
     },
+    "Status": {
+        "keywords": ("sleep", "levelup", "status", "conscious", "died", "death"),
+        "impact": "May change lifecycle/status transitions and the cleanup of incompatible runtime states.",
+        "inspect": "Inspect BPCharacterSleeped, BPNotifyLevelUp, status component reads, and movement/nursing/parachute cleanup calls.",
+    },
+    "Animation": {
+        "keywords": ("animnotify", "anim notify", "custom event", "montage", "jumpstartanim", "landedanim"),
+        "impact": "May change animation notify timing, cosmetic callbacks, or gameplay state triggered by animation events.",
+        "inspect": "Inspect BlueprintAnimNotifyCustomEvent and related montage/notify names.",
+    },
+    "Orchestration": {
+        "keywords": ("eventgraph", "event graph", "beginplay", "shijiantubiao"),
+        "impact": "May change top-level routing between behavior systems.",
+        "inspect": "Inspect the central event/orchestration graph and verify local graph calls remain captured or noted.",
+    },
+    "CollapsedGraph": {
+        "keywords": ("collapsegraph", "collapsed", "tunnel"),
+        "impact": "May hide internal Blueprint behavior behind a collapsed graph boundary.",
+        "inspect": "Open the collapsed graph internals and recopy if entry points or links are missing.",
+    },
 }
 
 
 def behavior_area_from_text(text: str) -> str:
     lowered = text.lower()
+    direct_area = behavior_area(text)
+    if direct_area != "Other" and direct_area in IMPACT_RULES:
+        return direct_area
     for area, rule in IMPACT_RULES.items():
         if any(str(keyword) in lowered for keyword in rule.get("keywords", ())) :
             return area
@@ -632,7 +660,7 @@ def collect_behavior_evidence(diff: dict[str, object]) -> dict[str, list[str]]:
 
 def impact_risk(area: str, items: list[str]) -> str:
     text = "\n".join(items).lower()
-    if area in {"Replication", "Glide", "Sliding", "Nursing", "MultiUse"} and len(items) >= 3:
+    if area in {"Replication", "Glide", "Sliding", "Nursing", "MultiUse", "Parachute"} and len(items) >= 3:
         return "high"
     if "removed" in text or "execution flow" in text or "linkedto" in text:
         return "high"

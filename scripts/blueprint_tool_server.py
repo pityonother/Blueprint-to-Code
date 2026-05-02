@@ -535,13 +535,45 @@ def markdown_table_cells(line: str) -> list[str]:
     return [cell.strip().replace("\\|", "|") for cell in stripped.strip("|").split("|")]
 
 
+def normalize_note_function_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "", name.lower())
+
+
+def missing_functions_from_context_json(asset_dir: Path, existing: set[str]) -> list[dict[str, object]] | None:
+    report_path = asset_dir / "output" / "context_review.json"
+    review = read_json_file(report_path)
+    if not isinstance(review, dict):
+        return None
+    rows: list[dict[str, object]] = []
+    for item in review.get("missing_functions", []):
+        if not isinstance(item, dict):
+            continue
+        function = str(item.get("function") or "").strip()
+        if not function or normalize_note_function_name(function) in existing:
+            continue
+        source_graphs = item.get("source_graphs", item.get("sourceGraphs", []))
+        areas = item.get("areas", [])
+        rows.append(
+            {
+                "function": function,
+                "sourceGraphs": [str(value) for value in source_graphs if str(value)] if isinstance(source_graphs, list) else [],
+                "areas": [str(value) for value in areas if str(value)] if isinstance(areas, list) else [],
+                "suggested": str(item.get("notes_inherited") or item.get("suggested") or f"inherited: {function}"),
+            }
+        )
+    return rows
+
+
 def missing_functions_from_report(asset_dir: Path) -> list[dict[str, object]]:
+    existing = existing_note_function_names(asset_dir)
+    json_rows = missing_functions_from_context_json(asset_dir, existing)
+    if json_rows is not None:
+        return json_rows
     report_path = asset_dir / "output" / "context_review.md"
     if not report_path.is_file():
         report_path = asset_dir / "output" / "notes_todo.md"
     if not report_path.is_file():
         return []
-    existing = existing_note_function_names(asset_dir)
     rows: list[dict[str, object]] = []
     in_table = False
     for line in report_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
@@ -561,7 +593,7 @@ def missing_functions_from_report(asset_dir: Path) -> list[dict[str, object]]:
         function = cells[0].strip()
         if not function or function == "---":
             continue
-        function_key = re.sub(r"[^a-z0-9_]+", "", function.lower())
+        function_key = normalize_note_function_name(function)
         if function_key in existing:
             continue
         rows.append(
@@ -590,9 +622,9 @@ def existing_note_function_names(asset_dir: Path) -> set[str]:
         prefix_key = prefix.strip().lower()
         value_text = values.strip().lower()
         if prefix_key in {"inherited", "native", "parent", "external", "ignore missing graph", "ignore_missing"}:
-            names.update(re.sub(r"[^a-z0-9_]+", "", item.lower()) for item in re.split(r"[,;]", values) if item.strip())
+            names.update(normalize_note_function_name(item) for item in re.split(r"[,;]", values) if item.strip())
         elif any(marker in value_text for marker in ("parent", "native", "inherited", "external", "ignore")):
-            names.add(re.sub(r"[^a-z0-9_]+", "", prefix_key))
+            names.add(normalize_note_function_name(prefix_key))
     return names
 
 
@@ -614,7 +646,7 @@ def append_notes_for_functions(asset_dir: Path, kind: str, functions: list[objec
     added: list[str] = []
     skipped: list[str] = []
     for name in names:
-        key = re.sub(r"[^a-z0-9_]+", "", name.lower())
+        key = normalize_note_function_name(name)
         if key in existing:
             skipped.append(name)
             continue

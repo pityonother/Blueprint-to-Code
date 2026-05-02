@@ -192,21 +192,6 @@ def ordered_nodes_by_exec(nodes: list[NodeInfo], exec_flow: dict[str, object]) -
     return ordered
 
 
-def ordered_nodes_by_exec(nodes: list[NodeInfo], exec_flow: dict[str, object]) -> list[NodeInfo]:
-    by_name = {node.name: node for node in nodes}
-    ordered: list[NodeInfo] = []
-    seen: set[str] = set()
-    for name in exec_flow.get("ordered_node_names", []):
-        node = by_name.get(str(name))
-        if node and node.name not in seen:
-            ordered.append(node)
-            seen.add(node.name)
-    for node in nodes:
-        if node.name not in seen:
-            ordered.append(node)
-    return ordered
-
-
 def expression_for_node(node: NodeInfo, source_pin: PinInfo | None = None, depth: int = 0) -> str:
     if depth > 4:
         return f"{node.label}(...)"

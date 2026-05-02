@@ -995,6 +995,8 @@ def run_asset_translate(args: argparse.Namespace) -> int:
     write_output("capture_quality_report", render_capture_quality_report(asset_payload))
     write_output("behavior_summary", render_behavior_summary(asset_payload))
     write_output("context_review", render_context_review(asset_payload))
+    if report_level in {"standard", "debug"}:
+        write_output("context_review_json", json.dumps(build_context_review(asset_payload), ensure_ascii=False, indent=2, default=list))
     write_output("next_actions", render_next_actions(asset_payload), encoding="utf-8-sig")
     write_output("notes_todo", render_notes_todo(asset_payload))
 
@@ -1026,7 +1028,6 @@ def run_asset_translate(args: argparse.Namespace) -> int:
         write_output("diagnostics_json", json.dumps({"metadata": asset_payload.get("metadata", {}), "diagnostics": asset_payload.get("diagnostics", {})}, ensure_ascii=False, indent=2))
         write_output("call_graph", render_call_graph(asset_payload))
         write_output("capture_quality_json", json.dumps(collect_asset_quality(asset_payload), ensure_ascii=False, indent=2))
-        write_output("context_review_json", json.dumps(build_context_review(asset_payload), ensure_ascii=False, indent=2, default=list))
         write_glossary(paths["dir"])
         written.append("ark_glossary")
     print(f"Wrote asset output directory: {paths['dir']}")

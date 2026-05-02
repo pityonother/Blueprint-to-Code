@@ -36,19 +36,19 @@ Do not read these by default unless debugging parser internals:
 - `asset.json`
 - `diagnostics.json`
 - `capture_quality.json`
-- `context_review.json`
+- `context_review.json` unless checking the control-center structured queue
 - `call_graph.md`
 - `graph_reports/*.json`
 - `graph_reports/*_diagnostics.md`
 - `ark_glossary.json`
 - duplicate legacy `report.md`
 
-The default asset report level should avoid writing those large or redundant files. Use `--report-level debug` only when parser internals or regression tests need the full payload.
+The default asset report level should avoid writing large or redundant debug files. `context_review.json` is intentionally kept in standard output because the control center reads it instead of scraping Markdown. Use `--report-level debug` only when parser internals or regression tests need the full payload.
 
 ## Output Levels
 
 - `--report-level compact`: writes only the main human reports.
-- `--report-level standard`: default; writes the useful human reports, `asset_report.md`, `context_review.md`, `notes_todo.md`, `behavior_summary.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
+- `--report-level standard`: default; writes the useful human reports, `asset_report.md`, `context_review.md`, structured `context_review.json`, `notes_todo.md`, `behavior_summary.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
 - `--report-level debug`: writes full JSON payloads, complete call graph, glossary, and all per-graph debug artifacts.
 
 Asset output generation cleans known stale generated files by default so old debug artifacts do not linger after a standard run. Use `--keep-stale-output` only when intentionally comparing generated artifacts by hand.
@@ -66,4 +66,4 @@ SomeFunction: parent - implemented by Dino_Character_BP
 
 When reviewing follow-up reports, treat noted functions as intentionally external unless new evidence shows they are implemented in the current asset.
 Use `notes_todo.md` as the source of candidate lines to verify and then copy into `notes.md`.
-The web control center also has a `notes.md 判定` panel that writes `inherited:` or `ignore missing graph:` lines and filters already-noted functions from the queue.
+The web control center also has a `notes.md 判定` panel that writes `inherited:` or `ignore missing graph:` lines, reruns standard analysis, and filters already-noted functions from the queue.
