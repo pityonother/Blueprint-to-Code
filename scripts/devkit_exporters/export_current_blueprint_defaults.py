@@ -711,6 +711,246 @@ def render_graph_queue(graph_pages):
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+GRAPH_DISCOVERY_TERMS = (
+    "graph",
+    "uber",
+    "function",
+    "macro",
+    "event",
+    "delegate",
+    "edgraph",
+)
+
+GRAPH_DISCOVERY_CALL_NAMES = set(
+    [
+        "get_all_graphs",
+        "get_graphs",
+        "get_blueprint_graphs",
+        "get_function_graphs",
+        "get_blueprint_function_graphs",
+        "get_macro_graphs",
+        "get_blueprint_macro_graphs",
+        "get_ubergraph_pages",
+        "get_uber_graph_pages",
+        "get_event_graph",
+        "get_event_graphs",
+        "get_delegate_signature_graphs",
+        "get_intermediate_generated_graphs",
+        "get_last_edited_documents",
+    ]
+)
+
+
+def graph_discovery_name_matches(name):
+    lowered = str(name or "").lower()
+    return any(term in lowered for term in GRAPH_DISCOVERY_TERMS)
+
+
+def short_debug_text(value, limit=240):
+    try:
+        text = str(value)
+    except Exception as exc:
+        return "<str failed: {}>".format(exc)
+    text = text.replace("\r", " ").replace("\n", " ").strip()
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
+def graph_debug_value_summary(value, item_limit=12):
+    summary = {
+        "python_type": type(value).__name__,
+        "unreal_class": class_name(value),
+        "name": object_name(value),
+        "path": object_path(value),
+        "text": short_debug_text(value),
+    }
+    items = iter_unreal_collection(value, limit=item_limit)
+    if isinstance(value, (str, bytes, bytearray)):
+        items = []
+    if items:
+        summary["collection_count_sampled"] = len(items)
+        summary["items"] = [
+            {
+                "python_type": type(item).__name__,
+                "unreal_class": class_name(item),
+                "name": object_name(item),
+                "path": object_path(item),
+                "text": short_debug_text(item, 160),
+            }
+            for item in items
+        ]
+    return summary
+
+
+def graph_debug_names_for_object(obj):
+    property_names = []
+    try:
+        property_names = [name for name in editor_property_names(obj) if graph_discovery_name_matches(name)]
+    except Exception as exc:
+        property_names = ["<editor_property_names failed: {}>".format(exc)]
+    dir_names = []
+    try:
+        dir_names = [name for name in dir(obj) if graph_discovery_name_matches(name)]
+    except Exception as exc:
+        dir_names = ["<dir failed: {}>".format(exc)]
+    return sorted(set(property_names)), sorted(set(dir_names))
+
+
+def inspect_graph_debug_object(obj, label):
+    item = {
+        "label": label,
+        "name": object_name(obj),
+        "class": class_name(obj),
+        "path": object_path(obj),
+        "property_candidates": [],
+        "method_candidates": [],
+    }
+    if obj is None:
+        return item
+    property_names, dir_names = graph_debug_names_for_object(obj)
+    item["property_names"] = property_names[:500]
+    item["dir_names"] = dir_names[:500]
+
+    for prop_name in property_names[:160]:
+        prop_result = {"name": prop_name}
+        try:
+            ok, value, method = raw_property_value(obj, prop_name)
+            prop_result["ok"] = bool(ok)
+            prop_result["method"] = method
+            if ok:
+                prop_result["value"] = graph_debug_value_summary(value)
+        except Exception as exc:
+            prop_result["ok"] = False
+            prop_result["error"] = str(exc)
+        item["property_candidates"].append(prop_result)
+
+    for method_name in dir_names[:200]:
+        method_result = {"name": method_name, "call_attempted": False}
+        try:
+            method = getattr(obj, method_name, None)
+            method_result["callable"] = callable(method)
+            if callable(method) and method_name.lower() in GRAPH_DISCOVERY_CALL_NAMES:
+                method_result["call_attempted"] = True
+                value = method()
+                method_result["value"] = graph_debug_value_summary(value)
+        except Exception as exc:
+            method_result["error"] = str(exc)
+        item["method_candidates"].append(method_result)
+    return item
+
+
+def inspect_blueprint_editor_library_graphs(blueprint):
+    library = getattr(unreal, "BlueprintEditorLibrary", None) if unreal is not None else None
+    result = {
+        "available": library is not None,
+        "method_names": [],
+        "call_results": [],
+    }
+    if library is None:
+        return result
+    try:
+        result["method_names"] = sorted(name for name in dir(library) if graph_discovery_name_matches(name))
+    except Exception as exc:
+        result["method_names_error"] = str(exc)
+    for method_name in result.get("method_names", [])[:200]:
+        if str(method_name).lower() not in GRAPH_DISCOVERY_CALL_NAMES:
+            continue
+        call_result = {"name": method_name, "call_attempted": True}
+        try:
+            method = getattr(library, method_name, None)
+            if not callable(method):
+                call_result["callable"] = False
+            else:
+                call_result["callable"] = True
+                value = method(blueprint)
+                call_result["value"] = graph_debug_value_summary(value)
+        except Exception as exc:
+            call_result["error"] = str(exc)
+        result["call_results"].append(call_result)
+    return result
+
+
+def collect_graph_discovery_debug(blueprint, generated_class=None):
+    return {
+        "schema": "blueprint-translator.graph-discovery-debug.v1",
+        "objects": [
+            inspect_graph_debug_object(blueprint, "blueprint"),
+            inspect_graph_debug_object(generated_class, "generated_class"),
+        ],
+        "blueprint_editor_library": inspect_blueprint_editor_library_graphs(blueprint),
+    }
+
+
+def render_graph_discovery_report(debug_payload, graph_pages):
+    lines = [
+        "# Blueprint Graph Discovery Debug",
+        "",
+        "## Summary",
+        "",
+        "- Graph pages collected: {}".format(len(graph_pages or [])),
+    ]
+    for item in debug_payload.get("objects", []):
+        if not isinstance(item, dict):
+            continue
+        lines.extend(
+            [
+                "- {}: {} property candidates, {} method candidates".format(
+                    item.get("label", ""),
+                    len(item.get("property_candidates", [])),
+                    len(item.get("method_candidates", [])),
+                )
+            ]
+        )
+    library = debug_payload.get("blueprint_editor_library", {})
+    if isinstance(library, dict):
+        lines.append("- BlueprintEditorLibrary graph-like methods: {}".format(len(library.get("method_names", []))))
+
+    lines.extend(["", "## Candidate Properties", ""])
+    for item in debug_payload.get("objects", []):
+        if not isinstance(item, dict):
+            continue
+        lines.append("### {}".format(item.get("label", "")))
+        rows = item.get("property_candidates", [])
+        if not rows:
+            lines.append("- No graph-like property names found.")
+            lines.append("")
+            continue
+        lines.append("| Name | OK | Method | Value Name | Value Type |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for row in rows[:80]:
+            value = row.get("value", {}) if isinstance(row.get("value", {}), dict) else {}
+            lines.append(
+                "| {} | {} | {} | {} | {} |".format(
+                    row.get("name", ""),
+                    row.get("ok", False),
+                    row.get("method", ""),
+                    value.get("name", ""),
+                    value.get("python_type", ""),
+                )
+            )
+        lines.append("")
+
+    lines.extend(["## Callable Library Results", ""])
+    if isinstance(library, dict) and library.get("call_results"):
+        lines.append("| Name | Error | Value Name | Value Type |")
+        lines.append("| --- | --- | --- | --- |")
+        for row in library.get("call_results", [])[:80]:
+            value = row.get("value", {}) if isinstance(row.get("value", {}), dict) else {}
+            lines.append(
+                "| {} | {} | {} | {} |".format(
+                    row.get("name", ""),
+                    str(row.get("error", ""))[:160],
+                    value.get("name", ""),
+                    value.get("python_type", ""),
+                )
+            )
+    else:
+        lines.append("- No callable graph discovery results.")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def blueprint_variable_names(blueprint):
     names = []
     library = getattr(unreal, "BlueprintEditorLibrary", None) if unreal is not None else None
@@ -1742,6 +1982,7 @@ def export_current_blueprint_defaults():
     class_defaults = collect_class_defaults(cdo, variables.keys(), generated_class=generated_class)
     components = collect_components(blueprint, cdo, generated_class=generated_class, asset_dir=asset_dir)
     graph_pages = collect_graph_pages(blueprint, generated_class)
+    graph_discovery_debug = collect_graph_discovery_debug(blueprint, generated_class)
 
     defaults_payload = {
         "schema": "blueprint-translator.defaults.v1",
@@ -1798,6 +2039,7 @@ def export_current_blueprint_defaults():
         graph_pages_payload,
         suggestion_report,
     )
+    graph_discovery_report = render_graph_discovery_report(graph_discovery_debug, graph_pages)
     log_payload = {
         "schema": "blueprint-translator.devkit-export-log.v1",
         "generated": now,
@@ -1808,6 +2050,7 @@ def export_current_blueprint_defaults():
         "skipped_attempts": STATE.skipped_attempts,
         "debug": STATE.debug,
         "graph_pages": graph_pages,
+        "graph_discovery_debug": graph_discovery_debug,
         "suggestions": suggestion_report,
     }
 
@@ -1815,12 +2058,16 @@ def export_current_blueprint_defaults():
     components_path = os.path.join(asset_dir, "components.json")
     graph_pages_path = os.path.join(asset_dir, "graph_pages.json")
     graph_queue_path = os.path.join(asset_dir, "graph_queue.txt")
+    graph_discovery_debug_path = os.path.join(asset_dir, "graph_discovery_debug.json")
+    graph_discovery_report_path = os.path.join(asset_dir, "graph_discovery_report.md")
     report_path = os.path.join(asset_dir, "devkit_export_report.md")
     log_path = os.path.join(asset_dir, "devkit_export_log.json")
     write_json(defaults_path, defaults_payload)
     write_json(components_path, components_payload)
     write_json(graph_pages_path, graph_pages_payload)
     write_text(graph_queue_path, render_graph_queue(graph_pages))
+    write_json(graph_discovery_debug_path, graph_discovery_debug)
+    write_text(graph_discovery_report_path, graph_discovery_report)
     write_text(report_path, report_text)
     write_json(log_path, log_payload)
 
@@ -1828,6 +2075,8 @@ def export_current_blueprint_defaults():
     log("Wrote: {}".format(components_path))
     log("Wrote: {}".format(graph_pages_path))
     log("Wrote: {}".format(graph_queue_path))
+    log("Wrote: {}".format(graph_discovery_debug_path))
+    log("Wrote: {}".format(graph_discovery_report_path))
     log("Wrote: {}".format(report_path))
     log("Wrote: {}".format(log_path))
     log("Next: run local analyzer with:")
@@ -1838,6 +2087,8 @@ def export_current_blueprint_defaults():
         "components": components_path,
         "graph_pages": graph_pages_path,
         "graph_queue": graph_queue_path,
+        "graph_discovery_debug": graph_discovery_debug_path,
+        "graph_discovery_report": graph_discovery_report_path,
         "report": report_path,
         "log": log_path,
     }

@@ -116,7 +116,7 @@ If you are in normal Output Log / command mode instead of Python Console mode, u
 py exec(open(r"C:\Users\ac\Documents\project gaming\Blueprint to Code\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
 ```
 
-The exporter also still tries the currently opened/selected Blueprint, the saved GUI request, clipboard text, and an in-DevKit paste dialog when available. It writes `defaults.json`, `components.json`, `graph_pages.json`, `graph_queue.txt`, `devkit_export_report.md`, and `devkit_export_log.json` under `captures/<BlueprintName>/`. The control center can load `graph_queue.txt` directly into the batch capture queue. Then rerun the asset analyzer:
+The exporter also still tries the currently opened/selected Blueprint, the saved GUI request, clipboard text, and an in-DevKit paste dialog when available. It writes `defaults.json`, `components.json`, `graph_pages.json`, `graph_queue.txt`, `graph_discovery_debug.json`, `graph_discovery_report.md`, `devkit_export_report.md`, and `devkit_export_log.json` under `captures/<BlueprintName>/`. The control center can load `graph_queue.txt` directly into the batch capture queue. If `graph_queue.txt` is empty, inspect `graph_discovery_report.md` and `graph_discovery_debug.json` to see what graph-related fields this ARK DevKit Python build exposes. Then rerun the asset analyzer:
 
 Component export runs in crash-safe mode by default: it writes analysis candidates rather than recursively reflecting live Unreal component objects, which can crash some ARK DevKit Python builds.
 Crash-safe mode now also attempts a shallow SimpleConstructionScript/component-template scan for component names, classes, and paths; it still avoids recursive component default reflection.
