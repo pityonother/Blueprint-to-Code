@@ -686,6 +686,12 @@ def collect_graph_pages(blueprint, generated_class=None):
 
     library = getattr(unreal, "BlueprintEditorLibrary", None) if unreal is not None else None
     if library is not None:
+        method = getattr(library, "find_event_graph", None)
+        if callable(method):
+            try:
+                add_graph_page(pages, seen, method(blueprint), "EventGraph", "BlueprintEditorLibrary.find_event_graph")
+            except Exception as exc:
+                STATE.skip("graph_pages", "BlueprintEditorLibrary.find_event_graph", str(exc))
         for method_name in ("get_all_graphs", "get_blueprint_graphs"):
             method = getattr(library, method_name, None)
             if callable(method):
@@ -734,6 +740,8 @@ GRAPH_DISCOVERY_CALL_NAMES = set(
         "get_uber_graph_pages",
         "get_event_graph",
         "get_event_graphs",
+        "find_event_graph",
+        "find_graph",
         "get_delegate_signature_graphs",
         "get_intermediate_generated_graphs",
         "get_last_edited_documents",
@@ -863,8 +871,20 @@ def inspect_blueprint_editor_library_graphs(blueprint):
                 call_result["callable"] = False
             else:
                 call_result["callable"] = True
-                value = method(blueprint)
-                call_result["value"] = graph_debug_value_summary(value)
+                if method_name == "find_graph":
+                    attempts = []
+                    for graph_name in ("EventGraph", "UserConstructionScript", "ConstructionScript"):
+                        attempt = {"graph_name": graph_name}
+                        try:
+                            value = method(blueprint, graph_name)
+                            attempt["value"] = graph_debug_value_summary(value)
+                        except Exception as exc:
+                            attempt["error"] = str(exc)
+                        attempts.append(attempt)
+                    call_result["attempts"] = attempts
+                else:
+                    value = method(blueprint)
+                    call_result["value"] = graph_debug_value_summary(value)
         except Exception as exc:
             call_result["error"] = str(exc)
         result["call_results"].append(call_result)
@@ -937,6 +957,13 @@ def render_graph_discovery_report(debug_payload, graph_pages):
         lines.append("| --- | --- | --- | --- |")
         for row in library.get("call_results", [])[:80]:
             value = row.get("value", {}) if isinstance(row.get("value", {}), dict) else {}
+            if not value and isinstance(row.get("attempts", []), list):
+                attempt_names = []
+                for attempt in row.get("attempts", [])[:5]:
+                    if isinstance(attempt, dict):
+                        attempt_value = attempt.get("value", {}) if isinstance(attempt.get("value", {}), dict) else {}
+                        attempt_names.append("{}:{}".format(attempt.get("graph_name", ""), attempt_value.get("name", attempt.get("error", ""))))
+                value = {"name": "; ".join(attempt_names), "python_type": "attempts"}
             lines.append(
                 "| {} | {} | {} | {} |".format(
                     row.get("name", ""),
