@@ -2,6 +2,18 @@
 
 This project is an ARK DevKit / Unreal Blueprint clipboard-text analyzer, not a game implementation task.
 
+## Local Control Center
+
+The user-facing app is a local Vite + TypeScript web control center served by a Python standard-library backend:
+
+- Frontend entry: `src/main.ts` and `src/styles.css`.
+- Backend entry: `scripts/blueprint_tool_server.py`.
+- Windows launcher: `scripts/launch_blueprint_tool.ps1`.
+- Start it with `.\scripts\launch_blueprint_tool.ps1`; it builds the UI and opens `http://127.0.0.1:8765/`.
+- The control center can capture one graph page from the Windows clipboard, rerun reports, inspect DevKit export quality, and run asset-level behavior compare.
+
+Do not treat the old Phaser prototype files/assets as the product direction. The current product direction is the Blueprint analysis control center.
+
 ## Report Reading Order
 
 When reviewing a captured Blueprint asset output directory, read these files first:
@@ -13,6 +25,8 @@ When reviewing a captured Blueprint asset output directory, read these files fir
 5. `diagnostics_report.md` - unresolved links, unknown sources, disconnected nodes, and confidence details.
 6. `asset_report.md` - full audit report, useful after the first four files identify where to focus.
 7. `graph_reports/<graph>_report.md` - only read the specific graph reports named by `next_actions.md` or `capture_quality_report.md`.
+
+For asset compare output, read `behavior_impact_report.md` before the full `compare_report.md`. It groups changes by likely ARK behavior area and points to the graph/default/component evidence first.
 
 ## Files Usually Safe To Ignore
 

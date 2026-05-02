@@ -1,0 +1,659 @@
+"""Local web control center for the Blueprint translator.
+
+The server intentionally uses only Python's standard library. The UI is built
+with Vite into dist/ and calls these JSON endpoints to run the existing
+Blueprint translator, open reports, and prepare ARK DevKit export requests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import mimetypes
+import os
+import re
+import subprocess
+import sys
+import time
+import webbrowser
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
+
+from blueprint_translator.capture import (
+    CAPTURE_GRAPH_TYPES,
+    infer_graph_type,
+    load_capture_manifest,
+    manifest_graph_records,
+    maybe_write_capture_sidecars,
+    save_captured_graph,
+    upsert_graph_record,
+    write_capture_manifest,
+)
+from blueprint_translator.utils import read_clipboard, safe_filename
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CAPTURE_ROOT = PROJECT_ROOT / "captures"
+DIST_ROOT = PROJECT_ROOT / "dist"
+EXPORT_SCRIPT = PROJECT_ROOT / "scripts" / "devkit_exporters" / "export_current_blueprint_defaults.py"
+DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
+
+REPORT_TARGETS = {
+    "next_actions": ("output", "next_actions.md"),
+    "notes_todo": ("output", "notes_todo.md"),
+    "behavior_summary": ("output", "behavior_summary.md"),
+    "capture_quality_report": ("output", "capture_quality_report.md"),
+    "diagnostics_report": ("output", "diagnostics_report.md"),
+    "asset_report": ("output", "asset_report.md"),
+    "call_graph_summary": ("output", "call_graph_summary.md"),
+    "notes": ("notes.md",),
+    "defaults": ("defaults.json",),
+    "components": ("components.json",),
+    "devkit_report": ("devkit_export_report.md",),
+}
+
+OPEN_TARGETS = {
+    **REPORT_TARGETS,
+    "asset_folder": (),
+    "output_folder": ("output",),
+    "graph_reports": ("output", "graph_reports"),
+}
+
+DEFAULT_COMPARE_ROOT = CAPTURE_ROOT / "_compare_reports"
+
+
+def is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def read_json_file(path: Path) -> object | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+
+
+def collection_size(value: object) -> int:
+    if isinstance(value, (list, tuple, set)):
+        return len(value)
+    if isinstance(value, dict):
+        return len(value)
+    return 0
+
+
+def count_defaults(data: object | None) -> int:
+    if isinstance(data, list):
+        return len(data)
+    if not isinstance(data, dict):
+        return 0
+    for key in ("defaults", "class_defaults", "properties", "values", "variables"):
+        count = collection_size(data.get(key))
+        if count:
+            return count
+    return collection_size(data)
+
+
+def count_components(data: object | None) -> int:
+    if isinstance(data, list):
+        return len(data)
+    if not isinstance(data, dict):
+        return 0
+    for key in ("components", "component_candidates", "templates", "items"):
+        count = collection_size(data.get(key))
+        if count:
+            return count
+    return collection_size(data)
+
+
+def component_source_counts(data: object | None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    components = data if isinstance(data, list) else data.get("components", []) if isinstance(data, dict) else []
+    if not isinstance(components, list):
+        return counts
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        source = str(component.get("source") or "manual_or_unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:12])
+
+
+def parse_devkit_report_counts(text: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for label, key in [
+        ("Blueprint variables exported", "blueprintVariables"),
+        ("Class defaults exported", "classDefaults"),
+        ("Components exported", "componentsExported"),
+        ("Warnings", "warnings"),
+        ("Errors", "errors"),
+        ("Skipped properties", "skipped"),
+    ]:
+        match = re.search(rf"-\s*{re.escape(label)}:\s*(\d+)", text)
+        if match:
+            counts[key] = int(match.group(1))
+    return counts
+
+
+def devkit_export_quality(asset_dir: Path, components_data: object | None) -> dict[str, object]:
+    log_path = asset_dir / "devkit_export_log.json"
+    report_path = asset_dir / "devkit_export_report.md"
+    log_data = read_json_file(log_path)
+    warnings: list[object] = []
+    errors: list[object] = []
+    skipped: list[object] = []
+    debug: list[object] = []
+    if isinstance(log_data, dict):
+        warnings = list(log_data.get("warnings", [])) if isinstance(log_data.get("warnings", []), list) else []
+        errors = list(log_data.get("errors", [])) if isinstance(log_data.get("errors", []), list) else []
+        skipped = list(log_data.get("skipped", [])) if isinstance(log_data.get("skipped", []), list) else []
+        debug = list(log_data.get("debug", [])) if isinstance(log_data.get("debug", []), list) else []
+    report_text = report_path.read_text(encoding="utf-8-sig", errors="replace") if report_path.is_file() else ""
+    report_counts = parse_devkit_report_counts(report_text)
+    sources = component_source_counts(components_data)
+    safe_scs_hits = sum(
+        count
+        for source, count in sources.items()
+        if "scs" in source.lower() or "simple_construction" in source.lower() or "componenttemplate" in source.lower()
+    )
+    restored_or_manual = sum(
+        count
+        for source, count in sources.items()
+        if "manual" in source.lower() or "restored" in source.lower() or "unknown" in source.lower()
+    )
+    status = "missing"
+    if log_path.is_file() or report_path.is_file():
+        status = "ok"
+        if errors:
+            status = "error"
+        elif warnings or skipped:
+            status = "warning"
+    return {
+        "status": status,
+        "hasLog": log_path.is_file(),
+        "hasReport": report_path.is_file(),
+        "logPath": str(log_path) if log_path.is_file() else "",
+        "reportPath": str(report_path) if report_path.is_file() else "",
+        "warnings": len(warnings),
+        "errors": len(errors),
+        "skipped": len(skipped),
+        "debugMessages": len(debug),
+        "reportCounts": report_counts,
+        "componentSourceCounts": sources,
+        "safeScsComponentCount": safe_scs_hits,
+        "manualOrRestoredComponentCount": restored_or_manual,
+        "summary": export_quality_summary(status, report_counts, len(warnings), len(errors), len(skipped), safe_scs_hits, restored_or_manual),
+    }
+
+
+def export_quality_summary(
+    status: str,
+    report_counts: dict[str, int],
+    warning_count: int,
+    error_count: int,
+    skipped_count: int,
+    safe_scs_hits: int,
+    restored_or_manual: int,
+) -> str:
+    if status == "missing":
+        return "还没有 DevKit 导出日志。请先保存资产路径，然后在 ARK DevKit 里运行导出器。"
+    if error_count:
+        return f"DevKit 导出出现 {error_count} 个错误，请先查看 devkit_export_report.md。"
+    exported_components = report_counts.get("componentsExported", 0)
+    if safe_scs_hits:
+        return f"组件上下文里有 {safe_scs_hits} 个疑似 SCS/component-template 来源，下一步可以补安全默认值字段白名单。"
+    if exported_components == 0 and restored_or_manual:
+        return "这次 DevKit 没有直接导出组件；当前 components.json 更像是分析器恢复或手工整理的候选。"
+    if skipped_count:
+        return f"导出成功，但跳过了 {skipped_count} 个属性；建议按报告复查关键默认值。"
+    if warning_count:
+        return f"导出成功，但有 {warning_count} 个警告。"
+    return "DevKit 导出状态正常。"
+
+
+def newest_mtime(path: Path) -> float | None:
+    if not path.exists():
+        return None
+    newest: float | None = None
+    for item in path.rglob("*") if path.is_dir() else [path]:
+        try:
+            mtime = item.stat().st_mtime
+        except OSError:
+            continue
+        newest = mtime if newest is None else max(newest, mtime)
+    return newest
+
+
+def iso_time(timestamp: float | None) -> str:
+    if timestamp is None:
+        return ""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+
+def graph_count(asset_dir: Path) -> int:
+    manifest = read_json_file(asset_dir / "manifest.json")
+    if isinstance(manifest, dict):
+        graphs = manifest.get("graphs")
+        if isinstance(graphs, list):
+            return len(graphs)
+        if isinstance(graphs, dict):
+            return len(graphs)
+    graphs_dir = asset_dir / "graphs"
+    return len(list(graphs_dir.glob("*.txt"))) if graphs_dir.is_dir() else 0
+
+
+def asset_summary(asset_dir: Path) -> dict[str, object]:
+    defaults_path = asset_dir / "defaults.json"
+    components_path = asset_dir / "components.json"
+    output_dir = asset_dir / "output"
+    defaults_data = read_json_file(defaults_path)
+    components_data = read_json_file(components_path)
+    reports = {
+        key: (asset_dir / Path(*parts)).is_file()
+        for key, parts in REPORT_TARGETS.items()
+    }
+    report_mtime = newest_mtime(output_dir)
+    return {
+        "name": asset_dir.name,
+        "path": str(asset_dir),
+        "graphs": graph_count(asset_dir),
+        "hasDefaults": defaults_path.is_file(),
+        "defaultsCount": count_defaults(defaults_data),
+        "hasComponents": components_path.is_file(),
+        "componentsCount": count_components(components_data),
+        "hasNotes": (asset_dir / "notes.md").is_file() or (asset_dir / "notes.txt").is_file(),
+        "hasOutput": output_dir.is_dir(),
+        "lastOutputAt": iso_time(report_mtime),
+        "reports": reports,
+        "exportQuality": devkit_export_quality(asset_dir, components_data),
+    }
+
+
+def list_assets() -> list[dict[str, object]]:
+    if not CAPTURE_ROOT.is_dir():
+        return []
+    assets = []
+    for path in sorted(CAPTURE_ROOT.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_dir() or path.name.startswith("_"):
+            continue
+        if (path / "graphs").is_dir() or (path / "manifest.json").is_file() or (path / "defaults.json").is_file():
+            assets.append(asset_summary(path))
+    return assets
+
+
+def normalize_asset_path(raw_text: str) -> str:
+    text = str(raw_text or "").strip().replace("\\", "/").strip("\"'")
+    quoted = re.search(r"['\"](?P<path>/Game/[^'\"]+)['\"]", text)
+    if quoted:
+        text = quoted.group("path").strip()
+    path_match = re.search(r"(?P<path>/Game/[^\s,'\"]+)", text)
+    if path_match:
+        text = path_match.group("path").strip()
+    text = text.strip("\"'")
+    if not text.startswith("/Game/"):
+        return ""
+    if "." in text and text.endswith("_C"):
+        package, obj = text.rsplit(".", 1)
+        text = package + "." + obj[:-2]
+    if "." not in text:
+        object_name = text.rsplit("/", 1)[-1]
+        if object_name:
+            text = text + "." + object_name
+    return text
+
+
+def read_devkit_request() -> str:
+    data = read_json_file(DEVKIT_REQUEST_PATH)
+    if isinstance(data, dict):
+        return str(data.get("asset_path") or "")
+    return ""
+
+
+def write_devkit_request(asset_path: str) -> None:
+    CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": "blueprint-translator.devkit-export-request.v1",
+        "asset_path": asset_path,
+    }
+    DEVKIT_REQUEST_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def devkit_python_command() -> str:
+    return 'exec(open(r"{}", encoding="utf-8").read())'.format(EXPORT_SCRIPT)
+
+
+def devkit_output_log_command() -> str:
+    return 'py exec(open(r"{}", encoding="utf-8").read())'.format(EXPORT_SCRIPT)
+
+
+def resolve_asset_dir(raw_path: str) -> Path:
+    if not raw_path:
+        raise ValueError("Missing asset path.")
+    asset_dir = Path(unquote(raw_path))
+    if not asset_dir.is_absolute():
+        asset_dir = PROJECT_ROOT / asset_dir
+    asset_dir = asset_dir.resolve()
+    if not asset_dir.is_dir():
+        raise ValueError("Asset directory does not exist.")
+    if not is_within(asset_dir, PROJECT_ROOT):
+        raise ValueError("Asset directory must be inside the project.")
+    return asset_dir
+
+
+def resolve_target(asset_dir: Path, target: str, mapping: dict[str, tuple[str, ...]]) -> Path:
+    if target not in mapping:
+        raise ValueError("Unknown target.")
+    parts = mapping[target]
+    path = asset_dir if not parts else asset_dir.joinpath(*parts)
+    if not is_within(path, asset_dir):
+        raise ValueError("Target must stay inside the asset directory.")
+    return path
+
+
+def open_path(path: Path) -> None:
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    if os.name == "nt":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, str(path)])
+
+
+def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
+    if report_level not in {"compact", "standard", "debug"}:
+        raise ValueError("Invalid report level.")
+    output_dir = asset_dir / "output"
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
+        "--asset-dir",
+        str(asset_dir),
+        "--output-dir",
+        str(output_dir),
+        "--report-level",
+        report_level,
+    ]
+    started = time.time()
+    completed = subprocess.run(
+        command,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=1800,
+    )
+    return {
+        "command": " ".join(command),
+        "returnCode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "durationSeconds": round(time.time() - started, 2),
+        "asset": asset_summary(asset_dir),
+    }
+
+
+def resolve_capture_target(body: dict[str, object]) -> tuple[Path, str]:
+    asset_path = str(body.get("assetPath") or "").strip()
+    asset_name = str(body.get("assetName") or "").strip()
+    if asset_path:
+        asset_dir = resolve_asset_dir(asset_path)
+        manifest = load_capture_manifest(asset_dir)
+        return asset_dir, str(manifest.get("asset_name") or asset_dir.name)
+    if not asset_name:
+        raise ValueError("Asset name is required for a new capture.")
+    asset_dir = (CAPTURE_ROOT / safe_filename(asset_name, "BlueprintAsset")).resolve()
+    if not is_within(asset_dir, PROJECT_ROOT):
+        raise ValueError("Capture asset must stay inside the project.")
+    return asset_dir, safe_filename(asset_name, "BlueprintAsset")
+
+
+def capture_graph_from_request(body: dict[str, object]) -> dict[str, object]:
+    asset_dir, asset_name = resolve_capture_target(body)
+    graph_name = str(body.get("graphName") or "").strip()
+    if not graph_name:
+        raise ValueError("Graph name is required.")
+    graph_type = str(body.get("graphType") or infer_graph_type(graph_name))
+    if graph_type not in CAPTURE_GRAPH_TYPES:
+        graph_type = "Unknown"
+    text = str(body.get("text") or "")
+    source = "request body"
+    if not text.strip():
+        text = read_clipboard().lstrip("\ufeff")
+        source = "Windows clipboard"
+    manifest = load_capture_manifest(asset_dir)
+    records = manifest_graph_records(manifest)
+    record = save_captured_graph(asset_dir, graph_name, graph_type, text)
+    records = upsert_graph_record(records, record)
+    write_capture_manifest(
+        asset_dir,
+        asset_name,
+        records,
+        parent_class=str(manifest.get("parent_class") or ""),
+        interfaces=manifest.get("interfaces", []) if isinstance(manifest.get("interfaces", []), list) else [],
+        tags=manifest.get("tags", []) if isinstance(manifest.get("tags", []), list) else [],
+    )
+    maybe_write_capture_sidecars(asset_dir)
+    result: dict[str, object] = {
+        "source": source,
+        "record": record,
+        "asset": asset_summary(asset_dir),
+        "manifest": str(asset_dir / "manifest.json"),
+        "graphPath": str(asset_dir / str(record.get("path", ""))),
+    }
+    if bool(body.get("analyzeAfter")):
+        result["analysis"] = run_analyzer(asset_dir, str(body.get("reportLevel") or "standard"))
+    return result
+
+
+def run_asset_compare_for_gui(old_asset_dir: Path, new_asset_dir: Path) -> dict[str, object]:
+    DEFAULT_COMPARE_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    compare_dir = DEFAULT_COMPARE_ROOT / f"{safe_filename(old_asset_dir.name, 'old')}_to_{safe_filename(new_asset_dir.name, 'new')}_{stamp}"
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
+        "--compare-asset",
+        str(old_asset_dir),
+        str(new_asset_dir),
+        "--output-dir",
+        str(compare_dir),
+    ]
+    started = time.time()
+    completed = subprocess.run(
+        command,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=1800,
+    )
+    behavior_report = compare_dir / "behavior_impact_report.md"
+    summary = compare_dir / "compare_summary.md"
+    return {
+        "command": " ".join(command),
+        "returnCode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "durationSeconds": round(time.time() - started, 2),
+        "outputDir": str(compare_dir),
+        "behaviorImpactPath": str(behavior_report) if behavior_report.is_file() else "",
+        "summaryPath": str(summary) if summary.is_file() else "",
+        "behaviorImpact": behavior_report.read_text(encoding="utf-8-sig", errors="replace") if behavior_report.is_file() else "",
+    }
+
+
+def api_state() -> dict[str, object]:
+    return {
+        "projectRoot": str(PROJECT_ROOT),
+        "captureRoot": str(CAPTURE_ROOT),
+        "assets": list_assets(),
+        "devkitRequestPath": str(DEVKIT_REQUEST_PATH),
+        "devkitAssetPath": read_devkit_request(),
+        "devkitPythonCommand": devkit_python_command(),
+        "devkitOutputLogCommand": devkit_output_log_command(),
+    }
+
+
+class ControlCenterHandler(BaseHTTPRequestHandler):
+    server_version = "BlueprintToolControlCenter/1.0"
+
+    def log_message(self, format: str, *args: object) -> None:
+        sys.stderr.write("[BlueprintTool] " + (format % args) + "\n")
+
+    def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def send_error_json(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
+        self.send_json({"ok": False, "error": message}, status)
+
+    def read_json_body(self) -> dict[str, object]:
+        length = int(self.headers.get("Content-Length") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8-sig")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("Request body must be a JSON object.")
+        return data
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/state":
+            self.send_json({"ok": True, **api_state()})
+            return
+        if parsed.path == "/api/report":
+            self.handle_report(parsed.query)
+            return
+        self.serve_static(parsed.path)
+
+    def do_POST(self) -> None:
+        try:
+            body = self.read_json_body()
+            if self.path == "/api/analyze":
+                asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
+                result = run_analyzer(asset_dir, str(body.get("reportLevel") or "standard"))
+                self.send_json({"ok": result["returnCode"] == 0, **result})
+                return
+            if self.path == "/api/capture-graph":
+                result = capture_graph_from_request(body)
+                analysis = result.get("analysis")
+                ok = True
+                if isinstance(analysis, dict):
+                    ok = int(analysis.get("returnCode", 0)) == 0
+                self.send_json({"ok": ok, **result})
+                return
+            if self.path == "/api/compare-asset":
+                old_asset = resolve_asset_dir(str(body.get("oldAssetPath") or ""))
+                new_asset = resolve_asset_dir(str(body.get("newAssetPath") or ""))
+                result = run_asset_compare_for_gui(old_asset, new_asset)
+                self.send_json({"ok": result["returnCode"] == 0, **result})
+                return
+            if self.path == "/api/open":
+                asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
+                target_path = resolve_target(asset_dir, str(body.get("target") or ""), OPEN_TARGETS)
+                open_path(target_path)
+                self.send_json({"ok": True, "path": str(target_path)})
+                return
+            if self.path == "/api/open-captures":
+                CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
+                open_path(CAPTURE_ROOT)
+                self.send_json({"ok": True, "path": str(CAPTURE_ROOT)})
+                return
+            if self.path == "/api/devkit-request":
+                asset_path = normalize_asset_path(str(body.get("assetPath") or ""))
+                if not asset_path:
+                    self.send_error_json("Paste an ARK DevKit path that starts with /Game/.")
+                    return
+                write_devkit_request(asset_path)
+                self.send_json(
+                    {
+                        "ok": True,
+                        "assetPath": asset_path,
+                        "requestPath": str(DEVKIT_REQUEST_PATH),
+                        "pythonCommand": devkit_python_command(),
+                        "outputLogCommand": devkit_output_log_command(),
+                    }
+                )
+                return
+            self.send_error_json("Unknown API endpoint.", HTTPStatus.NOT_FOUND)
+        except subprocess.TimeoutExpired:
+            self.send_error_json("Analyzer timed out after 30 minutes.", HTTPStatus.REQUEST_TIMEOUT)
+        except Exception as exc:
+            self.send_error_json(str(exc))
+
+    def handle_report(self, query: str) -> None:
+        values = parse_qs(query)
+        try:
+            asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
+            target_path = resolve_target(asset_dir, values.get("target", [""])[0], REPORT_TARGETS)
+            if not target_path.is_file():
+                self.send_error_json("Report file does not exist.", HTTPStatus.NOT_FOUND)
+                return
+            content = target_path.read_text(encoding="utf-8-sig", errors="replace")
+            self.send_json({"ok": True, "path": str(target_path), "content": content})
+        except Exception as exc:
+            self.send_error_json(str(exc))
+
+    def serve_static(self, request_path: str) -> None:
+        if request_path in {"", "/"}:
+            relative = Path("index.html")
+        else:
+            relative = Path(unquote(request_path.lstrip("/")))
+        static_path = (DIST_ROOT / relative).resolve()
+        if not is_within(static_path, DIST_ROOT) or not static_path.is_file():
+            self.send_response(HTTPStatus.NOT_FOUND)
+            self.end_headers()
+            self.wfile.write(b"Build the UI first with: npm run build")
+            return
+        mime_type, _encoding = mimetypes.guess_type(str(static_path))
+        data = static_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", mime_type or "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the local Blueprint translator web control center.")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--open", action="store_true", help="Open the control center in the default browser.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    server = ThreadingHTTPServer((args.host, args.port), ControlCenterHandler)
+    url = f"http://{args.host}:{args.port}/"
+    print(f"Blueprint Tool Control Center: {url}")
+    print("Press Ctrl+C to stop.")
+    if args.open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping Blueprint Tool Control Center.")
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

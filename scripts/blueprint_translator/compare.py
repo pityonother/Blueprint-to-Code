@@ -1,4 +1,4 @@
-"""Single-graph and asset-level Blueprint comparison workflows."""
+﻿"""Single-graph and asset-level Blueprint comparison workflows."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from .asset import (
 )
 from .core import parse_blueprint_text
 from .output import resolve_output_paths, write_glossary
+from .quality import behavior_area
 from .utils import label_for, node_key, profile_keywords, table_row
 
 def load_compare_input(path_text: str, keywords: list[str]) -> dict[str, object]:
@@ -489,7 +490,7 @@ def compare_asset_payloads(old: dict[str, object], new: dict[str, object]) -> di
     else:
         likely_equivalent_changes = []
 
-    return {
+    diff = {
         "metadata": {
             "generated": _dt.datetime.now().isoformat(timespec="seconds"),
             "old_asset_dir": old_meta.get("asset_dir", ""),
@@ -512,6 +513,189 @@ def compare_asset_payloads(old: dict[str, object], new: dict[str, object]) -> di
         "old_asset": old,
         "new_asset": new,
     }
+    diff["behavior_impacts"] = build_behavior_impact_rows(diff)
+    return diff
+
+
+IMPACT_RULES: dict[str, dict[str, object]] = {
+    "Glide": {
+        "keywords": ("glide", "gliding", "fallvelocity", "flyer", "wingtrail", "pullup", "parachute", "startglide"),
+        "impact": "May change glide entry conditions, air speed/pitch feel, pull-up logic, or glide visual feedback.",
+        "inspect": "Inspect StartGlide, CanGlide, Client/Server Tick Gliding, BPOverrideCharacterNewFallVelocity, and related defaults.",
+    },
+    "Sliding": {
+        "keywords": ("slide", "sliding", "slope", "replicatedslide", "clearsliding"),
+        "impact": "May change slide entry/exit, slope acceleration, server-synced position, or client presentation.",
+        "inspect": "Inspect Client Tick Sliding, Server Tick Sliding, Clear Sliding, replicatedSlideLocation, and replicatedSlideRotation.",
+    },
+    "Nursing": {
+        "keywords": ("nurs", "trough", "baby", "effectiveness", "disable nursing", "enable nursing"),
+        "impact": "May change nursing enablement, trough/range visuals, team checks, or food-effectiveness replication.",
+        "inspect": "Inspect EnableNursing, Disable Nursing, CanNurseDino, and Check Team and Toggle Trough Visibility.",
+    },
+    "MultiUse": {
+        "keywords": ("multiuse", "useentries", "trymultiuse", "entry", "menu"),
+        "impact": "May change player interaction entries, availability conditions, or use execution results.",
+        "inspect": "Inspect BPGetMultiUseEntries, BPTryMultiUse, and team/rider/state branches.",
+    },
+    "Damage": {
+        "keywords": ("damage", "attack", "hit", "steal"),
+        "impact": "May change damage adjustment, attack gating, or passive triggered behavior.",
+        "inspect": "Inspect BlueprintAdjustOutputDamage plus attacker/target team, passenger, and baby-related conditions.",
+    },
+    "Replication": {
+        "keywords": ("server", "client", "onrep", "replicated", "timer", "rpc", "authority"),
+        "impact": "May change server-owned state, client-visible state, RepNotify behavior, or timer-driven sync cadence.",
+        "inspect": "Inspect OnRep graphs, Server/Client Tick graphs, BPTimerServer/BPTimerNonDedicated, and authority branches.",
+    },
+    "Passenger": {
+        "keywords": ("passenger", "seat", "offset", "rider"),
+        "impact": "May change passenger seats, offsets, rider state, or passenger display.",
+        "inspect": "Inspect BPGetPassengerDinoAdditionalOffset, PassengerOffsets, and seat-index functions.",
+    },
+    "HUD": {
+        "keywords": ("hud", "icon", "draw", "floating"),
+        "impact": "May change HUD output, range hints, or status icons shown to the player.",
+        "inspect": "Inspect BlueprintDrawFloatingHUD and HideRangeIcon/ShowRangeIcon references.",
+    },
+    "Movement": {
+        "keywords": ("movement", "jump", "run", "velocity", "correction", "fall"),
+        "impact": "May change jump, run, movement mode, server correction, or animation-state transitions.",
+        "inspect": "Inspect ExecuteJump, BPOnMovementModeChangedNotify, and BPAcknowledgeServerCorrection.",
+    },
+}
+
+
+def behavior_area_from_text(text: str) -> str:
+    lowered = text.lower()
+    for area, rule in IMPACT_RULES.items():
+        if any(str(keyword) in lowered for keyword in rule.get("keywords", ())) :
+            return area
+    return behavior_area(text)
+
+
+def collect_behavior_evidence(diff: dict[str, object]) -> dict[str, list[str]]:
+    evidence: dict[str, list[str]] = defaultdict(list)
+
+    for graph_name in diff.get("added_graphs", []):
+        area = behavior_area_from_text(str(graph_name))
+        evidence[area].append(f"graph added: {graph_name}")
+    for graph_name in diff.get("removed_graphs", []):
+        area = behavior_area_from_text(str(graph_name))
+        evidence[area].append(f"graph removed: {graph_name}")
+
+    for graph_diff in diff.get("graph_diffs", []):
+        if not isinstance(graph_diff, dict):
+            continue
+        graph_name = str(graph_diff.get("graph", ""))
+        area = behavior_area_from_text(graph_name)
+        logic_notes = graph_diff.get("likely_logic_changes", [])
+        unknown_notes = graph_diff.get("unknown_changes", [])
+        added_nodes = graph_diff.get("added_nodes", [])
+        removed_nodes = graph_diff.get("removed_nodes", [])
+        if logic_notes:
+            evidence[area].append(f"{graph_name}: {len(logic_notes)} parsed logic change(s)")
+        if unknown_notes:
+            evidence[area].append(f"{graph_name}: {len(unknown_notes)} unknown change(s) need review")
+        if added_nodes or removed_nodes:
+            evidence[area].append(f"{graph_name}: added nodes {len(added_nodes)} / removed nodes {len(removed_nodes)}")
+
+    defaults_delta = diff.get("defaults_delta", {})
+    if isinstance(defaults_delta, dict):
+        for side in ("added", "removed", "changed"):
+            values = defaults_delta.get(side, {})
+            if isinstance(values, dict):
+                for name in values:
+                    area = behavior_area_from_text(str(name))
+                    evidence[area].append(f"default {side}: {name}")
+
+    components_delta = diff.get("components_delta", {})
+    if isinstance(components_delta, dict):
+        for side in ("added", "removed", "changed"):
+            values = components_delta.get(side, {})
+            if isinstance(values, dict):
+                for name in values:
+                    area = behavior_area_from_text(str(name))
+                    evidence[area].append(f"component {side}: {name}")
+
+    relation_deltas = diff.get("relation_deltas", {})
+    if isinstance(relation_deltas, dict):
+        for relation_name, delta in relation_deltas.items():
+            if not isinstance(delta, dict):
+                continue
+            for side in ("added", "removed"):
+                for item in delta.get(side, [])[:100]:
+                    area = behavior_area_from_text(str(item))
+                    evidence[area].append(f"{relation_name} {side}: {item}")
+    return evidence
+
+
+def impact_risk(area: str, items: list[str]) -> str:
+    text = "\n".join(items).lower()
+    if area in {"Replication", "Glide", "Sliding", "Nursing", "MultiUse"} and len(items) >= 3:
+        return "high"
+    if "removed" in text or "execution flow" in text or "linkedto" in text:
+        return "high"
+    if len(items) >= 2:
+        return "medium"
+    return "low"
+
+
+def build_behavior_impact_rows(diff: dict[str, object]) -> list[dict[str, object]]:
+    evidence = collect_behavior_evidence(diff)
+    rows: list[dict[str, object]] = []
+    for area, items in sorted(evidence.items(), key=lambda item: (item[0] == "Other", item[0])):
+        unique_items = list(dict.fromkeys(items))
+        rule = IMPACT_RULES.get(area, {})
+        rows.append(
+            {
+                "area": area,
+                "risk": impact_risk(area, unique_items),
+                "impact": rule.get("impact") or "May change runtime Blueprint behavior in this area; confirm with the graph and defaults.",
+                "inspect": rule.get("inspect") or "Inspect related graphs, variable writes, default changes, and unresolved links.",
+                "evidence": unique_items[:30],
+            }
+        )
+    return rows
+
+
+def render_behavior_impact_report(diff: dict[str, object]) -> str:
+    meta = diff.get("metadata", {})
+    impacts = [item for item in diff.get("behavior_impacts", []) if isinstance(item, dict)]
+    lines = [
+        "# Blueprint Behavior Impact Report",
+        "",
+        "This report translates the asset diff into ARK behavior areas. It is heuristic, but it is intended to answer which gameplay behavior may change.",
+        "",
+        "## Summary",
+        "",
+        f"- Old asset: {meta.get('old_asset_name') or '-'}",
+        f"- New asset: {meta.get('new_asset_name') or '-'}",
+        f"- Graph count: {diff.get('graph_count', {}).get('old', 0)} -> {diff.get('graph_count', {}).get('new', 0)}",
+        f"- Node count: {diff.get('node_count', {}).get('old', 0)} -> {diff.get('node_count', {}).get('new', 0)}",
+        f"- Impact areas: {len(impacts)}",
+        "",
+    ]
+    if impacts:
+        lines.append(table_row(["Area", "Risk", "Likely Impact", "Inspect First"]))
+        lines.append(table_row(["---", "---", "---", "---"]))
+        for item in impacts:
+            lines.append(table_row([item.get("area"), item.get("risk"), item.get("impact"), item.get("inspect")]))
+    else:
+        lines.append("- No behavior impact areas detected from parsed asset diff.")
+
+    lines.extend(["", "## Evidence By Area", ""])
+    for item in impacts:
+        lines.extend([f"### {item.get('area')} ({item.get('risk')})", ""])
+        lines.append(f"- Likely impact: {item.get('impact')}")
+        lines.append(f"- Inspect first: {item.get('inspect')}")
+        lines.append("- Evidence:")
+        for evidence_item in item.get("evidence", []):
+            lines.append(f"  - {evidence_item}")
+        if not item.get("evidence"):
+            lines.append("  - none")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def render_asset_compare_report(diff: dict[str, object]) -> str:
@@ -664,6 +848,7 @@ def run_asset_compare(args: argparse.Namespace) -> int:
     paths = resolve_output_paths(args, compare=True)
     paths["report"].write_text(render_asset_compare_report(diff), encoding="utf-8")
     paths["compare_summary"].write_text(render_asset_compare_summary(diff), encoding="utf-8")
+    paths["behavior_impact_report"].write_text(render_behavior_impact_report(diff), encoding="utf-8")
     paths["prompt"].write_text(render_asset_compare_prompt(diff), encoding="utf-8")
     paths["json"].write_text(json.dumps(diff, ensure_ascii=False, indent=2), encoding="utf-8")
     paths["compact"].write_text(render_asset_compare_compact(diff), encoding="utf-8")
@@ -671,6 +856,7 @@ def run_asset_compare(args: argparse.Namespace) -> int:
     print(f"Wrote asset compare output directory: {paths['dir']}")
     print(f"- report: {paths['report']}")
     print(f"- summary: {paths['compare_summary']}")
+    print(f"- behavior impact: {paths['behavior_impact_report']}")
     print(f"- prompt: {paths['prompt']}")
     print(f"- compare json: {paths['json']}")
     print(f"Compared graphs: {len(diff.get('matched_graphs', []))}")
@@ -695,3 +881,4 @@ def run_compare(args: argparse.Namespace) -> int:
     print(f"- prompt: {paths['prompt']}")
     print(f"- compare json: {paths['json']}")
     return 0
+

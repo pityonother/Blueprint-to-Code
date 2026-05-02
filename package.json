@@ -1,15 +1,13 @@
 {
-  "name": "petal-walk",
+  "name": "blueprint-tool-control-center",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "control": "npm run build && python scripts/blueprint_tool_server.py --open",
     "preview": "vite preview"
-  },
-  "dependencies": {
-    "phaser": "^3.90.0"
   },
   "devDependencies": {
     "typescript": "~6.0.2",

@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import Iterable
 
 from .context import context_from_args, function_note_for_name, parse_components_context, parse_defaults_context, parse_notes_context
 from .core import parse_blueprint_text
@@ -702,6 +703,88 @@ def infer_behavior_lines(area: str, rollup: dict[str, object]) -> list[str]:
     return lines
 
 
+BEHAVIOR_RULES: dict[str, dict[str, object]] = {
+    "Glide": {
+        "signals": ("bCanGlide", "bOverrideNewFallVelocity", "StartGlideLocation", "GlidingPullUpMultiplier", "WingTrail", "FlyerForce"),
+        "components": ("CharacterMovement", "WingTrail", "ParaAudio"),
+        "focus": "Confirm start checks, server/client tick split, fall-velocity override, pull-up modifiers, and visual/audio cues.",
+    },
+    "Sliding": {
+        "signals": ("replicatedSlideLocation", "replicatedSlideRotation", "SlidingAngle", "NewSlideMulti", "TempSlide", "NS_Sliding_VFX"),
+        "components": ("CharacterMovement", "Sliding", "VFX"),
+        "focus": "Confirm enter/clear paths, slope multiplier changes, replicated transform writes, and client presentation.",
+    },
+    "Nursing": {
+        "signals": ("bIsNursing", "bNurseVisualActive", "BaseNursingRange", "ReplicatedNursingTroughEffectiveness", "NursingTroughFoodEffectiveness"),
+        "components": ("TroughVisual", "Nursing", "Status"),
+        "focus": "Confirm team checks, enable/disable authority, trough visibility, and replicated effectiveness defaults.",
+    },
+    "MultiUse": {
+        "signals": ("MultiUse", "UseEntries", "BPTryMultiUse", "BPGetMultiUseEntries", "Team", "Rider"),
+        "components": ("Inventory", "Status"),
+        "focus": "Confirm menu entry availability, use execution branches, team/rider gates, and user-facing text/icon defaults.",
+    },
+    "Replication": {
+        "signals": ("OnRep", "Server", "Client", "Replicated", "Timer", "Authority"),
+        "components": ("CharacterMovement", "Status"),
+        "focus": "Confirm replicated variables, RepNotify ordering, server-owned writes, and client-only visual updates.",
+    },
+    "Damage": {
+        "signals": ("Damage", "Attack", "Team", "Rider", "Passenger"),
+        "components": ("Status",),
+        "focus": "Confirm damage adjustment inputs, attacker/target checks, passenger or baby side effects, and return value writes.",
+    },
+}
+
+
+def match_rule_terms(terms: Iterable[object], names: Iterable[object]) -> list[str]:
+    name_values = [str(name) for name in names if str(name)]
+    matches: list[str] = []
+    for term in terms:
+        lowered = str(term).lower()
+        for name in name_values:
+            if lowered and lowered in name.lower():
+                matches.append(name)
+                break
+    return list(dict.fromkeys(matches))
+
+
+def render_behavior_rule_checks(
+    sorted_area_items: list[tuple[str, list[dict[str, object]]]],
+    rollups: dict[str, dict[str, object]],
+    known_defaults: set[str],
+    known_components: set[str],
+) -> list[str]:
+    lines = ["", "## Behavior Rule Checks", ""]
+    lines.append(table_row(["Area", "Observed Signals", "Known Defaults", "Known Components", "Review Focus"]))
+    lines.append(table_row(["---", "---", "---", "---", "---"]))
+    for area, _area_items in sorted_area_items:
+        rule = BEHAVIOR_RULES.get(area)
+        if not rule:
+            continue
+        rollup = rollups.get(area, {})
+        reads = rollup.get("reads", {}) if isinstance(rollup.get("reads", {}), dict) else {}
+        writes = rollup.get("writes", {}) if isinstance(rollup.get("writes", {}), dict) else {}
+        graph_names = rollup.get("graph_names", set()) if isinstance(rollup.get("graph_names", set()), set) else set()
+        signal_names = set(reads) | set(writes) | set(str(name) for name in graph_names)
+        observed = match_rule_terms(rule.get("signals", ()), signal_names)
+        defaults = match_rule_terms(rule.get("signals", ()), known_defaults)
+        components = match_rule_terms(rule.get("components", ()), known_components)
+        lines.append(
+            table_row(
+                [
+                    area,
+                    ", ".join(observed[:8]) if observed else "-",
+                    ", ".join(defaults[:8]) if defaults else "-",
+                    ", ".join(components[:8]) if components else "-",
+                    rule.get("focus", ""),
+                ]
+            )
+        )
+    lines.append("")
+    return lines
+
+
 def render_behavior_summary(asset_payload: dict[str, object]) -> str:
     metadata = asset_payload.get("metadata", {}) if isinstance(asset_payload.get("metadata", {}), dict) else {}
     graphs = [graph for graph in asset_payload.get("graphs", []) if isinstance(graph, dict)]
@@ -755,6 +838,8 @@ def render_behavior_summary(asset_payload: dict[str, object]) -> str:
         lines.extend([f"### {area}", ""])
         lines.extend(infer_behavior_lines(area, rollups[area]))
         lines.append("")
+
+    lines.extend(render_behavior_rule_checks(sorted_area_items, rollups, known_defaults, known_components))
 
     lines.extend(["", "## Area Details", ""])
     for area, _area_items in sorted_area_items:

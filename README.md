@@ -1,27 +1,45 @@
-# Petal Walk
+# Blueprint to Code
 
-`Petal Walk` is a Phaser 3 + TypeScript + Vite narrative walking prototype for the browser.
+ARK DevKit / Unreal Blueprint clipboard-text analyzer for turning copied Blueprint
+graph pages, exported Class Defaults, and component context into reports that are
+useful for mod behavior review.
 
-## Run
+## Control Center
 
-```bash
+The easiest entrypoint is the local web control center. It uses the existing Vite
+frontend stack for the interface and a small Python standard-library backend for
+running the analyzer, opening reports, and preparing DevKit export requests.
+
+Run from Windows PowerShell:
+
+```powershell
+.\scripts\launch_blueprint_tool.ps1
+```
+
+The launcher builds the UI, starts `scripts/blueprint_tool_server.py`, and opens
+`http://127.0.0.1:8765/`. From the control center you can:
+
+- select an asset under `captures/`
+- regenerate standard, compact, or debug reports
+- capture one Blueprint graph page from the Windows clipboard into `graphs/*.txt`
+- open `next_actions.md`, `notes_todo.md`, `behavior_summary.md`, and other key reports
+- open the asset output folder or focused `graph_reports/`
+- paste a DevKit Blueprint Object Path and copy the exporter command
+- check DevKit default/component export health, warnings, skipped properties, and SCS/component-template candidates
+- compare two captured assets and generate `behavior_impact_report.md`
+
+For frontend-only development:
+
+```powershell
 npm install
 npm run dev
 ```
 
-Open the local Vite URL in a browser.
+For the combined local app without the PowerShell launcher:
 
-## Controls
-
-- `Right Arrow` / `D`: walk right
-- `Space` / `E`: advance text
-- `Esc`: toggle pause overlay
-- Touch right half: walk right
-
-## Notes
-
-- v0.1 uses generated placeholder art.
-- Audio is intentionally stubbed for the first prototype pass.
+```powershell
+npm run control
+```
 
 ## ARK DevKit Blueprint Translator
 
@@ -56,6 +74,8 @@ Asset report output is tiered:
 - `--report-level compact`: write only the main human reports.
 - `--report-level standard`: default; write `next_actions.md`, `notes_todo.md`, `behavior_summary.md`, `capture_quality_report.md`, `diagnostics_report.md`, `asset_report.md`, `call_graph_summary.md`, non-empty suggestions, and focused graph reports.
 - `--report-level debug`: write full parser payloads such as `asset.json`, `call_graph.md`, `capture_quality.json`, `diagnostics.json`, and all per-graph JSON/diagnostic files.
+
+`behavior_summary.md` includes ARK-focused rule checks for Glide, Sliding, Nursing, MultiUse, Replication, Damage, Movement, HUD, and Passenger-related graph groups. These checks are still heuristic, but they are designed to point you at the defaults, components, and graph pages that matter first.
 
 Known generated asset outputs are cleaned before each asset report run, so stale debug files do not remain after returning to standard output. Pass `--keep-stale-output` only when intentionally comparing old generated files.
 
@@ -102,6 +122,14 @@ For a single non-interactive capture from an existing text file:
 ```powershell
 python scripts\bp_clipboard_to_prompt.py --capture-asset captures\Achatina_Character_BP --capture-once EventGraph --input tests\fixtures\real_ark_achatina_beginplay.txt --capture-no-report
 ```
+
+Compare two captured Blueprint assets:
+
+```powershell
+python scripts\bp_clipboard_to_prompt.py --compare-asset captures\OldAsset_BP captures\NewAsset_BP --output-dir captures\_compare_reports\old_to_new
+```
+
+Asset compare writes `compare_report.md`, `compare_summary.md`, `compare.json`, and `behavior_impact_report.md`. The behavior impact report groups changes by likely ARK behavior areas such as Glide, Sliding, Nursing, MultiUse, Damage, Passenger, Movement, HUD, and Replication.
 
 Run tests:
 

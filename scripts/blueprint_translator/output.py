@@ -49,6 +49,7 @@ def resolve_output_paths(args: argparse.Namespace, compare: bool = False) -> dic
         "pseudocode": out_dir / "pseudocode.md",
         "cpp": out_dir / "cpp_reference.md",
         "compare_summary": out_dir / "compare_summary.md",
+        "behavior_impact_report": out_dir / "behavior_impact_report.md",
         "asset_report": out_dir / "asset_report.md",
         "asset_json": out_dir / "asset.json",
         "call_graph": out_dir / "call_graph.md",

@@ -124,6 +124,10 @@ class CompareTests(unittest.TestCase):
             self.assertIn("Blueprint Asset Compare Report", report)
             self.assertIn("Component Delta", report)
             self.assertIn("Function_InventoryRefresh", report)
+            impact_report = (out_dir / "behavior_impact_report.md").read_text(encoding="utf-8")
+            self.assertIn("Blueprint Behavior Impact Report", impact_report)
+            self.assertIn("Impact areas", impact_report)
+            self.assertTrue(diff["behavior_impacts"])
 
 
 if __name__ == "__main__":
