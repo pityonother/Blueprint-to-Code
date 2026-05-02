@@ -22,11 +22,13 @@ The launcher builds the UI, starts `scripts/blueprint_tool_server.py`, and opens
 - select an asset under `captures/`
 - regenerate standard, compact, or debug reports
 - capture one Blueprint graph page from the Windows clipboard into `graphs/*.txt`
+- confirm before replacing an existing graph page; old copies are backed up under `graphs/_backups/`
 - open `next_actions.md`, `notes_todo.md`, `behavior_summary.md`, and other key reports
 - open the asset output folder or focused `graph_reports/`
 - paste a DevKit Blueprint Object Path and copy the exporter command
 - check DevKit default/component export health, warnings, skipped properties, and SCS/component-template candidates
 - compare two captured assets and generate `behavior_impact_report.md`
+- run long analyses/asset compares as background jobs with visible status and cancellation
 
 For frontend-only development:
 
@@ -66,6 +68,7 @@ python scripts\bp_clipboard_to_prompt.py --capture-asset Achatina_Character_BP
 ```
 
 The capture wizard creates `captures/Achatina_Character_BP/graphs/`, saves each copied graph page as a `.txt` file, writes `manifest.json`, creates starter `defaults.json`, `components.json`, and `notes.md`, then runs the asset report into `captures/Achatina_Character_BP/output/`.
+If a graph page already exists, the CLI refuses to overwrite it unless you pass `--capture-overwrite`; overwritten files are copied to `graphs/_backups/` first. The web control center asks for confirmation before sending the overwrite request.
 For large real assets, start with `capture_quality_report.md`; it separates likely missing Blueprint graph pages from native/Kismet/inherited call noise and lists the defaults/components worth filling first.
 Asset reports also write `next_actions.md`, `defaults_suggestions.json`, and `components_suggestions.json` so you can fill Class Defaults and component context without digging through the full report by hand.
 
@@ -76,6 +79,7 @@ Asset report output is tiered:
 - `--report-level debug`: write full parser payloads such as `asset.json`, `call_graph.md`, `capture_quality.json`, `diagnostics.json`, and all per-graph JSON/diagnostic files.
 
 `behavior_summary.md` includes ARK-focused rule checks for Glide, Sliding, Nursing, MultiUse, Replication, Damage, Movement, HUD, and Passenger-related graph groups. These checks are still heuristic, but they are designed to point you at the defaults, components, and graph pages that matter first.
+The behavior summary rules live in `scripts/blueprint_translator/behavior_report.py`, so new ARK behavior areas can be added and tested without expanding the core asset orchestration module.
 
 Known generated asset outputs are cleaned before each asset report run, so stale debug files do not remain after returning to standard output. Pass `--keep-stale-output` only when intentionally comparing old generated files.
 

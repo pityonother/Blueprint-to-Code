@@ -8,6 +8,7 @@ keeps the historical ``blueprint_translator.engine`` import surface stable.
 from __future__ import annotations
 
 from .asset import *  # noqa: F401,F403
+from .behavior_report import *  # noqa: F401,F403
 from .capture import *  # noqa: F401,F403
 from .cli import *  # noqa: F401,F403
 from .compare import *  # noqa: F401,F403

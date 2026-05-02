@@ -28,7 +28,9 @@ class CaptureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             asset_dir = pathlib.Path(tmp) / "Achatina_Character_BP"
             first = bp.save_captured_graph(asset_dir, "EventGraph", "EventGraph", text)
-            second = bp.save_captured_graph(asset_dir, "EventGraph", "EventGraph", text)
+            with self.assertRaises(FileExistsError):
+                bp.save_captured_graph(asset_dir, "EventGraph", "EventGraph", text)
+            second = bp.save_captured_graph(asset_dir, "EventGraph", "EventGraph", text + "\n", allow_overwrite=True)
             records = bp.upsert_graph_record([], first)
             records = bp.upsert_graph_record(records, second)
             manifest_path = bp.write_capture_manifest(
@@ -41,6 +43,8 @@ class CaptureTests(unittest.TestCase):
             )
 
             self.assertTrue((asset_dir / "graphs" / "EventGraph.txt").exists())
+            self.assertTrue(second["overwritten"])
+            self.assertTrue((asset_dir / second["backup_path"]).exists())
             self.assertEqual(len(records), 1)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["asset_name"], "Achatina_Character_BP")
@@ -74,6 +78,46 @@ class CaptureTests(unittest.TestCase):
             self.assertTrue((asset_dir / "components.json").exists())
             manifest = json.loads((asset_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["graphs"][0]["name"], "EventGraph")
+
+            refused = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--capture-asset",
+                    str(asset_dir),
+                    "--capture-once",
+                    "EventGraph",
+                    "--input",
+                    str(FIXTURES / "blueprint_old.txt"),
+                    "--capture-no-report",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(refused.returncode, 3)
+            self.assertIn("--capture-overwrite", refused.stderr)
+
+            overwritten = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--capture-asset",
+                    str(asset_dir),
+                    "--capture-once",
+                    "EventGraph",
+                    "--input",
+                    str(FIXTURES / "blueprint_old.txt"),
+                    "--capture-no-report",
+                    "--capture-overwrite",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("Backup of overwritten graph:", overwritten.stdout)
 
     def test_function_call_classification_de_noises_engine_calls(self):
         bp = load_translator()
@@ -121,6 +165,40 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(defaults["variables"]["bCanGlide"]["_hint"], "boolean")
         self.assertEqual(components["components"][0]["name"], "CharacterMovement")
         self.assertIn("填 defaults.json", next_actions)
+
+    def test_behavior_summary_applies_ark_rule_fixture(self):
+        bp = load_translator()
+        payload = {
+            "metadata": {"asset_name": "MilkGlider_Character_BP", "graph_count": 1, "node_count": 4},
+            "diagnostics": {"confidence_level": "medium"},
+            "graphs": [
+                {
+                    "graph_name": "Client Tick Gliding",
+                    "node_count": 4,
+                    "payload": {
+                        "variable_gets": [
+                            {"variable": "bCanGlide"},
+                            {"variable": "CharacterMovement"},
+                            {"variable": "WingTrail"},
+                        ],
+                        "variable_sets": [
+                            {"variable": "bOverrideNewFallVelocity"},
+                        ],
+                    },
+                }
+            ],
+            "class_defaults": {"variables": {"bCanGlide": True, "GlidingPullUpMultiplier": 1.25}},
+            "component_defaults": {"components": [{"name": "CharacterMovement"}, {"name": "WingTrail"}]},
+            "call_graph": {"calls": []},
+        }
+
+        text = bp.render_behavior_summary(payload)
+
+        self.assertIn("Behavior Rule Checks", text)
+        self.assertIn("Glide", text)
+        self.assertIn("bCanGlide", text)
+        self.assertIn("CharacterMovement", text)
+        self.assertIn("Confirm start checks", text)
 
 
     def test_notes_sidecar_suppresses_known_external_function_candidates(self):

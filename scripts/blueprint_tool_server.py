@@ -15,7 +15,9 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+import uuid
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +26,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from blueprint_translator.capture import (
     CAPTURE_GRAPH_TYPES,
+    graph_capture_path,
     infer_graph_type,
     load_capture_manifest,
     manifest_graph_records,
@@ -63,6 +66,202 @@ OPEN_TARGETS = {
 }
 
 DEFAULT_COMPARE_ROOT = CAPTURE_ROOT / "_compare_reports"
+JOB_TIMEOUT_SECONDS = 1800
+JOB_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
+JOBS: dict[str, dict[str, object]] = {}
+JOBS_LOCK = threading.Lock()
+
+
+class ApiProblem(Exception):
+    def __init__(self, status: HTTPStatus, payload: dict[str, object]):
+        super().__init__(str(payload.get("error") or status.phrase))
+        self.status = status
+        self.payload = payload
+
+
+def now_iso() -> str:
+    return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def public_job(job: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in job.items()
+        if key not in {"process", "thread", "cancelRequested", "onComplete"}
+    }
+
+
+def get_job(job_id: str) -> dict[str, object]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise ApiProblem(
+                HTTPStatus.NOT_FOUND,
+                {"ok": False, "code": "job_not_found", "error": f"任务不存在：{job_id}"},
+            )
+        return public_job(dict(job))
+
+
+def append_job_stream(job_id: str, key: str, text: str) -> None:
+    if not text:
+        return
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        job[key] = str(job.get(key) or "") + text
+
+
+def read_job_stream(job_id: str, stream: object, key: str) -> None:
+    try:
+        for line in iter(stream.readline, ""):  # type: ignore[attr-defined]
+            append_job_stream(job_id, key, line)
+    finally:
+        try:
+            stream.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def prune_finished_jobs(limit: int = 60) -> None:
+    with JOBS_LOCK:
+        finished = [
+            (str(job.get("finishedAt") or ""), job_id)
+            for job_id, job in JOBS.items()
+            if str(job.get("status")) in JOB_TERMINAL_STATUSES
+        ]
+        finished.sort()
+        for _finished_at, job_id in finished[: max(0, len(finished) - limit)]:
+            JOBS.pop(job_id, None)
+
+
+def run_background_job(
+    job_id: str,
+    command: list[str],
+    on_complete: object,
+) -> None:
+    started = time.time()
+    process: subprocess.Popen[str] | None = None
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+        if bool(job.get("cancelRequested")):
+            job["status"] = "cancelled"
+            job["finishedAt"] = now_iso()
+            return
+        job["status"] = "running"
+        job["startedAt"] = now_iso()
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id]["process"] = process
+        readers: list[threading.Thread] = []
+        if process.stdout:
+            readers.append(threading.Thread(target=read_job_stream, args=(job_id, process.stdout, "stdout"), daemon=True))
+        if process.stderr:
+            readers.append(threading.Thread(target=read_job_stream, args=(job_id, process.stderr, "stderr"), daemon=True))
+        for reader in readers:
+            reader.start()
+        try:
+            return_code = process.wait(timeout=JOB_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return_code = process.wait()
+            with JOBS_LOCK:
+                if job_id in JOBS:
+                    JOBS[job_id]["status"] = "timed_out"
+                    JOBS[job_id]["error"] = f"任务超过 {JOB_TIMEOUT_SECONDS // 60} 分钟后超时。"
+        for reader in readers:
+            reader.join(timeout=2)
+        duration = round(time.time() - started, 2)
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if not job:
+                return
+            cancel_requested = bool(job.get("cancelRequested"))
+            if str(job.get("status")) != "timed_out":
+                job["status"] = "cancelled" if cancel_requested else "succeeded" if return_code == 0 else "failed"
+            job["returnCode"] = return_code
+            job["durationSeconds"] = duration
+            job["finishedAt"] = now_iso()
+        result: dict[str, object] = {}
+        if callable(on_complete):
+            result = on_complete(return_code)  # type: ignore[misc]
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id]["result"] = result
+    except Exception as exc:
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id]["status"] = "failed"
+                JOBS[job_id]["error"] = str(exc)
+                JOBS[job_id]["durationSeconds"] = round(time.time() - started, 2)
+                JOBS[job_id]["finishedAt"] = now_iso()
+    finally:
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id].pop("process", None)
+
+
+def create_background_job(
+    kind: str,
+    title: str,
+    command: list[str],
+    on_complete: object,
+) -> dict[str, object]:
+    prune_finished_jobs()
+    job_id = uuid.uuid4().hex[:12]
+    job: dict[str, object] = {
+        "id": job_id,
+        "kind": kind,
+        "title": title,
+        "status": "queued",
+        "command": " ".join(command),
+        "stdout": "",
+        "stderr": "",
+        "returnCode": None,
+        "durationSeconds": 0,
+        "createdAt": now_iso(),
+        "startedAt": "",
+        "finishedAt": "",
+        "error": "",
+        "result": {},
+        "cancelRequested": False,
+    }
+    thread = threading.Thread(target=run_background_job, args=(job_id, command, on_complete), daemon=True)
+    job["thread"] = thread
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+    thread.start()
+    return public_job(job)
+
+
+def cancel_job(job_id: str) -> dict[str, object]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise ApiProblem(
+                HTTPStatus.NOT_FOUND,
+                {"ok": False, "code": "job_not_found", "error": f"任务不存在：{job_id}"},
+            )
+        job["cancelRequested"] = True
+        process = job.get("process")
+        if str(job.get("status")) == "queued":
+            job["status"] = "cancelled"
+            job["finishedAt"] = now_iso()
+    if isinstance(process, subprocess.Popen):
+        process.terminate()
+    return get_job(job_id)
 
 
 def is_within(path: Path, parent: Path) -> bool:
@@ -368,11 +567,11 @@ def open_path(path: Path) -> None:
     subprocess.Popen([opener, str(path)])
 
 
-def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
+def analyzer_command(asset_dir: Path, report_level: str) -> list[str]:
     if report_level not in {"compact", "standard", "debug"}:
         raise ValueError("Invalid report level.")
     output_dir = asset_dir / "output"
-    command = [
+    return [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
         "--asset-dir",
@@ -382,6 +581,10 @@ def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
         "--report-level",
         report_level,
     ]
+
+
+def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
+    command = analyzer_command(asset_dir, report_level)
     started = time.time()
     completed = subprocess.run(
         command,
@@ -390,7 +593,7 @@ def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=1800,
+        timeout=JOB_TIMEOUT_SECONDS,
     )
     return {
         "command": " ".join(command),
@@ -400,6 +603,18 @@ def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
         "durationSeconds": round(time.time() - started, 2),
         "asset": asset_summary(asset_dir),
     }
+
+
+def start_analyzer_job(asset_dir: Path, report_level: str) -> dict[str, object]:
+    command = analyzer_command(asset_dir, report_level)
+
+    def complete(_return_code: int) -> dict[str, object]:
+        return {
+            "asset": asset_summary(asset_dir),
+            "outputDir": str(asset_dir / "output"),
+        }
+
+    return create_background_job("analyze", f"{asset_dir.name} {report_level} 分析", command, complete)
 
 
 def resolve_capture_target(body: dict[str, object]) -> tuple[Path, str]:
@@ -432,7 +647,19 @@ def capture_graph_from_request(body: dict[str, object]) -> dict[str, object]:
         source = "Windows clipboard"
     manifest = load_capture_manifest(asset_dir)
     records = manifest_graph_records(manifest)
-    record = save_captured_graph(asset_dir, graph_name, graph_type, text)
+    allow_overwrite = bool(body.get("allowOverwrite"))
+    existing_path = graph_capture_path(asset_dir, graph_name)
+    if existing_path.exists() and not allow_overwrite:
+        raise ApiProblem(
+            HTTPStatus.CONFLICT,
+            {
+                "ok": False,
+                "code": "overwrite_required",
+                "error": f"图页已存在：{existing_path.name}",
+                "existingPath": str(existing_path),
+            },
+        )
+    record = save_captured_graph(asset_dir, graph_name, graph_type, text, allow_overwrite=allow_overwrite)
     records = upsert_graph_record(records, record)
     write_capture_manifest(
         asset_dir,
@@ -451,15 +678,15 @@ def capture_graph_from_request(body: dict[str, object]) -> dict[str, object]:
         "graphPath": str(asset_dir / str(record.get("path", ""))),
     }
     if bool(body.get("analyzeAfter")):
-        result["analysis"] = run_analyzer(asset_dir, str(body.get("reportLevel") or "standard"))
+        result["analysisJob"] = start_analyzer_job(asset_dir, str(body.get("reportLevel") or "standard"))
     return result
 
 
-def run_asset_compare_for_gui(old_asset_dir: Path, new_asset_dir: Path) -> dict[str, object]:
+def asset_compare_command(old_asset_dir: Path, new_asset_dir: Path) -> tuple[list[str], Path]:
     DEFAULT_COMPARE_ROOT.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     compare_dir = DEFAULT_COMPARE_ROOT / f"{safe_filename(old_asset_dir.name, 'old')}_to_{safe_filename(new_asset_dir.name, 'new')}_{stamp}"
-    command = [
+    return [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
         "--compare-asset",
@@ -467,7 +694,11 @@ def run_asset_compare_for_gui(old_asset_dir: Path, new_asset_dir: Path) -> dict[
         str(new_asset_dir),
         "--output-dir",
         str(compare_dir),
-    ]
+    ], compare_dir
+
+
+def run_asset_compare_for_gui(old_asset_dir: Path, new_asset_dir: Path) -> dict[str, object]:
+    command, compare_dir = asset_compare_command(old_asset_dir, new_asset_dir)
     started = time.time()
     completed = subprocess.run(
         command,
@@ -476,7 +707,7 @@ def run_asset_compare_for_gui(old_asset_dir: Path, new_asset_dir: Path) -> dict[
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=1800,
+        timeout=JOB_TIMEOUT_SECONDS,
     )
     behavior_report = compare_dir / "behavior_impact_report.md"
     summary = compare_dir / "compare_summary.md"
@@ -491,6 +722,23 @@ def run_asset_compare_for_gui(old_asset_dir: Path, new_asset_dir: Path) -> dict[
         "summaryPath": str(summary) if summary.is_file() else "",
         "behaviorImpact": behavior_report.read_text(encoding="utf-8-sig", errors="replace") if behavior_report.is_file() else "",
     }
+
+
+def start_asset_compare_job(old_asset_dir: Path, new_asset_dir: Path) -> dict[str, object]:
+    command, compare_dir = asset_compare_command(old_asset_dir, new_asset_dir)
+
+    def complete(_return_code: int) -> dict[str, object]:
+        behavior_report = compare_dir / "behavior_impact_report.md"
+        summary = compare_dir / "compare_summary.md"
+        return {
+            "outputDir": str(compare_dir),
+            "behaviorImpactPath": str(behavior_report) if behavior_report.is_file() else "",
+            "summaryPath": str(summary) if summary.is_file() else "",
+            "behaviorImpact": behavior_report.read_text(encoding="utf-8-sig", errors="replace") if behavior_report.is_file() else "",
+        }
+
+    title = f"{old_asset_dir.name} → {new_asset_dir.name} 行为对比"
+    return create_background_job("compare_asset", title, command, complete)
 
 
 def api_state() -> dict[str, object]:
@@ -533,36 +781,45 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         return data
 
     def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/state":
-            self.send_json({"ok": True, **api_state()})
-            return
-        if parsed.path == "/api/report":
-            self.handle_report(parsed.query)
-            return
-        self.serve_static(parsed.path)
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/state":
+                self.send_json({"ok": True, **api_state()})
+                return
+            if parsed.path == "/api/report":
+                self.handle_report(parsed.query)
+                return
+            if parsed.path.startswith("/api/jobs/"):
+                job_id = parsed.path.rsplit("/", 1)[-1]
+                self.send_json({"ok": True, "job": get_job(job_id)})
+                return
+            self.serve_static(parsed.path)
+        except ApiProblem as exc:
+            self.send_json(exc.payload, exc.status)
+        except Exception as exc:
+            self.send_error_json(str(exc))
 
     def do_POST(self) -> None:
         try:
             body = self.read_json_body()
             if self.path == "/api/analyze":
                 asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
-                result = run_analyzer(asset_dir, str(body.get("reportLevel") or "standard"))
-                self.send_json({"ok": result["returnCode"] == 0, **result})
+                job = start_analyzer_job(asset_dir, str(body.get("reportLevel") or "standard"))
+                self.send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
                 return
             if self.path == "/api/capture-graph":
                 result = capture_graph_from_request(body)
-                analysis = result.get("analysis")
-                ok = True
-                if isinstance(analysis, dict):
-                    ok = int(analysis.get("returnCode", 0)) == 0
-                self.send_json({"ok": ok, **result})
+                self.send_json({"ok": True, **result})
                 return
             if self.path == "/api/compare-asset":
                 old_asset = resolve_asset_dir(str(body.get("oldAssetPath") or ""))
                 new_asset = resolve_asset_dir(str(body.get("newAssetPath") or ""))
-                result = run_asset_compare_for_gui(old_asset, new_asset)
-                self.send_json({"ok": result["returnCode"] == 0, **result})
+                job = start_asset_compare_job(old_asset, new_asset)
+                self.send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
+                return
+            if self.path.startswith("/api/jobs/") and self.path.endswith("/cancel"):
+                job_id = self.path.split("/")[-2]
+                self.send_json({"ok": True, "job": cancel_job(job_id)})
                 return
             if self.path == "/api/open":
                 asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
@@ -594,6 +851,8 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             self.send_error_json("Unknown API endpoint.", HTTPStatus.NOT_FOUND)
         except subprocess.TimeoutExpired:
             self.send_error_json("Analyzer timed out after 30 minutes.", HTTPStatus.REQUEST_TIMEOUT)
+        except ApiProblem as exc:
+            self.send_json(exc.payload, exc.status)
         except Exception as exc:
             self.send_error_json(str(exc))
 

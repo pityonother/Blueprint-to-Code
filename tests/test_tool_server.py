@@ -1,13 +1,24 @@
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from blueprint_tool_server import asset_summary, normalize_asset_path
+from blueprint_tool_server import cancel_job, create_background_job, asset_summary, get_job, normalize_asset_path
+
+
+def wait_for_job(job_id: str, timeout_seconds: float = 5.0) -> dict[str, object]:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        job = get_job(job_id)
+        if str(job.get("status")) in {"succeeded", "failed", "cancelled", "timed_out"}:
+            return job
+        time.sleep(0.05)
+    return get_job(job_id)
 
 
 class ToolServerTests(unittest.TestCase):
@@ -41,6 +52,35 @@ class ToolServerTests(unittest.TestCase):
         self.assertEqual(summary["componentsCount"], 1)
         self.assertTrue(summary["hasDefaults"])
         self.assertTrue(summary["hasComponents"])
+
+    def test_background_job_records_output_and_result(self):
+        job = create_background_job(
+            "test",
+            "test job",
+            [sys.executable, "-c", "print('job-ok')"],
+            lambda return_code: {"done": return_code == 0},
+        )
+
+        final = wait_for_job(str(job["id"]))
+
+        self.assertEqual(final["status"], "succeeded")
+        self.assertEqual(final["returnCode"], 0)
+        self.assertIn("job-ok", final["stdout"])
+        self.assertEqual(final["result"]["done"], True)
+
+    def test_background_job_can_be_cancelled(self):
+        job = create_background_job(
+            "test",
+            "slow job",
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            lambda return_code: {"returnCode": return_code},
+        )
+        time.sleep(0.1)
+
+        cancel_job(str(job["id"]))
+        final = wait_for_job(str(job["id"]))
+
+        self.assertEqual(final["status"], "cancelled")
 
 
 if __name__ == "__main__":

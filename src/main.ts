@@ -65,7 +65,22 @@ interface AppState extends ApiResult {
 interface ApiResult {
   ok: boolean;
   error?: string;
+  code?: string;
   [key: string]: unknown;
+}
+
+interface JobInfo {
+  id: string;
+  kind: string;
+  title: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+  command: string;
+  stdout: string;
+  stderr: string;
+  returnCode: number | null;
+  durationSeconds: number;
+  error?: string;
+  result?: Record<string, unknown>;
 }
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -73,6 +88,19 @@ if (!app) {
   throw new Error('Missing #app root.');
 }
 const root = app;
+
+class ApiFailure extends Error {
+  payload: ApiResult;
+  status: number;
+  code?: string;
+
+  constructor(payload: ApiResult, status: number) {
+    super(payload.error || `请求失败：${status}`);
+    this.payload = payload;
+    this.status = status;
+    this.code = typeof payload.code === 'string' ? payload.code : undefined;
+  }
+}
 
 const reportLabels: Record<ReportKey, string> = {
   next_actions: '下一步',
@@ -103,6 +131,8 @@ let compareNewPath = '';
 let compareContent = '';
 let comparePath = '';
 let logs: string[] = ['控制中心已就绪。请选择资产、采集图页，或重新生成分析报告。'];
+let activeJobId = '';
+let activeJobLabel = '';
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -126,9 +156,45 @@ async function api<T extends ApiResult>(path: string, options?: RequestInit): Pr
   });
   const payload = (await response.json()) as T;
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `请求失败：${response.status}`);
+    throw new ApiFailure(payload, response.status);
   }
   return payload;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isJobDone(job: JobInfo): boolean {
+  return ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(job.status);
+}
+
+function jobResultString(job: JobInfo, key: string): string {
+  const value = job.result?.[key];
+  return typeof value === 'string' ? value : '';
+}
+
+async function waitForJob(jobId: string, label: string): Promise<JobInfo> {
+  let lastProgressAt = 0;
+  let lastOutputLength = 0;
+  const localStartedAt = Date.now();
+  while (true) {
+    const payload = await api<ApiResult & { job: JobInfo }>(`/api/jobs/${jobId}`);
+    const job = payload.job;
+    const outputLength = (job.stdout || '').length + (job.stderr || '').length;
+    const now = Date.now();
+    if (!isJobDone(job)) {
+      if (now - lastProgressAt > 4000 || outputLength !== lastOutputLength) {
+        const seconds = Math.round((now - localStartedAt) / 1000);
+        appendLog(`${label}后台任务仍在运行：${job.status}，已耗时约 ${seconds}s。`);
+        lastProgressAt = now;
+        lastOutputLength = outputLength;
+      }
+      await delay(1000);
+      continue;
+    }
+    return job;
+  }
 }
 
 function selectedAsset(): AssetSummary | undefined {
@@ -440,6 +506,7 @@ function renderMain(): void {
             ${actionButton('生成 debug 包', 'analyze-debug', 'danger', !asset || !asset.graphs || busy)}
             ${actionButton('生成 compact 报告', 'analyze-compact', 'secondary', !asset || !asset.graphs || busy)}
             ${actionButton('打开输出文件夹', 'open-output', 'secondary', !asset || !asset.hasOutput)}
+            ${activeJobId ? actionButton(`取消${activeJobLabel}`, 'cancel-job', 'danger') : ''}
           </div>
         </section>
 
@@ -611,32 +678,44 @@ async function runAnalysis(reportLevel: 'compact' | 'standard' | 'debug'): Promi
   busy = true;
   appendLog(`开始为 ${asset.name} 生成 ${reportLevel} 报告。`);
   try {
-    const payload = await api<ApiResult & { returnCode: number; stdout: string; stderr: string; durationSeconds: number }>(
+    const payload = await api<ApiResult & { job: JobInfo }>(
       '/api/analyze',
       {
         method: 'POST',
         body: JSON.stringify({ assetPath: asset.path, reportLevel }),
       },
     );
-    const outcome = payload.returnCode === 0 ? '完成' : `失败，退出码 ${payload.returnCode}`;
-    appendLog(`分析${outcome}，耗时 ${payload.durationSeconds}s。`);
-    if (payload.stderr) {
-      appendLog(payload.stderr.trim().slice(-1200));
+    activeJobId = payload.job.id;
+    activeJobLabel = '分析';
+    appendLog(`分析后台任务已创建：${payload.job.id}`);
+    render();
+    const job = await waitForJob(payload.job.id, '分析');
+    const outcome = job.status === 'succeeded' ? '完成' : `${job.status}，退出码 ${job.returnCode ?? '-'}`;
+    appendLog(`分析${outcome}，耗时 ${job.durationSeconds}s。`);
+    if (job.error) {
+      appendLog(job.error);
     }
-    if (payload.stdout) {
-      appendLog(payload.stdout.trim().slice(-1200));
+    if (job.stderr) {
+      appendLog(job.stderr.trim().slice(-1200));
+    }
+    if (job.stdout) {
+      appendLog(job.stdout.trim().slice(-1200));
     }
     await refreshState(false);
-    await loadReport('next_actions');
+    if (job.status === 'succeeded') {
+      await loadReport('next_actions');
+    }
   } catch (error) {
     appendLog(error instanceof Error ? error.message : String(error));
   } finally {
     busy = false;
+    activeJobId = '';
+    activeJobLabel = '';
     render();
   }
 }
 
-async function capturePage(analyzeAfter: boolean): Promise<void> {
+async function capturePage(analyzeAfter: boolean, allowOverwrite = false): Promise<void> {
   syncInputs();
   if (!captureGraphName.trim()) {
     appendLog('保存剪贴板图页前，需要先填写图页名。');
@@ -646,7 +725,7 @@ async function capturePage(analyzeAfter: boolean): Promise<void> {
   appendLog(`正在从剪贴板采集图页：“${captureGraphName}”。`);
   try {
     const asset = selectedAsset();
-    const payload = await api<ApiResult & { asset: AssetSummary; graphPath: string; record: { warnings?: string[] } }>(
+    const payload = await api<ApiResult & { asset: AssetSummary; graphPath: string; record: { warnings?: string[]; backup_path?: string }; analysisJob?: JobInfo }>(
       '/api/capture-graph',
       {
         method: 'POST',
@@ -657,24 +736,57 @@ async function capturePage(analyzeAfter: boolean): Promise<void> {
           graphType: captureGraphType,
           analyzeAfter,
           reportLevel: 'standard',
+          allowOverwrite,
         }),
       },
     );
     selectedPath = payload.asset.path;
     window.localStorage.setItem('blueprint-tool.selected', selectedPath);
     appendLog(`已保存图页：${payload.graphPath}`);
+    if (payload.record.backup_path) {
+      appendLog(`已备份被覆盖的旧图页：${payload.record.backup_path}`);
+    }
     if (payload.record.warnings?.length) {
       appendLog(`采集警告：${payload.record.warnings.join('; ')}`);
     }
     captureGraphName = '';
     await refreshState(false);
-    if (analyzeAfter) {
-      await loadReport('next_actions');
+    if (analyzeAfter && payload.analysisJob) {
+      activeJobId = payload.analysisJob.id;
+      activeJobLabel = '分析';
+      appendLog(`保存后分析后台任务已创建：${payload.analysisJob.id}`);
+      render();
+      const job = await waitForJob(payload.analysisJob.id, '保存后分析');
+      const outcome = job.status === 'succeeded' ? '完成' : `${job.status}，退出码 ${job.returnCode ?? '-'}`;
+      appendLog(`保存后分析${outcome}，耗时 ${job.durationSeconds}s。`);
+      if (job.error) {
+        appendLog(job.error);
+      }
+      if (job.stderr) {
+        appendLog(job.stderr.trim().slice(-1200));
+      }
+      await refreshState(false);
+      if (job.status === 'succeeded') {
+        await loadReport('next_actions');
+      }
     }
   } catch (error) {
+    if (error instanceof ApiFailure && error.code === 'overwrite_required') {
+      busy = false;
+      render();
+      const ok = window.confirm('这个图页已经存在。要覆盖它吗？旧文件会自动备份到 graphs/_backups/。');
+      if (ok) {
+        await capturePage(analyzeAfter, true);
+      } else {
+        appendLog('已取消覆盖，原图页保持不变。');
+      }
+      return;
+    }
     appendLog(error instanceof Error ? error.message : String(error));
   } finally {
     busy = false;
+    activeJobId = '';
+    activeJobLabel = '';
     render();
   }
 }
@@ -730,21 +842,45 @@ async function runCompare(): Promise<void> {
   busy = true;
   appendLog('正在运行资产行为对比。');
   try {
-    const payload = await api<ApiResult & { returnCode: number; behaviorImpact: string; behaviorImpactPath: string; stderr: string; durationSeconds: number }>(
+    const payload = await api<ApiResult & { job: JobInfo }>(
       '/api/compare-asset',
       {
         method: 'POST',
         body: JSON.stringify({ oldAssetPath: compareOldPath, newAssetPath: compareNewPath }),
       },
     );
-    compareContent = payload.behaviorImpact || payload.stderr || '对比已完成，但没有生成行为影响报告。';
-    comparePath = payload.behaviorImpactPath || '';
-    appendLog(`对比完成，耗时 ${payload.durationSeconds}s。`);
+    activeJobId = payload.job.id;
+    activeJobLabel = '对比';
+    appendLog(`对比后台任务已创建：${payload.job.id}`);
+    render();
+    const job = await waitForJob(payload.job.id, '对比');
+    compareContent = jobResultString(job, 'behaviorImpact') || job.stderr || job.error || '对比已完成，但没有生成行为影响报告。';
+    comparePath = jobResultString(job, 'behaviorImpactPath');
+    const outcome = job.status === 'succeeded' ? '完成' : `${job.status}，退出码 ${job.returnCode ?? '-'}`;
+    appendLog(`对比${outcome}，耗时 ${job.durationSeconds}s。`);
   } catch (error) {
     appendLog(error instanceof Error ? error.message : String(error));
   } finally {
     busy = false;
+    activeJobId = '';
+    activeJobLabel = '';
     render();
+  }
+}
+
+async function cancelCurrentJob(): Promise<void> {
+  if (!activeJobId) {
+    appendLog('当前没有正在运行的后台任务。');
+    return;
+  }
+  try {
+    await api<ApiResult & { job: JobInfo }>(`/api/jobs/${activeJobId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    appendLog(`已请求取消${activeJobLabel || '当前'}任务。`);
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -776,6 +912,10 @@ async function handleAction(action: string): Promise<void> {
   }
   if (action === 'analyze-compact') {
     await runAnalysis('compact');
+    return;
+  }
+  if (action === 'cancel-job') {
+    await cancelCurrentJob();
     return;
   }
   if (action === 'capture-page') {

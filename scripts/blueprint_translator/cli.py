@@ -19,6 +19,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--capture-once", metavar="GRAPH_NAME", help="Capture one graph from --input or clipboard, update manifest.json, then optionally run the asset report.")
     parser.add_argument("--capture-graph-type", choices=CAPTURE_GRAPH_TYPES, help="Graph type for --capture-once. Defaults to a name-based guess.")
     parser.add_argument("--capture-no-report", action="store_true", help="Only save captured graph files and manifest.json; do not run the asset report after capture.")
+    parser.add_argument("--capture-overwrite", action="store_true", help="Overwrite an existing captured graph and save a backup under graphs/_backups/.")
     parser.add_argument("--output", "-o", help="Legacy report.md output path. Other files go beside it.")
     parser.add_argument("--output-dir", help="Directory for generated files.")
     parser.add_argument("--report-level", choices=["compact", "standard", "debug"], default="standard", help="Asset report verbosity. standard avoids large debug JSON; debug writes every intermediate artifact.")

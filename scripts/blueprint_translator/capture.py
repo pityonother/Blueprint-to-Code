@@ -6,6 +6,7 @@ import argparse
 import datetime as _dt
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Iterable
 
@@ -55,6 +56,19 @@ def blueprint_capture_warnings(text: str) -> list[str]:
 
 def graph_capture_path(asset_dir: Path, graph_name: str) -> Path:
     return asset_dir / "graphs" / f"{safe_filename(graph_name, 'Graph')}.txt"
+
+
+def graph_backup_path(asset_dir: Path, graph_name: str) -> Path:
+    source_path = graph_capture_path(asset_dir, graph_name)
+    backups_dir = asset_dir / "graphs" / "_backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = backups_dir / f"{source_path.stem}.{stamp}{source_path.suffix}"
+    index = 2
+    while candidate.exists():
+        candidate = backups_dir / f"{source_path.stem}.{stamp}-{index}{source_path.suffix}"
+        index += 1
+    return candidate
 
 
 def manifest_graph_records(manifest: dict[str, object]) -> list[dict[str, object]]:
@@ -125,7 +139,15 @@ def write_capture_manifest(
     return path
 
 
-def save_captured_graph(asset_dir: Path, graph_name: str, graph_type: str, text: str) -> dict[str, object]:
+def save_captured_graph(
+    asset_dir: Path,
+    graph_name: str,
+    graph_type: str,
+    text: str,
+    *,
+    allow_overwrite: bool = False,
+    backup_existing: bool = True,
+) -> dict[str, object]:
     if not graph_name.strip():
         raise ValueError("Graph name is required.")
     if not text.strip():
@@ -134,15 +156,26 @@ def save_captured_graph(asset_dir: Path, graph_name: str, graph_type: str, text:
     graphs_dir = asset_dir / "graphs"
     graphs_dir.mkdir(parents=True, exist_ok=True)
     graph_path = graph_capture_path(asset_dir, graph_name)
+    backup_path: Path | None = None
+    if graph_path.exists():
+        if not allow_overwrite:
+            raise FileExistsError(f"Graph capture already exists: {graph_path}")
+        if backup_existing:
+            backup_path = graph_backup_path(asset_dir, graph_name)
+            shutil.copy2(graph_path, backup_path)
     graph_path.write_text(text.lstrip("\ufeff"), encoding="utf-8")
-    return {
+    record = {
         "name": graph_name,
         "type": graph_type or infer_graph_type(graph_name),
         "path": graph_path.relative_to(asset_dir).as_posix(),
         "captured_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "characters": len(text),
         "warnings": blueprint_capture_warnings(text),
+        "overwritten": backup_path is not None,
     }
+    if backup_path:
+        record["backup_path"] = backup_path.relative_to(asset_dir).as_posix()
+    return record
 
 
 def maybe_write_capture_sidecars(asset_dir: Path) -> None:
@@ -191,8 +224,12 @@ def _commit_capture(
     graph_name: str,
     graph_type: str,
     text: str,
+    *,
+    allow_overwrite: bool | None = None,
 ) -> list[dict[str, object]]:
-    record = save_captured_graph(asset_dir, graph_name, graph_type, text)
+    if allow_overwrite is None:
+        allow_overwrite = bool(getattr(args, "capture_overwrite", False))
+    record = save_captured_graph(asset_dir, graph_name, graph_type, text, allow_overwrite=allow_overwrite)
     records = upsert_graph_record(records, record)
     write_capture_manifest(
         asset_dir,
@@ -203,6 +240,8 @@ def _commit_capture(
         tags=split_csvish(args.tags),
     )
     print(f"Saved graph: {asset_dir / record['path']}")
+    if record.get("backup_path"):
+        print(f"Backup of overwritten graph: {asset_dir / str(record['backup_path'])}")
     _print_capture_warnings(record.get("warnings", []))
     return records
 
@@ -223,6 +262,13 @@ def _interactive_capture(args: argparse.Namespace, asset_dir: Path, asset_name: 
         if graph_type not in CAPTURE_GRAPH_TYPES:
             print(f"Unknown graph type '{graph_type}', using Unknown.")
             graph_type = "Unknown"
+        allow_overwrite = bool(getattr(args, "capture_overwrite", False))
+        if graph_capture_path(asset_dir, graph_name).exists() and not allow_overwrite:
+            choice = input("Graph already exists. Overwrite it and create a backup? [y/N]: ").strip().lower()
+            if choice not in {"y", "yes"}:
+                print("Skipped existing graph.")
+                continue
+            allow_overwrite = True
         input("Copy the graph page now, then press Enter to read clipboard...")
         while True:
             text = read_clipboard().lstrip("\ufeff")
@@ -237,7 +283,7 @@ def _interactive_capture(args: argparse.Namespace, asset_dir: Path, asset_name: 
                     break
                 if choice.startswith("q"):
                     return records
-            records = _commit_capture(args, asset_dir, asset_name, records, graph_name, graph_type, text)
+            records = _commit_capture(args, asset_dir, asset_name, records, graph_name, graph_type, text, allow_overwrite=allow_overwrite)
             break
     return records
 
@@ -250,21 +296,26 @@ def run_capture_asset(args: argparse.Namespace) -> int:
     asset_dir.mkdir(parents=True, exist_ok=True)
     (asset_dir / "graphs").mkdir(parents=True, exist_ok=True)
 
-    if args.capture_once:
-        text, source = _read_capture_text(args)
-        graph_type = args.capture_graph_type or infer_graph_type(args.capture_once)
-        print(f"Capturing {args.capture_once} from {source}")
-        records = _commit_capture(args, asset_dir, asset_name, records, args.capture_once, graph_type, text)
-    else:
-        records = _interactive_capture(args, asset_dir, asset_name, records)
-        write_capture_manifest(
-            asset_dir,
-            asset_name,
-            records,
-            parent_class=args.parent_class or "",
-            interfaces=split_csvish(args.interfaces),
-            tags=split_csvish(args.tags),
-        )
+    try:
+        if args.capture_once:
+            text, source = _read_capture_text(args)
+            graph_type = args.capture_graph_type or infer_graph_type(args.capture_once)
+            print(f"Capturing {args.capture_once} from {source}")
+            records = _commit_capture(args, asset_dir, asset_name, records, args.capture_once, graph_type, text)
+        else:
+            records = _interactive_capture(args, asset_dir, asset_name, records)
+            write_capture_manifest(
+                asset_dir,
+                asset_name,
+                records,
+                parent_class=args.parent_class or "",
+                interfaces=split_csvish(args.interfaces),
+                tags=split_csvish(args.tags),
+            )
+    except FileExistsError as exc:
+        print(str(exc), file=os.sys.stderr)
+        print("Pass --capture-overwrite to replace the existing graph and create a backup.", file=os.sys.stderr)
+        return 3
 
     maybe_write_capture_sidecars(asset_dir)
     print(f"Manifest: {asset_dir / 'manifest.json'}")
