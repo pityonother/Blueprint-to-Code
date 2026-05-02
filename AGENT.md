@@ -10,7 +10,7 @@ The user-facing app is a local Vite + TypeScript web control center served by a 
 - Backend entry: `scripts/blueprint_tool_server.py`.
 - Windows launcher: `scripts/launch_blueprint_tool.ps1`.
 - Start it with `.\scripts\launch_blueprint_tool.ps1`; it builds the UI and opens `http://127.0.0.1:8765/`.
-- The control center can capture one graph page from the Windows clipboard, rerun reports, inspect DevKit export quality, and run asset-level behavior compare.
+- The control center can capture one graph page from the Windows clipboard, run a pasted graph-page capture queue, rerun reports, inspect DevKit export quality, and run asset-level behavior compare.
 
 Do not treat the old Phaser prototype files/assets as the product direction. The current product direction is the Blueprint analysis control center.
 

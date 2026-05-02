@@ -136,6 +136,8 @@ let devkitInput = '';
 let captureAssetName = '';
 let captureGraphName = '';
 let captureGraphType = 'Unknown';
+let captureQueueText = window.localStorage.getItem('blueprint-tool.captureQueue') || '';
+let captureQueueCursor = Number(window.localStorage.getItem('blueprint-tool.captureQueueCursor') || '0') || 0;
 let compareOldPath = '';
 let compareNewPath = '';
 let compareContent = '';
@@ -265,6 +267,72 @@ function graphTypeLabel(type: string): string {
   return '未知';
 }
 
+interface CaptureQueueItem {
+  name: string;
+  type: string;
+  raw: string;
+}
+
+function normalizeGraphType(value: string): string {
+  const text = value.trim().toLowerCase();
+  if (!text) {
+    return 'Unknown';
+  }
+  if (text === 'eventgraph' || text === 'event graph' || text === 'event' || text === '事件图') {
+    return 'EventGraph';
+  }
+  if (text === 'function' || text === 'func' || text === '函数') {
+    return 'Function';
+  }
+  if (text === 'macro' || text === '宏') {
+    return 'Macro';
+  }
+  if (text === 'constructionscript' || text === 'construction script' || text === 'construction' || text === '构造脚本') {
+    return 'ConstructionScript';
+  }
+  return graphTypes.includes(value.trim()) ? value.trim() : 'Unknown';
+}
+
+function parseCaptureQueue(text: string): CaptureQueueItem[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line) => {
+      let name = line;
+      let type = 'Unknown';
+      const pipeParts = line.split('|').map((part) => part.trim()).filter(Boolean);
+      const tabParts = line.split(/\t|,/).map((part) => part.trim()).filter(Boolean);
+      if (pipeParts.length >= 2) {
+        name = pipeParts[0];
+        type = normalizeGraphType(pipeParts[1]);
+      } else if (tabParts.length >= 2 && normalizeGraphType(tabParts[tabParts.length - 1]) !== 'Unknown') {
+        name = tabParts.slice(0, -1).join(' ');
+        type = normalizeGraphType(tabParts[tabParts.length - 1]);
+      }
+      return { name: name.trim(), type, raw: line };
+    })
+    .filter((item) => item.name);
+}
+
+function captureQueueItems(): CaptureQueueItem[] {
+  return parseCaptureQueue(captureQueueText);
+}
+
+function currentCaptureQueueItem(): CaptureQueueItem | undefined {
+  const items = captureQueueItems();
+  if (!items.length || captureQueueCursor >= items.length) {
+    return undefined;
+  }
+  const index = Math.max(0, captureQueueCursor);
+  return items[index];
+}
+
+function saveCaptureQueueState(): void {
+  window.localStorage.setItem('blueprint-tool.captureQueue', captureQueueText);
+  window.localStorage.setItem('blueprint-tool.captureQueueCursor', String(captureQueueCursor));
+}
+
 function metric(label: string, value: string | number, tone = ''): string {
   return `
     <div class="metric ${tone}">
@@ -347,6 +415,53 @@ function graphTypeOptions(): string {
     .join('');
 }
 
+function renderCaptureQueue(): string {
+  const items = captureQueueItems();
+  const hasItems = items.length > 0;
+  const currentIndex = hasItems ? Math.max(0, Math.min(captureQueueCursor, items.length - 1)) : 0;
+  const current = hasItems && captureQueueCursor < items.length ? items[currentIndex] : undefined;
+  const progress = hasItems ? `${Math.min(captureQueueCursor, items.length)} / ${items.length} 已保存` : '未设置';
+  const list = hasItems
+    ? items
+        .map((item, index) => {
+          const classes = ['queue-row'];
+          if (index < captureQueueCursor) {
+            classes.push('done');
+          }
+          if (index === currentIndex && captureQueueCursor < items.length) {
+            classes.push('current');
+          }
+          return `
+            <div class="${classes.join(' ')}">
+              <span>${index + 1}</span>
+              <strong>${escapeHtml(item.name)}</strong>
+              <small>${escapeHtml(graphTypeLabel(item.type))}</small>
+            </div>
+          `;
+        })
+        .join('')
+    : '<div class="queue-empty">把 My Blueprint 里的分页名称粘贴到这里，一行一个。</div>';
+  return `
+    <div class="capture-queue">
+      <label>
+        <span>批量图页队列</span>
+        <textarea id="capture-queue-text" spellcheck="false" placeholder="SetParachuteState&#10;OnRep_bWantsToParachute | Function&#10;EventGraph | EventGraph">${escapeHtml(captureQueueText)}</textarea>
+      </label>
+      <div class="queue-summary">
+        <span>当前：${current ? escapeHtml(current.name) : '无'}</span>
+        <strong>${escapeHtml(progress)}</strong>
+      </div>
+      <div class="queue-list">${list}</div>
+      <div class="button-row">
+        ${actionButton('保存队列当前项', 'capture-queue-current', 'primary', busy)}
+        ${actionButton('跳过当前项', 'capture-queue-skip', 'secondary', busy)}
+        ${actionButton('重置队列', 'capture-queue-reset', 'ghost', busy)}
+        ${actionButton('清空队列', 'capture-queue-clear', 'ghost', busy)}
+      </div>
+    </div>
+  `;
+}
+
 function renderCapturePanel(asset?: AssetSummary): string {
   const assetName = captureAssetName || asset?.name || '';
   return `
@@ -376,6 +491,7 @@ function renderCapturePanel(asset?: AssetSummary): string {
         ${actionButton('保存剪贴板图页', 'capture-page', 'primary', busy)}
         ${actionButton('保存并分析', 'capture-page-analyze', 'secondary', busy)}
       </div>
+      ${renderCaptureQueue()}
     </section>
   `;
 }
@@ -627,9 +743,15 @@ function render(): void {
 }
 
 function syncInputs(): void {
+  const nextQueueText = document.querySelector<HTMLTextAreaElement>('#capture-queue-text')?.value;
   captureAssetName = document.querySelector<HTMLInputElement>('#capture-asset-name')?.value || captureAssetName;
   captureGraphName = document.querySelector<HTMLInputElement>('#capture-graph-name')?.value || captureGraphName;
   captureGraphType = document.querySelector<HTMLSelectElement>('#capture-graph-type')?.value || captureGraphType;
+  if (typeof nextQueueText === 'string' && nextQueueText !== captureQueueText) {
+    captureQueueText = nextQueueText;
+    captureQueueCursor = 0;
+    saveCaptureQueueState();
+  }
   devkitInput = document.querySelector<HTMLTextAreaElement>('#devkit-path')?.value || devkitInput;
   compareOldPath = document.querySelector<HTMLSelectElement>('#compare-old')?.value || compareOldPath;
   compareNewPath = document.querySelector<HTMLSelectElement>('#compare-new')?.value || compareNewPath;
@@ -890,14 +1012,21 @@ async function runAnalysis(reportLevel: 'compact' | 'standard' | 'debug'): Promi
   }
 }
 
-async function capturePage(analyzeAfter: boolean, allowOverwrite = false): Promise<void> {
+async function capturePage(analyzeAfter: boolean, allowOverwrite = false, fromQueue = false): Promise<void> {
   syncInputs();
-  if (!captureGraphName.trim()) {
+  const queueItem = fromQueue ? currentCaptureQueueItem() : undefined;
+  if (fromQueue && !queueItem) {
+    appendLog('图页采集队列里没有当前项。请先粘贴分页名称，或重置队列。');
+    return;
+  }
+  const graphName = (queueItem?.name || captureGraphName).trim();
+  const graphType = queueItem?.type || captureGraphType;
+  if (!graphName) {
     appendLog('保存剪贴板图页前，需要先填写图页名。');
     return;
   }
   busy = true;
-  appendLog(`正在从剪贴板采集图页：“${captureGraphName}”。`);
+  appendLog(`正在从剪贴板采集图页：“${graphName}”。`);
   try {
     const asset = selectedAsset();
     const payload = await api<ApiResult & { asset: AssetSummary; graphPath: string; record: { warnings?: string[]; backup_path?: string }; analysisJob?: JobInfo }>(
@@ -907,8 +1036,8 @@ async function capturePage(analyzeAfter: boolean, allowOverwrite = false): Promi
         body: JSON.stringify({
           assetPath: asset?.path || '',
           assetName: captureAssetName,
-          graphName: captureGraphName,
-          graphType: captureGraphType,
+          graphName,
+          graphType,
           analyzeAfter,
           reportLevel: 'standard',
           allowOverwrite,
@@ -924,7 +1053,15 @@ async function capturePage(analyzeAfter: boolean, allowOverwrite = false): Promi
     if (payload.record.warnings?.length) {
       appendLog(`采集警告：${payload.record.warnings.join('; ')}`);
     }
-    captureGraphName = '';
+    if (fromQueue) {
+      const total = captureQueueItems().length;
+      captureQueueCursor = Math.min(captureQueueCursor + 1, total);
+      saveCaptureQueueState();
+      const next = currentCaptureQueueItem();
+      appendLog(next ? `队列已前进到下一项：${next.name}` : '队列已保存完。可以运行标准分析。');
+    } else {
+      captureGraphName = '';
+    }
     await refreshState(false);
     if (analyzeAfter && payload.analysisJob) {
       activeJobId = payload.analysisJob.id;
@@ -951,7 +1088,7 @@ async function capturePage(analyzeAfter: boolean, allowOverwrite = false): Promi
       render();
       const ok = window.confirm('这个图页已经存在。要覆盖它吗？旧文件会自动备份到 graphs/_backups/。');
       if (ok) {
-        await capturePage(analyzeAfter, true);
+        await capturePage(analyzeAfter, true, fromQueue);
       } else {
         appendLog('已取消覆盖，原图页保持不变。');
       }
@@ -1099,6 +1236,39 @@ async function handleAction(action: string): Promise<void> {
   }
   if (action === 'capture-page-analyze') {
     await capturePage(true);
+    return;
+  }
+  if (action === 'capture-queue-current') {
+    await capturePage(false, false, true);
+    return;
+  }
+  if (action === 'capture-queue-skip') {
+    syncInputs();
+    const current = currentCaptureQueueItem();
+    if (!current) {
+      appendLog('队列里没有可跳过的当前项。');
+      return;
+    }
+    captureQueueCursor = Math.min(captureQueueCursor + 1, captureQueueItems().length);
+    saveCaptureQueueState();
+    appendLog(`已跳过队列项：${current.name}`);
+    render();
+    return;
+  }
+  if (action === 'capture-queue-reset') {
+    syncInputs();
+    captureQueueCursor = 0;
+    saveCaptureQueueState();
+    appendLog('图页采集队列已重置到第一项。');
+    render();
+    return;
+  }
+  if (action === 'capture-queue-clear') {
+    captureQueueText = '';
+    captureQueueCursor = 0;
+    saveCaptureQueueState();
+    appendLog('图页采集队列已清空。');
+    render();
     return;
   }
   if (action === 'open-output') {

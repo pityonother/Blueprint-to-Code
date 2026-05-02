@@ -382,6 +382,7 @@ code {
 }
 
 #devkit-path,
+#capture-queue-text,
 .form-grid input,
 .form-grid select {
   width: 100%;
@@ -398,12 +399,18 @@ code {
   resize: vertical;
 }
 
+#capture-queue-text {
+  min-height: 132px;
+  resize: vertical;
+}
+
 .form-grid input,
 .form-grid select {
   min-height: 40px;
 }
 
 #devkit-path:focus,
+#capture-queue-text:focus,
 .form-grid input:focus,
 .form-grid select:focus {
   border-color: rgba(87, 199, 167, 0.76);
@@ -424,6 +431,84 @@ code {
   gap: 6px;
   color: #aab7b1;
   font-size: 0.84rem;
+}
+
+.capture-queue {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.capture-queue label {
+  display: grid;
+  gap: 6px;
+  color: #aab7b1;
+  font-size: 0.84rem;
+}
+
+.queue-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #cbd4cf;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: #181d1f;
+  padding: 10px 12px;
+}
+
+.queue-summary strong {
+  color: #8fe0c8;
+  white-space: nowrap;
+}
+
+.queue-list {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.queue-empty,
+.queue-row {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: #151a1c;
+  color: #b8c4be;
+  padding: 9px 10px;
+}
+
+.queue-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.queue-row span {
+  color: #7f8b86;
+}
+
+.queue-row strong {
+  color: #eef2f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-row small {
+  color: #9ca8a2;
+  white-space: nowrap;
+}
+
+.queue-row.current {
+  border-color: rgba(87, 199, 167, 0.72);
+  background: #17231f;
+}
+
+.queue-row.done {
+  opacity: 0.55;
 }
 
 .soft-copy {

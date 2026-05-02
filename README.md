@@ -22,6 +22,7 @@ The launcher builds the UI, starts `scripts/blueprint_tool_server.py`, and opens
 - select an asset under `captures/`
 - regenerate standard, compact, or debug reports
 - capture one Blueprint graph page from the Windows clipboard into `graphs/*.txt`
+- paste a graph-page queue and save copied pages one by one without retyping each page name
 - confirm before replacing an existing graph page; old copies are backed up under `graphs/_backups/`
 - open `next_actions.md`, `context_review.md`, `notes_todo.md`, `behavior_summary.md`, and other key reports
 - review missing function candidates and append confirmed parent/native or ignored functions directly to `notes.md`; the app reruns standard analysis afterward so previews stay fresh
