@@ -16,6 +16,11 @@ __pycache__/
 captures/
 output/
 
+# Unreal plugin build output
+devkit_plugins/**/Binaries/
+devkit_plugins/**/Intermediate/
+devkit_plugins/**/Saved/
+
 node_modules
 dist
 dist-ssr

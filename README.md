@@ -121,6 +121,35 @@ The exporter also still tries the currently opened/selected Blueprint, the saved
 Component export runs in crash-safe mode by default: it writes analysis candidates rather than recursively reflecting live Unreal component objects, which can crash some ARK DevKit Python builds.
 Crash-safe mode now also attempts a shallow SimpleConstructionScript/component-template scan for component names, classes, and paths; it still avoids recursive component default reflection.
 
+### Experimental C++ Graph Queue Exporter
+
+ARK DevKit Python can validate known graph names, but it has not exposed a reliable
+API for enumerating every function/macro/event graph. The experimental editor
+plugin under `devkit_plugins/BlueprintToCodeExporter/` uses Unreal's C++
+`UBlueprint::GetAllGraphs()` API to export the real graph-page queue.
+
+Install helper:
+
+```powershell
+.\scripts\devkit_plugins\install_blueprint_to_code_exporter.ps1
+```
+
+When prompted, paste an ARK DevKit `Plugins` directory that can load editor
+plugins. The script copies the plugin and sets `BLUEPRINT_TO_CODE_ROOT` to this
+repository. Restart ARK DevKit afterward. First verification target:
+
+```text
+Tools -> Blueprint to Code -> Export Selected Blueprint Graph Queue
+```
+
+Select a Blueprint asset in the Content Browser before running the menu command.
+On success the plugin writes `graph_queue.txt`, `graph_pages_cpp.json`, and
+`cpp_export_report.md` under `captures/<BlueprintName>/`. Load the queue from the
+control center and continue copying graph pages in order.
+
+If ARK DevKit cannot compile or load custom C++ editor plugins, stop using this
+path and fall back to the Python exporter plus manual/candidate graph names.
+
 ```powershell
 python scripts\bp_clipboard_to_prompt.py --asset-dir captures\<BlueprintName>
 ```

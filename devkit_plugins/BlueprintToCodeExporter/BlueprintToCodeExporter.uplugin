@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "Blueprint To Code Exporter",
+  "Description": "Editor-only exporter that writes Blueprint graph queues for the Blueprint to Code analyzer.",
+  "Category": "Editor",
+  "CreatedBy": "Blueprint to Code",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "BlueprintToCodeExporter",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ]
+}

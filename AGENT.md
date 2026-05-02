@@ -14,6 +14,15 @@ The user-facing app is a local Vite + TypeScript web control center served by a 
 
 Do not treat the old Phaser prototype files/assets as the product direction. The current product direction is the Blueprint analysis control center.
 
+## Experimental DevKit C++ Plugin
+
+`devkit_plugins/BlueprintToCodeExporter/` is a narrow ARK DevKit / Unreal Editor plugin that tries to export graph-page queues using `UBlueprint::GetAllGraphs()`. It is intentionally not a full Blueprint decompiler.
+
+- Install helper: `scripts/devkit_plugins/install_blueprint_to_code_exporter.ps1`.
+- Expected output: `captures/<BlueprintName>/graph_queue.txt`, `graph_pages_cpp.json`, and `cpp_export_report.md`.
+- The Python analyzer and web control center remain the reporting layer.
+- If ARK DevKit cannot compile/load custom editor plugins, use the Python exporter and graph-name candidate fallback instead of expanding the plugin prematurely.
+
 ## Report Reading Order
 
 When reviewing a captured Blueprint asset output directory, read these files first:
