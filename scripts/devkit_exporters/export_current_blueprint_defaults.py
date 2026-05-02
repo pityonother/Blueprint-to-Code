@@ -735,6 +735,10 @@ GRAPH_DISCOVERY_TERMS = (
     "event",
     "delegate",
     "edgraph",
+    "document",
+    "tab",
+    "edited",
+    "open",
 )
 
 GRAPH_DISCOVERY_CALL_NAMES = set(
@@ -755,6 +759,9 @@ GRAPH_DISCOVERY_CALL_NAMES = set(
         "get_delegate_signature_graphs",
         "get_intermediate_generated_graphs",
         "get_last_edited_documents",
+        "get_all_edited_assets",
+        "get_open_assets",
+        "find_editor_for_asset",
     ]
 )
 
@@ -901,6 +908,59 @@ def inspect_blueprint_editor_library_graphs(blueprint):
     return result
 
 
+def call_editor_subsystem_method(subsystem, method_name, blueprint):
+    method = getattr(subsystem, method_name, None)
+    if not callable(method):
+        return {"name": method_name, "callable": False}
+    result = {"name": method_name, "callable": True, "call_attempted": False}
+    try:
+        if method_name in ("get_all_edited_assets", "get_open_assets"):
+            result["call_attempted"] = True
+            result["value"] = graph_debug_value_summary(method())
+        elif method_name == "find_editor_for_asset":
+            result["call_attempted"] = True
+            try:
+                value = method(blueprint, False)
+            except Exception:
+                value = method(blueprint)
+            result["value"] = graph_debug_value_summary(value)
+            result["editor_object"] = inspect_graph_debug_object(value, "asset_editor_instance")
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def inspect_asset_editor_subsystem_graphs(blueprint):
+    result = {
+        "available": False,
+        "class": "",
+        "method_names": [],
+        "call_results": [],
+    }
+    subsystem_class = getattr(unreal, "AssetEditorSubsystem", None) if unreal is not None else None
+    getter = getattr(unreal, "get_editor_subsystem", None) if unreal is not None else None
+    if subsystem_class is None or not callable(getter):
+        return result
+    try:
+        subsystem = getter(subsystem_class)
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+    if subsystem is None:
+        return result
+    result["available"] = True
+    result["class"] = class_name(subsystem)
+    try:
+        result["method_names"] = sorted(name for name in dir(subsystem) if graph_discovery_name_matches(name))
+    except Exception as exc:
+        result["method_names_error"] = str(exc)
+    for method_name in result.get("method_names", [])[:200]:
+        if str(method_name).lower() not in GRAPH_DISCOVERY_CALL_NAMES:
+            continue
+        result["call_results"].append(call_editor_subsystem_method(subsystem, method_name, blueprint))
+    return result
+
+
 def collect_graph_discovery_debug(blueprint, generated_class=None):
     return {
         "schema": "blueprint-translator.graph-discovery-debug.v1",
@@ -909,6 +969,7 @@ def collect_graph_discovery_debug(blueprint, generated_class=None):
             inspect_graph_debug_object(generated_class, "generated_class"),
         ],
         "blueprint_editor_library": inspect_blueprint_editor_library_graphs(blueprint),
+        "asset_editor_subsystem": inspect_asset_editor_subsystem_graphs(blueprint),
     }
 
 
@@ -935,6 +996,9 @@ def render_graph_discovery_report(debug_payload, graph_pages):
     library = debug_payload.get("blueprint_editor_library", {})
     if isinstance(library, dict):
         lines.append("- BlueprintEditorLibrary graph-like methods: {}".format(len(library.get("method_names", []))))
+    editor_subsystem = debug_payload.get("asset_editor_subsystem", {})
+    if isinstance(editor_subsystem, dict):
+        lines.append("- AssetEditorSubsystem document/tab-like methods: {}".format(len(editor_subsystem.get("method_names", []))))
 
     lines.extend(["", "## Candidate Properties", ""])
     for item in debug_payload.get("objects", []):
@@ -984,6 +1048,24 @@ def render_graph_discovery_report(debug_payload, graph_pages):
             )
     else:
         lines.append("- No callable graph discovery results.")
+    lines.append("")
+
+    lines.extend(["## Asset Editor Subsystem Results", ""])
+    if isinstance(editor_subsystem, dict) and editor_subsystem.get("call_results"):
+        lines.append("| Name | Error | Value Name | Value Type |")
+        lines.append("| --- | --- | --- | --- |")
+        for row in editor_subsystem.get("call_results", [])[:80]:
+            value = row.get("value", {}) if isinstance(row.get("value", {}), dict) else {}
+            lines.append(
+                "| {} | {} | {} | {} |".format(
+                    row.get("name", ""),
+                    str(row.get("error", ""))[:160],
+                    value.get("name", ""),
+                    value.get("python_type", ""),
+                )
+            )
+    else:
+        lines.append("- No callable AssetEditorSubsystem discovery results.")
     lines.append("")
     return "\n".join(lines)
 
