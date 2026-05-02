@@ -692,6 +692,16 @@ def collect_graph_pages(blueprint, generated_class=None):
                 add_graph_page(pages, seen, method(blueprint), "EventGraph", "BlueprintEditorLibrary.find_event_graph")
             except Exception as exc:
                 STATE.skip("graph_pages", "BlueprintEditorLibrary.find_event_graph", str(exc))
+        method = getattr(library, "find_graph", None)
+        if callable(method):
+            for graph_name, graph_type in (
+                ("UserConstructionScript", "ConstructionScript"),
+                ("ConstructionScript", "ConstructionScript"),
+            ):
+                try:
+                    add_graph_page(pages, seen, method(blueprint, graph_name), graph_type, "BlueprintEditorLibrary.find_graph({})".format(graph_name))
+                except Exception as exc:
+                    STATE.skip("graph_pages", "BlueprintEditorLibrary.find_graph({})".format(graph_name), str(exc))
         for method_name in ("get_all_graphs", "get_blueprint_graphs"):
             method = getattr(library, method_name, None)
             if callable(method):
