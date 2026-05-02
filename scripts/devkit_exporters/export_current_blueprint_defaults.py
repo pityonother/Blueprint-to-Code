@@ -5,8 +5,9 @@ Blueprint asset:
 
 exec(open(r"C:\Users\ac\Documents\project gaming\Blueprint to Code\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
 
-The script writes defaults.json, components.json, and diagnostic reports under
-captures/<BlueprintName>/ so the local Blueprint translator can consume them.
+The script writes defaults.json, components.json, graph_pages.json,
+graph_queue.txt, and diagnostic reports under captures/<BlueprintName>/ so the
+local Blueprint translator can consume them.
 """
 
 from __future__ import print_function
@@ -619,6 +620,95 @@ def parent_class_name(blueprint, generated_class):
     if not parent and generated_class is not None:
         parent = call_any(generated_class, ("get_super_class", "get_super_struct"))
     return object_name(parent)
+
+
+def graph_type_from_name(name, fallback):
+    lowered = str(name or "").lower()
+    if "construction" in lowered or lowered == "userconstructionscript":
+        return "ConstructionScript"
+    return fallback or "Unknown"
+
+
+def add_graph_page(pages, seen, graph, graph_type, source):
+    if graph is None:
+        return
+    name = object_name(graph)
+    if not name and isinstance(graph, str):
+        name = graph
+    name = str(name or "").strip()
+    if not name:
+        return
+    key = name.lower()
+    if key in seen:
+        return
+    seen.add(key)
+    pages.append(
+        {
+            "name": name,
+            "type": graph_type_from_name(name, graph_type),
+            "source": source,
+            "path": object_path(graph),
+            "class": class_name(graph),
+        }
+    )
+
+
+def add_graph_collection(pages, seen, value, graph_type, source):
+    items = iter_unreal_collection(value)
+    if not items and (is_unreal_object(value) or isinstance(value, str)):
+        items = [value]
+    for item in items:
+        add_graph_page(pages, seen, item, graph_type, source)
+
+
+def collect_graph_pages(blueprint, generated_class=None):
+    pages = []
+    seen = set()
+    sources = (
+        (blueprint, "blueprint"),
+        (generated_class, "generated_class"),
+    )
+    property_groups = (
+        ("EventGraph", ("ubergraph_pages", "UbergraphPages", "uber_graph_pages")),
+        ("Function", ("function_graphs", "FunctionGraphs", "functionGraphs")),
+        ("Macro", ("macro_graphs", "MacroGraphs", "macroGraphs")),
+        ("Function", ("delegate_signature_graphs", "DelegateSignatureGraphs")),
+        ("Unknown", ("intermediate_generated_graphs", "IntermediateGeneratedGraphs")),
+    )
+    for graph_type, prop_names in property_groups:
+        for obj, label in sources:
+            if obj is None:
+                continue
+            for prop_name in prop_names:
+                ok, value, method = raw_property_value(obj, prop_name)
+                if ok and value is not None:
+                    add_graph_collection(pages, seen, value, graph_type, "{}.{} via {}".format(label, prop_name, method))
+
+    library = getattr(unreal, "BlueprintEditorLibrary", None) if unreal is not None else None
+    if library is not None:
+        for method_name in ("get_all_graphs", "get_blueprint_graphs"):
+            method = getattr(library, method_name, None)
+            if callable(method):
+                try:
+                    add_graph_collection(pages, seen, method(blueprint), "Unknown", "BlueprintEditorLibrary.{}".format(method_name))
+                except Exception as exc:
+                    STATE.skip("graph_pages", method_name, str(exc))
+
+    for item in pages:
+        item["queue_line"] = "{} | {}".format(item.get("name", ""), item.get("type", "Unknown"))
+    STATE.info("Collected {} Blueprint graph page names".format(len(pages)))
+    return pages
+
+
+def render_graph_queue(graph_pages):
+    lines = []
+    for item in graph_pages:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        graph_type = str(item.get("type") or "Unknown").strip() or "Unknown"
+        lines.append("{} | {}".format(name, graph_type))
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def blueprint_variable_names(blueprint):
@@ -1463,7 +1553,7 @@ def build_suggestion_match_report(suggestions, exported_variables, exported_clas
     }
 
 
-def render_report(asset_name, discovery_source, asset_path, generated_class, parent_class, defaults_payload, components_payload, suggestion_report):
+def render_report(asset_name, discovery_source, asset_path, generated_class, parent_class, defaults_payload, components_payload, graph_pages_payload, suggestion_report):
     lines = [
         "# DevKit Blueprint Defaults Export Report",
         "",
@@ -1477,14 +1567,34 @@ def render_report(asset_name, discovery_source, asset_path, generated_class, par
         "- Blueprint variables exported: {}".format(len(defaults_payload.get("variables", {}))),
         "- Class defaults exported: {}".format(len(defaults_payload.get("classDefaults", {}))),
         "- Components exported: {}".format(len(components_payload.get("components", []))),
+        "- Blueprint graph pages found: {}".format(len(graph_pages_payload.get("graphs", []))),
         "- Warnings: {}".format(len(STATE.warnings)),
         "- Errors: {}".format(len(STATE.errors)),
         "- Skipped unique properties: {}".format(len(STATE.skipped)),
         "- Skipped read attempts: {}".format(STATE.skipped_attempts),
         "",
-        "## Analyzer Suggestions Match",
+        "## Blueprint Graph Pages",
         "",
     ]
+    graph_pages = graph_pages_payload.get("graphs", [])
+    if graph_pages:
+        lines.append("The exporter wrote `graph_queue.txt`; paste it into the control center capture queue.")
+        lines.append("")
+        lines.append("| Name | Type | Source |")
+        lines.append("| --- | --- | --- |")
+        for item in graph_pages[:200]:
+            lines.append("| {} | {} | {} |".format(item.get("name", ""), item.get("type", ""), item.get("source", "")))
+        if len(graph_pages) > 200:
+            lines.append("")
+            lines.append("- {} additional graph pages omitted from this report.".format(len(graph_pages) - 200))
+    else:
+        lines.append("- No graph page list was exposed by this DevKit Python build.")
+
+    lines.extend([
+        "",
+        "## Analyzer Suggestions Match",
+        "",
+    ])
     if suggestion_report.get("suggestions_found"):
         lines.append("- Matched suggested defaults: {}".format(len(suggestion_report.get("matched", []))))
         lines.append("- Still missing suggested defaults: {}".format(len(suggestion_report.get("missing", []))))
@@ -1631,6 +1741,7 @@ def export_current_blueprint_defaults():
     variables = collect_blueprint_variable_defaults(blueprint, cdo, generated_class)
     class_defaults = collect_class_defaults(cdo, variables.keys(), generated_class=generated_class)
     components = collect_components(blueprint, cdo, generated_class=generated_class, asset_dir=asset_dir)
+    graph_pages = collect_graph_pages(blueprint, generated_class)
 
     defaults_payload = {
         "schema": "blueprint-translator.defaults.v1",
@@ -1662,6 +1773,17 @@ def export_current_blueprint_defaults():
             "max_component_properties": MAX_COMPONENT_PROPERTIES,
         },
     }
+    graph_pages_payload = {
+        "schema": "blueprint-translator.graph-pages.v1",
+        "generated": now,
+        "asset_name": asset_name,
+        "object_path": asset_path,
+        "graphs": graph_pages,
+        "exporter": {
+            "source": "ARK DevKit / Unreal Python",
+            "discovery_source": discovery_source,
+        },
+    }
 
     suggestions = read_defaults_suggestions(asset_dir)
     suggestion_report = build_suggestion_match_report(suggestions, variables, class_defaults)
@@ -1673,6 +1795,7 @@ def export_current_blueprint_defaults():
         parent_class,
         defaults_payload,
         components_payload,
+        graph_pages_payload,
         suggestion_report,
     )
     log_payload = {
@@ -1684,20 +1807,27 @@ def export_current_blueprint_defaults():
         "skipped": STATE.skipped,
         "skipped_attempts": STATE.skipped_attempts,
         "debug": STATE.debug,
+        "graph_pages": graph_pages,
         "suggestions": suggestion_report,
     }
 
     defaults_path = os.path.join(asset_dir, "defaults.json")
     components_path = os.path.join(asset_dir, "components.json")
+    graph_pages_path = os.path.join(asset_dir, "graph_pages.json")
+    graph_queue_path = os.path.join(asset_dir, "graph_queue.txt")
     report_path = os.path.join(asset_dir, "devkit_export_report.md")
     log_path = os.path.join(asset_dir, "devkit_export_log.json")
     write_json(defaults_path, defaults_payload)
     write_json(components_path, components_payload)
+    write_json(graph_pages_path, graph_pages_payload)
+    write_text(graph_queue_path, render_graph_queue(graph_pages))
     write_text(report_path, report_text)
     write_json(log_path, log_payload)
 
     log("Wrote: {}".format(defaults_path))
     log("Wrote: {}".format(components_path))
+    log("Wrote: {}".format(graph_pages_path))
+    log("Wrote: {}".format(graph_queue_path))
     log("Wrote: {}".format(report_path))
     log("Wrote: {}".format(log_path))
     log("Next: run local analyzer with:")
@@ -1706,6 +1836,8 @@ def export_current_blueprint_defaults():
         "asset_dir": asset_dir,
         "defaults": defaults_path,
         "components": components_path,
+        "graph_pages": graph_pages_path,
+        "graph_queue": graph_queue_path,
         "report": report_path,
         "log": log_path,
     }

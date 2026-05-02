@@ -51,6 +51,7 @@ class ToolServerTests(unittest.TestCase):
                 json.dumps({"components": [{"name": "Mesh"}]}),
                 encoding="utf-8",
             )
+            (asset_dir / "graph_queue.txt").write_text("EventGraph | EventGraph\nStartGlide | Function\n", encoding="utf-8")
 
             summary = asset_summary(asset_dir)
 
@@ -58,6 +59,8 @@ class ToolServerTests(unittest.TestCase):
         self.assertEqual(summary["graphs"], 1)
         self.assertEqual(summary["defaultsCount"], 2)
         self.assertEqual(summary["componentsCount"], 1)
+        self.assertTrue(summary["hasGraphQueue"])
+        self.assertEqual(summary["graphQueueCount"], 2)
         self.assertTrue(summary["hasDefaults"])
         self.assertTrue(summary["hasComponents"])
 

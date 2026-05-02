@@ -452,10 +452,18 @@ def graph_count(asset_dir: Path) -> int:
     return len(list(graphs_dir.glob("*.txt"))) if graphs_dir.is_dir() else 0
 
 
+def graph_queue_count(asset_dir: Path) -> int:
+    queue_path = asset_dir / "graph_queue.txt"
+    if not queue_path.is_file():
+        return 0
+    return len([line for line in queue_path.read_text(encoding="utf-8-sig", errors="replace").splitlines() if line.strip() and not line.strip().startswith("#")])
+
+
 def asset_summary(asset_dir: Path) -> dict[str, object]:
     defaults_path = asset_dir / "defaults.json"
     components_path = asset_dir / "components.json"
     output_dir = asset_dir / "output"
+    graph_queue_path = asset_dir / "graph_queue.txt"
     defaults_data = read_json_file(defaults_path)
     components_data = read_json_file(components_path)
     reports = {
@@ -467,6 +475,8 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
         "name": asset_dir.name,
         "path": str(asset_dir),
         "graphs": graph_count(asset_dir),
+        "hasGraphQueue": graph_queue_path.is_file(),
+        "graphQueueCount": graph_queue_count(asset_dir),
         "hasDefaults": defaults_path.is_file(),
         "defaultsCount": count_defaults(defaults_data),
         "hasComponents": components_path.is_file(),
@@ -932,6 +942,15 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 values = parse_qs(parsed.query)
                 asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
                 self.send_json({"ok": True, "items": missing_functions_from_report(asset_dir)})
+                return
+            if parsed.path == "/api/graph-queue":
+                values = parse_qs(parsed.query)
+                asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
+                queue_path = asset_dir / "graph_queue.txt"
+                if not queue_path.is_file():
+                    self.send_json({"ok": True, "path": str(queue_path), "content": ""})
+                    return
+                self.send_json({"ok": True, "path": str(queue_path), "content": queue_path.read_text(encoding="utf-8-sig", errors="replace")})
                 return
             if parsed.path.startswith("/api/jobs/"):
                 job_id = parsed.path.rsplit("/", 1)[-1]

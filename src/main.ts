@@ -42,6 +42,8 @@ interface AssetSummary {
   name: string;
   path: string;
   graphs: number;
+  hasGraphQueue: boolean;
+  graphQueueCount: number;
   hasDefaults: boolean;
   defaultsCount: number;
   hasComponents: boolean;
@@ -417,6 +419,7 @@ function graphTypeOptions(): string {
 
 function renderCaptureQueue(): string {
   const items = captureQueueItems();
+  const asset = selectedAsset();
   const hasItems = items.length > 0;
   const currentIndex = hasItems ? Math.max(0, Math.min(captureQueueCursor, items.length - 1)) : 0;
   const current = hasItems && captureQueueCursor < items.length ? items[currentIndex] : undefined;
@@ -447,6 +450,7 @@ function renderCaptureQueue(): string {
         <span>批量图页队列</span>
         <textarea id="capture-queue-text" spellcheck="false" placeholder="SetParachuteState&#10;OnRep_bWantsToParachute | Function&#10;EventGraph | EventGraph">${escapeHtml(captureQueueText)}</textarea>
       </label>
+      ${asset?.hasGraphQueue ? `<div class="button-row tight">${actionButton(`载入 DevKit 导出的 ${asset.graphQueueCount} 个分页名`, 'load-graph-queue', 'secondary', busy)}</div>` : ''}
       <div class="queue-summary">
         <span>当前：${current ? escapeHtml(current.name) : '无'}</span>
         <strong>${escapeHtml(progress)}</strong>
@@ -1103,6 +1107,29 @@ async function capturePage(analyzeAfter: boolean, allowOverwrite = false, fromQu
   }
 }
 
+async function loadGraphQueueFromAsset(): Promise<void> {
+  const asset = selectedAsset();
+  if (!asset) {
+    appendLog('请先选择一个资产。');
+    return;
+  }
+  try {
+    const query = new URLSearchParams({ assetPath: asset.path });
+    const payload = await api<ApiResult & { path: string; content: string }>(`/api/graph-queue?${query}`);
+    if (!payload.content.trim()) {
+      appendLog('这个资产还没有 graph_queue.txt。请先在 DevKit 里运行默认值导出器。');
+      return;
+    }
+    captureQueueText = payload.content;
+    captureQueueCursor = 0;
+    saveCaptureQueueState();
+    appendLog(`已载入分页队列：${payload.path}`);
+    render();
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function openTarget(target: OpenTarget): Promise<void> {
   const asset = selectedAsset();
   if (!asset) {
@@ -1236,6 +1263,10 @@ async function handleAction(action: string): Promise<void> {
   }
   if (action === 'capture-page-analyze') {
     await capturePage(true);
+    return;
+  }
+  if (action === 'load-graph-queue') {
+    await loadGraphQueueFromAsset();
     return;
   }
   if (action === 'capture-queue-current') {

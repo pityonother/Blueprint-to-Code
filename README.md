@@ -22,7 +22,7 @@ The launcher builds the UI, starts `scripts/blueprint_tool_server.py`, and opens
 - select an asset under `captures/`
 - regenerate standard, compact, or debug reports
 - capture one Blueprint graph page from the Windows clipboard into `graphs/*.txt`
-- paste a graph-page queue and save copied pages one by one without retyping each page name
+- paste or load a DevKit-exported graph-page queue and save copied pages one by one without retyping each page name
 - confirm before replacing an existing graph page; old copies are backed up under `graphs/_backups/`
 - open `next_actions.md`, `context_review.md`, `notes_todo.md`, `behavior_summary.md`, and other key reports
 - review missing function candidates and append confirmed parent/native or ignored functions directly to `notes.md`; the app reruns standard analysis afterward so previews stay fresh
@@ -114,7 +114,7 @@ If you are in normal Output Log / command mode instead of Python Console mode, u
 py exec(open(r"C:\Users\ac\Documents\project gaming\Blueprint to Code\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
 ```
 
-The exporter also still tries the currently opened/selected Blueprint, the saved GUI request, clipboard text, and an in-DevKit paste dialog when available. It writes `defaults.json`, `components.json`, `devkit_export_report.md`, and `devkit_export_log.json` under `captures/<BlueprintName>/`. Then rerun the asset analyzer:
+The exporter also still tries the currently opened/selected Blueprint, the saved GUI request, clipboard text, and an in-DevKit paste dialog when available. It writes `defaults.json`, `components.json`, `graph_pages.json`, `graph_queue.txt`, `devkit_export_report.md`, and `devkit_export_log.json` under `captures/<BlueprintName>/`. The control center can load `graph_queue.txt` directly into the batch capture queue. Then rerun the asset analyzer:
 
 Component export runs in crash-safe mode by default: it writes analysis candidates rather than recursively reflecting live Unreal component objects, which can crash some ARK DevKit Python builds.
 Crash-safe mode now also attempts a shallow SimpleConstructionScript/component-template scan for component names, classes, and paths; it still avoids recursive component default reflection.
