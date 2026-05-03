@@ -12,10 +12,17 @@ class PinInfo:
     direction: str = "EGPD_Input"
     category: str = ""
     subcategory: str = ""
+    pin_type: dict[str, object] = field(default_factory=dict)
     default: str = ""
+    default_object: str = ""
     persistent_guid: str = ""
     linked_to_raw: str = ""
     links: list[dict[str, str]] = field(default_factory=list)
+    source: str = "clipboard"
+    confidence: str = "high"
+    warnings: list[str] = field(default_factory=list)
+    raw_offsets: dict[str, int] = field(default_factory=dict)
+    resolution: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -33,7 +40,15 @@ class NodeInfo:
     delegate: str = ""
     macro: str = ""
     comment: str = ""
+    node_pos_x: int | None = None
+    node_pos_y: int | None = None
+    properties: dict[str, object] = field(default_factory=dict)
+    semantic: dict[str, object] = field(default_factory=dict)
     pins: list[PinInfo] = field(default_factory=list)
+    source: str = "clipboard"
+    confidence: str = "high"
+    warnings: list[str] = field(default_factory=list)
+    raw_offsets: dict[str, int] = field(default_factory=dict)
     keyword_hits: Counter = field(default_factory=Counter)
     raw: str = ""
 

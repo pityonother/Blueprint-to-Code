@@ -15,6 +15,7 @@ __pycache__/
 # Generated Blueprint captures and reports
 captures/
 output/
+.tmp_*/
 
 # Unreal plugin build output
 devkit_plugins/**/Binaries/

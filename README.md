@@ -22,7 +22,7 @@ The launcher builds the UI, starts `scripts/blueprint_tool_server.py`, and opens
 - select an asset under `captures/`
 - regenerate standard, compact, or debug reports
 - capture one Blueprint graph page from the Windows clipboard into `graphs/*.txt`
-- paste or load a DevKit-exported graph-page queue and save copied pages one by one without retyping each page name
+- paste or load a DevKit-exported graph-page queue and save copied pages one by one without retyping each page name; the queue can be loaded as compact, supplemental-context, or full graph set
 - confirm before replacing an existing graph page; old copies are backed up under `graphs/_backups/`
 - open `next_actions.md`, `context_review.md`, `notes_todo.md`, `behavior_summary.md`, and other key reports
 - review missing function candidates and append confirmed parent/native or ignored functions directly to `notes.md`; the app reruns standard analysis afterward so previews stay fresh
@@ -121,12 +121,123 @@ The exporter also still tries the currently opened/selected Blueprint, the saved
 Component export runs in crash-safe mode by default: it writes analysis candidates rather than recursively reflecting live Unreal component objects, which can crash some ARK DevKit Python builds.
 Crash-safe mode now also attempts a shallow SimpleConstructionScript/component-template scan for component names, classes, and paths; it still avoids recursive component default reflection.
 
+### UAsset Graph Name Candidates
+
+For large Blueprints, use the control center DevKit panel before hand-typing
+graph page names:
+
+1. Paste the Blueprint Object Path.
+2. Click `从 .uasset 提取分页候选名`.
+3. Click `保存候选名并复制 DevKit 验证命令`.
+4. Run the copied command inside ARK DevKit.
+5. Load the generated `graph_queue.txt` in the capture queue. Start with `载入精简采集`, use `载入补充上下文` only if the report still says context is missing, and reserve `载入全部` for deep debugging.
+
+The local extractor maps `/Game/.../MyBP.MyBP` to the installed ARK DevKit
+`Projects/ShooterGame/Content/.../MyBP.uasset`, scans safe ASCII/UTF-16 strings,
+and writes:
+
+```text
+captures/<BlueprintName>/graph_candidates_uasset.json
+captures/<BlueprintName>/graph_candidates_uasset.txt
+captures/<BlueprintName>/graph_candidates_uasset_report.md
+```
+
+The DevKit exporter then validates those candidates with
+`BlueprintEditorLibrary.find_graph(blueprint, name)`. Validated pages are written
+to `graph_queue.txt`; rejected names are written to
+`graph_candidates_rejected.json`.
+
+`graph_queue.txt` can include more than the top visible editor tabs: event graphs,
+functions, Blueprint overrides, RPC/replication graphs, macros, and collapsed
+graphs may all be valid Unreal graph objects. The control center classifies them
+into automatic tiers: `精简采集` loads the recommended queue, `补充上下文` adds
+supporting context graphs, and `全部` is only for deep debugging. The normal
+workflow should not depend on screenshot-confirmed name lists.
+
+Command-line equivalent:
+
+```powershell
+python scripts\uasset_graph_candidates.py "/Game/Genesis2/Dinos/LionfishLion/LionfishLion_Character_BP.LionfishLion_Character_BP"
+```
+
+### Experimental UAsset Graph Content Reader
+
+The control center can now go past graph names and read recoverable graph content
+directly from `.uasset` / `.uexp` exports:
+
+1. Paste the Blueprint Object Path.
+2. Click `从 .uasset 读取图内容`.
+3. Review `uasset_graph_read_report.md` and the generated standard asset reports.
+4. If some pages are partial, click `只补采失败图页` to load a focused manual copy queue.
+
+The reader locates ExportMap serialized data, reads `EdGraph.Nodes`, extracts
+K2 node classes, node coordinates, function/variable/event references, and
+recoverable custom pin/link data with per-graph confidence and failure
+categories. It writes:
+
+```text
+captures/<BlueprintName>/uasset_package.json
+captures/<BlueprintName>/uasset_exports.json
+captures/<BlueprintName>/uasset_properties.json
+captures/<BlueprintName>/uasset_unknown_properties.json
+captures/<BlueprintName>/uasset_property_parse_report.md
+captures/<BlueprintName>/uasset_pin_links.json
+captures/<BlueprintName>/uasset_link_resolution_report.md
+captures/<BlueprintName>/uasset_partial_graph_triage.json
+captures/<BlueprintName>/uasset_partial_graph_triage.md
+captures/<BlueprintName>/uasset_quality_gates.json
+captures/<BlueprintName>/uasset_quality_gates.md
+captures/<BlueprintName>/uasset_graph_nodes.json
+captures/<BlueprintName>/uasset_graph_read_report.md
+captures/<BlueprintName>/uasset_failed_graph_queue.txt
+captures/<BlueprintName>/uasset_failed_graph_queue.json
+captures/<BlueprintName>/uasset_compare_matrix.json
+captures/<BlueprintName>/uasset_vs_clipboard_compare.md
+captures/<BlueprintName>/graphs_from_uasset/<GraphName>.json
+```
+
+`graphs_from_uasset/*.json` is a parser-compatible graph payload. The asset
+analyzer prefers copied `graphs/*.txt` when present, and falls back to these
+binary graph payloads when no clipboard graph pages exist. When both clipboard
+text and binary graph payloads exist, the analyzer writes a validation matrix
+comparing node class distribution, function/variable/event recovery, pin counts,
+and link counts.
+
+The binary reader deliberately reports four useful kinds of uncertainty:
+
+- `complete`: nodes, pins, and node-level links were recovered well enough for
+  normal reports.
+- `partial`: the graph is usable, but pin coverage, link coverage, or custom
+  data layout needs more rules.
+- `heuristic`: the graph was recovered mainly through byte-pattern scanning.
+- `needs_clipboard` / `failed`: manually copy the page or add a new binary rule.
+
+`uasset_link_resolution_report.md` separates exact target pin matches from
+`resolved_pin_heuristic`, where the reader resolves the target node and chooses
+the most likely target pin by exec/data direction and pin category. Treat
+heuristic links as graph-level useful but pin-level low confidence until a
+clipboard comparison or stronger LinkedTo layout rule confirms them.
+
+Command-line equivalent:
+
+```powershell
+python scripts\bp_clipboard_to_prompt.py --asset-binary "/Game/Genesis2/Dinos/LionfishLion/LionfishLion_Character_BP.LionfishLion_Character_BP"
+```
+
+Use `--asset-binary-no-report` to only write extraction artifacts, and
+`--uasset-max-graphs 3` for a fast smoke test.
+
 ### Experimental C++ Graph Queue Exporter
 
 ARK DevKit Python can validate known graph names, but it has not exposed a reliable
 API for enumerating every function/macro/event graph. The experimental editor
 plugin under `devkit_plugins/BlueprintToCodeExporter/` uses Unreal's C++
 `UBlueprint::GetAllGraphs()` API to export the real graph-page queue.
+
+On installed ARK DevKit builds that lack `Engine\Source\Runtime` and
+`Engine\Intermediate\Build\BuildRules\UE5Rules.dll`, this source plugin cannot
+compile. Prefer the UAsset candidate workflow above unless you have a separate
+plugin build environment or a precompiled DLL.
 
 Install helper:
 

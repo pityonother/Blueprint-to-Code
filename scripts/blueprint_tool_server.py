@@ -24,6 +24,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
 from blueprint_translator.capture import (
     CAPTURE_GRAPH_TYPES,
     graph_capture_path,
@@ -35,7 +39,15 @@ from blueprint_translator.capture import (
     upsert_graph_record,
     write_capture_manifest,
 )
+from blueprint_translator.graph_queue import graph_queue_summary, graph_queue_text_for_mode
 from blueprint_translator.utils import read_clipboard, safe_filename
+from blueprint_translator.uasset_graphs import (
+    mine_graph_candidates,
+    object_path_to_uasset_path,
+    read_uasset_graph_content,
+    write_graph_candidate_files,
+    write_uasset_graph_read_files,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +69,14 @@ REPORT_TARGETS = {
     "defaults": ("defaults.json",),
     "components": ("components.json",),
     "devkit_report": ("devkit_export_report.md",),
+    "uasset_graph_read_report": ("uasset_graph_read_report.md",),
+    "uasset_property_parse_report": ("uasset_property_parse_report.md",),
+    "uasset_link_resolution_report": ("uasset_link_resolution_report.md",),
+    "uasset_partial_graph_triage": ("uasset_partial_graph_triage.md",),
+    "uasset_quality_gates": ("uasset_quality_gates.md",),
+    "uasset_vs_clipboard_compare": ("uasset_vs_clipboard_compare.md",),
+    "uasset_structure_report": ("uasset_structure_report.md",),
+    "uasset_class_defaults_report": ("uasset_class_defaults_report.md",),
 }
 
 OPEN_TARGETS = {
@@ -440,31 +460,141 @@ def iso_time(timestamp: float | None) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
 
-def graph_count(asset_dir: Path) -> int:
+def graph_name_key(value: str) -> str:
+    lowered = value.lower().strip()
+    for prefix in ("function_", "func_", "macro_", "event_", "graph_"):
+        if lowered.startswith(prefix):
+            lowered = lowered[len(prefix) :]
+    return re.sub(r"[^a-z0-9_]+", "", lowered)
+
+
+def captured_graph_keys(asset_dir: Path) -> set[str]:
+    keys: set[str] = set()
     manifest = read_json_file(asset_dir / "manifest.json")
     if isinstance(manifest, dict):
         graphs = manifest.get("graphs")
-        if isinstance(graphs, list):
-            return len(graphs)
         if isinstance(graphs, dict):
-            return len(graphs)
+            items = [{"name": name, **value} if isinstance(value, dict) else {"name": name, "path": value} for name, value in graphs.items()]
+        elif isinstance(graphs, list):
+            items = graphs
+        else:
+            items = []
+        for item in items:
+            if isinstance(item, dict):
+                path_text = str(item.get("path") or item.get("file") or "")
+                keys.add(graph_name_key(str(item.get("name") or item.get("graph_name") or Path(path_text).stem)))
+            elif isinstance(item, str):
+                keys.add(graph_name_key(Path(item).stem))
     graphs_dir = asset_dir / "graphs"
-    return len(list(graphs_dir.glob("*.txt"))) if graphs_dir.is_dir() else 0
+    if graphs_dir.is_dir():
+        keys.update(graph_name_key(path.stem) for path in graphs_dir.glob("*.txt"))
+    return {key for key in keys if key}
+
+
+def graph_count(asset_dir: Path) -> int:
+    keys = captured_graph_keys(asset_dir)
+    uasset_graphs_dir = asset_dir / "graphs_from_uasset"
+    if uasset_graphs_dir.is_dir():
+        keys.update(graph_name_key(path.stem.rsplit("_", 1)[0]) for path in uasset_graphs_dir.glob("*.json"))
+    return len({key for key in keys if key})
 
 
 def graph_queue_count(asset_dir: Path) -> int:
     queue_path = asset_dir / "graph_queue.txt"
     if not queue_path.is_file():
+        queue_text = ""
+    else:
+        queue_text = queue_path.read_text(encoding="utf-8-sig", errors="replace")
+    return int(graph_queue_summary(queue_text).get("total") or 0)
+
+
+def graph_queue_counts(asset_dir: Path) -> dict[str, int]:
+    queue_path = asset_dir / "graph_queue.txt"
+    queue_text = queue_path.read_text(encoding="utf-8-sig", errors="replace") if queue_path.is_file() else ""
+    summary = graph_queue_summary(queue_text)
+    return {
+        "total": int(summary.get("total") or 0),
+        "compact": int(summary.get("compact") or summary.get("recommended") or 0),
+        "recommended": int(summary.get("recommended") or 0),
+        "optional": int(summary.get("optional") or 0),
+        "deferred": int(summary.get("deferred") or 0),
+        "focused": int(summary.get("focused") or 0),
+    }
+
+
+def graph_candidate_count(asset_dir: Path) -> int:
+    payload = read_json_file(asset_dir / "graph_candidates_uasset.json")
+    if not isinstance(payload, dict):
         return 0
-    return len([line for line in queue_path.read_text(encoding="utf-8-sig", errors="replace").splitlines() if line.strip() and not line.strip().startswith("#")])
+    try:
+        return int(payload.get("candidate_count") or len(payload.get("candidates", [])))
+    except Exception:
+        return 0
+
+
+def uasset_structure_counts(asset_dir: Path) -> dict[str, int]:
+    payload = read_json_file(asset_dir / "uasset_structure.json")
+    if not isinstance(payload, dict):
+        return {
+            "edgraph": 0,
+            "function_graph": 0,
+            "collapsed": 0,
+            "standalone": 0,
+            "function": 0,
+        }
+    return {
+        "edgraph": int(payload.get("graph_exports_count") or 0),
+        "function_graph": int(payload.get("function_graph_exports_count") or 0),
+        "collapsed": int(payload.get("collapsed_graph_exports_count") or 0),
+        "standalone": int(payload.get("standalone_graph_exports_count") or 0),
+        "function": int(payload.get("function_exports_count") or 0),
+    }
+
+
+def uasset_graph_read_counts(asset_dir: Path) -> dict[str, int]:
+    payload = read_json_file(asset_dir / "uasset_graph_nodes.json")
+    if not isinstance(payload, dict):
+        return {"graphs": 0, "nodes": 0, "pins": 0, "links": 0, "complete": 0, "partial": 0, "needs": 0}
+    status_counts = payload.get("status_counts", {})
+    if not isinstance(status_counts, dict):
+        status_counts = {}
+    failed_queue = read_json_file(asset_dir / "uasset_failed_graph_queue.json")
+    captured_keys = captured_graph_keys(asset_dir)
+    pending_manual = 0
+    if isinstance(failed_queue, dict) and isinstance(failed_queue.get("graphs"), list):
+        for item in failed_queue.get("graphs", []):
+            if isinstance(item, dict) and graph_name_key(str(item.get("graph") or "")) not in captured_keys:
+                pending_manual += 1
+    else:
+        pending_manual = int(status_counts.get("needs_clipboard") or 0) + int(status_counts.get("failed") or 0)
+    return {
+        "graphs": int(payload.get("graph_count") or 0),
+        "nodes": int(payload.get("node_count") or 0),
+        "pins": int(payload.get("pin_count") or 0),
+        "links": int(payload.get("link_count") or 0),
+        "complete": int(status_counts.get("complete") or 0),
+        "partial": int(status_counts.get("partial") or 0) + int(status_counts.get("heuristic") or 0),
+        "needs": pending_manual,
+    }
 
 
 def asset_summary(asset_dir: Path) -> dict[str, object]:
     defaults_path = asset_dir / "defaults.json"
+    uasset_defaults_path = asset_dir / "uasset_class_defaults.json"
     components_path = asset_dir / "components.json"
     output_dir = asset_dir / "output"
     graph_queue_path = asset_dir / "graph_queue.txt"
+    graph_candidates_path = asset_dir / "graph_candidates_uasset.json"
+    uasset_structure_path = asset_dir / "uasset_structure.json"
+    uasset_graph_read_path = asset_dir / "uasset_graph_nodes.json"
+    queue_counts = graph_queue_counts(asset_dir)
+    structure_counts = uasset_structure_counts(asset_dir)
+    graph_read_counts = uasset_graph_read_counts(asset_dir)
     defaults_data = read_json_file(defaults_path)
+    uasset_defaults_data = read_json_file(uasset_defaults_path)
+    defaults_count = count_defaults(defaults_data)
+    if not defaults_count:
+        defaults_count = count_defaults(uasset_defaults_data)
     components_data = read_json_file(components_path)
     reports = {
         key: (asset_dir / Path(*parts)).is_file()
@@ -476,9 +606,30 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
         "path": str(asset_dir),
         "graphs": graph_count(asset_dir),
         "hasGraphQueue": graph_queue_path.is_file(),
-        "graphQueueCount": graph_queue_count(asset_dir),
-        "hasDefaults": defaults_path.is_file(),
-        "defaultsCount": count_defaults(defaults_data),
+        "graphQueueCount": queue_counts["total"],
+        "graphQueueCompactCount": queue_counts["compact"],
+        "graphQueueRecommendedCount": queue_counts["recommended"],
+        "graphQueueOptionalCount": queue_counts["optional"],
+        "graphQueueDeferredCount": queue_counts["deferred"],
+        "graphQueueFocusedCount": queue_counts["focused"],
+        "hasGraphCandidates": graph_candidates_path.is_file(),
+        "graphCandidateCount": graph_candidate_count(asset_dir),
+        "hasUassetStructure": uasset_structure_path.is_file(),
+        "uassetEdGraphCount": structure_counts["edgraph"],
+        "uassetFunctionGraphCount": structure_counts["function_graph"],
+        "uassetCollapsedGraphCount": structure_counts["collapsed"],
+        "uassetStandaloneGraphCount": structure_counts["standalone"],
+        "uassetFunctionCount": structure_counts["function"],
+        "hasUassetGraphRead": uasset_graph_read_path.is_file(),
+        "uassetReadGraphCount": graph_read_counts["graphs"],
+        "uassetReadNodeCount": graph_read_counts["nodes"],
+        "uassetReadPinCount": graph_read_counts["pins"],
+        "uassetReadLinkCount": graph_read_counts["links"],
+        "uassetReadCompleteCount": graph_read_counts["complete"],
+        "uassetReadPartialCount": graph_read_counts["partial"],
+        "uassetReadNeedsClipboardCount": graph_read_counts["needs"],
+        "hasDefaults": defaults_path.is_file() or uasset_defaults_path.is_file(),
+        "defaultsCount": defaults_count,
         "hasComponents": components_path.is_file(),
         "componentsCount": count_components(components_data),
         "hasNotes": (asset_dir / "notes.md").is_file() or (asset_dir / "notes.txt").is_file(),
@@ -496,7 +647,14 @@ def list_assets() -> list[dict[str, object]]:
     for path in sorted(CAPTURE_ROOT.iterdir(), key=lambda item: item.name.lower()):
         if not path.is_dir() or path.name.startswith("_"):
             continue
-        if (path / "graphs").is_dir() or (path / "manifest.json").is_file() or (path / "defaults.json").is_file():
+        if (
+            (path / "graphs").is_dir()
+            or (path / "manifest.json").is_file()
+            or (path / "defaults.json").is_file()
+            or (path / "uasset_class_defaults.json").is_file()
+            or (path / "graph_candidates_uasset.json").is_file()
+            or (path / "uasset_graph_nodes.json").is_file()
+        ):
             assets.append(asset_summary(path))
     return assets
 
@@ -536,6 +694,77 @@ def write_devkit_request(asset_path: str) -> None:
         "asset_path": asset_path,
     }
     DEVKIT_REQUEST_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def mine_uasset_graph_candidates_for_request(asset_path: str, max_candidates: int = 1600) -> dict[str, object]:
+    normalized = normalize_asset_path(asset_path)
+    if not normalized:
+        raise ValueError("Paste an ARK DevKit Object Path that starts with /Game/.")
+    payload, attempted = mine_graph_candidates(normalized, max_candidates=max_candidates)
+    paths = write_graph_candidate_files(normalized, CAPTURE_ROOT, payload)
+    write_devkit_request(normalized)
+    return {
+        "assetPath": normalized,
+        "assetDir": paths.get("asset_dir", ""),
+        "jsonPath": paths.get("json", ""),
+        "textPath": paths.get("text", ""),
+        "reportPath": paths.get("report", ""),
+        "structureJsonPath": paths.get("structure_json", ""),
+        "structureReportPath": paths.get("structure_report", ""),
+        "uassetPath": str(payload.get("uasset_path") or ""),
+        "candidateCount": int(payload.get("candidate_count") or 0),
+        "rawStringCount": int(payload.get("raw_string_count") or 0),
+        "structure": payload.get("structure", {}),
+        "attemptedPaths": attempted,
+        "pythonCommand": devkit_python_command(),
+        "outputLogCommand": devkit_output_log_command(),
+    }
+
+
+def read_uasset_graphs_for_request(asset_path: str, max_graphs: int = 0, report_level: str = "standard", analyze_after: bool = True) -> dict[str, object]:
+    normalized = normalize_asset_path(asset_path)
+    if not normalized:
+        raise ValueError("Paste an ARK DevKit Object Path that starts with /Game/.")
+    uasset_path, attempted = object_path_to_uasset_path(normalized)
+    if uasset_path is None:
+        raise ApiProblem(
+            HTTPStatus.NOT_FOUND,
+            {
+                "ok": False,
+                "code": "uasset_not_found",
+                "error": "本地 .uasset 没有找到，请检查 DevKit Content root 或对象路径。",
+                "attemptedPaths": attempted,
+            },
+        )
+    payload = read_uasset_graph_content(normalized, uasset_path, max_graphs=max_graphs)
+    paths = write_uasset_graph_read_files(normalized, CAPTURE_ROOT, payload)
+    write_devkit_request(normalized)
+    result: dict[str, object] = {
+        "assetPath": normalized,
+        "assetDir": paths.get("asset_dir", ""),
+        "uassetPath": str(uasset_path),
+        "uexpPath": str(payload.get("uexp_path") or ""),
+        "graphReportPath": paths.get("graph_report", ""),
+        "graphNodesPath": paths.get("graph_nodes_json", ""),
+        "propertyReportPath": paths.get("property_report", ""),
+        "pinLinkReportPath": paths.get("pin_link_report", ""),
+        "partialTriageReportPath": paths.get("partial_triage_report", ""),
+        "qualityGatesReportPath": paths.get("quality_gates_report", ""),
+        "compareReportPath": paths.get("compare_report", ""),
+        "failedQueuePath": paths.get("failed_queue", ""),
+        "failedQueueJsonPath": paths.get("failed_queue_json", ""),
+        "graphsDir": paths.get("graphs_dir", ""),
+        "graphCount": int(payload.get("graph_count") or 0),
+        "nodeCount": int(payload.get("node_count") or 0),
+        "pinCount": int(payload.get("pin_count") or 0),
+        "linkCount": int(payload.get("link_count") or 0),
+        "statusCounts": payload.get("status_counts", {}),
+        "attemptedPaths": attempted,
+        "asset": asset_summary(Path(paths.get("asset_dir", ""))),
+    }
+    if analyze_after:
+        result["analysisJob"] = start_analyzer_job(Path(paths["asset_dir"]), report_level, keep_stale_output=True)
+    return result
 
 
 def markdown_table_cells(line: str) -> list[str]:
@@ -716,11 +945,11 @@ def open_path(path: Path) -> None:
     subprocess.Popen([opener, str(path)])
 
 
-def analyzer_command(asset_dir: Path, report_level: str) -> list[str]:
+def analyzer_command(asset_dir: Path, report_level: str, *, keep_stale_output: bool = False) -> list[str]:
     if report_level not in {"compact", "standard", "debug"}:
         raise ValueError("Invalid report level.")
     output_dir = asset_dir / "output"
-    return [
+    command = [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
         "--asset-dir",
@@ -730,6 +959,9 @@ def analyzer_command(asset_dir: Path, report_level: str) -> list[str]:
         "--report-level",
         report_level,
     ]
+    if keep_stale_output:
+        command.append("--keep-stale-output")
+    return command
 
 
 def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
@@ -754,8 +986,8 @@ def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
     }
 
 
-def start_analyzer_job(asset_dir: Path, report_level: str) -> dict[str, object]:
-    command = analyzer_command(asset_dir, report_level)
+def start_analyzer_job(asset_dir: Path, report_level: str, *, keep_stale_output: bool = False) -> dict[str, object]:
+    command = analyzer_command(asset_dir, report_level, keep_stale_output=keep_stale_output)
 
     def complete(_return_code: int) -> dict[str, object]:
         return {
@@ -946,11 +1178,55 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/graph-queue":
                 values = parse_qs(parsed.query)
                 asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
+                mode = values.get("mode", ["all"])[0]
                 queue_path = asset_dir / "graph_queue.txt"
-                if not queue_path.is_file():
-                    self.send_json({"ok": True, "path": str(queue_path), "content": ""})
-                    return
-                self.send_json({"ok": True, "path": str(queue_path), "content": queue_path.read_text(encoding="utf-8-sig", errors="replace")})
+                queue_text = queue_path.read_text(encoding="utf-8-sig", errors="replace") if queue_path.is_file() else ""
+                self.send_json(
+                    {
+                        "ok": True,
+                        "path": str(queue_path),
+                        "mode": mode,
+                        "content": graph_queue_text_for_mode(queue_text, mode),
+                        "summary": graph_queue_summary(queue_text),
+                    }
+                )
+                return
+            if parsed.path == "/api/uasset-failed-queue":
+                values = parse_qs(parsed.query)
+                asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
+                queue_path = asset_dir / "uasset_failed_graph_queue.txt"
+                queue_json_path = asset_dir / "uasset_failed_graph_queue.json"
+                queue_text = queue_path.read_text(encoding="utf-8-sig", errors="replace") if queue_path.is_file() else ""
+                captured_keys = captured_graph_keys(asset_dir)
+                if captured_keys:
+                    pending_lines = []
+                    for line in queue_text.splitlines():
+                        name = line.split("|", 1)[0].strip()
+                        if graph_name_key(name) not in captured_keys:
+                            pending_lines.append(line)
+                    queue_text = "\n".join(pending_lines)
+                    if queue_text:
+                        queue_text += "\n"
+                classified = read_json_file(queue_json_path)
+                if isinstance(classified, dict) and captured_keys:
+                    graphs = classified.get("graphs")
+                    if isinstance(graphs, list):
+                        classified = dict(classified)
+                        classified["graphs"] = [
+                            item
+                            for item in graphs
+                            if not isinstance(item, dict) or graph_name_key(str(item.get("graph") or "")) not in captured_keys
+                        ]
+                self.send_json(
+                    {
+                        "ok": True,
+                        "path": str(queue_path),
+                        "jsonPath": str(queue_json_path),
+                        "content": queue_text,
+                        "summary": graph_queue_summary(queue_text),
+                        "classified": classified,
+                    }
+                )
                 return
             if parsed.path.startswith("/api/jobs/"):
                 job_id = parsed.path.rsplit("/", 1)[-1]
@@ -1010,6 +1286,25 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                         "outputLogCommand": devkit_output_log_command(),
                     }
                 )
+                return
+            if self.path == "/api/uasset-candidates":
+                asset_path = str(body.get("assetPath") or "")
+                max_candidates = int(body.get("maxCandidates") or 1600)
+                result = mine_uasset_graph_candidates_for_request(asset_path, max_candidates=max_candidates)
+                self.send_json({"ok": True, **result})
+                return
+            if self.path == "/api/uasset-graphs":
+                asset_path = str(body.get("assetPath") or "")
+                max_graphs = int(body.get("maxGraphs") or 0)
+                analyze_after = bool(body.get("analyzeAfter", True))
+                report_level = str(body.get("reportLevel") or "standard")
+                result = read_uasset_graphs_for_request(
+                    asset_path,
+                    max_graphs=max_graphs,
+                    report_level=report_level,
+                    analyze_after=analyze_after,
+                )
+                self.send_json({"ok": True, **result}, HTTPStatus.ACCEPTED if analyze_after else HTTPStatus.OK)
                 return
             if self.path == "/api/notes-append":
                 asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))

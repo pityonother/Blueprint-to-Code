@@ -11,6 +11,8 @@ The user-facing app is a local Vite + TypeScript web control center served by a 
 - Windows launcher: `scripts/launch_blueprint_tool.ps1`.
 - Start it with `.\scripts\launch_blueprint_tool.ps1`; it builds the UI and opens `http://127.0.0.1:8765/`.
 - The control center can capture one graph page from the Windows clipboard, run a pasted or DevKit-exported graph-page capture queue, rerun reports, inspect DevKit export quality, and run asset-level behavior compare.
+- The preferred graph-name automation path is now `.uasset` candidate mining plus DevKit Python validation: local script writes `graph_candidates_uasset.json`, then the DevKit exporter validates candidates with `BlueprintEditorLibrary.find_graph` and writes `graph_queue.txt`.
+- `graph_queue.txt` may include functions, overrides, RPCs, macros, and collapsed graphs, not only the visible event-tab row. The control center uses `scripts/blueprint_translator/graph_queue.py` to split the queue into automatic compact/recommended, optional, and deferred tiers. Default user guidance should start with `载入精简采集`; screenshot-confirmed name lists were only a temporary calibration aid and should not be part of the normal workflow.
 
 Do not treat the old Phaser prototype files/assets as the product direction. The current product direction is the Blueprint analysis control center.
 
@@ -23,6 +25,7 @@ Do not treat the old Phaser prototype files/assets as the product direction. The
 - The Python analyzer and web control center remain the reporting layer.
 - If ARK DevKit cannot compile/load custom editor plugins, use the Python exporter and graph-name candidate fallback instead of expanding the plugin prematurely.
 - On the current local ARK DevKit install, `Engine\Source\Runtime` and `Engine\Intermediate\Build\BuildRules\UE5Rules.dll` were missing, so the source plugin could be scanned but not compiled; the install helper now aborts before creating that startup error.
+Do not continue this path unless a real plugin build environment or precompiled module is available.
 
 ## Report Reading Order
 

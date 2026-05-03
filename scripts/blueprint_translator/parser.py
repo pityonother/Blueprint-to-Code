@@ -33,6 +33,9 @@ from .patterns import (
 )
 from .utils import first_match, node_type_from_class, strip_quotes
 
+NODE_POS_X_RE = re.compile(r"\bNodePosX=(?P<value>-?\d+)")
+NODE_POS_Y_RE = re.compile(r"\bNodePosY=(?P<value>-?\d+)")
+
 def split_node_blocks(text: str) -> list[str]:
     blocks: list[list[str]] = []
     current: list[str] = []
@@ -118,6 +121,8 @@ def parse_node(block: str, index: int, keywords: Iterable[str]) -> NodeInfo:
     delegate = first_match(DELEGATE_MEMBER_RE, block) if "DelegateReference=" in block else ""
     if not event and "K2Node_CustomEvent" in block:
         event = first_match(CUSTOM_FUNCTION_RE, block)
+    pos_x = first_match(NODE_POS_X_RE, block, "value")
+    pos_y = first_match(NODE_POS_Y_RE, block, "value")
 
     pins = [parse_pin(line) for line in block.splitlines() if "CustomProperties Pin" in line]
     return NodeInfo(
@@ -134,6 +139,8 @@ def parse_node(block: str, index: int, keywords: Iterable[str]) -> NodeInfo:
         delegate=delegate,
         macro=macro_name_from_block(block) if "MacroGraphReference=" in block or "K2Node_MacroInstance" in block else "",
         comment=first_match(COMMENT_RE, block, "comment"),
+        node_pos_x=int(pos_x) if pos_x else None,
+        node_pos_y=int(pos_y) if pos_y else None,
         pins=pins,
         keyword_hits=keyword_counter(block, keywords),
         raw=block,

@@ -1,0 +1,4 @@
+﻿Bundled runtime: Python 3.13.13 Windows embeddable package (64-bit)
+Source: https://www.python.org/ftp/python/3.13.13/python-3.13.13-embed-amd64.zip
+Downloaded: 2026-05-03 15:43:37 +08:00
+Usage: START_HERE.bat and scripts\launch_blueprint_tool.ps1 prefer runtime\python\python.exe when present.

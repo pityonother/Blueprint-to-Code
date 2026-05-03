@@ -52,6 +52,10 @@ class ToolServerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (asset_dir / "graph_queue.txt").write_text("EventGraph | EventGraph\nStartGlide | Function\n", encoding="utf-8")
+            (asset_dir / "graph_candidates_uasset.json").write_text(
+                json.dumps({"candidate_count": 3, "candidates": [{"name": "EventGraph"}, {"name": "StartGlide"}, {"name": "CanGlide"}]}),
+                encoding="utf-8",
+            )
 
             summary = asset_summary(asset_dir)
 
@@ -61,8 +65,40 @@ class ToolServerTests(unittest.TestCase):
         self.assertEqual(summary["componentsCount"], 1)
         self.assertTrue(summary["hasGraphQueue"])
         self.assertEqual(summary["graphQueueCount"], 2)
+        self.assertEqual(summary["graphQueueCompactCount"], 2)
+        self.assertEqual(summary["graphQueueRecommendedCount"], 2)
+        self.assertEqual(summary["graphQueueFocusedCount"], 2)
+        self.assertEqual(summary["graphQueueOptionalCount"], 0)
+        self.assertEqual(summary["graphQueueDeferredCount"], 0)
+        self.assertTrue(summary["hasGraphCandidates"])
+        self.assertEqual(summary["graphCandidateCount"], 3)
         self.assertTrue(summary["hasDefaults"])
         self.assertTrue(summary["hasComponents"])
+
+    def test_asset_summary_counts_uasset_remaining_manual_queue_after_captures(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = Path(temp_dir) / "TestAsset"
+            graphs_dir = asset_dir / "graphs"
+            uasset_dir = asset_dir / "graphs_from_uasset"
+            graphs_dir.mkdir(parents=True)
+            uasset_dir.mkdir()
+            (graphs_dir / "EventGraph.txt").write_text("EventGraph", encoding="utf-8")
+            (uasset_dir / "EventGraph_1.json").write_text("{}", encoding="utf-8")
+            (uasset_dir / "OtherGraph_2.json").write_text("{}", encoding="utf-8")
+            (asset_dir / "uasset_graph_nodes.json").write_text(
+                json.dumps({"graph_count": 2, "status_counts": {"complete": 1, "failed": 1}}),
+                encoding="utf-8",
+            )
+            (asset_dir / "uasset_failed_graph_queue.json").write_text(
+                json.dumps({"graphs": [{"graph": "EventGraph", "status": "failed"}]}),
+                encoding="utf-8",
+            )
+
+            summary = asset_summary(asset_dir)
+
+        self.assertEqual(summary["graphs"], 2)
+        self.assertEqual(summary["uassetReadGraphCount"], 2)
+        self.assertEqual(summary["uassetReadNeedsClipboardCount"], 0)
 
     def test_background_job_records_output_and_result(self):
         job = create_background_job(

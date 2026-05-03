@@ -661,7 +661,118 @@ def add_graph_collection(pages, seen, value, graph_type, source):
         add_graph_page(pages, seen, item, graph_type, source)
 
 
-def collect_graph_pages(blueprint, generated_class=None):
+def candidate_name(item):
+    if isinstance(item, dict):
+        return str(item.get("name") or item.get("graph") or "").strip()
+    return str(item or "").strip()
+
+
+def candidate_type_hint(item):
+    if isinstance(item, dict):
+        return str(item.get("type_hint") or item.get("type") or "Unknown").strip() or "Unknown"
+    return "Unknown"
+
+
+def read_uasset_graph_candidates(asset_dir, current_asset_path=""):
+    path = os.path.join(asset_dir, "graph_candidates_uasset.json")
+    result = {
+        "path": path,
+        "loaded": False,
+        "asset_path": "",
+        "candidate_count": 0,
+        "candidates": [],
+        "warnings": [],
+    }
+    if not os.path.isfile(path):
+        return result
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        result["warnings"].append("Could not read graph_candidates_uasset.json: {}".format(exc))
+        STATE.warn(result["warnings"][-1])
+        return result
+    if not isinstance(payload, dict):
+        result["warnings"].append("graph_candidates_uasset.json was not a JSON object.")
+        STATE.warn(result["warnings"][-1])
+        return result
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+    candidate_asset_path = normalize_asset_path(payload.get("asset_path") or "")
+    current_normalized = normalize_asset_path(current_asset_path or "")
+    if candidate_asset_path and current_normalized and candidate_asset_path != current_normalized:
+        warning = "UAsset graph candidates were generated for {}, but current asset is {}.".format(candidate_asset_path, current_normalized)
+        result["warnings"].append(warning)
+        STATE.warn(warning)
+    result.update(
+        {
+            "loaded": True,
+            "asset_path": candidate_asset_path,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "uasset_path": payload.get("uasset_path", ""),
+        }
+    )
+    STATE.info("Loaded {} UAsset graph name candidates".format(len(candidates)))
+    return result
+
+
+def validate_candidate_graph_pages(blueprint, pages, seen, candidates, validation):
+    library = getattr(unreal, "BlueprintEditorLibrary", None) if unreal is not None else None
+    method = getattr(library, "find_graph", None) if library is not None else None
+    validation["attempted"] = 0
+    validation["accepted"] = []
+    validation["rejected"] = []
+    validation["skipped"] = []
+    if not callable(method):
+        validation["error"] = "BlueprintEditorLibrary.find_graph is not available."
+        STATE.warn(validation["error"])
+        return
+    for item in candidates:
+        name = candidate_name(item)
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            validation["skipped"].append({"name": name, "reason": "already_discovered"})
+            continue
+        validation["attempted"] += 1
+        try:
+            graph = method(blueprint, name)
+        except Exception as exc:
+            validation["rejected"].append({"name": name, "reason": str(exc)})
+            continue
+        if graph is None:
+            validation["rejected"].append({"name": name, "reason": "find_graph returned None"})
+            continue
+        before = len(pages)
+        add_graph_page(
+            pages,
+            seen,
+            graph,
+            candidate_type_hint(item),
+            "UAsset candidates + BlueprintEditorLibrary.find_graph({})".format(name),
+        )
+        accepted_name = object_name(graph) or name
+        validation["accepted"].append(
+            {
+                "name": name,
+                "resolved_name": accepted_name,
+                "added": len(pages) > before,
+                "type_hint": candidate_type_hint(item),
+            }
+        )
+    STATE.info(
+        "Validated UAsset graph candidates: {} accepted, {} rejected, {} skipped".format(
+            len(validation.get("accepted", [])),
+            len(validation.get("rejected", [])),
+            len(validation.get("skipped", [])),
+        )
+    )
+
+
+def collect_graph_pages(blueprint, generated_class=None, graph_candidates=None, candidate_validation=None):
     pages = []
     seen = set()
     sources = (
@@ -709,6 +820,9 @@ def collect_graph_pages(blueprint, generated_class=None):
                     add_graph_collection(pages, seen, method(blueprint), "Unknown", "BlueprintEditorLibrary.{}".format(method_name))
                 except Exception as exc:
                     STATE.skip("graph_pages", method_name, str(exc))
+
+    if graph_candidates:
+        validate_candidate_graph_pages(blueprint, pages, seen, graph_candidates, candidate_validation if isinstance(candidate_validation, dict) else {})
 
     for item in pages:
         item["queue_line"] = "{} | {}".format(item.get("name", ""), item.get("type", "Unknown"))
@@ -1949,6 +2063,35 @@ def render_report(asset_name, discovery_source, asset_path, generated_class, par
     else:
         lines.append("- No graph page list was exposed by this DevKit Python build.")
 
+    candidate_validation = graph_pages_payload.get("candidateValidation", {})
+    if isinstance(candidate_validation, dict) and candidate_validation.get("loaded"):
+        accepted = candidate_validation.get("accepted", [])
+        rejected = candidate_validation.get("rejected", [])
+        skipped = candidate_validation.get("skipped", [])
+        lines.extend(
+            [
+                "",
+                "## UAsset Candidate Validation",
+                "",
+                "- Candidate file: {}".format(candidate_validation.get("candidate_path", "")),
+                "- UAsset path: {}".format(candidate_validation.get("uasset_path", "")),
+                "- Candidates loaded: {}".format(candidate_validation.get("candidate_count", 0)),
+                "- find_graph attempts: {}".format(candidate_validation.get("attempted", 0)),
+                "- Accepted: {}".format(len(accepted) if isinstance(accepted, list) else 0),
+                "- Rejected: {}".format(len(rejected) if isinstance(rejected, list) else 0),
+                "- Already discovered/skipped: {}".format(len(skipped) if isinstance(skipped, list) else 0),
+                "",
+            ]
+        )
+        if isinstance(accepted, list) and accepted:
+            lines.append("| Candidate | Resolved | Added |")
+            lines.append("| --- | --- | --- |")
+            for item in accepted[:200]:
+                lines.append("| {} | {} | {} |".format(item.get("name", ""), item.get("resolved_name", ""), item.get("added", "")))
+            lines.append("")
+        if isinstance(rejected, list) and rejected:
+            lines.append("Rejected candidates are written to `graph_candidates_rejected.json`.")
+
     lines.extend([
         "",
         "## Analyzer Suggestions Match",
@@ -2090,6 +2233,21 @@ def export_current_blueprint_defaults():
     asset_name = blueprint_asset_name(blueprint)
     asset_dir = os.path.join(CAPTURE_ROOT, safe_filename(asset_name))
     ensure_dir(asset_dir)
+    uasset_candidate_payload = read_uasset_graph_candidates(asset_dir, asset_path or requested_path)
+    uasset_candidate_validation = {
+        "schema": "blueprint-translator.graph-candidate-validation.v1",
+        "source": "graph_candidates_uasset.json",
+        "candidate_path": uasset_candidate_payload.get("path", ""),
+        "candidate_asset_path": uasset_candidate_payload.get("asset_path", ""),
+        "uasset_path": uasset_candidate_payload.get("uasset_path", ""),
+        "loaded": bool(uasset_candidate_payload.get("loaded")),
+        "candidate_count": int(uasset_candidate_payload.get("candidate_count") or 0),
+        "warnings": uasset_candidate_payload.get("warnings", []),
+        "attempted": 0,
+        "accepted": [],
+        "rejected": [],
+        "skipped": [],
+    }
 
     parent_class = parent_class_name(blueprint, generated_class)
     now = datetime.datetime.now().isoformat(timespec="seconds")
@@ -2100,7 +2258,12 @@ def export_current_blueprint_defaults():
     variables = collect_blueprint_variable_defaults(blueprint, cdo, generated_class)
     class_defaults = collect_class_defaults(cdo, variables.keys(), generated_class=generated_class)
     components = collect_components(blueprint, cdo, generated_class=generated_class, asset_dir=asset_dir)
-    graph_pages = collect_graph_pages(blueprint, generated_class)
+    graph_pages = collect_graph_pages(
+        blueprint,
+        generated_class,
+        uasset_candidate_payload.get("candidates", []),
+        uasset_candidate_validation,
+    )
     graph_discovery_debug = collect_graph_discovery_debug(blueprint, generated_class)
 
     defaults_payload = {
@@ -2139,6 +2302,7 @@ def export_current_blueprint_defaults():
         "asset_name": asset_name,
         "object_path": asset_path,
         "graphs": graph_pages,
+        "candidateValidation": uasset_candidate_validation,
         "exporter": {
             "source": "ARK DevKit / Unreal Python",
             "discovery_source": discovery_source,
@@ -2169,6 +2333,7 @@ def export_current_blueprint_defaults():
         "skipped_attempts": STATE.skipped_attempts,
         "debug": STATE.debug,
         "graph_pages": graph_pages,
+        "graph_candidate_validation": uasset_candidate_validation,
         "graph_discovery_debug": graph_discovery_debug,
         "suggestions": suggestion_report,
     }
@@ -2177,6 +2342,7 @@ def export_current_blueprint_defaults():
     components_path = os.path.join(asset_dir, "components.json")
     graph_pages_path = os.path.join(asset_dir, "graph_pages.json")
     graph_queue_path = os.path.join(asset_dir, "graph_queue.txt")
+    graph_candidates_rejected_path = os.path.join(asset_dir, "graph_candidates_rejected.json")
     graph_discovery_debug_path = os.path.join(asset_dir, "graph_discovery_debug.json")
     graph_discovery_report_path = os.path.join(asset_dir, "graph_discovery_report.md")
     report_path = os.path.join(asset_dir, "devkit_export_report.md")
@@ -2185,6 +2351,7 @@ def export_current_blueprint_defaults():
     write_json(components_path, components_payload)
     write_json(graph_pages_path, graph_pages_payload)
     write_text(graph_queue_path, render_graph_queue(graph_pages))
+    write_json(graph_candidates_rejected_path, uasset_candidate_validation)
     write_json(graph_discovery_debug_path, graph_discovery_debug)
     write_text(graph_discovery_report_path, graph_discovery_report)
     write_text(report_path, report_text)
@@ -2194,6 +2361,7 @@ def export_current_blueprint_defaults():
     log("Wrote: {}".format(components_path))
     log("Wrote: {}".format(graph_pages_path))
     log("Wrote: {}".format(graph_queue_path))
+    log("Wrote: {}".format(graph_candidates_rejected_path))
     log("Wrote: {}".format(graph_discovery_debug_path))
     log("Wrote: {}".format(graph_discovery_report_path))
     log("Wrote: {}".format(report_path))
@@ -2206,6 +2374,7 @@ def export_current_blueprint_defaults():
         "components": components_path,
         "graph_pages": graph_pages_path,
         "graph_queue": graph_queue_path,
+        "graph_candidates_rejected": graph_candidates_rejected_path,
         "graph_discovery_debug": graph_discovery_debug_path,
         "graph_discovery_report": graph_discovery_report_path,
         "report": report_path,

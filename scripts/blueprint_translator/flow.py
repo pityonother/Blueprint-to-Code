@@ -425,10 +425,17 @@ def pin_to_dict(pin: PinInfo) -> dict[str, object]:
         "direction": pin.direction,
         "category": pin.category,
         "subcategory": pin.subcategory,
+        "pin_type": pin.pin_type,
         "default": pin.default,
+        "default_object": pin.default_object,
         "persistent_guid": pin.persistent_guid,
         "linked_to_raw": pin.linked_to_raw,
         "links": pin.links,
+        "source": pin.source,
+        "confidence": pin.confidence,
+        "warnings": pin.warnings,
+        "raw_offsets": pin.raw_offsets,
+        "resolution": pin.resolution,
     }
 
 
@@ -444,6 +451,8 @@ def node_to_dict(node: NodeInfo, include_raw: bool = False) -> dict[str, object]
         "export_path": node.export_path,
         "node_guid": node.node_guid,
         "graph_guid": node.graph_guid,
+        "x": node.node_pos_x,
+        "y": node.node_pos_y,
         "function": node.function,
         "variable": node.variable,
         "event": node.event,
@@ -451,6 +460,12 @@ def node_to_dict(node: NodeInfo, include_raw: bool = False) -> dict[str, object]
         "macro": node.macro,
         "comment": node.comment,
         "control_kind": control_kind(node),
+        "properties": node.properties,
+        "uasset_semantic": node.semantic,
+        "source": node.source,
+        "confidence": node.confidence,
+        "warnings": node.warnings,
+        "raw_offsets": node.raw_offsets,
         "pins": [pin_to_dict(pin) for pin in node.pins],
         "keyword_hits": dict(node.keyword_hits),
     }
@@ -476,6 +491,11 @@ def all_links(nodes: list[NodeInfo]) -> list[dict[str, object]]:
                         "source_pin_direction": pin.direction,
                         "target_node": link.get("target_node", ""),
                         "target_pin_id": link.get("target_pin_id", ""),
+                        "target_package_index": link.get("target_package_index", ""),
+                        "target_node_guid": link.get("target_node_guid", ""),
+                        "link_source": link.get("source", ""),
+                        "link_confidence": link.get("confidence", ""),
+                        "resolution_status": link.get("resolution_status", ""),
                     }
                 )
     return links

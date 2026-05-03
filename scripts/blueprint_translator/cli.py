@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from .asset import run_asset_translate
+from .asset import run_asset_binary_translate, run_asset_translate
 from .capture import CAPTURE_GRAPH_TYPES, run_capture_asset
 from .compare import run_asset_compare, run_compare
 from .config import PROFILE_CONFIG
@@ -14,6 +14,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Translate ARK DevKit / Unreal Blueprint clipboard text into reports, flow graphs, prompts, JSON, and diffs.")
     parser.add_argument("--input", "-i", help="Optional .txt file. If omitted, read Windows clipboard.")
     parser.add_argument("--asset-dir", help="Directory containing one Blueprint asset capture with graphs/*.txt and optional defaults/components sidecars.")
+    parser.add_argument("--asset-binary", help="Blueprint Object Path to read graph content directly from a local .uasset/.uexp package.")
+    parser.add_argument("--asset-binary-no-report", action="store_true", help="Only write uasset graph extraction files; do not run the asset report afterward.")
+    parser.add_argument("--content-root", action="append", default=[], help="Extra ARK DevKit Content root for --asset-binary or uasset lookup.")
+    parser.add_argument("--uasset-max-graphs", type=int, default=0, help="Debug limit for --asset-binary graph reads. 0 means all graphs.")
     parser.add_argument("--capture-asset", metavar="ASSET_DIR_OR_NAME", help="Start a clipboard capture workflow that builds an asset directory with graphs/*.txt and manifest.json.")
     parser.add_argument("--capture-root", help="Root directory for --capture-asset when a simple asset name is provided. Default: captures/ under the current directory.")
     parser.add_argument("--capture-once", metavar="GRAPH_NAME", help="Capture one graph from --input or clipboard, update manifest.json, then optionally run the asset report.")
@@ -52,6 +56,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.asset_binary:
+        return run_asset_binary_translate(args)
     if args.capture_asset:
         return run_capture_asset(args)
     if args.compare_asset:

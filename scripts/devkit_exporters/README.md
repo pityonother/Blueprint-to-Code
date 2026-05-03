@@ -137,3 +137,24 @@ Then run the same `exec(open(...).read())` command again in Python Console mode.
 ```
 
 The local analyzer already accepts these sidecar formats.
+
+## Graph Name Candidate Validation
+
+The local control center can mine likely graph page names from the Blueprint
+`.uasset` before you run this DevKit exporter. It writes:
+
+```text
+captures\<BlueprintName>\graph_candidates_uasset.json
+```
+
+When this exporter runs inside ARK DevKit, it reads that file and validates each
+candidate with:
+
+```python
+unreal.BlueprintEditorLibrary.find_graph(blueprint, name)
+```
+
+Accepted graph pages are added to `graph_queue.txt`; rejected candidates are
+written to `graph_candidates_rejected.json`. This avoids manually typing every
+page name while still letting ARK DevKit confirm which strings are real graph
+pages.

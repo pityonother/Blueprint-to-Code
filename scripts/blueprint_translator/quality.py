@@ -515,6 +515,7 @@ def collect_asset_quality(asset_payload: dict[str, object]) -> dict[str, object]
             "suggested_type": suggested_type,
             "behavior_area": behavior,
             "nodes": graph.get("node_count", 0),
+            "empty_graph": bool(graph.get("empty_graph")),
             "confidence": diagnostics.get("confidence_level", ""),
             "unresolved_links": unresolved,
             "unsupported_node_types": len(unsupported),
@@ -524,7 +525,7 @@ def collect_asset_quality(asset_payload: dict[str, object]) -> dict[str, object]
         graph_rows.append(row)
         if current_type in {"", "Unknown"} and suggested_type != "Unknown":
             graph_type_suggestions.append({"graph": graph_name, "suggested_type": suggested_type, "behavior_area": behavior})
-        if unresolved or diagnostics.get("confidence_level") == "low" or row["missing_entry_points"]:
+        if not row["empty_graph"] and (unresolved or diagnostics.get("confidence_level") == "low" or row["missing_entry_points"]):
             unresolved_rows.append(row)
     return {
         "metadata": asset_payload.get("metadata", {}),

@@ -169,6 +169,69 @@ class AssetDirTests(unittest.TestCase):
             self.assertFalse((out_dir / "graph_reports" / "stale.json").exists())
             self.assertFalse((out_dir / "report.md").exists())
 
+    def test_manual_graphs_override_uasset_graphs_without_hiding_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset_dir = pathlib.Path(tmp) / "Hybrid_Character_BP"
+            graphs_dir = asset_dir / "graphs"
+            uasset_dir = asset_dir / "graphs_from_uasset"
+            out_dir = pathlib.Path(tmp) / "out"
+            graphs_dir.mkdir(parents=True)
+            uasset_dir.mkdir()
+            (graphs_dir / "ManualGraph.txt").write_text(
+                (FIXTURES / "real_ark_achatina_beginplay.txt").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            (uasset_dir / "ManualGraph_1.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {"graph_name": "ManualGraph", "graph_type": "Function", "node_count": 1},
+                        "nodes": [{"name": "StaleBinaryNode", "node_type": "K2Node_CallFunction"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (uasset_dir / "BinaryOnly_2.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {"graph_name": "BinaryOnly", "graph_type": "Function", "node_count": 1},
+                        "nodes": [{"name": "RecoveredNode", "node_type": "K2Node_CallFunction"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (asset_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "asset_name": "Hybrid_Character_BP",
+                        "graphs": [{"name": "ManualGraph", "type": "Function", "path": "graphs/ManualGraph.txt"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--asset-dir",
+                    str(asset_dir),
+                    "--output-dir",
+                    str(out_dir),
+                    "--report-level",
+                    "debug",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            self.assertIn("Parsed graphs: 2", result.stdout)
+            payload = json.loads((out_dir / "asset.json").read_text(encoding="utf-8"))
+            graph_sources = {item["graph_name"]: item.get("source_kind", "clipboard") for item in payload["graphs"]}
+            self.assertEqual(graph_sources["ManualGraph"], "clipboard")
+            self.assertEqual(graph_sources["BinaryOnly"], "uasset_binary")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -28,6 +29,13 @@ from .quality import (
     render_next_actions,
 )
 from .renderers import format_component_refs, format_default_refs, render_report
+from .uasset_graphs import (
+    compare_uasset_with_clipboard,
+    object_path_to_uasset_path,
+    read_uasset_graph_content,
+    write_uasset_clipboard_compare_files,
+    write_uasset_graph_read_files,
+)
 from .utils import profile_keywords, safe_filename, split_csvish, table_row
 
 ASSET_OUTPUT_FILE_KEYS = (
@@ -69,6 +77,15 @@ def read_sidecar_text(path: Path | None) -> str:
     return path.read_text(encoding="utf-8-sig", errors="replace")
 
 
+def defaults_sidecar_has_values(path: Path | None) -> bool:
+    if not path or not path.is_file():
+        return False
+    parsed = parse_defaults_context({"defaults_text": read_sidecar_text(path)})
+    variables = parsed.get("variables", {})
+    class_defaults = parsed.get("class_defaults", {})
+    return bool(isinstance(variables, dict) and variables) or bool(isinstance(class_defaults, dict) and class_defaults)
+
+
 def asset_context_from_args(args: argparse.Namespace, asset_dir: Path, manifest: dict[str, object]) -> dict[str, object]:
     context = context_from_args(args)
     context["parent_class"] = args.parent_class or str(manifest.get("parent_class", ""))
@@ -78,6 +95,9 @@ def asset_context_from_args(args: argparse.Namespace, asset_dir: Path, manifest:
     defaults_path = Path(os.path.expandvars(args.defaults_file)).expanduser() if args.defaults_file else first_existing_path(
         asset_dir / name for name in ("defaults.json", "defaults.md", "defaults.txt", "class_defaults.json", "class_defaults.md", "class_defaults.txt")
     )
+    uasset_defaults_path = asset_dir / "uasset_class_defaults.json"
+    if not args.defaults_file and uasset_defaults_path.is_file() and (not defaults_path or not defaults_sidecar_has_values(defaults_path)):
+        defaults_path = uasset_defaults_path
     components_path = Path(os.path.expandvars(args.components_file)).expanduser() if args.components_file else first_existing_path(
         asset_dir / name for name in ("components.json", "components.md", "components.txt")
     )
@@ -112,29 +132,62 @@ def graph_record_from_manifest_item(asset_dir: Path, item: object) -> dict[str, 
     return {"graph_name": "", "graph_type": "Unknown", "path": ""}
 
 
+def graph_record_key(value: str) -> str:
+    lowered = value.lower().strip()
+    for prefix in ("function_", "func_", "macro_", "event_", "graph_"):
+        if lowered.startswith(prefix):
+            lowered = lowered[len(prefix) :]
+    return re.sub(r"[^a-z0-9_]+", "", lowered)
+
+
+def uasset_graph_record_from_path(path: Path) -> dict[str, str]:
+    return {
+        "graph_name": path.stem.rsplit("_", 1)[0],
+        "graph_type": "Unknown",
+        "path": str(path),
+        "source_kind": "uasset_binary",
+    }
+
+
 def discover_asset_graphs(asset_dir: Path, manifest: dict[str, object]) -> list[dict[str, str]]:
     graph_items = manifest.get("graphs", [])
     if isinstance(graph_items, dict):
         graph_items = [{"name": name, **value} if isinstance(value, dict) else {"name": name, "path": value} for name, value in graph_items.items()]
     records = [graph_record_from_manifest_item(asset_dir, item) for item in graph_items] if isinstance(graph_items, list) else []
     records = [record for record in records if record.get("path")]
-    if records:
-        return records
 
     graphs_dir = asset_dir / "graphs"
-    candidates = sorted(graphs_dir.glob("*.txt")) if graphs_dir.exists() else []
-    if not candidates:
-        skip_names = {"defaults.txt", "components.txt", "notes.txt", "readme.txt"}
+    candidates: list[Path] = []
+    if not records:
+        candidates = sorted(graphs_dir.glob("*.txt")) if graphs_dir.exists() else []
+        records = [{"graph_name": path.stem, "graph_type": "Unknown", "path": str(path)} for path in candidates]
+    if not records:
+        skip_names = {
+            "defaults.txt",
+            "components.txt",
+            "notes.txt",
+            "readme.txt",
+            "graph_candidates_uasset.txt",
+            "graph_queue.txt",
+            "uasset_failed_graph_queue.txt",
+        }
         candidates = [path for path in sorted(asset_dir.glob("*.txt")) if path.name.lower() not in skip_names]
-    return [{"graph_name": path.stem, "graph_type": "Unknown", "path": str(path)} for path in candidates]
+        records = [{"graph_name": path.stem, "graph_type": "Unknown", "path": str(path)} for path in candidates]
+
+    seen = {graph_record_key(str(record.get("graph_name") or Path(record.get("path", "")).stem)) for record in records}
+    uasset_graphs_dir = asset_dir / "graphs_from_uasset"
+    uasset_candidates = sorted(uasset_graphs_dir.glob("*.json")) if uasset_graphs_dir.exists() else []
+    for path in uasset_candidates:
+        record = uasset_graph_record_from_path(path)
+        key = graph_record_key(record["graph_name"])
+        if key and key not in seen:
+            records.append(record)
+            seen.add(key)
+    return records
 
 
 def normalize_graph_lookup(value: str) -> str:
-    lowered = value.lower().strip()
-    for prefix in ("function_", "func_", "macro_", "event_", "graph_"):
-        if lowered.startswith(prefix):
-            lowered = lowered[len(prefix) :]
-    return re.sub(r"[^a-z0-9_]+", "", lowered)
+    return graph_record_key(value)
 
 
 def build_asset_call_graph(asset_payload: dict[str, object]) -> dict[str, object]:
@@ -267,13 +320,41 @@ def build_asset_payload(args: argparse.Namespace, asset_dir: Path, manifest: dic
     graphs: list[dict[str, object]] = []
     for record in graph_records:
         path = Path(record["path"])
-        raw = path.read_text(encoding="utf-8-sig", errors="replace")
         graph_name = record.get("graph_name") or path.stem
         graph_type = record.get("graph_type") or "Unknown"
+        if path.suffix.lower() == ".json" or str(record.get("source_kind") or "") == "uasset_binary":
+            graph_payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(graph_payload, dict):
+                graph_payload = {}
+            metadata = graph_payload.get("metadata", {}) if isinstance(graph_payload.get("metadata", {}), dict) else {}
+            graph_name = str(metadata.get("graph_name") or graph_name)
+            graph_type = str(metadata.get("graph_type") or graph_type)
+            inferred_graph_type = infer_asset_graph_type(graph_name, graph_payload)
+            if graph_type in {"", "Unknown"}:
+                graph_type = inferred_graph_type
+            graph_payload["context"] = context
+            graph_payload["class_defaults"] = defaults_context
+            graph_payload["component_defaults"] = components_context
+            graph_payload["notes"] = notes_context
+            graphs.append(
+                {
+                    "graph_name": graph_name,
+                    "graph_type": graph_type,
+                    "inferred_graph_type": inferred_graph_type,
+                    "source": str(path),
+                    "source_kind": "uasset_binary",
+                    "cleaned_characters": int(metadata.get("cleaned_characters") or 0),
+                    "node_count": int(metadata.get("node_count") or len(graph_payload.get("nodes", []))),
+                    "payload": graph_payload,
+                }
+            )
+            continue
+        raw = path.read_text(encoding="utf-8-sig", errors="replace")
+        is_empty_manual_text = raw.strip() in {"", graph_name} and "Begin Object" not in raw
         graph_context = dict(context)
         graph_context["graph_type"] = graph_type
         cleaned, nodes, payload = parse_blueprint_text(
-            text=raw,
+            text="" if is_empty_manual_text else raw,
             source=str(path),
             asset_name=args.asset_name or str(manifest.get("asset_name") or asset_dir.name),
             graph_name=graph_name,
@@ -285,6 +366,12 @@ def build_asset_payload(args: argparse.Namespace, asset_dir: Path, manifest: dic
         inferred_graph_type = infer_asset_graph_type(graph_name, payload)
         if graph_type in {"", "Unknown"}:
             graph_type = inferred_graph_type
+        is_empty_manual_graph = is_empty_manual_text and not nodes
+        if is_empty_manual_graph:
+            metadata = payload.setdefault("metadata", {})
+            if isinstance(metadata, dict):
+                metadata["empty_graph"] = True
+                metadata["empty_reason"] = "manual_capture_confirmed_empty"
         graphs.append(
             {
                 "graph_name": graph_name,
@@ -293,6 +380,7 @@ def build_asset_payload(args: argparse.Namespace, asset_dir: Path, manifest: dic
                 "source": str(path),
                 "cleaned_characters": len(cleaned),
                 "node_count": len(nodes),
+                "empty_graph": is_empty_manual_graph,
                 "payload": payload,
             }
         )
@@ -316,9 +404,51 @@ def build_asset_payload(args: argparse.Namespace, asset_dir: Path, manifest: dic
         "notes": notes_context,
         "graphs": graphs,
     }
+    asset_payload["uasset_binary"] = load_uasset_binary_quality(asset_dir)
     asset_payload["call_graph"] = build_asset_call_graph(asset_payload)
     asset_payload["diagnostics"] = build_asset_diagnostics(asset_payload)
     return asset_payload
+
+
+def load_json_sidecar(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def load_uasset_binary_quality(asset_dir: Path) -> dict[str, object]:
+    graph_nodes = load_json_sidecar(asset_dir / "uasset_graph_nodes.json")
+    pin_links = load_json_sidecar(asset_dir / "uasset_pin_links.json")
+    compare = load_json_sidecar(asset_dir / "uasset_compare_matrix.json")
+    failed_queue = load_json_sidecar(asset_dir / "uasset_failed_graph_queue.json")
+    unknown_properties = load_json_sidecar(asset_dir / "uasset_unknown_properties.json")
+    partial_triage = load_json_sidecar(asset_dir / "uasset_partial_graph_triage.json")
+    quality_gates = load_json_sidecar(asset_dir / "uasset_quality_gates.json")
+    class_defaults = load_json_sidecar(asset_dir / "uasset_class_defaults.json")
+    if not graph_nodes:
+        return {"present": False}
+    return {
+        "present": True,
+        "graph_count": int(graph_nodes.get("graph_count") or 0),
+        "node_count": int(graph_nodes.get("node_count") or 0),
+        "pin_count": int(graph_nodes.get("pin_count") or 0),
+        "link_count": int(graph_nodes.get("link_count") or 0),
+        "status_counts": graph_nodes.get("status_counts", {}),
+        "confidence_counts": graph_nodes.get("confidence_counts", {}),
+        "failure_category_counts": graph_nodes.get("failure_category_counts", {}),
+        "failed_graphs": failed_queue.get("graphs", []) if isinstance(failed_queue.get("graphs", []), list) else [],
+        "unknown_property_count": len(unknown_properties.get("unknown_properties", [])) if isinstance(unknown_properties.get("unknown_properties", []), list) else 0,
+        "pin_link_summary": pin_links.get("summary", {}) if isinstance(pin_links.get("summary", {}), dict) else {},
+        "partial_triage": partial_triage,
+        "quality_gates": quality_gates,
+        "class_default_count": int(class_defaults.get("variable_count") or 0),
+        "class_defaults": class_defaults,
+        "compare": compare,
+    }
 
 
 def build_asset_diagnostics(asset_payload: dict[str, object]) -> dict[str, object]:
@@ -348,6 +478,70 @@ def build_asset_diagnostics(asset_payload: dict[str, object]) -> dict[str, objec
                 "Add other EventGraph/function/macro/construction graph captures to the asset directory.",
             )
         )
+
+    uasset_quality = asset_payload.get("uasset_binary", {})
+    if isinstance(uasset_quality, dict) and uasset_quality.get("present"):
+        manual_graph_keys = {
+            normalize_graph_lookup(str(graph.get("graph_name") or ""))
+            for graph in graphs
+            if isinstance(graph, dict) and str(graph.get("source_kind") or "") != "uasset_binary"
+        }
+        failed_graphs = [
+            item
+            for item in uasset_quality.get("failed_graphs", [])
+            if isinstance(item, dict) and normalize_graph_lookup(str(item.get("graph") or "")) not in manual_graph_keys
+        ]
+        failure_counts = uasset_quality.get("failure_category_counts", {})
+        pin_summary = uasset_quality.get("pin_link_summary", {})
+        resolution_counts = pin_summary.get("resolution_counts", {}) if isinstance(pin_summary, dict) else {}
+        if failed_graphs:
+            evidence = [
+                f"{item.get('graph')} [{item.get('status')}/{item.get('confidence')}] {', '.join(str(value) for value in item.get('failure_categories', []))}"
+                for item in failed_graphs[:60]
+            ]
+            findings.append(
+                diagnostic_finding(
+                    "UASSET010",
+                    "warning",
+                    "Some binary-read graphs still need targeted rules or manual supplement",
+                    "The .uasset reader recovered useful graph content, but these pages did not reach complete status.",
+                    evidence,
+                    "Use uasset_failed_graph_queue.json to decide whether to add pin-layout rules, node readers, cross-graph resolving, or manual clipboard captures.",
+                )
+            )
+        if isinstance(resolution_counts, dict) and int(resolution_counts.get("node_resolved_pin_unknown") or 0) > 0:
+            findings.append(
+                diagnostic_finding(
+                    "UASSET020",
+                    "info",
+                    "Some binary links resolve only to target nodes",
+                    "LinkedTo package-index scanning identified destination nodes, but target PinId fields still need a stronger structural decoder.",
+                    [f"node_resolved_pin_unknown={resolution_counts.get('node_resolved_pin_unknown')}"],
+                    "Prioritize FEdGraphPinReference / LinkedTo array decoding before treating pin-level diffs as exact.",
+                )
+            )
+        if isinstance(resolution_counts, dict) and int(resolution_counts.get("resolved_pin_heuristic") or 0) > 0:
+            findings.append(
+                diagnostic_finding(
+                    "UASSET021",
+                    "info",
+                    "Some target pins were inferred by direction/category",
+                    "The binary reader resolved target nodes and selected likely target pins, but these links should be treated as pin-level heuristic until LinkedTo PinId bytes are decoded exactly.",
+                    [f"resolved_pin_heuristic={resolution_counts.get('resolved_pin_heuristic')}"],
+                    "Use uasset_link_resolution_report.md and clipboard compare fixtures to validate exact pin-level behavior.",
+                )
+            )
+        if isinstance(failure_counts, dict) and failure_counts.get("need_node_reader"):
+            findings.append(
+                diagnostic_finding(
+                    "UASSET030",
+                    "info",
+                    "Additional node semantic readers would improve explanations",
+                    "The binary reader can load the nodes structurally, but some classes are still interpreted by the generic fallback.",
+                    [f"need_node_reader={failure_counts.get('need_node_reader')}"],
+                    "Add dedicated semantic readers for the most frequent unknown classes in uasset_graph_read_report.md.",
+                )
+            )
 
     if not str(context.get("defaults_text", "")).strip():
         findings.append(
@@ -443,6 +637,8 @@ def build_asset_diagnostics(asset_payload: dict[str, object]) -> dict[str, objec
     for graph in graphs:
         payload = graph.get("payload", {})
         if not isinstance(payload, dict):
+            continue
+        if bool(graph.get("empty_graph")):
             continue
         graph_diag = payload.get("diagnostics", {})
         graph_levels.append(str(graph_diag.get("confidence_level", "")))
@@ -730,9 +926,78 @@ def render_asset_report(asset_payload: dict[str, object]) -> str:
         f"- Parsed note function overrides: {metadata.get('note_function_count', 0)}",
         f"- Confidence: {diagnostics.get('confidence_level', '-')}",
         "",
-        "## Graphs",
+        "## Binary Graph Coverage",
         "",
     ]
+    uasset_quality = asset_payload.get("uasset_binary", {})
+    if isinstance(uasset_quality, dict) and uasset_quality.get("present"):
+        lines.extend(
+            [
+                f"- Binary graphs: {uasset_quality.get('graph_count', 0)}",
+                f"- Binary nodes: {uasset_quality.get('node_count', 0)}",
+                f"- Binary pins: {uasset_quality.get('pin_count', 0)}",
+                f"- Binary links: {uasset_quality.get('link_count', 0)}",
+                f"- Binary class defaults: {uasset_quality.get('class_default_count', 0)}",
+                f"- Unknown/raw properties: {uasset_quality.get('unknown_property_count', 0)}",
+                "",
+                "### Read Status",
+                "",
+                table_row(["Status", "Count"]),
+                table_row(["---", "---:"]),
+            ]
+        )
+        status_counts = uasset_quality.get("status_counts", {})
+        if isinstance(status_counts, dict) and status_counts:
+            for status, count in sorted(status_counts.items()):
+                lines.append(table_row([status, count]))
+        else:
+            lines.append(table_row(["none", 0]))
+        lines.extend(["", "### Link Resolution", "", table_row(["Status", "Count"]), table_row(["---", "---:"])])
+        pin_summary = uasset_quality.get("pin_link_summary", {})
+        resolution_counts = pin_summary.get("resolution_counts", {}) if isinstance(pin_summary, dict) else {}
+        if isinstance(resolution_counts, dict) and resolution_counts:
+            for status, count in sorted(resolution_counts.items()):
+                lines.append(table_row([status, count]))
+        else:
+            lines.append(table_row(["none", 0]))
+        compare = uasset_quality.get("compare", {})
+        if isinstance(compare, dict) and compare.get("matched_graph_count"):
+            averages = compare.get("averages", {}) if isinstance(compare.get("averages", {}), dict) else {}
+            lines.extend(
+                [
+                    "",
+                    "### Clipboard Validation",
+                    "",
+                    f"- Matched graphs: {compare.get('matched_graph_count', 0)}",
+                    f"- Average node match: {averages.get('node_match_ratio', 0)}",
+                    f"- Average pin recovery: {averages.get('pin_recovery_ratio', 0)}",
+                    f"- Average link recovery: {averages.get('link_recovery_ratio', 0)}",
+                ]
+            )
+        quality_gates = uasset_quality.get("quality_gates", {})
+        if isinstance(quality_gates, dict) and quality_gates:
+            lines.extend(
+                [
+                    "",
+                    "### Quality Gates",
+                    "",
+                    f"- Overall: {'PASS' if quality_gates.get('passed') else 'NEEDS WORK'}",
+                ]
+            )
+            for gate in quality_gates.get("gates", [])[:12]:
+                if isinstance(gate, dict):
+                    lines.append(
+                        f"- {gate.get('metric')}: {gate.get('actual')} ({gate.get('operator')} {gate.get('target')}) {'PASS' if gate.get('passed') else 'FAIL'}"
+                    )
+    else:
+        lines.append("- No .uasset graph read files were found for this asset.")
+    lines.extend(
+        [
+            "",
+            "## Graphs",
+            "",
+        ]
+    )
     graphs = list(asset_payload.get("graphs", []))
     if graphs:
         lines.append(table_row(["Graph", "Type", "Nodes", "Confidence", "Source"]))
@@ -958,6 +1223,40 @@ def clean_asset_outputs(paths: dict[str, Path]) -> None:
         shutil.rmtree(graph_reports)
 
 
+def run_asset_binary_translate(args: argparse.Namespace) -> int:
+    asset_path = str(getattr(args, "asset_binary", "") or "").strip()
+    uasset_path, attempted = object_path_to_uasset_path(asset_path, getattr(args, "content_root", []))
+    if uasset_path is None:
+        print(f"Could not resolve local .uasset for: {asset_path}", file=sys.stderr)
+        for item in attempted:
+            print(f"- attempted: {item}", file=sys.stderr)
+        return 2
+    max_graphs = int(getattr(args, "uasset_max_graphs", 0) or 0)
+    payload = read_uasset_graph_content(asset_path, uasset_path, max_graphs=max_graphs)
+    capture_root = Path(os.path.expandvars(getattr(args, "capture_root", "") or "captures")).expanduser()
+    paths = write_uasset_graph_read_files(asset_path, capture_root, payload)
+    print(f"Wrote uasset graph read directory: {paths['asset_dir']}")
+    print(f"- graph report: {paths['graph_report']}")
+    print(f"- graph nodes: {paths['graph_nodes_json']}")
+    print(f"- pin links: {paths.get('pin_links_json', '')}")
+    if paths.get("compare_report"):
+        print(f"- uasset vs clipboard compare: {paths['compare_report']}")
+    print(f"- graph payloads: {paths['graphs_dir']}")
+    print(f"Read graphs: {payload.get('graph_count', 0)}")
+    print(f"Read nodes: {payload.get('node_count', 0)}")
+    print(f"Recovered pins: {payload.get('pin_count', 0)}")
+    print(f"Recovered links: {payload.get('link_count', 0)}")
+    if bool(getattr(args, "asset_binary_no_report", False)):
+        return 0
+    args.asset_dir = paths["asset_dir"]
+    if not getattr(args, "output_dir", None):
+        args.output_dir = str(Path(paths["asset_dir"]) / "output")
+    if not getattr(args, "asset_name", None):
+        args.asset_name = str(payload.get("asset_name") or "")
+    args.keep_stale_output = True
+    return run_asset_translate(args)
+
+
 def suggestion_has_items(suggestions: dict[str, object], key: str) -> bool:
     value = suggestions.get(key)
     if isinstance(value, dict):
@@ -981,6 +1280,11 @@ def run_asset_translate(args: argparse.Namespace) -> int:
     keywords = profile_keywords(args.profile, args.keyword)
     context = asset_context_from_args(args, asset_dir, manifest)
     asset_payload = build_asset_payload(args, asset_dir, manifest, graph_records, context, keywords)
+    if (asset_dir / "graphs").is_dir() and (asset_dir / "graphs_from_uasset").is_dir():
+        compare_payload = compare_uasset_with_clipboard(asset_dir, keywords=keywords)
+        write_uasset_clipboard_compare_files(asset_dir, compare_payload)
+        asset_payload["uasset_binary"] = load_uasset_binary_quality(asset_dir)
+        asset_payload["diagnostics"] = build_asset_diagnostics(asset_payload)
     report_level = getattr(args, "report_level", "standard")
     if not getattr(args, "keep_stale_output", False):
         clean_asset_outputs(paths)

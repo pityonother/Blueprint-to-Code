@@ -23,20 +23,19 @@ from .flow import (
 from .models import NodeInfo
 from .parser import clean_blueprint_text, parse_node, split_node_blocks
 
-def parse_blueprint_text(
+def build_blueprint_payload_from_nodes(
     *,
+    nodes: list[NodeInfo],
+    raw_text: str,
+    cleaned_text: str,
     text: str,
     source: str,
     asset_name: str,
     graph_name: str,
     keywords: list[str],
-    keep_guids: bool = False,
     include_raw: bool = False,
     context: dict[str, object] | None = None,
-) -> tuple[str, list[NodeInfo], dict[str, object]]:
-    cleaned = clean_blueprint_text(text, keep_guids=keep_guids)
-    blocks = split_node_blocks(text)
-    nodes = [parse_node(block, index + 1, keywords) for index, block in enumerate(blocks)]
+) -> dict[str, object]:
     exec_flow = build_exec_flow(nodes)
     data_flow = build_data_flow(nodes)
     defaults_context = parse_defaults_context(context or {})
@@ -56,8 +55,8 @@ def parse_blueprint_text(
             "source": source,
             "asset_name": asset_name,
             "graph_name": graph_name,
-            "raw_characters": len(text),
-            "cleaned_characters": len(cleaned),
+            "raw_characters": len(raw_text),
+            "cleaned_characters": len(cleaned_text),
             "node_count": len(nodes),
             "pin_count": len(flat_pins),
             "link_count": len(all_links(nodes)),
@@ -83,4 +82,33 @@ def parse_blueprint_text(
         "data_flow": data_flow,
     }
     payload["diagnostics"] = diagnostics_for(nodes, exec_flow, data_flow)
+    return payload
+
+
+def parse_blueprint_text(
+    *,
+    text: str,
+    source: str,
+    asset_name: str,
+    graph_name: str,
+    keywords: list[str],
+    keep_guids: bool = False,
+    include_raw: bool = False,
+    context: dict[str, object] | None = None,
+) -> tuple[str, list[NodeInfo], dict[str, object]]:
+    cleaned = clean_blueprint_text(text, keep_guids=keep_guids)
+    blocks = split_node_blocks(text)
+    nodes = [parse_node(block, index + 1, keywords) for index, block in enumerate(blocks)]
+    payload = build_blueprint_payload_from_nodes(
+        nodes=nodes,
+        raw_text=text,
+        cleaned_text=cleaned,
+        text=text,
+        source=source,
+        asset_name=asset_name,
+        graph_name=graph_name,
+        keywords=keywords,
+        include_raw=include_raw,
+        context=context,
+    )
     return cleaned, nodes, payload

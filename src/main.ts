@@ -8,7 +8,15 @@ type ReportKey =
   | 'capture_quality_report'
   | 'diagnostics_report'
   | 'asset_report'
-  | 'call_graph_summary';
+  | 'call_graph_summary'
+  | 'uasset_graph_read_report'
+  | 'uasset_property_parse_report'
+  | 'uasset_link_resolution_report'
+  | 'uasset_partial_graph_triage'
+  | 'uasset_quality_gates'
+  | 'uasset_vs_clipboard_compare'
+  | 'uasset_class_defaults_report'
+  | 'uasset_structure_report';
 
 type OpenTarget =
   | ReportKey
@@ -44,6 +52,27 @@ interface AssetSummary {
   graphs: number;
   hasGraphQueue: boolean;
   graphQueueCount: number;
+  graphQueueCompactCount: number;
+  graphQueueRecommendedCount: number;
+  graphQueueOptionalCount: number;
+  graphQueueDeferredCount: number;
+  graphQueueFocusedCount: number;
+  hasGraphCandidates: boolean;
+  graphCandidateCount: number;
+  hasUassetStructure: boolean;
+  uassetEdGraphCount: number;
+  uassetFunctionGraphCount: number;
+  uassetCollapsedGraphCount: number;
+  uassetStandaloneGraphCount: number;
+  uassetFunctionCount: number;
+  hasUassetGraphRead: boolean;
+  uassetReadGraphCount: number;
+  uassetReadNodeCount: number;
+  uassetReadPinCount: number;
+  uassetReadLinkCount: number;
+  uassetReadCompleteCount: number;
+  uassetReadPartialCount: number;
+  uassetReadNeedsClipboardCount: number;
   hasDefaults: boolean;
   defaultsCount: number;
   hasComponents: boolean;
@@ -94,6 +123,24 @@ interface MissingFunctionItem {
   suggested: string;
 }
 
+interface GraphQueueItem {
+  name: string;
+  type: string;
+  line: string;
+  tier: 'recommended' | 'optional' | 'deferred';
+  reason: string;
+}
+
+interface GraphQueueSummary {
+  total: number;
+  compact: number;
+  recommended: number;
+  optional: number;
+  deferred: number;
+  focused: number;
+  items: GraphQueueItem[];
+}
+
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
   throw new Error('Missing #app root.');
@@ -122,6 +169,14 @@ const reportLabels: Record<ReportKey, string> = {
   diagnostics_report: '诊断',
   asset_report: '完整报告',
   call_graph_summary: '调用摘要',
+  uasset_graph_read_report: '.uasset 图内容',
+  uasset_property_parse_report: '.uasset 属性',
+  uasset_link_resolution_report: '.uasset 连线',
+  uasset_partial_graph_triage: 'Partial 归因',
+  uasset_quality_gates: '质量门槛',
+  uasset_vs_clipboard_compare: '二进制/复制对比',
+  uasset_class_defaults_report: '.uasset 默认值',
+  uasset_structure_report: '.uasset 结构',
 };
 
 const graphTypes = ['EventGraph', 'Function', 'Macro', 'ConstructionScript', 'Unknown'];
@@ -149,6 +204,8 @@ let activeJobId = '';
 let activeJobLabel = '';
 let missingFunctions: MissingFunctionItem[] = [];
 let selectedMissingFunctions = new Set<string>();
+let graphQueueSummary: GraphQueueSummary | null = null;
+let graphQueueSummaryAssetPath = '';
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -267,6 +324,35 @@ function graphTypeLabel(type: string): string {
     return 'Construction Script';
   }
   return '未知';
+}
+
+function graphQueueTierLabel(tier: string): string {
+  if (tier === 'recommended') {
+    return '推荐采集';
+  }
+  if (tier === 'optional') {
+    return '可选采集';
+  }
+  if (tier === 'deferred') {
+    return '暂不采集';
+  }
+  return '未分类';
+}
+
+function graphQueueModeLabel(mode: string): string {
+  if (mode === 'compact') {
+    return '精简采集队列';
+  }
+  if (mode === 'recommended') {
+    return '推荐分页';
+  }
+  if (mode === 'focused') {
+    return '推荐+可选分页';
+  }
+  if (mode === 'all') {
+    return '全部分页';
+  }
+  return '分页队列';
 }
 
 interface CaptureQueueItem {
@@ -417,6 +503,55 @@ function graphTypeOptions(): string {
     .join('');
 }
 
+function renderGraphQueuePreview(asset?: AssetSummary): string {
+  if (!asset || graphQueueSummaryAssetPath !== asset.path || !graphQueueSummary) {
+    return '';
+  }
+  const summary = graphQueueSummary;
+  const buckets: Array<['recommended' | 'optional' | 'deferred', string]> = [
+    ['recommended', '优先复制这些，通常是事件入口、RPC、状态修改和关键 ARK 行为。'],
+    ['optional', '分析报告提示缺上下文时，再补这些判断或辅助函数。'],
+    ['deferred', '折叠图或低价值 Getter，默认先不碰。'],
+  ];
+  const bucketHtml = buckets
+    .map(([tier, hint]) => {
+      const rows = summary.items
+        .filter((item) => item.tier === tier)
+        .slice(0, 12)
+        .map(
+          (item) => `
+            <div class="queue-preview-row">
+              <strong>${escapeHtml(item.name)}</strong>
+              <small>${escapeHtml(graphTypeLabel(item.type))} - ${escapeHtml(item.reason)}</small>
+            </div>
+          `,
+        )
+        .join('');
+      const count = summary[tier];
+      return `
+        <div class="queue-bucket ${tier}">
+          <div class="queue-bucket-head">
+            <strong>${escapeHtml(graphQueueTierLabel(tier))}</strong>
+            <span>${escapeHtml(count)}</span>
+          </div>
+          <p>${escapeHtml(hint)}</p>
+          <div class="queue-preview-list">${rows || '<div class="queue-empty compact">无</div>'}</div>
+        </div>
+      `;
+    })
+    .join('');
+  return `
+    <div class="queue-filter-panel">
+      <div class="queue-filter-metrics">
+        ${metric('精简', summary.compact ?? summary.recommended, 'good')}
+        ${metric('可选', summary.optional, 'warn')}
+        ${metric('暂不采集', summary.deferred)}
+      </div>
+      ${bucketHtml}
+    </div>
+  `;
+}
+
 function renderCaptureQueue(): string {
   const items = captureQueueItems();
   const asset = selectedAsset();
@@ -450,7 +585,17 @@ function renderCaptureQueue(): string {
         <span>批量图页队列</span>
         <textarea id="capture-queue-text" spellcheck="false" placeholder="SetParachuteState&#10;OnRep_bWantsToParachute | Function&#10;EventGraph | EventGraph">${escapeHtml(captureQueueText)}</textarea>
       </label>
-      ${asset?.hasGraphQueue ? `<div class="button-row tight">${actionButton(`载入 DevKit 导出的 ${asset.graphQueueCount} 个分页名`, 'load-graph-queue', 'secondary', busy)}</div>` : ''}
+      ${
+        asset?.hasGraphQueue
+          ? `<div class="button-row tight">
+              ${actionButton(`载入精简采集 ${asset.graphQueueCompactCount} 个`, 'load-graph-queue-compact', 'primary', busy || !asset.graphQueueCompactCount)}
+              ${actionButton(`载入补充上下文 ${asset.graphQueueFocusedCount} 个`, 'load-graph-queue-focused', 'secondary', busy || !asset.graphQueueFocusedCount)}
+              ${actionButton(`载入全部 ${asset.graphQueueCount} 个`, 'load-graph-queue-all', 'ghost', busy || !asset.graphQueueCount)}
+              ${actionButton('查看分页分类', 'inspect-graph-queue', 'ghost', busy)}
+            </div>`
+          : ''
+      }
+      ${renderGraphQueuePreview(asset)}
       <div class="queue-summary">
         <span>当前：${current ? escapeHtml(current.name) : '无'}</span>
         <strong>${escapeHtml(progress)}</strong>
@@ -535,6 +680,16 @@ function renderQualityPanel(asset?: AssetSummary): string {
 
 function renderDevkitPanel(): string {
   const currentPath = devkitInput || state?.devkitAssetPath || '';
+  const asset = selectedAsset();
+  const structureHint = asset?.hasUassetStructure
+    ? `；结构解析：EdGraph ${asset.uassetEdGraphCount} 个，其中函数图 ${asset.uassetFunctionGraphCount} 个、折叠图 ${asset.uassetCollapsedGraphCount} 个`
+    : '';
+  const candidateHint = asset?.hasGraphCandidates
+    ? `已提取 ${asset.graphCandidateCount} 个 .uasset 候选名${structureHint}，下一步在 DevKit 里运行验证命令`
+    : '可先从 .uasset 提取分页候选名，再到 DevKit 里验证生成 graph_queue.txt';
+  const readHint = asset?.hasUassetGraphRead
+    ? `.uasset 图内容已读取：${asset.uassetReadGraphCount} 图 / ${asset.uassetReadNodeCount} 节点 / ${asset.uassetReadPinCount} pin / ${asset.uassetReadLinkCount} link；完整 ${asset.uassetReadCompleteCount}，部分/启发式 ${asset.uassetReadPartialCount}，需补采 ${asset.uassetReadNeedsClipboardCount}`
+    : '可直接读取 .uasset/.uexp 里的 EdGraph 节点与可恢复 pin/link，失败页再手动补采。';
   return `
     <section class="panel devkit-panel">
       <div class="panel-heading">
@@ -550,6 +705,21 @@ function renderDevkitPanel(): string {
         ${actionButton('复制 Python 命令', 'copy-python-command', 'secondary')}
         ${actionButton('复制 Output Log 命令', 'copy-output-command', 'secondary')}
       </div>
+      <div class="button-row">
+        ${actionButton('从 .uasset 提取分页候选名', 'mine-uasset-candidates', 'secondary', busy)}
+        ${actionButton('保存候选名并复制 DevKit 验证命令', 'mine-uasset-candidates-copy', 'primary', busy)}
+      </div>
+      <div class="button-row">
+        ${actionButton('从 .uasset 读取图内容', 'read-uasset-graphs', 'primary', busy)}
+        ${actionButton('查看资产解析诊断', 'open-uasset-diagnostics', 'secondary', !asset || !asset.reports.uasset_graph_read_report)}
+        ${actionButton('查看连线解析', 'open-uasset-links', 'secondary', !asset || !asset.reports.uasset_link_resolution_report)}
+        ${actionButton('查看 partial 归因', 'open-uasset-triage', 'secondary', !asset || !asset.reports.uasset_partial_graph_triage)}
+        ${actionButton('查看质量门槛', 'open-uasset-gates', 'secondary', !asset || !asset.reports.uasset_quality_gates)}
+        ${actionButton('查看二进制/复制对比', 'open-uasset-compare', 'secondary', !asset || !asset.reports.uasset_vs_clipboard_compare)}
+        ${actionButton('只补采失败图页', 'load-uasset-failed-queue', 'ghost', !asset || !asset.hasUassetGraphRead)}
+      </div>
+      <p class="soft-copy">${escapeHtml(readHint)}</p>
+      <p class="soft-copy">${escapeHtml(candidateHint)}</p>
     </section>
   `;
 }
@@ -1107,23 +1277,32 @@ async function capturePage(analyzeAfter: boolean, allowOverwrite = false, fromQu
   }
 }
 
-async function loadGraphQueueFromAsset(): Promise<void> {
+async function loadGraphQueueFromAsset(mode = 'all', applyToQueue = true): Promise<void> {
   const asset = selectedAsset();
   if (!asset) {
     appendLog('请先选择一个资产。');
     return;
   }
   try {
-    const query = new URLSearchParams({ assetPath: asset.path });
-    const payload = await api<ApiResult & { path: string; content: string }>(`/api/graph-queue?${query}`);
+    const query = new URLSearchParams({ assetPath: asset.path, mode });
+    const payload = await api<ApiResult & { path: string; content: string; summary: GraphQueueSummary }>(`/api/graph-queue?${query}`);
+    graphQueueSummary = payload.summary;
+    graphQueueSummaryAssetPath = asset.path;
     if (!payload.content.trim()) {
       appendLog('这个资产还没有 graph_queue.txt。请先在 DevKit 里运行默认值导出器。');
+      render();
       return;
     }
-    captureQueueText = payload.content;
-    captureQueueCursor = 0;
-    saveCaptureQueueState();
-    appendLog(`已载入分页队列：${payload.path}`);
+    if (applyToQueue) {
+      captureQueueText = payload.content;
+      captureQueueCursor = 0;
+      saveCaptureQueueState();
+      appendLog(`已载入${graphQueueModeLabel(mode)}：${parseCaptureQueue(payload.content).length} 个，来源 ${payload.path}`);
+    } else {
+      appendLog(
+        `分页分类：推荐 ${payload.summary.recommended}，可选 ${payload.summary.optional}，暂不采集 ${payload.summary.deferred}，全量 ${payload.summary.total}。`,
+      );
+    }
     render();
   } catch (error) {
     appendLog(error instanceof Error ? error.message : String(error));
@@ -1167,6 +1346,138 @@ async function saveDevkitRequest(): Promise<void> {
     await copyText(payload.pythonCommand, 'DevKit Python 命令');
     appendLog(`已保存 DevKit 导出路径：${payload.assetPath}`);
     await refreshState(false);
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function mineUassetCandidates(copyCommand: boolean): Promise<void> {
+  syncInputs();
+  if (!devkitInput) {
+    appendLog('请先粘贴目标蓝图 Object Path。');
+    return;
+  }
+  busy = true;
+  render();
+  try {
+    const payload = await api<
+      ApiResult & {
+        assetPath: string;
+        uassetPath: string;
+        candidateCount: number;
+        rawStringCount: number;
+        jsonPath: string;
+        pythonCommand: string;
+        structure?: {
+          loaded?: boolean;
+          graph_exports_count?: number;
+          function_graph_exports_count?: number;
+          collapsed_graph_exports_count?: number;
+          standalone_graph_exports_count?: number;
+          function_exports_count?: number;
+        };
+      }
+    >('/api/uasset-candidates', {
+      method: 'POST',
+      body: JSON.stringify({ assetPath: devkitInput }),
+    });
+    devkitInput = payload.assetPath;
+    appendLog(
+      `已从 .uasset 提取 ${payload.candidateCount} 个分页候选名；源文件：${payload.uassetPath || '未找到本地 .uasset'}`,
+    );
+    if (payload.structure?.loaded) {
+      appendLog(
+        `结构解析：EdGraph ${payload.structure.graph_exports_count ?? 0} 个，函数图 ${payload.structure.function_graph_exports_count ?? 0} 个，折叠图 ${payload.structure.collapsed_graph_exports_count ?? 0} 个，独立图 ${payload.structure.standalone_graph_exports_count ?? 0} 个。`,
+      );
+    }
+    appendLog(`候选文件：${payload.jsonPath}`);
+    if (copyCommand) {
+      await copyText(payload.pythonCommand, 'DevKit Python 验证命令');
+    }
+    await refreshState(false);
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
+  } finally {
+    busy = false;
+    render();
+  }
+}
+
+async function readUassetGraphs(): Promise<void> {
+  syncInputs();
+  if (!devkitInput) {
+    appendLog('请先粘贴目标蓝图 Object Path。');
+    return;
+  }
+  busy = true;
+  render();
+  try {
+    const payload = await api<
+      ApiResult & {
+        assetPath: string;
+        uassetPath: string;
+        graphCount: number;
+        nodeCount: number;
+        pinCount: number;
+        linkCount: number;
+        graphReportPath: string;
+        analysisJob?: JobInfo;
+      }
+    >('/api/uasset-graphs', {
+      method: 'POST',
+      body: JSON.stringify({ assetPath: devkitInput, analyzeAfter: true, reportLevel: 'standard' }),
+    });
+    devkitInput = payload.assetPath;
+    appendLog(
+      `已从 .uasset 读取 ${payload.graphCount} 个图、${payload.nodeCount} 个节点、${payload.pinCount} 个 pin、${payload.linkCount} 条候选连线。`,
+    );
+    appendLog(`资产解析报告：${payload.graphReportPath}`);
+    await refreshState(false);
+    if (payload.analysisJob) {
+      activeJobId = payload.analysisJob.id;
+      activeJobLabel = '.uasset 分析';
+      render();
+      const job = await waitForJob(payload.analysisJob.id, '.uasset 分析');
+      const outcome = job.status === 'succeeded' ? '完成' : `${job.status}，退出码 ${job.returnCode ?? '-'}`;
+      appendLog(`.uasset 图内容分析${outcome}，耗时 ${job.durationSeconds}s。`);
+      if (job.stderr) {
+        appendLog(job.stderr.trim().slice(-1200));
+      }
+      await refreshState(false);
+      if (job.status === 'succeeded') {
+        await loadReport('asset_report');
+      }
+    }
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
+  } finally {
+    busy = false;
+    activeJobId = '';
+    activeJobLabel = '';
+    render();
+  }
+}
+
+async function loadUassetFailedQueue(): Promise<void> {
+  const asset = selectedAsset();
+  if (!asset) {
+    appendLog('请先选择一个资产。');
+    return;
+  }
+  try {
+    const query = new URLSearchParams({ assetPath: asset.path });
+    const payload = await api<ApiResult & { path: string; content: string; summary: GraphQueueSummary }>(`/api/uasset-failed-queue?${query}`);
+    if (!payload.content.trim()) {
+      appendLog('没有需要手动补采的 .uasset 失败图页。');
+      return;
+    }
+    captureQueueText = payload.content;
+    captureQueueCursor = 0;
+    graphQueueSummary = payload.summary;
+    graphQueueSummaryAssetPath = asset.path;
+    saveCaptureQueueState();
+    appendLog(`已载入 .uasset 失败补采队列：${parseCaptureQueue(payload.content).length} 个，来源 ${payload.path}`);
+    render();
   } catch (error) {
     appendLog(error instanceof Error ? error.message : String(error));
   }
@@ -1265,8 +1576,24 @@ async function handleAction(action: string): Promise<void> {
     await capturePage(true);
     return;
   }
-  if (action === 'load-graph-queue') {
-    await loadGraphQueueFromAsset();
+  if (action === 'load-graph-queue-compact') {
+    await loadGraphQueueFromAsset('compact', true);
+    return;
+  }
+  if (action === 'load-graph-queue-recommended') {
+    await loadGraphQueueFromAsset('recommended', true);
+    return;
+  }
+  if (action === 'load-graph-queue-focused') {
+    await loadGraphQueueFromAsset('focused', true);
+    return;
+  }
+  if (action === 'load-graph-queue-all') {
+    await loadGraphQueueFromAsset('all', true);
+    return;
+  }
+  if (action === 'inspect-graph-queue') {
+    await loadGraphQueueFromAsset('all', false);
     return;
   }
   if (action === 'capture-queue-current') {
@@ -1340,6 +1667,42 @@ async function handleAction(action: string): Promise<void> {
   }
   if (action === 'save-devkit-request') {
     await saveDevkitRequest();
+    return;
+  }
+  if (action === 'mine-uasset-candidates') {
+    await mineUassetCandidates(false);
+    return;
+  }
+  if (action === 'mine-uasset-candidates-copy') {
+    await mineUassetCandidates(true);
+    return;
+  }
+  if (action === 'read-uasset-graphs') {
+    await readUassetGraphs();
+    return;
+  }
+  if (action === 'open-uasset-diagnostics') {
+    await openTarget('uasset_graph_read_report');
+    return;
+  }
+  if (action === 'open-uasset-links') {
+    await openTarget('uasset_link_resolution_report');
+    return;
+  }
+  if (action === 'open-uasset-triage') {
+    await openTarget('uasset_partial_graph_triage');
+    return;
+  }
+  if (action === 'open-uasset-gates') {
+    await openTarget('uasset_quality_gates');
+    return;
+  }
+  if (action === 'open-uasset-compare') {
+    await openTarget('uasset_vs_clipboard_compare');
+    return;
+  }
+  if (action === 'load-uasset-failed-queue') {
+    await loadUassetFailedQueue();
     return;
   }
   if (action === 'copy-python-command') {
