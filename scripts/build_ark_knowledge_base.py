@@ -155,17 +155,18 @@ DEEP_READ_GROUPS = {
         "asset_types": {"status_component_blueprint"},
         "keywords": {
             "Gigantoraptor": 80,
-            "DinoCharacterStatusComponent": 45,
-            "StatusComponent": 35,
+            "PlayerCharacterStatusComponent": 90,
+            "Base": 60,
             "Baby": 25,
             "Experience": 35,
             "XP": 35,
             "Level": 30,
-            "Stat": 35,
             "Imprint": 30,
             "Maturation": 25,
             "Taming": 25,
         },
+        "queue_min_score": 150,
+        "generic_path_bonus": False,
         "limit": 120,
     },
     "primal_item_blueprint": {
@@ -587,12 +588,13 @@ def score_priority_asset(item: dict[str, Any], group: dict[str, Any]) -> tuple[i
             score += int(weight)
             reasons.append(f"命中关键词：{keyword}")
     rel = str(item.get("relative_path") or "")
-    if rel.startswith("ASA/"):
-        score += 10
-        reasons.append("ASA 路径")
-    if "/Dinos/" in rel or rel.startswith("ASA/Dinos/"):
-        score += 10
-        reasons.append("Dinos 路径")
+    if group.get("generic_path_bonus", True):
+        if rel.startswith("ASA/"):
+            score += 10
+            reasons.append("ASA 路径")
+        if "/Dinos/" in rel or rel.startswith("ASA/Dinos/"):
+            score += 10
+            reasons.append("Dinos 路径")
     if item.get("captured"):
         score += 15
         reasons.append("已有 captures，可直接做交叉验证")
@@ -633,7 +635,12 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
             )
         candidates.sort(key=lambda item: (-int(item["score"]), bool(item["captured"]), str(item["object_path"]).lower()))
         limit = int(group.get("limit") or 100)
-        first_batch = [item for item in candidates if not item.get("captured")][:25]
+        queue_min_score = int(group.get("queue_min_score") or 0)
+        first_batch = [
+            item
+            for item in candidates
+            if not item.get("captured") and int(item.get("score") or 0) >= queue_min_score
+        ][:25]
         for item in first_batch:
             object_path = str(item.get("object_path") or "")
             if object_path and object_path not in all_queue:
@@ -643,6 +650,7 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
             "total_count": total_count,
             "captured_count": captured_count,
             "candidate_count": len(candidates),
+            "queue_min_score": queue_min_score,
             "first_batch_count": len(first_batch),
             "first_batch": first_batch,
             "candidates": candidates[:limit],
@@ -677,6 +685,8 @@ def render_priority_targets_report(priority: dict[str, Any]) -> str:
         lines.append(f"- 全局数量：{group.get('total_count', 0)}")
         lines.append(f"- 已深度解析：{group.get('captured_count', 0)}")
         lines.append(f"- 本轮候选：{group.get('candidate_count', 0)}")
+        if group.get("queue_min_score"):
+            lines.append(f"- 自动队列最低分：{group.get('queue_min_score')}")
         lines.append("")
         lines.append("### 第一批建议深读")
         lines.append("")
@@ -750,6 +760,8 @@ def contains_keyword(text: str, word: str) -> bool:
         return False
     if word == "XP":
         return bool(re.search(r"(?<![A-Za-z])XP(?![A-Za-z])|KillXP|StoredXP", text))
+    if word == "Stat":
+        return bool(re.search(r"(?<![A-Za-z])Stat(?![a-z])|Stat[A-Z_]", text))
     return word.lower() in text.lower()
 
 
