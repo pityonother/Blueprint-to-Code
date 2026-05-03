@@ -148,15 +148,17 @@ DEEP_READ_GROUPS = {
             "CoreBlueprints": 25,
             "ASA": 10,
         },
+        "first_batch_limit": 15,
+        "include_captured_in_queue": True,
         "limit": 60,
     },
     "status_component_blueprint": {
         "title": "StatusComponent：生物属性、成长、经验和状态值",
         "asset_types": {"status_component_blueprint"},
+        "include_asset_names": {"PlayerCharacterStatusComponent_BP"},
+        "exclude_name_patterns": {r"^(?:DinoCharacter)?StatusComponent_BP_.+"},
         "keywords": {
-            "Gigantoraptor": 80,
             "PlayerCharacterStatusComponent": 90,
-            "Base": 60,
             "Baby": 25,
             "Experience": 35,
             "XP": 35,
@@ -165,25 +167,27 @@ DEEP_READ_GROUPS = {
             "Maturation": 25,
             "Taming": 25,
         },
-        "queue_min_score": 150,
+        "first_batch_limit": 1,
+        "include_captured_in_queue": True,
         "generic_path_bonus": False,
-        "limit": 120,
+        "limit": 20,
     },
     "primal_item_blueprint": {
         "title": "PrimalItem：物品描述、使用逻辑、消耗与显示数据",
         "asset_types": {"primal_item_blueprint"},
+        "include_asset_names": {"PrimalItem_TreasureMap_ShoulderDragon"},
+        "exclude_keywords": {"Egg", "Saddle", "Costume", "Skin", "Chibi"},
         "keywords": {
-            "Gigantoraptor": 80,
-            "Feather": 70,
             "Treasure": 50,
             "Experience": 35,
             "XP": 35,
             "Resource": 20,
-            "Egg": 25,
             "Consumable": 20,
             "Artifact": 15,
         },
-        "limit": 160,
+        "first_batch_limit": 1,
+        "include_captured_in_queue": True,
+        "limit": 20,
     },
     "buff_blueprint": {
         "title": "Buff：临时效果、训练、继承概率、状态覆盖",
@@ -201,6 +205,8 @@ DEEP_READ_GROUPS = {
             "Parent": 25,
             "Pride": 25,
         },
+        "first_batch_limit": "all",
+        "include_captured_in_queue": True,
         "limit": 160,
     },
     "loot_or_supply_crate": {
@@ -217,6 +223,8 @@ DEEP_READ_GROUPS = {
             "ItemSet": 25,
             "Quality": 20,
         },
+        "first_batch_limit": "all",
+        "include_captured_in_queue": True,
         "limit": 160,
     },
 }
@@ -575,6 +583,31 @@ def priority_text_for_asset(item: dict[str, Any]) -> str:
     )
 
 
+def priority_asset_allowed(item: dict[str, Any], group: dict[str, Any]) -> bool:
+    name = str(item.get("asset_name") or "")
+    object_path = str(item.get("object_path") or "")
+    include_names = {str(value) for value in group.get("include_asset_names") or []}
+    if include_names and name not in include_names and object_path not in include_names:
+        return False
+
+    for pattern in group.get("exclude_name_patterns") or []:
+        if re.search(str(pattern), name):
+            return False
+
+    text = priority_text_for_asset(item)
+    for keyword in group.get("exclude_keywords") or []:
+        if contains_keyword(text, str(keyword)):
+            return False
+    return True
+
+
+def first_batch_limit(group: dict[str, Any]) -> int | None:
+    value = group.get("first_batch_limit", 25)
+    if isinstance(value, str) and value.lower() == "all":
+        return None
+    return max(int(value), 0)
+
+
 def score_priority_asset(item: dict[str, Any], group: dict[str, Any]) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
@@ -617,6 +650,8 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
             total_count += 1
             if item.get("captured"):
                 captured_count += 1
+            if not priority_asset_allowed(item, group):
+                continue
             score, reasons = score_priority_asset(item, group)
             if score <= 0:
                 continue
@@ -636,11 +671,14 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
         candidates.sort(key=lambda item: (-int(item["score"]), bool(item["captured"]), str(item["object_path"]).lower()))
         limit = int(group.get("limit") or 100)
         queue_min_score = int(group.get("queue_min_score") or 0)
-        first_batch = [
+        include_captured = bool(group.get("include_captured_in_queue"))
+        batch_candidates = [
             item
             for item in candidates
-            if not item.get("captured") and int(item.get("score") or 0) >= queue_min_score
-        ][:25]
+            if (include_captured or not item.get("captured")) and int(item.get("score") or 0) >= queue_min_score
+        ]
+        batch_limit = first_batch_limit(group)
+        first_batch = batch_candidates if batch_limit is None else batch_candidates[:batch_limit]
         for item in first_batch:
             object_path = str(item.get("object_path") or "")
             if object_path and object_path not in all_queue:
@@ -651,6 +689,8 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
             "captured_count": captured_count,
             "candidate_count": len(candidates),
             "queue_min_score": queue_min_score,
+            "first_batch_limit": group.get("first_batch_limit", 25),
+            "include_captured_in_queue": include_captured,
             "first_batch_count": len(first_batch),
             "first_batch": first_batch,
             "candidates": candidates[:limit],
@@ -687,6 +727,10 @@ def render_priority_targets_report(priority: dict[str, Any]) -> str:
         lines.append(f"- 本轮候选：{group.get('candidate_count', 0)}")
         if group.get("queue_min_score"):
             lines.append(f"- 自动队列最低分：{group.get('queue_min_score')}")
+        if group.get("first_batch_limit") == "all":
+            lines.append("- 自动队列范围：全部候选")
+        else:
+            lines.append(f"- 自动队列上限：{group.get('first_batch_limit', 25)}")
         lines.append("")
         lines.append("### 第一批建议深读")
         lines.append("")
