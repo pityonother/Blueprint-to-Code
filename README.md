@@ -31,20 +31,36 @@ Run from Windows PowerShell:
 ```
 
 The launcher builds the UI, starts `scripts/blueprint_tool_server.py`, and opens
-`http://127.0.0.1:8765/`. From the control center you can:
+`http://127.0.0.1:8765/`. The control center is laid out as a four-step
+workflow that is friendly for non-coders:
 
-- select an asset under `captures/`
-- regenerate standard, compact, or debug reports
-- capture one Blueprint graph page from the Windows clipboard into `graphs/*.txt`
-- paste or load a DevKit-exported graph-page queue and save copied pages one by one without retyping each page name; the queue can be loaded as compact, supplemental-context, or full graph set
-- confirm before replacing an existing graph page; old copies are backed up under `graphs/_backups/`
-- open `next_actions.md`, `context_review.md`, `notes_todo.md`, `behavior_summary.md`, and other key reports
-- review missing function candidates and append confirmed parent/native or ignored functions directly to `notes.md`; the app reruns standard analysis afterward so previews stay fresh
-- open the asset output folder or focused `graph_reports/`
-- paste a DevKit Blueprint Object Path and copy the exporter command
-- check DevKit default/component export health, warnings, skipped properties, and SCS/component-template candidates
-- compare two captured assets and generate `behavior_impact_report.md`
-- run long analyses/asset compares as background jobs with visible status and cancellation
+1. **粘贴蓝图 Object Path** — paste the DevKit `Copy Reference` path.
+2. **从 .uasset 读取图内容** — one big primary button that parses the
+   `.uasset`/`.uexp` and runs the standard analysis automatically.
+3. **读取结果** — clearly shows how many graphs were read completely, how many
+   are partial/heuristic, and how many still need manual clipboard supplements.
+4. **打开报告** — large tiles that open `asset_report.md`,
+   `behavior_summary.md`, `diagnostics_report.md`, and `call_graph_summary.md`
+   in the system editor. Other report variants live behind a "更多分项报告"
+   disclosure.
+
+If the `.uasset` reader reports any failed or partial graphs, a highlighted
+"需要手动补采的图页" panel appears with one click to load the failed queue and
+an expandable clipboard capture form.
+
+Less common features are kept under a single "高级功能" disclosure:
+
+- DevKit export request file save + Python/Output Log command copy
+- `.uasset` graph-name candidate mining
+- compact / debug report variants
+- DevKit class-defaults/components quality check
+- `notes.md` parent-class / native function triage
+- two-asset behavior comparison (`behavior_impact_report.md`)
+- captured-asset history switcher
+- run log
+
+Long analyses and asset compares still run as background jobs with status,
+cancel, and overwrite-confirmation prompts.
 
 For frontend-only development:
 

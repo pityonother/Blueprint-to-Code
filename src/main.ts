@@ -678,52 +678,6 @@ function renderQualityPanel(asset?: AssetSummary): string {
   `;
 }
 
-function renderDevkitPanel(): string {
-  const currentPath = devkitInput || state?.devkitAssetPath || '';
-  const asset = selectedAsset();
-  const structureHint = asset?.hasUassetStructure
-    ? `；结构解析：EdGraph ${asset.uassetEdGraphCount} 个，其中函数图 ${asset.uassetFunctionGraphCount} 个、折叠图 ${asset.uassetCollapsedGraphCount} 个`
-    : '';
-  const candidateHint = asset?.hasGraphCandidates
-    ? `已提取 ${asset.graphCandidateCount} 个 .uasset 候选名${structureHint}，下一步在 DevKit 里运行验证命令`
-    : '可先从 .uasset 提取分页候选名，再到 DevKit 里验证生成 graph_queue.txt';
-  const readHint = asset?.hasUassetGraphRead
-    ? `.uasset 图内容已读取：${asset.uassetReadGraphCount} 图 / ${asset.uassetReadNodeCount} 节点 / ${asset.uassetReadPinCount} pin / ${asset.uassetReadLinkCount} link；完整 ${asset.uassetReadCompleteCount}，部分/启发式 ${asset.uassetReadPartialCount}，需补采 ${asset.uassetReadNeedsClipboardCount}`
-    : '可直接读取 .uasset/.uexp 里的 EdGraph 节点与可恢复 pin/link，失败页再手动补采。';
-  return `
-    <section class="panel devkit-panel">
-      <div class="panel-heading">
-        <div>
-          <p class="eyebrow">DevKit 导出</p>
-          <h2>准备导出器命令</h2>
-        </div>
-        <span class="soft-label">请求文件：${escapeHtml(state?.devkitRequestPath || '')}</span>
-      </div>
-      <textarea id="devkit-path" spellcheck="false" placeholder="/Game/Mods/.../Asset.Asset">${escapeHtml(currentPath)}</textarea>
-      <div class="button-row">
-        ${actionButton('保存路径并复制 Python 命令', 'save-devkit-request', 'primary', busy)}
-        ${actionButton('复制 Python 命令', 'copy-python-command', 'secondary')}
-        ${actionButton('复制 Output Log 命令', 'copy-output-command', 'secondary')}
-      </div>
-      <div class="button-row">
-        ${actionButton('从 .uasset 提取分页候选名', 'mine-uasset-candidates', 'secondary', busy)}
-        ${actionButton('保存候选名并复制 DevKit 验证命令', 'mine-uasset-candidates-copy', 'primary', busy)}
-      </div>
-      <div class="button-row">
-        ${actionButton('从 .uasset 读取图内容', 'read-uasset-graphs', 'primary', busy)}
-        ${actionButton('查看资产解析诊断', 'open-uasset-diagnostics', 'secondary', !asset || !asset.reports.uasset_graph_read_report)}
-        ${actionButton('查看连线解析', 'open-uasset-links', 'secondary', !asset || !asset.reports.uasset_link_resolution_report)}
-        ${actionButton('查看 partial 归因', 'open-uasset-triage', 'secondary', !asset || !asset.reports.uasset_partial_graph_triage)}
-        ${actionButton('查看质量门槛', 'open-uasset-gates', 'secondary', !asset || !asset.reports.uasset_quality_gates)}
-        ${actionButton('查看二进制/复制对比', 'open-uasset-compare', 'secondary', !asset || !asset.reports.uasset_vs_clipboard_compare)}
-        ${actionButton('只补采失败图页', 'load-uasset-failed-queue', 'ghost', !asset || !asset.hasUassetGraphRead)}
-      </div>
-      <p class="soft-copy">${escapeHtml(readHint)}</p>
-      <p class="soft-copy">${escapeHtml(candidateHint)}</p>
-    </section>
-  `;
-}
-
 function renderNotesPanel(asset?: AssetSummary): string {
   const rows = missingFunctions;
   const selectedCount = selectedMissingFunctions.size;
@@ -795,8 +749,302 @@ function renderComparePanel(): string {
   `;
 }
 
+function currentAsset(): AssetSummary | undefined {
+  return selectedAsset();
+}
+
+function renderTopbar(): string {
+  return `
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1>蓝图分析工作台</h1>
+        <small>从 .uasset 还原 Unreal/ARK Blueprint，再生成中文行为说明。</small>
+      </div>
+      <div class="top-actions">
+        ${actionButton('刷新状态', 'refresh', 'ghost', busy)}
+        ${actionButton('打开 captures 目录', 'open-capture-root', 'ghost')}
+      </div>
+    </header>
+  `;
+}
+
+function readStatusBadge(asset?: AssetSummary): string {
+  if (!asset) {
+    return '<span class="status-line muted">未识别。粘贴一个 Object Path，或从下方“历史资产”里挑一个。</span>';
+  }
+  if (!asset.hasUassetGraphRead) {
+    return `<span class="status-line muted">这个资产还没有从 .uasset 读取过。点下面的“从 .uasset 读取图内容”开始。</span>`;
+  }
+  const total = asset.uassetReadGraphCount;
+  const complete = asset.uassetReadCompleteCount;
+  const partial = asset.uassetReadPartialCount;
+  const need = asset.uassetReadNeedsClipboardCount;
+  const tone = need > 0 ? 'danger' : partial > 0 ? 'warn' : 'good';
+  return `
+    <span class="status-line ${tone}">
+      已读取 ${total} 个图页 · 完整 ${complete} · 部分 ${partial} · 需手动补 ${need}${asset.lastOutputAt ? ` · 最近分析 ${escapeHtml(asset.lastOutputAt)}` : ''}
+    </span>
+  `;
+}
+
+function renderStepPath(asset?: AssetSummary): string {
+  const value = devkitInput || state?.devkitAssetPath || '';
+  return `
+    <section class="panel step-panel">
+      <div class="step-head">
+        <span class="step-num">1</span>
+        <div class="step-title">
+          <h2>粘贴蓝图 Object Path</h2>
+          <p class="hint">在 ARK DevKit 里右键资产 → <code>Copy Reference</code>，把整段路径粘贴到下面。例如 <code>/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP</code>。</p>
+        </div>
+      </div>
+      <textarea id="devkit-path" spellcheck="false" placeholder="/Game/ASA/.../Asset.Asset">${escapeHtml(value)}</textarea>
+      <div class="status-row">
+        <strong>已选资产：</strong>
+        <span class="asset-name">${escapeHtml(asset?.name || '无')}</span>
+        ${readStatusBadge(asset)}
+      </div>
+    </section>
+  `;
+}
+
+function renderStepActions(asset?: AssetSummary): string {
+  const readPath = devkitInput || state?.devkitAssetPath || '';
+  const canRead = !busy && Boolean(readPath.trim());
+  const canAnalyze = !busy && Boolean(asset && asset.graphs);
+  return `
+    <section class="panel step-panel">
+      <div class="step-head">
+        <span class="step-num">2</span>
+        <div class="step-title">
+          <h2>读取并生成报告</h2>
+          <p class="hint">第一次操作只需要点左边那个绿色按钮，它会自动解析 .uasset 并跑出完整报告。右边只有想重新刷一次报告时再用。</p>
+        </div>
+      </div>
+      <div class="big-action-row">
+        <button class="big-btn primary" data-action="read-uasset-graphs" ${canRead ? '' : 'disabled'}>
+          <strong>从 .uasset 读取图内容</strong>
+          <small>解析 .uasset / .uexp 里的节点和连线，自动生成完整报告。</small>
+        </button>
+        <button class="big-btn secondary" data-action="analyze-standard" ${canAnalyze ? '' : 'disabled'}>
+          <strong>重新生成完整报告</strong>
+          <small>已经读过的资产，重跑一次分析以更新 asset_report 等。</small>
+        </button>
+      </div>
+      ${
+        activeJobId
+          ? `<div class="job-bar"><span>正在后台执行：${escapeHtml(activeJobLabel || '任务')}……可以等它跑完，也可以取消。</span>${actionButton('取消任务', 'cancel-job', 'danger')}</div>`
+          : ''
+      }
+    </section>
+  `;
+}
+
+function renderStepResult(asset?: AssetSummary): string {
+  if (!asset || !asset.hasUassetGraphRead) {
+    return `
+      <section class="panel step-panel">
+        <div class="step-head">
+          <span class="step-num">3</span>
+          <div class="step-title">
+            <h2>读取结果</h2>
+            <p class="hint">点完上面那个按钮以后，这里会出现：读取了多少图页，多少完整、多少部分、多少需要手动补。</p>
+          </div>
+        </div>
+        <div class="empty-state">还没有读取过这个资产。</div>
+      </section>
+    `;
+  }
+  const partial = asset.uassetReadPartialCount;
+  const need = asset.uassetReadNeedsClipboardCount;
+  return `
+    <section class="panel step-panel">
+      <div class="step-head">
+        <span class="step-num">3</span>
+        <div class="step-title">
+          <h2>读取结果</h2>
+          <p class="hint">这是工具从 .uasset 文件里成功还原出多少图页的统计。</p>
+        </div>
+      </div>
+      <div class="result-grid">
+        <div class="result-tile good">
+          <span class="tile-num">${asset.uassetReadCompleteCount}</span>
+          <strong>已完整读取</strong>
+          <small>节点、连线、属性都还原成功，可以直接信任报告里这部分内容。</small>
+        </div>
+        <div class="result-tile ${partial ? 'warn' : 'idle'}">
+          <span class="tile-num">${partial}</span>
+          <strong>部分读取</strong>
+          <small>能看，但有些连线或字段是工具猜出来的（启发式）。报告里相关说明仅供参考，必要时再补采。</small>
+        </div>
+        <div class="result-tile ${need ? 'danger' : 'idle'}">
+          <span class="tile-num">${need}</span>
+          <strong>需要手动补充</strong>
+          <small>这些图页 .uasset 解析失败，需要回 DevKit 里复制粘贴。下方会自动出现“补采”面板。</small>
+        </div>
+      </div>
+      <div class="result-meta">共 ${asset.uassetReadGraphCount} 个图页 · 节点 ${asset.uassetReadNodeCount} · pin ${asset.uassetReadPinCount} · 连线 ${asset.uassetReadLinkCount}</div>
+    </section>
+  `;
+}
+
+function reportTile(
+  key: ReportKey,
+  title: string,
+  hint: string,
+  asset?: AssetSummary,
+): string {
+  const exists = Boolean(asset?.reports?.[key]);
+  return `
+    <button class="report-tile ${exists ? '' : 'missing'}" data-action="open-report-${key}" ${exists ? '' : 'disabled'}>
+      <strong>${escapeHtml(title)}</strong>
+      <small>${escapeHtml(exists ? hint : '尚未生成 — 先完成第 2 步“读取图内容”。')}</small>
+    </button>
+  `;
+}
+
+function renderStepReports(asset?: AssetSummary): string {
+  const tiles = [
+    reportTile('asset_report', '完整报告 (asset_report)', '一个 .md 里看资产的整体情况、节点伪代码、注释、调用关系。', asset),
+    reportTile('behavior_summary', '行为说明 (behavior_summary)', '把图页翻译成中文的行为段落，给非程序的同事看。', asset),
+    reportTile('diagnostics_report', '诊断报告 (diagnostics_report)', '哪里靠猜、哪里缺数据、哪些图页要补采。', asset),
+    reportTile('call_graph_summary', '调用关系摘要 (call_graph_summary)', '函数互相调用的关系，找入口和影响面。', asset),
+  ].join('');
+  const allTabs = reportTargets.map((k) => reportButton(k, asset)).join('');
+  return `
+    <section class="panel step-panel">
+      <div class="step-head">
+        <span class="step-num">4</span>
+        <div class="step-title">
+          <h2>打开报告</h2>
+          <p class="hint">点卡片会用系统默认编辑器打开本地 <code>.md</code> 文件。这些都是中文报告。</p>
+        </div>
+      </div>
+      <div class="report-tile-grid">${tiles}</div>
+      <details class="more-reports">
+        <summary>查看预览 / 更多分项报告</summary>
+        <div class="report-tabs">${allTabs}</div>
+        ${renderReportPreview(asset)}
+        <div class="button-row tight">
+          ${actionButton('在编辑器里打开当前预览', 'open-current-report', 'secondary', !asset || !asset.reports[selectedReport])}
+          ${actionButton('打开 graph_reports 目录', 'open-graph-reports', 'ghost', !asset)}
+          ${actionButton('打开输出目录', 'open-output', 'ghost', !asset || !asset.hasOutput)}
+        </div>
+      </details>
+    </section>
+  `;
+}
+
+function renderRecaptureSection(asset?: AssetSummary): string {
+  if (!asset || !asset.hasUassetGraphRead) return '';
+  const need = asset.uassetReadNeedsClipboardCount;
+  const partial = asset.uassetReadPartialCount;
+  if (!need && !partial) return '';
+  return `
+    <section class="panel step-panel alert">
+      <div class="step-head">
+        <span class="step-num warn">!</span>
+        <div class="step-title">
+          <h2>需要手动补采的图页</h2>
+          <p class="hint">.uasset 里有 <strong>${need}</strong> 个图页解析失败，<strong>${partial}</strong> 个只能部分还原。补采办法：在 DevKit 里打开对应蓝图的图页，按 <code>Ctrl+A</code>、<code>Ctrl+C</code>，回到这里展开下方的补采面板粘贴保存。</p>
+        </div>
+      </div>
+      <div class="button-row">
+        ${actionButton('载入失败图页到补采队列', 'load-uasset-failed-queue', 'primary', !asset.hasUassetGraphRead)}
+        ${actionButton('查看部分读取的原因', 'open-uasset-triage', 'secondary', !asset.reports.uasset_partial_graph_triage)}
+        ${actionButton('查看资产解析诊断', 'open-uasset-diagnostics', 'secondary', !asset.reports.uasset_graph_read_report)}
+      </div>
+      <details class="recapture-detail">
+        <summary>展开补采面板（粘贴 DevKit 剪贴板内容）</summary>
+        ${renderCapturePanel(asset)}
+      </details>
+    </section>
+  `;
+}
+
+function renderAdvancedDevkit(): string {
+  return `
+    <section class="advanced-card">
+      <h3>DevKit 导出辅助</h3>
+      <p class="hint">把当前路径写入 DevKit 请求文件，复制 Python 命令贴到 DevKit Output Log。一般只在 .uasset 解析不出来、或想用 DevKit 重新导出默认值时才用。</p>
+      <div class="button-row">
+        ${actionButton('保存路径并复制 Python 命令', 'save-devkit-request', 'primary', busy)}
+        ${actionButton('复制 Python 命令', 'copy-python-command', 'secondary')}
+        ${actionButton('复制 Output Log 命令', 'copy-output-command', 'secondary')}
+      </div>
+      <div class="button-row">
+        ${actionButton('从 .uasset 提取分页候选名', 'mine-uasset-candidates', 'ghost', busy)}
+        ${actionButton('提取并复制 DevKit 验证命令', 'mine-uasset-candidates-copy', 'ghost', busy)}
+      </div>
+      <small class="path-line">请求文件：${escapeHtml(state?.devkitRequestPath || '')}</small>
+    </section>
+  `;
+}
+
+function renderAdvancedAnalyze(asset?: AssetSummary): string {
+  return `
+    <section class="advanced-card">
+      <h3>更多分析模式与质检</h3>
+      <p class="hint">普通用户用主流程的“重新生成完整报告”就够。下面是给开发者排查问题用的。</p>
+      <div class="button-row">
+        ${actionButton('生成 compact 报告（精简）', 'analyze-compact', 'secondary', !asset || !asset.graphs || busy)}
+        ${actionButton('生成 debug 报告（含调试信息）', 'analyze-debug', 'danger', !asset || !asset.graphs || busy)}
+      </div>
+      <div class="button-row">
+        ${actionButton('查看连线解析', 'open-uasset-links', 'ghost', !asset?.reports.uasset_link_resolution_report)}
+        ${actionButton('查看读取质量自检', 'open-uasset-gates', 'ghost', !asset?.reports.uasset_quality_gates)}
+        ${actionButton('和剪贴板复制对比', 'open-uasset-compare', 'ghost', !asset?.reports.uasset_vs_clipboard_compare)}
+      </div>
+    </section>
+  `;
+}
+
+function renderAssetHistory(asset?: AssetSummary): string {
+  if (!state?.assets.length) {
+    return `
+      <section class="advanced-card">
+        <h3>历史资产</h3>
+        <div class="empty-state compact">还没有处理过任何资产。</div>
+      </section>
+    `;
+  }
+  return `
+    <section class="advanced-card">
+      <h3>历史资产</h3>
+      <p class="hint">点一行会把那个资产的路径填到顶部输入框，方便切换。</p>
+      <div class="asset-list">${renderAssetList(asset)}</div>
+    </section>
+  `;
+}
+
+function renderAdvancedLog(): string {
+  return `
+    <section class="advanced-card">
+      <h3>运行日志</h3>
+      <pre class="log-output">${escapeHtml(logs.join('\n'))}</pre>
+    </section>
+  `;
+}
+
+function renderAdvancedSection(asset?: AssetSummary): string {
+  return `
+    <details class="advanced-section">
+      <summary>高级功能（DevKit 导出、对比、debug、notes 判定、历史资产、日志）</summary>
+      <div class="advanced-grid">
+        ${renderAdvancedDevkit()}
+        ${renderAdvancedAnalyze(asset)}
+        ${renderQualityPanel(asset)}
+        ${renderNotesPanel(asset)}
+        ${renderComparePanel()}
+        ${renderAssetHistory(asset)}
+        ${renderAdvancedLog()}
+      </div>
+    </details>
+  `;
+}
+
 function renderMain(): void {
-  const asset = selectedAsset();
+  const asset = currentAsset();
   if (asset && asset.path !== selectedPath) {
     selectedPath = asset.path;
     window.localStorage.setItem('blueprint-tool.selected', selectedPath);
@@ -804,91 +1052,15 @@ function renderMain(): void {
 
   root.innerHTML = `
     <div class="shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">ARK DevKit Blueprint Translator</p>
-          <h1>蓝图分析控制中心</h1>
-        </div>
-        <div class="top-actions">
-          ${actionButton('刷新资产', 'refresh', 'secondary', busy)}
-          ${actionButton('打开 captures', 'open-capture-root', 'ghost')}
-        </div>
-      </header>
-
-      <aside class="sidebar">
-        <div class="sidebar-heading">
-          <span>捕获资产</span>
-          <strong>${state?.assets.length || 0}</strong>
-        </div>
-        <div class="asset-list">${renderAssetList(asset)}</div>
-      </aside>
-
+      ${renderTopbar()}
       <main class="workspace">
-        <section class="panel hero-panel">
-          <div class="status-banner ${busy ? 'working' : ''}">
-            <strong>${busy ? '正在执行' : '当前状态'}</strong>
-            <span>${escapeHtml(logs[0] || '等待操作。')}</span>
-          </div>
-          <div class="asset-title">
-            <div>
-              <p class="eyebrow">当前资产</p>
-              <h2>${escapeHtml(asset?.name || '未选择资产')}</h2>
-              <p class="path-line">${escapeHtml(asset?.path || state?.captureRoot || '')}</p>
-            </div>
-            ${asset ? `<span class="status-pill large ${assetStatus(asset)}">${escapeHtml(statusText(asset))}</span>` : ''}
-          </div>
-          <div class="metrics-grid">
-            ${metric('图页', asset?.graphs ?? 0)}
-            ${metric('默认值', asset?.hasDefaults ? asset.defaultsCount : '缺失', asset?.hasDefaults ? 'good' : 'warn')}
-            ${metric('组件', asset?.hasComponents ? asset.componentsCount : '缺失', asset?.hasComponents ? 'good' : 'warn')}
-            ${metric('最近分析', asset?.lastOutputAt || '无', asset?.hasOutput ? 'good' : 'warn')}
-          </div>
-          <div class="button-row">
-            ${actionButton('重新分析标准报告', 'analyze-standard', 'primary', !asset || !asset.graphs || busy)}
-            ${actionButton('生成 debug 包', 'analyze-debug', 'danger', !asset || !asset.graphs || busy)}
-            ${actionButton('生成 compact 报告', 'analyze-compact', 'secondary', !asset || !asset.graphs || busy)}
-            ${actionButton('打开输出文件夹', 'open-output', 'secondary', !asset || !asset.hasOutput)}
-            ${activeJobId ? actionButton(`取消${activeJobLabel}`, 'cancel-job', 'danger') : ''}
-          </div>
-        </section>
-
-        ${renderCapturePanel(asset)}
-
-        <section class="panel report-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">报告</p>
-              <h2>先看这些关键文件</h2>
-            </div>
-            <div class="button-row tight">
-              ${actionButton('打开当前报告', 'open-current-report', 'secondary', !asset || !asset.reports[selectedReport])}
-              ${actionButton('打开 graph_reports', 'open-graph-reports', 'ghost', !asset)}
-            </div>
-          </div>
-          <div class="report-tabs">
-            ${reportTargets.map((key) => reportButton(key, asset)).join('')}
-          </div>
-          ${renderReportPreview(asset)}
-        </section>
-
-        <div class="split-grid">
-          ${renderQualityPanel(asset)}
-          ${renderDevkitPanel()}
-        </div>
-
-        ${renderNotesPanel(asset)}
-
-        ${renderComparePanel()}
-
-        <section class="panel log-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">运行日志</p>
-              <h2>${busy ? '正在执行...' : '最近动作'}</h2>
-            </div>
-          </div>
-          <pre class="log-output">${escapeHtml(logs.join('\n'))}</pre>
-        </section>
+        ${renderStepPath(asset)}
+        ${renderStepActions(asset)}
+        ${renderStepResult(asset)}
+        ${renderStepReports(asset)}
+        ${renderRecaptureSection(asset)}
+        ${renderAdvancedSection(asset)}
+        <p class="footnote">日志最近一条：${escapeHtml(logs[0] || '无')}</p>
       </main>
     </div>
   `;
@@ -936,6 +1108,7 @@ function bindEvents(): void {
     button.addEventListener('click', () => {
       syncInputs();
       selectedPath = button.dataset.selectAsset || '';
+      devkitInput = selectedPath;
       window.localStorage.setItem('blueprint-tool.selected', selectedPath);
       captureAssetName = selectedAsset()?.name || captureAssetName;
       reportContent = '';
@@ -945,6 +1118,20 @@ function bindEvents(): void {
       render();
     });
   });
+
+  const devkitField = document.querySelector<HTMLTextAreaElement>('#devkit-path');
+  if (devkitField) {
+    devkitField.addEventListener('input', () => {
+      devkitInput = devkitField.value;
+      document
+        .querySelector<HTMLButtonElement>('[data-action="read-uasset-graphs"]')
+        ?.toggleAttribute('disabled', busy || !devkitInput.trim());
+    });
+    devkitField.addEventListener('change', () => {
+      syncInputs();
+      render();
+    });
+  }
 
   document.querySelectorAll<HTMLButtonElement>('[data-report]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -1535,6 +1722,15 @@ async function cancelCurrentJob(): Promise<void> {
 }
 
 async function handleAction(action: string): Promise<void> {
+  if (action.startsWith('open-report-')) {
+    const key = action.slice('open-report-'.length) as ReportKey;
+    if (reportTargets.includes(key)) {
+      selectedReport = key;
+      await openTarget(key);
+      await loadReport(key);
+    }
+    return;
+  }
   if (action === 'refresh') {
     await refreshState();
     appendLog('资产状态已刷新。');
