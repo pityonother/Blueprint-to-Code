@@ -85,7 +85,7 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertIn("BPUnstasis | Unknown", render_candidate_text(payload))
 
     def test_real_order_tagged_properties_recover_nodes_and_ints(self):
-        names = [f"Filler{i}" for i in range(100)] + [
+        names = ["/Game/Fixture"] + [f"Filler{i}" for i in range(99)] + [
             "Schema",
             "ObjectProperty",
             "Nodes",
@@ -124,6 +124,77 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(properties["Schema"]["value"], -1)
         self.assertEqual(properties["Nodes"]["value"], refs)
         self.assertEqual(properties["NodePosX"]["value"], 144)
+
+    def test_member_reference_name_can_extend_past_next_property_marker(self):
+        names = ["/Game/Fixture"] + [f"Filler{i}" for i in range(99)] + [
+            "FunctionReference",
+            "StructProperty",
+            "HideCategories",
+            "MemberReference",
+            "MemberName",
+            "NameProperty",
+            "bCommentBubblePinned",
+            "BoolProperty",
+            "IsPrimalDino",
+            "None",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        data = bytearray(b"\x00" * 160)
+        data[0:8] = fname("FunctionReference")
+        data[8:16] = fname("StructProperty")
+        data[16:24] = fname("HideCategories")
+        data[24:32] = fname("MemberReference")
+        data[78:86] = fname("MemberName")
+        data[86:94] = fname("NameProperty")
+        data[94:102] = fname("bCommentBubblePinned")
+        data[103:111] = fname("IsPrimalDino")
+        data[120:128] = fname("None")
+
+        properties, warnings = parse_export_properties(bytes(data), names, [], [])
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(properties["FunctionReference"]["member_name"], "IsPrimalDino")
+
+    def test_invalid_property_type_marker_does_not_overwrite_real_property(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "FunctionReference",
+            "StructProperty",
+            "MemberReference",
+            "MemberName",
+            "NameProperty",
+            "RealFunction",
+            "NotAPropertyType",
+            "NodePosX",
+            "IntProperty",
+            "None",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        data = bytearray(b"\x00" * 220)
+        data[0:8] = fname("FunctionReference")
+        data[8:16] = fname("StructProperty")
+        data[24:32] = fname("MemberReference")
+        data[72:80] = fname("MemberName")
+        data[80:88] = fname("NameProperty")
+        data[97:105] = fname("RealFunction")
+        data[128:136] = fname("FunctionReference")
+        data[136:144] = fname("NotAPropertyType")
+        data[160:168] = fname("NodePosX")
+        data[168:176] = fname("IntProperty")
+        data[176:185] = struct.pack("<iiB", 0, 4, 0)
+        data[185:189] = struct.pack("<i", 42)
+        data[196:204] = fname("None")
+
+        properties, warnings = parse_export_properties(bytes(data), names, [], [])
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(properties["FunctionReference"]["member_name"], "RealFunction")
+        self.assertEqual(properties["NodePosX"]["value"], 42)
 
     def test_cdo_class_defaults_recover_scalar_struct_and_soft_object_values(self):
         names = [

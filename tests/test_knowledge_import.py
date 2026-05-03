@@ -119,6 +119,15 @@ class KnowledgeCaptureImportTests(unittest.TestCase):
                 capture_dir / "uasset_failed_graph_queue.json",
                 {"graphs": [{"graph": "ReceiveBeginPlay", "primary_category": "need_manual_clipboard"}]},
             )
+            write_json(
+                capture_dir / "uasset_unknown_properties.json",
+                {
+                    "unknown_properties": [
+                        {"property": "AdvancedPinDisplay", "type": "Guid", "confidence": "low"},
+                        {"property": "BaseArmorValue", "type": "StructProperty", "confidence": "low"},
+                    ]
+                },
+            )
 
             db_path = db_dir / "buffs.sqlite"
             connection = sqlite3.connect(db_path)
@@ -221,7 +230,13 @@ class KnowledgeCaptureImportTests(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM buff_stacks").fetchone()[0], 2)
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM buff_triggers").fetchone()[0], 2)
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM buff_references").fetchone()[0], 1)
-                self.assertEqual(connection.execute("SELECT COUNT(*) FROM unresolved_work").fetchone()[0], 1)
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM unresolved_work").fetchone()[0], 2)
+                unresolved = {
+                    row[0]
+                    for row in connection.execute("SELECT detail FROM unresolved_work")
+                }
+                self.assertIn("BaseArmorValue", unresolved)
+                self.assertNotIn("AdvancedPinDisplay", unresolved)
                 row = connection.execute("SELECT reference_type, source_property FROM asset_references").fetchone()
                 self.assertEqual(row, ("buff", "POIBuff"))
             finally:

@@ -983,6 +983,8 @@ def parse_top_property_blocks(data: bytes, names: list[str]) -> list[dict[str, o
         type_info = _fname_at(data, pos + 8, names)
         if type_info:
             type_name = type_info[0]
+        if type_name not in UOBJECT_PROPERTY_TYPE_NAMES:
+            continue
         next_start = _next_position_after(start_positions, pos)
         next_none = _next_position_after(none_positions, pos)
         if next_start is not None:
@@ -1094,10 +1096,20 @@ def extract_object_ref_array(
     return best_refs, best_offset
 
 
+def is_member_reference_name_candidate(value: str) -> bool:
+    if not value or value in UOBJECT_PROPERTY_TYPE_NAMES or value in TOP_UOBJECT_PROPERTY_NAMES:
+        return False
+    if value in {"None", "MemberName", "MemberParent", "MemberReference", "ObjectProperty", "NameProperty"}:
+        return False
+    if value.startswith(("/Game/", "/Script/")):
+        return False
+    return True
+
+
 def extract_member_reference_name(data: bytes, names: list[str]) -> str:
     for pos, _name in fname_positions(data, names, {"MemberName"}):
         value = _read_fname_candidate(data, names, [pos + 25, pos + 24, pos + 26, pos + 29])
-        if value and value not in UOBJECT_PROPERTY_TYPE_NAMES:
+        if is_member_reference_name_candidate(value):
             return value
     return ""
 
@@ -1262,7 +1274,8 @@ def parse_property_block_value(
             item["element_kind"] = "FPackageIndex"
             item["objects"] = [object_ref_name(value, imports, exports) for value in refs[:500]]
         elif type_name == "StructProperty":
-            member_name = extract_member_reference_name(chunk, names)
+            struct_region = export_data[pos : min(len(export_data), max(end, pos + 192))]
+            member_name = extract_member_reference_name(struct_region, names)
             if member_name:
                 item["member_name"] = member_name
             guid = extract_guid_value(chunk, names, "MemberGuid")

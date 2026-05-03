@@ -81,6 +81,42 @@ CATEGORY_DATABASES: dict[str, dict[str, Any]] = {
 
 COMMON_IMPORT_TABLES = {"read_sources", "unresolved_work", "asset_references"}
 
+BENIGN_UNKNOWN_PROPERTIES = {
+    "AdvancedPinDisplay",
+    "BlueprintInternalUseOnly",
+    "BlueprintProtected",
+    "BlueprintReadOnly",
+    "BlueprintReadWrite",
+    "BlueprintType",
+    "Category",
+    "DisplayName",
+    "ExposeOnSpawn",
+    "Nodes",
+    "MacroGraphReference",
+    "RepNotifyFunc",
+    "Schema",
+    "ToolTip",
+    "bCanToggleVisibility",
+    "bCalculateAsPercent",
+    "bCommentBubblePinned",
+    "bEnforceConstCorrectness",
+    "bForceKeepSynced",
+    "bForceTickPoseAndServerUpdateMesh",
+    "bIsMarkedForAdvancedDisplay",
+    "bIsPureFunc",
+    "bMadeAfterOverridePinRemoval",
+    "bPropertyIsCustomized",
+}
+BENIGN_UNKNOWN_PREFIXES = (
+    "CallFunc_",
+    "K2Node_",
+    "/Game/",
+)
+BENIGN_UNKNOWN_TYPES = {
+    "Guid",
+    "BPVariableDescription",
+}
+
 
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
@@ -397,6 +433,8 @@ def insert_unresolved_work(connection: sqlite3.Connection, object_path: str, cap
         if not isinstance(item, dict):
             continue
         detail = str(item.get("name") or item.get("property") or item.get("class") or "unknown_property")
+        if is_benign_unknown_property(item, detail):
+            continue
         connection.execute(
             """
             INSERT INTO unresolved_work (object_path, work_type, detail, source_json, status)
@@ -406,6 +444,23 @@ def insert_unresolved_work(connection: sqlite3.Connection, object_path: str, cap
         )
         count += 1
     return count
+
+
+def is_benign_unknown_property(item: dict[str, Any], detail: str) -> bool:
+    property_name = str(item.get("property") or item.get("name") or detail or "")
+    type_name = str(item.get("type") or "")
+    error = str(item.get("error") or "")
+    if error:
+        return False
+    if property_name in BENIGN_UNKNOWN_PROPERTIES:
+        return True
+    if type_name in BENIGN_UNKNOWN_TYPES and property_name in BENIGN_UNKNOWN_PROPERTIES:
+        return True
+    if any(property_name.startswith(prefix) for prefix in BENIGN_UNKNOWN_PREFIXES):
+        return True
+    if property_name.startswith("b") and property_name in BENIGN_UNKNOWN_PROPERTIES:
+        return True
+    return False
 
 
 def upsert_metadata(connection: sqlite3.Connection, summary: dict[str, Any]) -> None:
