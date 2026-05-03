@@ -11,11 +11,13 @@ lerna-debug.log*
 __pycache__/
 *.py[cod]
 *$py.class
+.claude/
 
 # Generated Blueprint captures and reports
 captures/
 output/
 .tmp_*/
+knowledge_base/
 
 # Unreal plugin build output
 devkit_plugins/**/Binaries/

@@ -84,11 +84,28 @@ interface AssetSummary {
   exportQuality: ExportQuality;
 }
 
+interface KnowledgeBaseSummary {
+  exists: boolean;
+  root: string;
+  indexPath: string;
+  reportPath: string;
+  reportExists: boolean;
+  globalReportPath: string;
+  globalReportExists: boolean;
+  generated: string;
+  focus: string;
+  assetCount: number;
+  systemCount: number;
+  globalAssetCount: number;
+  capturedAssetCount: number;
+}
+
 interface AppState extends ApiResult {
   ok: boolean;
   projectRoot: string;
   captureRoot: string;
   assets: AssetSummary[];
+  knowledgeBase: KnowledgeBaseSummary;
   devkitRequestPath: string;
   devkitAssetPath: string;
   devkitPythonCommand: string;
@@ -999,6 +1016,35 @@ function renderAdvancedAnalyze(asset?: AssetSummary): string {
   `;
 }
 
+function renderKnowledgeBaseSection(): string {
+  const kb = state?.knowledgeBase;
+  const status = kb?.exists
+    ? `已生成 ${escapeHtml(kb.generated || '未知时间')}，全局索引 ${escapeHtml(kb.globalAssetCount || 0)} 个 .uasset，专题深读 ${escapeHtml(kb.assetCount || 0)} 个资产。`
+    : '还没有生成。会先建立全局 DevKit 资产索引，再生成巨盗龙专题样本。';
+  return `
+    <section class="panel knowledge-panel">
+      <div class="step-head">
+        <span class="step-num">KB</span>
+        <div class="step-title">
+          <h2>背景知识库</h2>
+          <p class="hint">先扫整个 ARK DevKit 的 .uasset 资产作为底座，再把已深度读取的蓝图合成专题机制地图。</p>
+        </div>
+      </div>
+      <div class="status-row">
+        <strong>当前状态：</strong>
+        <span>${status}</span>
+      </div>
+      <div class="button-row">
+        ${actionButton('生成/更新全局知识库', 'build-knowledge-base', 'primary', busy)}
+        ${actionButton('打开知识库报告', 'open-knowledge-report', 'secondary', !kb?.reportExists)}
+        ${actionButton('打开全局资产索引', 'open-knowledge-global-report', 'secondary', !kb?.globalReportExists)}
+        ${actionButton('打开知识库目录', 'open-knowledge-folder', 'ghost', !kb?.exists)}
+      </div>
+      ${kb?.reportExists ? `<small class="path-line">${escapeHtml(kb.reportPath)}</small>` : ''}
+    </section>
+  `;
+}
+
 function renderAssetHistory(asset?: AssetSummary): string {
   if (!state?.assets.length) {
     return `
@@ -1058,6 +1104,7 @@ function renderMain(): void {
         ${renderStepActions(asset)}
         ${renderStepResult(asset)}
         ${renderStepReports(asset)}
+        ${renderKnowledgeBaseSection()}
         ${renderRecaptureSection(asset)}
         ${renderAdvancedSection(asset)}
         <p class="footnote">日志最近一条：${escapeHtml(logs[0] || '无')}</p>
@@ -1721,6 +1768,63 @@ async function cancelCurrentJob(): Promise<void> {
   }
 }
 
+async function buildKnowledgeBase(): Promise<void> {
+  busy = true;
+  appendLog('开始生成 ARK DevKit 全局背景知识库。');
+  try {
+    const payload = await api<ApiResult & { job: JobInfo }>(
+      '/api/knowledge-base/build',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          focus: 'gigantoraptor',
+          assets: [
+            'Gigantoraptor_Character_BP',
+            'PrimalItemResource_GigantoraptorFeather',
+            'Buff_GigantoraptorCallPlayer',
+          ],
+        }),
+      },
+    );
+    activeJobId = payload.job.id;
+    activeJobLabel = '背景知识库';
+    appendLog(`知识库后台任务已创建：${payload.job.id}`);
+    render();
+    const job = await waitForJob(payload.job.id, '背景知识库');
+    const outcome = job.status === 'succeeded' ? '完成' : `${job.status}，退出码 ${job.returnCode ?? '-'}`;
+    appendLog(`知识库生成${outcome}，耗时 ${job.durationSeconds}s。`);
+    if (job.error) {
+      appendLog(job.error);
+    }
+    if (job.stderr) {
+      appendLog(job.stderr.trim().slice(-1200));
+    }
+    if (job.stdout) {
+      appendLog(job.stdout.trim().slice(-1200));
+    }
+    await refreshState(false);
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
+  } finally {
+    busy = false;
+    activeJobId = '';
+    activeJobLabel = '';
+    render();
+  }
+}
+
+async function openKnowledgeBase(target: 'report' | 'folder' | 'index' | 'global_report' = 'report'): Promise<void> {
+  try {
+    const payload = await api<ApiResult & { path: string }>('/api/knowledge-base/open', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    });
+    appendLog(`已打开：${payload.path}`);
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function handleAction(action: string): Promise<void> {
   if (action.startsWith('open-report-')) {
     const key = action.slice('open-report-'.length) as ReportKey;
@@ -1754,6 +1858,22 @@ async function handleAction(action: string): Promise<void> {
   }
   if (action === 'analyze-debug') {
     await runAnalysis('debug');
+    return;
+  }
+  if (action === 'build-knowledge-base') {
+    await buildKnowledgeBase();
+    return;
+  }
+  if (action === 'open-knowledge-report') {
+    await openKnowledgeBase('report');
+    return;
+  }
+  if (action === 'open-knowledge-global-report') {
+    await openKnowledgeBase('global_report');
+    return;
+  }
+  if (action === 'open-knowledge-folder') {
+    await openKnowledgeBase('folder');
     return;
   }
   if (action === 'analyze-compact') {

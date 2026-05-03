@@ -53,6 +53,7 @@ from blueprint_translator.uasset_graphs import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CAPTURE_ROOT = PROJECT_ROOT / "captures"
 DIST_ROOT = PROJECT_ROOT / "dist"
+KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge_base"
 EXPORT_SCRIPT = PROJECT_ROOT / "scripts" / "devkit_exporters" / "export_current_blueprint_defaults.py"
 DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
 
@@ -84,6 +85,18 @@ OPEN_TARGETS = {
     "asset_folder": (),
     "output_folder": ("output",),
     "graph_reports": ("output", "graph_reports"),
+}
+
+KNOWLEDGE_TARGETS = {
+    "folder": (),
+    "index": ("index.json",),
+    "report": ("reports", "gigantoraptor_knowledge_base.md"),
+    "global_report": ("global", "asset_index_report.md"),
+    "global_index": ("global", "asset_index.sqlite"),
+    "global_summary": ("global", "asset_index_summary.json"),
+    "system": ("systems", "gigantoraptor.json"),
+    "native_functions": ("native_functions.json",),
+    "evidence": ("evidence.json",),
 }
 
 DEFAULT_COMPARE_ROOT = CAPTURE_ROOT / "_compare_reports"
@@ -1122,11 +1135,73 @@ def start_asset_compare_job(old_asset_dir: Path, new_asset_dir: Path) -> dict[st
     return create_background_job("compare_asset", title, command, complete)
 
 
+def knowledge_base_summary() -> dict[str, object]:
+    index_path = KNOWLEDGE_ROOT / "index.json"
+    report_path = KNOWLEDGE_ROOT / "reports" / "gigantoraptor_knowledge_base.md"
+    global_report_path = KNOWLEDGE_ROOT / "global" / "asset_index_report.md"
+    index = read_json_file(index_path)
+    assets = index.get("assets", []) if isinstance(index, dict) else []
+    systems = index.get("systems", []) if isinstance(index, dict) else []
+    global_data = index.get("global", {}) if isinstance(index, dict) else {}
+    generated = str(index.get("generated") or "") if isinstance(index, dict) else ""
+    focus = str(index.get("focus") or "gigantoraptor") if isinstance(index, dict) else "gigantoraptor"
+    return {
+        "exists": index_path.is_file(),
+        "root": str(KNOWLEDGE_ROOT),
+        "indexPath": str(index_path),
+        "reportPath": str(report_path),
+        "reportExists": report_path.is_file(),
+        "globalReportPath": str(global_report_path),
+        "globalReportExists": global_report_path.is_file(),
+        "generated": generated,
+        "focus": focus,
+        "assetCount": len(assets) if isinstance(assets, list) else 0,
+        "systemCount": len(systems) if isinstance(systems, list) else 0,
+        "globalAssetCount": int(global_data.get("asset_count") or 0) if isinstance(global_data, dict) else 0,
+        "capturedAssetCount": int(global_data.get("captured_asset_count") or 0) if isinstance(global_data, dict) else 0,
+    }
+
+
+def knowledge_command(focus: str = "gigantoraptor", assets: list[str] | None = None) -> list[str]:
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "build_ark_knowledge_base.py"),
+        "--focus",
+        focus or "gigantoraptor",
+    ]
+    for asset in assets or []:
+        if str(asset).strip():
+            command.extend(["--asset", str(asset).strip()])
+    return command
+
+
+def start_knowledge_base_job(focus: str = "gigantoraptor", assets: list[str] | None = None) -> dict[str, object]:
+    command = knowledge_command(focus, assets)
+
+    def complete(_return_code: int) -> dict[str, object]:
+        return {
+            "knowledgeBase": knowledge_base_summary(),
+        }
+
+    return create_background_job("knowledge_base", f"{focus or 'gigantoraptor'} 背景知识库", command, complete)
+
+
+def resolve_knowledge_target(target: str) -> Path:
+    if target not in KNOWLEDGE_TARGETS:
+        raise ValueError("Unknown knowledge base target.")
+    parts = KNOWLEDGE_TARGETS[target]
+    path = KNOWLEDGE_ROOT if not parts else KNOWLEDGE_ROOT.joinpath(*parts)
+    if not is_within(path, KNOWLEDGE_ROOT):
+        raise ValueError("Target must stay inside the knowledge base directory.")
+    return path
+
+
 def api_state() -> dict[str, object]:
     return {
         "projectRoot": str(PROJECT_ROOT),
         "captureRoot": str(CAPTURE_ROOT),
         "assets": list_assets(),
+        "knowledgeBase": knowledge_base_summary(),
         "devkitRequestPath": str(DEVKIT_REQUEST_PATH),
         "devkitAssetPath": read_devkit_request(),
         "devkitPythonCommand": devkit_python_command(),
@@ -1270,6 +1345,17 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
                 open_path(CAPTURE_ROOT)
                 self.send_json({"ok": True, "path": str(CAPTURE_ROOT)})
+                return
+            if self.path == "/api/knowledge-base/build":
+                raw_assets = body.get("assets", [])
+                assets = [str(item) for item in raw_assets] if isinstance(raw_assets, list) else None
+                job = start_knowledge_base_job(str(body.get("focus") or "gigantoraptor"), assets)
+                self.send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
+                return
+            if self.path == "/api/knowledge-base/open":
+                target_path = resolve_knowledge_target(str(body.get("target") or "report"))
+                open_path(target_path)
+                self.send_json({"ok": True, "path": str(target_path)})
                 return
             if self.path == "/api/devkit-request":
                 asset_path = normalize_asset_path(str(body.get("assetPath") or ""))
