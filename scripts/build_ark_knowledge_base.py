@@ -155,10 +155,15 @@ DEEP_READ_GROUPS = {
     "status_component_blueprint": {
         "title": "StatusComponent：生物属性、成长、经验和状态值",
         "asset_types": {"status_component_blueprint"},
-        "include_asset_names": {"PlayerCharacterStatusComponent_BP"},
-        "exclude_name_patterns": {r"^(?:DinoCharacter)?StatusComponent_BP_.+"},
+        "queue_include_asset_names": {"PlayerCharacterStatusComponent_BP"},
+        "defer_name_patterns": {
+            r"StatusComponent_BP_.+",
+            r"^DinoCharacterStatusComponent_(?!BP$).+",
+        },
+        "defer_reason": "单个生物 StatusComponent，留给后续全生物扫描",
         "keywords": {
             "PlayerCharacterStatusComponent": 90,
+            "StatusComponent": 20,
             "Baby": 25,
             "Experience": 35,
             "XP": 35,
@@ -170,7 +175,7 @@ DEEP_READ_GROUPS = {
         "first_batch_limit": 1,
         "include_captured_in_queue": True,
         "generic_path_bonus": False,
-        "limit": 20,
+        "limit": 120,
     },
     "primal_item_blueprint": {
         "title": "PrimalItem：物品描述、使用逻辑、消耗与显示数据",
@@ -590,14 +595,27 @@ def priority_asset_allowed(item: dict[str, Any], group: dict[str, Any]) -> bool:
     if include_names and name not in include_names and object_path not in include_names:
         return False
 
-    for pattern in group.get("exclude_name_patterns") or []:
-        if re.search(str(pattern), name):
-            return False
-
     text = priority_text_for_asset(item)
     for keyword in group.get("exclude_keywords") or []:
         if contains_keyword(text, str(keyword)):
             return False
+    return True
+
+
+def priority_asset_defer_reason(item: dict[str, Any], group: dict[str, Any]) -> str | None:
+    name = str(item.get("asset_name") or "")
+    for pattern in group.get("defer_name_patterns") or []:
+        if re.search(str(pattern), name):
+            return str(group.get("defer_reason") or f"匹配暂缓规则：{pattern}")
+    return None
+
+
+def queue_asset_allowed(item: dict[str, Any], group: dict[str, Any]) -> bool:
+    name = str(item.get("asset_name") or "")
+    object_path = str(item.get("object_path") or "")
+    include_names = {str(value) for value in group.get("queue_include_asset_names") or []}
+    if include_names and name not in include_names and object_path not in include_names:
+        return False
     return True
 
 
@@ -642,6 +660,7 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
     all_queue: list[str] = []
     for group_id, group in DEEP_READ_GROUPS.items():
         candidates: list[dict[str, Any]] = []
+        deferred_candidates: list[dict[str, Any]] = []
         total_count = 0
         captured_count = 0
         for item in assets:
@@ -655,27 +674,37 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
             score, reasons = score_priority_asset(item, group)
             if score <= 0:
                 continue
-            candidates.append(
-                {
-                    "asset_name": item.get("asset_name"),
-                    "object_path": item.get("object_path"),
-                    "asset_type": item.get("asset_type"),
-                    "domain": item.get("domain"),
-                    "relative_path": item.get("relative_path"),
-                    "captured": item.get("captured"),
-                    "has_uexp": item.get("has_uexp"),
-                    "score": score,
-                    "reasons": reasons[:8],
-                }
-            )
+            candidate = {
+                "asset_name": item.get("asset_name"),
+                "object_path": item.get("object_path"),
+                "asset_type": item.get("asset_type"),
+                "domain": item.get("domain"),
+                "relative_path": item.get("relative_path"),
+                "captured": item.get("captured"),
+                "has_uexp": item.get("has_uexp"),
+                "score": score,
+                "reasons": reasons[:8],
+            }
+            defer_reason = priority_asset_defer_reason(item, group)
+            if defer_reason:
+                candidate["deferred"] = True
+                candidate["deferred_reason"] = defer_reason
+                deferred_candidates.append(candidate)
+            else:
+                candidates.append(candidate)
         candidates.sort(key=lambda item: (-int(item["score"]), bool(item["captured"]), str(item["object_path"]).lower()))
+        deferred_candidates.sort(key=lambda item: (-int(item["score"]), bool(item["captured"]), str(item["object_path"]).lower()))
         limit = int(group.get("limit") or 100)
         queue_min_score = int(group.get("queue_min_score") or 0)
         include_captured = bool(group.get("include_captured_in_queue"))
         batch_candidates = [
             item
             for item in candidates
-            if (include_captured or not item.get("captured")) and int(item.get("score") or 0) >= queue_min_score
+            if (
+                queue_asset_allowed(item, group)
+                and (include_captured or not item.get("captured"))
+                and int(item.get("score") or 0) >= queue_min_score
+            )
         ]
         batch_limit = first_batch_limit(group)
         first_batch = batch_candidates if batch_limit is None else batch_candidates[:batch_limit]
@@ -688,12 +717,14 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
             "total_count": total_count,
             "captured_count": captured_count,
             "candidate_count": len(candidates),
+            "deferred_count": len(deferred_candidates),
             "queue_min_score": queue_min_score,
             "first_batch_limit": group.get("first_batch_limit", 25),
             "include_captured_in_queue": include_captured,
             "first_batch_count": len(first_batch),
             "first_batch": first_batch,
             "candidates": candidates[:limit],
+            "deferred_candidates": deferred_candidates[:limit],
         }
     return {
         "schema": "ark-devkit-knowledge.priority-targets.v1",
@@ -725,6 +756,8 @@ def render_priority_targets_report(priority: dict[str, Any]) -> str:
         lines.append(f"- 全局数量：{group.get('total_count', 0)}")
         lines.append(f"- 已深度解析：{group.get('captured_count', 0)}")
         lines.append(f"- 本轮候选：{group.get('candidate_count', 0)}")
+        if group.get("deferred_count"):
+            lines.append(f"- 暂缓候选：{group.get('deferred_count', 0)}")
         if group.get("queue_min_score"):
             lines.append(f"- 自动队列最低分：{group.get('queue_min_score')}")
         if group.get("first_batch_limit") == "all":
@@ -754,6 +787,17 @@ def render_priority_targets_report(priority: dict[str, Any]) -> str:
                 f"| `{item.get('asset_name')}` | `{item.get('asset_type')}` | {item.get('score')} | {captured} |"
             )
         lines.append("")
+        deferred = group.get("deferred_candidates", [])
+        if deferred:
+            lines.append("### 暂缓候选 Top 15")
+            lines.append("")
+            lines.append("| 资产 | 分数 | 暂缓原因 |")
+            lines.append("| --- | ---: | --- |")
+            for item in deferred[:15]:
+                lines.append(
+                    f"| `{item.get('asset_name')}` | {item.get('score')} | {item.get('deferred_reason', '')} |"
+                )
+            lines.append("")
     return "\n".join(lines)
 
 
