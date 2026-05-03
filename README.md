@@ -1,5 +1,19 @@
 # Blueprint to Code
 
+## 项目简介 / Project Overview
+
+**中文：** Blueprint to Code 是一个面向 ARK DevKit / Unreal Blueprint 的本地分析工具。它可以从复制的蓝图图页、DevKit 导出的 Class Defaults / Components，以及 `.uasset` / `.uexp` 资产文件中恢复蓝图结构，生成行为报告、伪代码、诊断信息、调用关系和玩家/模组作者可读的分析结论。目标是尽量减少手动 Ctrl+A/C 图页复制，让复杂蓝图资产可以被更快地审查、比较和理解。
+
+**English:** Blueprint to Code is a local analysis toolkit for ARK DevKit / Unreal Blueprint assets. It can read copied Blueprint graph text, DevKit-exported Class Defaults / Components, and recoverable graph data from `.uasset` / `.uexp` files, then generate behavior reports, pseudocode, diagnostics, call graphs, and readable summaries for players and mod authors. Its goal is to reduce manual graph copying and make large Blueprint assets easier to inspect, compare, and understand.
+
+核心能力 / Key features:
+
+- 直接从 `.uasset` / `.uexp` 读取可恢复的 EdGraph、K2 节点、Pins 和连线。
+- 兼容传统剪贴板图页输入，二进制读取失败的图页可单独补采。
+- 生成 `asset_report.md`、`behavior_summary.md`、`diagnostics_report.md`、`call_graph_summary.md` 等报告。
+- 提供本地 Web 控制中心和一键启动脚本，方便非程序用户使用。
+- Full local web control center, one-click Windows launcher, packaged Python runtime, and focused reports for Blueprint behavior review.
+
 ARK DevKit / Unreal Blueprint clipboard-text analyzer for turning copied Blueprint
 graph pages, exported Class Defaults, and component context into reports that are
 useful for mod behavior review.
