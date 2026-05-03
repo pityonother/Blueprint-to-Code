@@ -22,6 +22,7 @@ from blueprint_translator.asset_ledger import (
     replace_deferred_assets,
     restore_ledger_snapshot,
 )
+from import_captures_to_knowledge_dbs import import_captures_to_business_databases
 
 
 DEFAULT_FOCUS = "gigantoraptor"
@@ -2229,6 +2230,7 @@ def build_knowledge_base(
     priority_report_path = ""
     priority_targets_path = ""
     business_database_paths: dict[str, str] = {}
+    capture_import_summary: dict[str, Any] = {}
     global_summary: dict[str, Any] = {
         "exists": False,
         "content_root": "",
@@ -2255,6 +2257,11 @@ def build_knowledge_base(
             write_priority_database_tables(catalog_db_path, priority_targets)
             replace_deferred_assets(catalog_db_path, priority_targets)
             business_database_paths = write_business_databases(out_dir, global_index, priority_targets)
+            capture_import_summary = import_captures_to_business_databases(
+                out_dir / "db",
+                captures,
+                out_dir / "imports",
+            )
             legacy_db_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(catalog_db_path, legacy_db_path)
             global_index_path = "db/asset_catalog.sqlite"
@@ -2273,6 +2280,7 @@ def build_knowledge_base(
                 "database": global_index_path,
                 "legacy_database": legacy_global_index_path,
                 "business_databases": business_database_paths,
+                "capture_import": "imports/capture_import_report.md",
                 "summary": "global/asset_index_summary.json",
                 "priority_report": priority_report_path,
                 "priority_targets": priority_targets_path,
@@ -2298,6 +2306,7 @@ def build_knowledge_base(
         "priority_targets": priority_targets_path,
         "global": global_summary,
         "business_databases": business_database_paths,
+        "capture_import": capture_import_summary,
         "assets": [
             {
                 "name": name,
