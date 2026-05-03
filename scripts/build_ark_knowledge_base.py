@@ -4,10 +4,23 @@ import argparse
 import json
 import re
 import sqlite3
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from blueprint_translator.asset_ledger import (
+    annotate_scan_item,
+    fingerprint_for_scan_item,
+    read_ledger_snapshot,
+    replace_deferred_assets,
+    restore_ledger_snapshot,
+)
 
 
 DEFAULT_FOCUS = "gigantoraptor"
@@ -234,6 +247,16 @@ DEEP_READ_GROUPS = {
     },
 }
 
+KNOWLEDGE_ASSET_TYPES = {
+    "primal_game_data",
+    "creature_character_blueprint",
+    "status_component_blueprint",
+    "primal_item_blueprint",
+    "buff_blueprint",
+    "loot_or_supply_crate",
+    "engram_entry",
+}
+
 
 def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
@@ -359,8 +382,14 @@ def captured_asset_lookup(captures_root: Path) -> dict[str, str]:
     return captured
 
 
-def scan_devkit_assets(content_root: Path, captures_root: Path, project_root: Path) -> dict[str, Any]:
+def scan_devkit_assets(
+    content_root: Path,
+    captures_root: Path,
+    project_root: Path,
+    ledger_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     captured = captured_asset_lookup(captures_root)
+    ledger_snapshot = ledger_snapshot or {"processed": {}, "failed": {}, "deferred": []}
     assets: list[dict[str, Any]] = []
     by_domain: Counter[str] = Counter()
     by_type: Counter[str] = Counter()
@@ -385,120 +414,181 @@ def scan_devkit_assets(content_root: Path, captures_root: Path, project_root: Pa
         by_top_folder[classification["top_folder"]] += 1
         uexp = path.with_suffix(".uexp")
         ubulk = path.with_suffix(".ubulk")
-        assets.append(
-            {
-                "asset_name": path.stem,
-                "object_path": object_path_from_uasset(path, content_root),
-                "relative_path": rel,
-                "uasset_path": str(path),
-                "has_uexp": uexp.is_file(),
-                "has_ubulk": ubulk.is_file(),
-                "uasset_size": stat.st_size,
-                "uexp_size": uexp.stat().st_size if uexp.is_file() else 0,
-                "ubulk_size": ubulk.stat().st_size if ubulk.is_file() else 0,
-                "modified": datetime.fromtimestamp(stat.st_mtime).replace(microsecond=0).isoformat(),
-                "captured": is_captured,
-                "capture_dir": short_path(Path(captured[name_key]), project_root) if is_captured else "",
-                **classification,
-            }
-        )
+        uexp_stat = uexp.stat() if uexp.is_file() else None
+        ubulk_stat = ubulk.stat() if ubulk.is_file() else None
+        modified = datetime.fromtimestamp(stat.st_mtime).replace(microsecond=0).isoformat()
+        item = {
+            "asset_name": path.stem,
+            "object_path": object_path_from_uasset(path, content_root),
+            "relative_path": rel,
+            "uasset_path": str(path),
+            "has_uexp": uexp.is_file(),
+            "has_ubulk": ubulk.is_file(),
+            "uasset_size": stat.st_size,
+            "uasset_modified": modified,
+            "uexp_size": uexp_stat.st_size if uexp_stat else 0,
+            "uexp_modified": datetime.fromtimestamp(uexp_stat.st_mtime).replace(microsecond=0).isoformat() if uexp_stat else "",
+            "ubulk_size": ubulk_stat.st_size if ubulk_stat else 0,
+            "ubulk_modified": datetime.fromtimestamp(ubulk_stat.st_mtime).replace(microsecond=0).isoformat() if ubulk_stat else "",
+            "modified": modified,
+            "captured": is_captured,
+            "capture_dir": short_path(Path(captured[name_key]), project_root) if is_captured else "",
+            **classification,
+        }
+        assets.append(annotate_scan_item(item, ledger_snapshot))
 
     assets.sort(key=lambda item: item["object_path"].lower())
-    priority = [
-        item
-        for item in assets
-        if item["asset_type"]
-        in {
-            "primal_game_data",
-            "creature_character_blueprint",
-            "status_component_blueprint",
-            "primal_item_blueprint",
-            "buff_blueprint",
-            "loot_or_supply_crate",
-            "engram_entry",
-        }
-    ]
+    knowledge_assets = [item for item in assets if item["asset_type"] in KNOWLEDGE_ASSET_TYPES]
+    processed_current_count = sum(1 for item in knowledge_assets if item.get("processed_current"))
+    failed_current_count = sum(1 for item in knowledge_assets if item.get("failed_current"))
     return {
         "schema": "ark-devkit-knowledge.global-asset-index.v1",
         "generated": now_iso(),
         "content_root": str(content_root),
         "asset_count": len(assets),
+        "knowledge_asset_count": len(knowledge_assets),
         "captured_asset_count": captured_count,
+        "processed_current_count": processed_current_count,
+        "failed_current_count": failed_current_count,
         "total_uasset_size": total_size,
         "counts": {
             "by_domain": dict(by_domain.most_common()),
             "by_type": dict(by_type.most_common()),
             "by_top_folder": dict(by_top_folder.most_common()),
         },
-        "priority_assets": priority[:5000],
+        "priority_assets": knowledge_assets[:5000],
+        "knowledge_assets": knowledge_assets,
         "assets": assets,
     }
 
 
+ASSET_TABLE_COLUMNS = """
+    asset_name TEXT NOT NULL,
+    object_path TEXT NOT NULL PRIMARY KEY,
+    relative_path TEXT NOT NULL,
+    uasset_path TEXT NOT NULL,
+    top_folder TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    captured INTEGER NOT NULL,
+    capture_dir TEXT NOT NULL,
+    has_uexp INTEGER NOT NULL,
+    has_ubulk INTEGER NOT NULL,
+    uasset_size INTEGER NOT NULL,
+    uasset_modified TEXT NOT NULL,
+    uexp_size INTEGER NOT NULL,
+    uexp_modified TEXT NOT NULL,
+    ubulk_size INTEGER NOT NULL,
+    ubulk_modified TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    processed_current INTEGER NOT NULL,
+    failed_current INTEGER NOT NULL,
+    knowledge_status TEXT NOT NULL,
+    read_status TEXT NOT NULL,
+    last_read_at TEXT NOT NULL,
+    failure_count INTEGER NOT NULL,
+    last_failed_at TEXT NOT NULL,
+    modified TEXT NOT NULL
+"""
+
+
+def asset_table_row(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        item["asset_name"],
+        item["object_path"],
+        item["relative_path"],
+        item["uasset_path"],
+        item["top_folder"],
+        item["domain"],
+        item["asset_type"],
+        1 if item["captured"] else 0,
+        item["capture_dir"],
+        1 if item["has_uexp"] else 0,
+        1 if item["has_ubulk"] else 0,
+        int(item["uasset_size"]),
+        item.get("uasset_modified") or item.get("modified") or "",
+        int(item["uexp_size"]),
+        item.get("uexp_modified") or "",
+        int(item["ubulk_size"]),
+        item.get("ubulk_modified") or "",
+        item.get("fingerprint") or fingerprint_for_scan_item(item),
+        1 if item.get("processed_current") else 0,
+        1 if item.get("failed_current") else 0,
+        item.get("knowledge_status") or "",
+        item.get("read_status") or "",
+        item.get("last_read_at") or "",
+        int(item.get("failure_count") or 0),
+        item.get("last_failed_at") or "",
+        item.get("modified") or item.get("uasset_modified") or "",
+    )
+
+
 def write_global_asset_database(path: Path, index: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_snapshot = read_ledger_snapshot(path)
     if path.exists():
         path.unlink()
     connection = sqlite3.connect(path)
     try:
+        connection.execute(f"CREATE TABLE asset_files ({ASSET_TABLE_COLUMNS})")
+        connection.execute(f"CREATE TABLE assets ({ASSET_TABLE_COLUMNS})")
+        columns = """
+            asset_name, object_path, relative_path, uasset_path, top_folder,
+            domain, asset_type, captured, capture_dir, has_uexp, has_ubulk,
+            uasset_size, uasset_modified, uexp_size, uexp_modified,
+            ubulk_size, ubulk_modified, fingerprint, processed_current,
+            failed_current, knowledge_status, read_status, last_read_at,
+            failure_count, last_failed_at, modified
+        """
+        placeholders = ", ".join(["?"] * 26)
+        all_rows = [asset_table_row(item) for item in index.get("assets", [])]
+        knowledge_rows = [asset_table_row(item) for item in index.get("knowledge_assets", [])]
+        connection.executemany(
+            f"INSERT INTO asset_files ({columns}) VALUES ({placeholders})",
+            all_rows,
+        )
+        connection.executemany(f"INSERT INTO assets ({columns}) VALUES ({placeholders})", knowledge_rows)
+        for table in ("asset_files", "assets"):
+            connection.execute(f"CREATE INDEX idx_{table}_name ON {table}(asset_name)")
+            connection.execute(f"CREATE INDEX idx_{table}_object_path ON {table}(object_path)")
+            connection.execute(f"CREATE INDEX idx_{table}_type ON {table}(asset_type)")
+            connection.execute(f"CREATE INDEX idx_{table}_domain ON {table}(domain)")
+            connection.execute(f"CREATE INDEX idx_{table}_captured ON {table}(captured)")
+            connection.execute(f"CREATE INDEX idx_{table}_processed ON {table}(processed_current)")
+            connection.execute(f"CREATE INDEX idx_{table}_failed ON {table}(failed_current)")
+            connection.execute(f"CREATE INDEX idx_{table}_relative_path ON {table}(relative_path)")
         connection.execute(
             """
-            CREATE TABLE assets (
-                asset_name TEXT NOT NULL,
+            CREATE TABLE priority_categories (
+                category_order INTEGER NOT NULL,
+                group_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                total_count INTEGER NOT NULL,
+                candidate_count INTEGER NOT NULL,
+                processed_count INTEGER NOT NULL,
+                failed_count INTEGER NOT NULL,
+                deferred_count INTEGER NOT NULL,
+                first_batch_count INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE priority_queue (
+                queue_index INTEGER PRIMARY KEY,
+                category_order INTEGER NOT NULL,
+                group_id TEXT NOT NULL,
+                rank_in_category INTEGER NOT NULL,
                 object_path TEXT NOT NULL,
-                relative_path TEXT NOT NULL,
-                uasset_path TEXT NOT NULL,
-                top_folder TEXT NOT NULL,
-                domain TEXT NOT NULL,
+                asset_name TEXT NOT NULL,
                 asset_type TEXT NOT NULL,
-                captured INTEGER NOT NULL,
-                capture_dir TEXT NOT NULL,
-                has_uexp INTEGER NOT NULL,
-                has_ubulk INTEGER NOT NULL,
-                uasset_size INTEGER NOT NULL,
-                uexp_size INTEGER NOT NULL,
-                ubulk_size INTEGER NOT NULL,
-                modified TEXT NOT NULL
+                score INTEGER NOT NULL,
+                reasons_json TEXT NOT NULL DEFAULT '[]'
             )
             """
         )
-        rows = [
-            (
-                item["asset_name"],
-                item["object_path"],
-                item["relative_path"],
-                item["uasset_path"],
-                item["top_folder"],
-                item["domain"],
-                item["asset_type"],
-                1 if item["captured"] else 0,
-                item["capture_dir"],
-                1 if item["has_uexp"] else 0,
-                1 if item["has_ubulk"] else 0,
-                item["uasset_size"],
-                item["uexp_size"],
-                item["ubulk_size"],
-                item["modified"],
-            )
-            for item in index.get("assets", [])
-        ]
-        connection.executemany(
-            """
-            INSERT INTO assets (
-                asset_name, object_path, relative_path, uasset_path, top_folder,
-                domain, asset_type, captured, capture_dir, has_uexp, has_ubulk,
-                uasset_size, uexp_size, ubulk_size, modified
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        connection.execute("CREATE INDEX idx_assets_name ON assets(asset_name)")
-        connection.execute("CREATE INDEX idx_assets_object_path ON assets(object_path)")
-        connection.execute("CREATE INDEX idx_assets_type ON assets(asset_type)")
-        connection.execute("CREATE INDEX idx_assets_domain ON assets(domain)")
-        connection.execute("CREATE INDEX idx_assets_captured ON assets(captured)")
-        connection.execute("CREATE INDEX idx_assets_relative_path ON assets(relative_path)")
+        connection.execute("CREATE INDEX idx_priority_queue_group ON priority_queue(group_id)")
+        connection.execute("CREATE INDEX idx_priority_queue_object_path ON priority_queue(object_path)")
         connection.execute(
             """
             CREATE TABLE metadata (
@@ -512,9 +602,13 @@ def write_global_asset_database(path: Path, index: dict[str, Any]) -> None:
             "generated": index.get("generated", ""),
             "content_root": index.get("content_root", ""),
             "asset_count": str(index.get("asset_count", 0)),
+            "knowledge_asset_count": str(index.get("knowledge_asset_count", 0)),
             "captured_asset_count": str(index.get("captured_asset_count", 0)),
+            "processed_current_count": str(index.get("processed_current_count", 0)),
+            "failed_current_count": str(index.get("failed_current_count", 0)),
         }
         connection.executemany("INSERT INTO metadata (key, value) VALUES (?, ?)", metadata.items())
+        restore_ledger_snapshot(connection, ledger_snapshot)
         connection.commit()
     finally:
         connection.close()
@@ -524,7 +618,7 @@ def global_index_summary(index: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in index.items()
-        if key not in {"assets"}
+        if key not in {"assets", "knowledge_assets", "priority_assets"}
     }
 
 
@@ -538,7 +632,10 @@ def render_global_asset_report(index: dict[str, Any]) -> str:
     lines.append("## 总览")
     lines.append("")
     lines.append(f"- `.uasset` 数量：{index.get('asset_count', 0)}")
+    lines.append(f"- 知识库工作资产：{index.get('knowledge_asset_count', 0)}")
     lines.append(f"- 已有深度解析 captures：{index.get('captured_asset_count', 0)}")
+    lines.append(f"- 已入库且文件未变：{index.get('processed_current_count', 0)}")
+    lines.append(f"- 最近失败且文件未变：{index.get('failed_current_count', 0)}")
     lines.append("")
     lines.append("## 按类型统计")
     lines.append("")
@@ -655,20 +752,42 @@ def score_priority_asset(item: dict[str, Any], group: dict[str, Any]) -> tuple[i
 
 
 def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
-    assets = global_index.get("assets", [])
+    assets = global_index.get("knowledge_assets") or global_index.get("assets", [])
     groups: dict[str, Any] = {}
     all_queue: list[str] = []
-    for group_id, group in DEEP_READ_GROUPS.items():
+    for category_order, (group_id, group) in enumerate(DEEP_READ_GROUPS.items(), start=1):
         candidates: list[dict[str, Any]] = []
         deferred_candidates: list[dict[str, Any]] = []
+        failed_candidates: list[dict[str, Any]] = []
         total_count = 0
         captured_count = 0
+        processed_count = 0
+        failed_count = 0
         for item in assets:
             if item.get("asset_type") not in group["asset_types"]:
                 continue
             total_count += 1
             if item.get("captured"):
                 captured_count += 1
+            if item.get("processed_current"):
+                processed_count += 1
+                continue
+            if item.get("failed_current"):
+                failed_count += 1
+                failed_candidates.append(
+                    {
+                        "asset_name": item.get("asset_name"),
+                        "object_path": item.get("object_path"),
+                        "asset_type": item.get("asset_type"),
+                        "domain": item.get("domain"),
+                        "relative_path": item.get("relative_path"),
+                        "captured": item.get("captured"),
+                        "has_uexp": item.get("has_uexp"),
+                        "failure_count": item.get("failure_count", 0),
+                        "last_failed_at": item.get("last_failed_at", ""),
+                    }
+                )
+                continue
             if not priority_asset_allowed(item, group):
                 continue
             score, reasons = score_priority_asset(item, group)
@@ -694,6 +813,7 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
                 candidates.append(candidate)
         candidates.sort(key=lambda item: (-int(item["score"]), bool(item["captured"]), str(item["object_path"]).lower()))
         deferred_candidates.sort(key=lambda item: (-int(item["score"]), bool(item["captured"]), str(item["object_path"]).lower()))
+        failed_candidates.sort(key=lambda item: (-int(item.get("failure_count") or 0), str(item["object_path"]).lower()))
         limit = int(group.get("limit") or 100)
         queue_min_score = int(group.get("queue_min_score") or 0)
         include_captured = bool(group.get("include_captured_in_queue"))
@@ -714,8 +834,11 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
                 all_queue.append(object_path)
         groups[group_id] = {
             "title": group["title"],
+            "category_order": category_order,
             "total_count": total_count,
             "captured_count": captured_count,
+            "processed_count": processed_count,
+            "failed_count": failed_count,
             "candidate_count": len(candidates),
             "deferred_count": len(deferred_candidates),
             "queue_min_score": queue_min_score,
@@ -724,12 +847,14 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
             "first_batch_count": len(first_batch),
             "first_batch": first_batch,
             "candidates": candidates[:limit],
-            "deferred_candidates": deferred_candidates[:limit],
+            "deferred_candidates": deferred_candidates,
+            "failed_candidates": failed_candidates,
         }
     return {
         "schema": "ark-devkit-knowledge.priority-targets.v1",
         "generated": now_iso(),
         "source_global_asset_count": global_index.get("asset_count", 0),
+        "source_knowledge_asset_count": global_index.get("knowledge_asset_count", 0),
         "groups": groups,
         "deep_read_queue": all_queue,
     }
@@ -742,6 +867,7 @@ def render_priority_targets_report(priority: dict[str, Any]) -> str:
     lines.append(f"生成时间：{priority.get('generated')}")
     lines.append("")
     lines.append("这份清单从全局 DevKit 索引里挑出下一批最值得深度解析的资产。")
+    lines.append("优先级按类别分桶：先决定类别顺序，再在类别内部按分数排序。")
     lines.append("目标是补齐：全局规则、属性状态、物品逻辑、Buff 效果、宝箱/掉落。")
     lines.append("")
     lines.append("## 一键队列")
@@ -753,8 +879,13 @@ def render_priority_targets_report(priority: dict[str, Any]) -> str:
     for group_id, group in priority.get("groups", {}).items():
         lines.append(f"## {group['title']}")
         lines.append("")
+        lines.append(f"- 类别顺序：{group.get('category_order', '-')}")
         lines.append(f"- 全局数量：{group.get('total_count', 0)}")
         lines.append(f"- 已深度解析：{group.get('captured_count', 0)}")
+        if group.get("processed_count"):
+            lines.append(f"- 已入库并跳过：{group.get('processed_count', 0)}")
+        if group.get("failed_count"):
+            lines.append(f"- 失败暂不重试：{group.get('failed_count', 0)}")
         lines.append(f"- 本轮候选：{group.get('candidate_count', 0)}")
         if group.get("deferred_count"):
             lines.append(f"- 暂缓候选：{group.get('deferred_count', 0)}")
@@ -798,6 +929,17 @@ def render_priority_targets_report(priority: dict[str, Any]) -> str:
                     f"| `{item.get('asset_name')}` | {item.get('score')} | {item.get('deferred_reason', '')} |"
                 )
             lines.append("")
+        failed = group.get("failed_candidates", [])
+        if failed:
+            lines.append("### 失败候选 Top 15")
+            lines.append("")
+            lines.append("| 资产 | 失败次数 | 最近失败 |")
+            lines.append("| --- | ---: | --- |")
+            for item in failed[:15]:
+                lines.append(
+                    f"| `{item.get('asset_name')}` | {item.get('failure_count', 0)} | {item.get('last_failed_at', '')} |"
+                )
+            lines.append("")
     return "\n".join(lines)
 
 
@@ -813,6 +955,71 @@ def write_priority_outputs(out_dir: Path, priority: dict[str, Any]) -> None:
         if group_queue:
             group_queue += "\n"
         write_text(out_dir / "priorities" / f"{group_id}_queue.txt", group_queue)
+
+
+def write_priority_database_tables(db_path: Path, priority: dict[str, Any]) -> None:
+    if not db_path.is_file():
+        return
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("DELETE FROM priority_categories")
+        connection.execute("DELETE FROM priority_queue")
+        category_rows: list[tuple[Any, ...]] = []
+        queue_rows: list[tuple[Any, ...]] = []
+        queue_index = 1
+        for group_id, group in priority.get("groups", {}).items():
+            category_order = int(group.get("category_order") or 0)
+            category_rows.append(
+                (
+                    category_order,
+                    str(group_id),
+                    str(group.get("title") or ""),
+                    int(group.get("total_count") or 0),
+                    int(group.get("candidate_count") or 0),
+                    int(group.get("processed_count") or 0),
+                    int(group.get("failed_count") or 0),
+                    int(group.get("deferred_count") or 0),
+                    int(group.get("first_batch_count") or 0),
+                )
+            )
+            for rank, item in enumerate(group.get("first_batch", []), start=1):
+                queue_rows.append(
+                    (
+                        queue_index,
+                        category_order,
+                        str(group_id),
+                        rank,
+                        str(item.get("object_path") or ""),
+                        str(item.get("asset_name") or ""),
+                        str(item.get("asset_type") or ""),
+                        int(item.get("score") or 0),
+                        json.dumps(item.get("reasons") or [], ensure_ascii=False),
+                    )
+                )
+                queue_index += 1
+        connection.executemany(
+            """
+            INSERT INTO priority_categories (
+                category_order, group_id, title, total_count, candidate_count,
+                processed_count, failed_count, deferred_count, first_batch_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            category_rows,
+        )
+        connection.executemany(
+            """
+            INSERT INTO priority_queue (
+                queue_index, category_order, group_id, rank_in_category,
+                object_path, asset_name, asset_type, score, reasons_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            queue_rows,
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def infer_asset_role(name: str) -> str:
@@ -1564,15 +1771,19 @@ def build_knowledge_base(
     if scan_devkit:
         resolved_content_root = content_root or default_content_root()
         if resolved_content_root and resolved_content_root.is_dir():
-            global_index = scan_devkit_assets(resolved_content_root.resolve(), captures, root)
+            global_db_path = out_dir / "global" / "asset_index.sqlite"
+            ledger_snapshot = read_ledger_snapshot(global_db_path)
+            global_index = scan_devkit_assets(resolved_content_root.resolve(), captures, root, ledger_snapshot)
             stale_full_json = out_dir / "global" / "asset_index.json"
             if stale_full_json.exists():
                 stale_full_json.unlink()
-            write_global_asset_database(out_dir / "global" / "asset_index.sqlite", global_index)
+            write_global_asset_database(global_db_path, global_index)
             write_json(out_dir / "global" / "asset_index_summary.json", global_index_summary(global_index))
             write_text(out_dir / "global" / "asset_index_report.md", render_global_asset_report(global_index))
             priority_targets = build_priority_targets(global_index)
             write_priority_outputs(out_dir, priority_targets)
+            write_priority_database_tables(global_db_path, priority_targets)
+            replace_deferred_assets(global_db_path, priority_targets)
             global_index_path = "global/asset_index.sqlite"
             global_report_path = "global/asset_index_report.md"
             priority_report_path = "priorities/priority_targets.md"
@@ -1581,7 +1792,10 @@ def build_knowledge_base(
                 "exists": True,
                 "content_root": global_index["content_root"],
                 "asset_count": global_index["asset_count"],
+                "knowledge_asset_count": global_index["knowledge_asset_count"],
                 "captured_asset_count": global_index["captured_asset_count"],
+                "processed_current_count": global_index["processed_current_count"],
+                "failed_current_count": global_index["failed_current_count"],
                 "database": global_index_path,
                 "summary": "global/asset_index_summary.json",
                 "priority_report": priority_report_path,

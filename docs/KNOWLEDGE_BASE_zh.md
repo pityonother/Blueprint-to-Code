@@ -61,6 +61,20 @@ knowledge_base/index.json
 - `knowledge_base/native_functions.json`：记录蓝图里看得到调用、但看不到内部实现的 native/父类函数。
 - `knowledge_base/evidence.json`：从报告中抽出的行级证据，方便 AI 回答时说明来源。
 
+## SQLite 里面怎么分表
+
+`asset_index.sqlite` 不是让你主要盯着 27 万行看的。它现在按“原始目录”和“知识库工作流”分开：
+
+- `asset_files`：全量 `.uasset` 文件目录，机器用，数量会很大。
+- `assets`：知识库工作资产，只放可能进入分析循环的类型。
+- `priority_categories`：优先级第一层，按 GameData、StatusComponent、PrimalItem、Buff、宝箱等类别分桶。
+- `priority_queue`：当前这一轮真正要读的队列，记录类别顺序和类别内排名。
+- `processed_assets`：已经读取并纳入知识库、且文件没有变化的资产。
+- `failed_assets`：读取失败或找不到文件的资产，避免每轮无限重复失败。
+- `deferred_assets`：暂缓资产，例如单个生物的 `DinoCharacterStatusComponent_BP_恐龙名`。
+
+后续循环会先看 `processed_assets`，文件没变就不会再读；文件变了、失败需要重试、或我们解除暂缓规则时，才会重新进入队列。
+
 ## 怎么加新资产
 
 先用 GUI 读取新蓝图，确认 `captures/<资产名>/` 里有报告和 uasset JSON。

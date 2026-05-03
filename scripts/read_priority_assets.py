@@ -16,9 +16,14 @@ from blueprint_translator.uasset_graphs import (
     read_uasset_graph_content,
     write_uasset_graph_read_files,
 )
+from blueprint_translator.asset_ledger import (
+    processed_current_for_path,
+    record_asset_results,
+)
 from blueprint_translator.utils import safe_filename
 CAPTURE_ROOT = PROJECT_ROOT / "captures"
 DEFAULT_QUEUE = PROJECT_ROOT / "knowledge_base" / "priorities" / "deep_read_queue.txt"
+LEDGER_DB = PROJECT_ROOT / "knowledge_base" / "global" / "asset_index.sqlite"
 
 
 def read_queue(path: Path) -> list[str]:
@@ -74,15 +79,6 @@ def analyze_asset(asset_dir: Path, report_level: str) -> dict[str, Any]:
 def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level: str, force: bool) -> dict[str, Any]:
     asset_name = asset_name_from_object_path(object_path)
     asset_dir = CAPTURE_ROOT / safe_filename(asset_name, "BlueprintAsset")
-    existing = asset_dir / "uasset_graph_nodes.json"
-    if existing.is_file() and not force:
-        return {
-            "asset_path": object_path,
-            "asset_name": asset_name,
-            "status": "skipped_existing",
-            "asset_dir": str(asset_dir),
-        }
-
     uasset_path, attempted = object_path_to_uasset_path(object_path)
     if uasset_path is None:
         return {
@@ -90,6 +86,25 @@ def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level
             "asset_name": asset_name,
             "status": "missing_uasset",
             "attempted": attempted,
+        }
+
+    if not force and processed_current_for_path(LEDGER_DB, object_path, uasset_path):
+        return {
+            "asset_path": object_path,
+            "asset_name": asset_name,
+            "status": "skipped_processed",
+            "asset_dir": str(asset_dir),
+            "uasset_path": str(uasset_path),
+        }
+
+    existing = asset_dir / "uasset_graph_nodes.json"
+    if existing.is_file() and not force:
+        return {
+            "asset_path": object_path,
+            "asset_name": asset_name,
+            "status": "skipped_existing",
+            "asset_dir": str(asset_dir),
+            "uasset_path": str(uasset_path),
         }
 
     started = time.time()
@@ -137,7 +152,7 @@ def write_batch_report(out_path: Path, payload: dict[str, Any]) -> None:
                 item.get("duration_seconds", 0),
             )
         )
-    failures = [item for item in payload.get("results", []) if item.get("status") not in {"read", "skipped_existing"}]
+    failures = [item for item in payload.get("results", []) if item.get("status") not in {"read", "skipped_existing", "skipped_processed"}]
     if failures:
         lines.extend(["", "## 失败或未解析", ""])
         for item in failures:
@@ -190,11 +205,15 @@ def main() -> int:
     write_batch_report(out_md, payload)
 
     if args.rebuild_knowledge:
+        record_asset_results(LEDGER_DB, results, knowledge_status="captured")
         command = [sys.executable, str(PROJECT_ROOT / "scripts" / "build_ark_knowledge_base.py")]
         print("rebuilding knowledge base", flush=True)
         completed = subprocess.run(command, cwd=str(PROJECT_ROOT), text=True, encoding="utf-8", errors="replace")
         if completed.returncode != 0:
             return completed.returncode
+        record_asset_results(LEDGER_DB, results, knowledge_status="imported")
+    else:
+        record_asset_results(LEDGER_DB, results, knowledge_status="captured")
 
     print(f"wrote {out_md}")
     return 0
