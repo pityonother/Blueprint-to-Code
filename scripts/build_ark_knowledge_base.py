@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sqlite3
 import sys
 from collections import Counter, defaultdict
@@ -255,6 +256,299 @@ KNOWLEDGE_ASSET_TYPES = {
     "buff_blueprint",
     "loot_or_supply_crate",
     "engram_entry",
+}
+
+BUSINESS_DATABASES = {
+    "primal_game_data": {
+        "filename": "primal_game_data.sqlite",
+        "asset_table": "game_data_assets",
+        "asset_types": {"primal_game_data"},
+        "tables": {
+            "game_data_rules": """
+                rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                rule_key TEXT NOT NULL,
+                rule_value TEXT NOT NULL DEFAULT '',
+                value_type TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "registered_creatures": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                creature_path TEXT NOT NULL,
+                creature_name TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "registered_items": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                item_path TEXT NOT NULL,
+                item_name TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "registered_buffs": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                buff_path TEXT NOT NULL,
+                buff_name TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "registered_loot": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                loot_path TEXT NOT NULL,
+                loot_name TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "remaps": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                remap_type TEXT NOT NULL,
+                from_path TEXT NOT NULL DEFAULT '',
+                to_path TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "game_data_references": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                reference_path TEXT NOT NULL,
+                reference_type TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+        },
+    },
+    "status_component_blueprint": {
+        "filename": "status_components.sqlite",
+        "asset_table": "status_assets",
+        "asset_types": {"status_component_blueprint"},
+        "tables": {
+            "status_values": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                stat_name TEXT NOT NULL,
+                base_value TEXT NOT NULL DEFAULT '',
+                per_level_value TEXT NOT NULL DEFAULT '',
+                value_type TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "leveling_rules": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                rule_key TEXT NOT NULL,
+                rule_value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "growth_rules": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                rule_key TEXT NOT NULL,
+                rule_value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "taming_status_rules": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                rule_key TEXT NOT NULL,
+                rule_value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "creature_status_links": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creature_object_path TEXT NOT NULL,
+                status_object_path TEXT NOT NULL,
+                link_source TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "deferred_creature_status": """
+                object_path TEXT PRIMARY KEY,
+                asset_name TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                last_seen_at TEXT NOT NULL DEFAULT ''
+            """,
+        },
+    },
+    "primal_item_blueprint": {
+        "filename": "primal_items.sqlite",
+        "asset_table": "item_assets",
+        "asset_types": {"primal_item_blueprint"},
+        "tables": {
+            "item_display": """
+                object_path TEXT PRIMARY KEY,
+                item_name TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                icon_path TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "item_properties": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                property_name TEXT NOT NULL,
+                property_value TEXT NOT NULL DEFAULT '',
+                value_type TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "item_use_logic": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                trigger_name TEXT NOT NULL,
+                effect_summary TEXT NOT NULL DEFAULT '',
+                source_graph TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "item_crafting_costs": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                ingredient_path TEXT NOT NULL,
+                quantity TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "item_grants": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                grant_type TEXT NOT NULL,
+                grant_path TEXT NOT NULL DEFAULT '',
+                grant_value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "item_references": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                reference_path TEXT NOT NULL,
+                reference_type TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+        },
+    },
+    "buff_blueprint": {
+        "filename": "buffs.sqlite",
+        "asset_table": "buff_assets",
+        "asset_types": {"buff_blueprint"},
+        "tables": {
+            "buff_effects": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                effect_key TEXT NOT NULL,
+                effect_value TEXT NOT NULL DEFAULT '',
+                duration TEXT NOT NULL DEFAULT '',
+                interval TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "buff_triggers": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                trigger_name TEXT NOT NULL,
+                graph_name TEXT NOT NULL DEFAULT '',
+                function_name TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "buff_conditions": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                condition_key TEXT NOT NULL,
+                condition_value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "buff_stacks": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                stack_key TEXT NOT NULL,
+                stack_value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "buff_stat_modifiers": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                stat_name TEXT NOT NULL,
+                operation TEXT NOT NULL DEFAULT '',
+                value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "buff_references": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                reference_path TEXT NOT NULL,
+                reference_type TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+        },
+    },
+    "loot_or_supply_crate": {
+        "filename": "loot.sqlite",
+        "asset_table": "loot_assets",
+        "asset_types": {"loot_or_supply_crate"},
+        "tables": {
+            "loot_crates": """
+                object_path TEXT PRIMARY KEY,
+                crate_type TEXT NOT NULL DEFAULT '',
+                quality_min TEXT NOT NULL DEFAULT '',
+                quality_max TEXT NOT NULL DEFAULT '',
+                level_requirement TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "loot_item_sets": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                set_name TEXT NOT NULL DEFAULT '',
+                set_weight TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "loot_entries": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                item_path TEXT NOT NULL DEFAULT '',
+                entry_weight TEXT NOT NULL DEFAULT '',
+                quantity_min TEXT NOT NULL DEFAULT '',
+                quantity_max TEXT NOT NULL DEFAULT '',
+                quality_min TEXT NOT NULL DEFAULT '',
+                quality_max TEXT NOT NULL DEFAULT '',
+                blueprint_chance TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "loot_conditions": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                condition_key TEXT NOT NULL,
+                condition_value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            "loot_rewards": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                reward_type TEXT NOT NULL,
+                reward_value TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown',
+                source_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            "loot_references": """
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                reference_path TEXT NOT NULL,
+                reference_type TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            """,
+        },
+    },
 }
 
 
@@ -1022,6 +1316,177 @@ def write_priority_database_tables(db_path: Path, priority: dict[str, Any]) -> N
         connection.close()
 
 
+BUSINESS_ASSET_COLUMNS = """
+    object_path TEXT PRIMARY KEY,
+    asset_name TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    domain TEXT NOT NULL DEFAULT '',
+    relative_path TEXT NOT NULL DEFAULT '',
+    uasset_path TEXT NOT NULL DEFAULT '',
+    captured INTEGER NOT NULL DEFAULT 0,
+    processed_current INTEGER NOT NULL DEFAULT 0,
+    failed_current INTEGER NOT NULL DEFAULT 0,
+    fingerprint TEXT NOT NULL DEFAULT '',
+    capture_dir TEXT NOT NULL DEFAULT '',
+    read_status TEXT NOT NULL DEFAULT '',
+    knowledge_status TEXT NOT NULL DEFAULT '',
+    last_read_at TEXT NOT NULL DEFAULT ''
+"""
+
+
+def business_asset_row(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        item.get("object_path") or "",
+        item.get("asset_name") or "",
+        item.get("asset_type") or "",
+        item.get("domain") or "",
+        item.get("relative_path") or "",
+        item.get("uasset_path") or "",
+        1 if item.get("captured") else 0,
+        1 if item.get("processed_current") else 0,
+        1 if item.get("failed_current") else 0,
+        item.get("fingerprint") or fingerprint_for_scan_item(item),
+        item.get("capture_dir") or "",
+        item.get("read_status") or "",
+        item.get("knowledge_status") or "",
+        item.get("last_read_at") or "",
+    )
+
+
+def write_business_database(
+    db_dir: Path,
+    group_id: str,
+    config: dict[str, Any],
+    global_index: dict[str, Any],
+    priority_targets: dict[str, Any],
+) -> None:
+    db_path = db_dir / str(config["filename"])
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
+    assets = [
+        item
+        for item in global_index.get("knowledge_assets", [])
+        if item.get("asset_type") in set(config.get("asset_types") or [])
+    ]
+    group = (priority_targets.get("groups") or {}).get(group_id, {})
+    connection = sqlite3.connect(db_path)
+    try:
+        asset_table = str(config["asset_table"])
+        connection.execute(f"CREATE TABLE {asset_table} ({BUSINESS_ASSET_COLUMNS})")
+        connection.executemany(
+            f"""
+            INSERT INTO {asset_table} (
+                object_path, asset_name, asset_type, domain, relative_path, uasset_path,
+                captured, processed_current, failed_current, fingerprint, capture_dir,
+                read_status, knowledge_status, last_read_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [business_asset_row(item) for item in assets],
+        )
+        connection.execute(f"CREATE INDEX idx_{asset_table}_asset_name ON {asset_table}(asset_name)")
+        connection.execute(f"CREATE INDEX idx_{asset_table}_processed ON {asset_table}(processed_current)")
+        connection.execute(f"CREATE INDEX idx_{asset_table}_failed ON {asset_table}(failed_current)")
+
+        connection.execute(
+            """
+            CREATE TABLE metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        metadata = {
+            "schema": "ark-devkit-knowledge.business-db.v1",
+            "group_id": group_id,
+            "generated": global_index.get("generated", ""),
+            "asset_table": asset_table,
+            "asset_count": str(len(assets)),
+            "candidate_count": str(group.get("candidate_count", 0)),
+            "processed_count": str(group.get("processed_count", 0)),
+            "failed_count": str(group.get("failed_count", 0)),
+            "deferred_count": str(group.get("deferred_count", 0)),
+            "first_batch_count": str(group.get("first_batch_count", 0)),
+        }
+        connection.executemany("INSERT INTO metadata (key, value) VALUES (?, ?)", metadata.items())
+
+        connection.execute(
+            """
+            CREATE TABLE read_sources (
+                object_path TEXT PRIMARY KEY,
+                capture_dir TEXT NOT NULL DEFAULT '',
+                package_json TEXT NOT NULL DEFAULT '',
+                graph_nodes_json TEXT NOT NULL DEFAULT '',
+                class_defaults_json TEXT NOT NULL DEFAULT '',
+                last_read_at TEXT NOT NULL DEFAULT '',
+                read_status TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE unresolved_work (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                work_type TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                source_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'open'
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE asset_references (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                reference_path TEXT NOT NULL,
+                reference_type TEXT NOT NULL DEFAULT '',
+                source_property TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT 'unknown'
+            )
+            """
+        )
+        for table_name, columns in (config.get("tables") or {}).items():
+            connection.execute(f"CREATE TABLE {table_name} ({columns})")
+            if table_name.endswith("_references") or table_name == "asset_references":
+                connection.execute(f"CREATE INDEX idx_{table_name}_object_path ON {table_name}(object_path)")
+
+        if group_id == "status_component_blueprint":
+            rows = [
+                (
+                    item.get("object_path") or "",
+                    item.get("asset_name") or "",
+                    item.get("deferred_reason") or "",
+                    priority_targets.get("generated") or "",
+                )
+                for item in group.get("deferred_candidates", [])
+            ]
+            if rows:
+                connection.executemany(
+                    """
+                    INSERT OR REPLACE INTO deferred_creature_status (
+                        object_path, asset_name, reason, last_seen_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def write_business_databases(out_dir: Path, global_index: dict[str, Any], priority_targets: dict[str, Any]) -> dict[str, str]:
+    db_dir = out_dir / "db"
+    paths: dict[str, str] = {}
+    for group_id, config in BUSINESS_DATABASES.items():
+        write_business_database(db_dir, group_id, config, global_index, priority_targets)
+        paths[group_id] = f"db/{config['filename']}"
+    return paths
+
+
 def infer_asset_role(name: str) -> str:
     lowered = name.lower()
     if "character_bp" in lowered:
@@ -1759,9 +2224,11 @@ def build_knowledge_base(
         },
     )
     global_index_path = ""
+    legacy_global_index_path = ""
     global_report_path = ""
     priority_report_path = ""
     priority_targets_path = ""
+    business_database_paths: dict[str, str] = {}
     global_summary: dict[str, Any] = {
         "exists": False,
         "content_root": "",
@@ -1771,20 +2238,27 @@ def build_knowledge_base(
     if scan_devkit:
         resolved_content_root = content_root or default_content_root()
         if resolved_content_root and resolved_content_root.is_dir():
-            global_db_path = out_dir / "global" / "asset_index.sqlite"
-            ledger_snapshot = read_ledger_snapshot(global_db_path)
+            catalog_db_path = out_dir / "db" / "asset_catalog.sqlite"
+            legacy_db_path = out_dir / "global" / "asset_index.sqlite"
+            ledger_snapshot = read_ledger_snapshot(catalog_db_path)
+            if not ledger_snapshot.get("processed") and legacy_db_path.exists():
+                ledger_snapshot = read_ledger_snapshot(legacy_db_path)
             global_index = scan_devkit_assets(resolved_content_root.resolve(), captures, root, ledger_snapshot)
             stale_full_json = out_dir / "global" / "asset_index.json"
             if stale_full_json.exists():
                 stale_full_json.unlink()
-            write_global_asset_database(global_db_path, global_index)
+            write_global_asset_database(catalog_db_path, global_index)
             write_json(out_dir / "global" / "asset_index_summary.json", global_index_summary(global_index))
             write_text(out_dir / "global" / "asset_index_report.md", render_global_asset_report(global_index))
             priority_targets = build_priority_targets(global_index)
             write_priority_outputs(out_dir, priority_targets)
-            write_priority_database_tables(global_db_path, priority_targets)
-            replace_deferred_assets(global_db_path, priority_targets)
-            global_index_path = "global/asset_index.sqlite"
+            write_priority_database_tables(catalog_db_path, priority_targets)
+            replace_deferred_assets(catalog_db_path, priority_targets)
+            business_database_paths = write_business_databases(out_dir, global_index, priority_targets)
+            legacy_db_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(catalog_db_path, legacy_db_path)
+            global_index_path = "db/asset_catalog.sqlite"
+            legacy_global_index_path = "global/asset_index.sqlite"
             global_report_path = "global/asset_index_report.md"
             priority_report_path = "priorities/priority_targets.md"
             priority_targets_path = "priorities/priority_targets.json"
@@ -1797,6 +2271,8 @@ def build_knowledge_base(
                 "processed_current_count": global_index["processed_current_count"],
                 "failed_current_count": global_index["failed_current_count"],
                 "database": global_index_path,
+                "legacy_database": legacy_global_index_path,
+                "business_databases": business_database_paths,
                 "summary": "global/asset_index_summary.json",
                 "priority_report": priority_report_path,
                 "priority_targets": priority_targets_path,
@@ -1816,10 +2292,12 @@ def build_knowledge_base(
         "scope": "ark_devkit_global_with_focused_systems",
         "focus": focus,
         "global_asset_index": global_index_path,
+        "legacy_global_asset_index": legacy_global_index_path,
         "global_asset_report": global_report_path,
         "priority_report": priority_report_path,
         "priority_targets": priority_targets_path,
         "global": global_summary,
+        "business_databases": business_database_paths,
         "assets": [
             {
                 "name": name,

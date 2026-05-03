@@ -50,7 +50,13 @@ knowledge_base/index.json
 ## 每个文件是什么
 
 - `knowledge_base/index.json`：知识库入口，列出纳入的资产、系统主题和报告。
-- `knowledge_base/global/asset_index.sqlite`：整个 ARK DevKit Content 目录下的 `.uasset` 文件索引数据库。
+- `knowledge_base/db/asset_catalog.sqlite`：总目录数据库，负责全局索引、分桶、排队、去重、失败和暂缓。
+- `knowledge_base/db/primal_game_data.sqlite`：全局规则、资源注册、物品/生物入口。
+- `knowledge_base/db/status_components.sqlite`：人物/生物状态、属性、成长、经验和暂缓单体状态组件。
+- `knowledge_base/db/primal_items.sqlite`：物品描述、使用逻辑、消耗、给予内容和引用。
+- `knowledge_base/db/buffs.sqlite`：Buff 效果、触发、条件、叠加、属性修改。
+- `knowledge_base/db/loot.sqlite`：宝箱、掉落池、掉落项、奖励和条件。
+- `knowledge_base/global/asset_index.sqlite`：兼容旧工具的总目录数据库副本。
 - `knowledge_base/global/asset_index_summary.json`：全局索引摘要，适合直接交给 AI 看。
 - `knowledge_base/global/asset_index_report.md`：全局索引的人读版报告。
 - `knowledge_base/priorities/priority_targets.md`：五类重点资产的自动解析优先清单。
@@ -63,7 +69,7 @@ knowledge_base/index.json
 
 ## SQLite 里面怎么分表
 
-`asset_index.sqlite` 不是让你主要盯着 27 万行看的。它现在按“原始目录”和“知识库工作流”分开：
+`asset_catalog.sqlite` 不是让你主要盯着 27 万行看的。它现在按“原始目录”和“知识库工作流”分开：
 
 - `asset_files`：全量 `.uasset` 文件目录，机器用，数量会很大。
 - `assets`：知识库工作资产，只放可能进入分析循环的类型。
@@ -74,6 +80,8 @@ knowledge_base/index.json
 - `deferred_assets`：暂缓资产，例如单个生物的 `DinoCharacterStatusComponent_BP_恐龙名`。
 
 后续循环会先看 `processed_assets`，文件没变就不会再读；文件变了、失败需要重试、或我们解除暂缓规则时，才会重新进入队列。
+
+五个业务库只存各自类别的知识表，不再混在一个大库里。例如 Buff 只看 `buffs.sqlite`，宝箱只看 `loot.sqlite`。总目录库只负责告诉工具“下一轮读谁、谁已经读过、谁暂缓”。
 
 ## 怎么加新资产
 

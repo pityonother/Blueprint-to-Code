@@ -23,7 +23,19 @@ from blueprint_translator.asset_ledger import (
 from blueprint_translator.utils import safe_filename
 CAPTURE_ROOT = PROJECT_ROOT / "captures"
 DEFAULT_QUEUE = PROJECT_ROOT / "knowledge_base" / "priorities" / "deep_read_queue.txt"
-LEDGER_DB = PROJECT_ROOT / "knowledge_base" / "global" / "asset_index.sqlite"
+CATALOG_DB = PROJECT_ROOT / "knowledge_base" / "db" / "asset_catalog.sqlite"
+LEGACY_LEDGER_DB = PROJECT_ROOT / "knowledge_base" / "global" / "asset_index.sqlite"
+
+
+def ledger_db_path() -> Path:
+    return CATALOG_DB if CATALOG_DB.is_file() else LEGACY_LEDGER_DB
+
+
+def record_results(results: list[dict[str, Any]], *, knowledge_status: str) -> None:
+    primary = ledger_db_path()
+    record_asset_results(primary, results, knowledge_status=knowledge_status)
+    if CATALOG_DB.is_file() and LEGACY_LEDGER_DB.is_file() and primary.resolve() != LEGACY_LEDGER_DB.resolve():
+        record_asset_results(LEGACY_LEDGER_DB, results, knowledge_status=knowledge_status)
 
 
 def read_queue(path: Path) -> list[str]:
@@ -88,7 +100,7 @@ def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level
             "attempted": attempted,
         }
 
-    if not force and processed_current_for_path(LEDGER_DB, object_path, uasset_path):
+    if not force and processed_current_for_path(ledger_db_path(), object_path, uasset_path):
         return {
             "asset_path": object_path,
             "asset_name": asset_name,
@@ -205,15 +217,15 @@ def main() -> int:
     write_batch_report(out_md, payload)
 
     if args.rebuild_knowledge:
-        record_asset_results(LEDGER_DB, results, knowledge_status="captured")
+        record_results(results, knowledge_status="captured")
         command = [sys.executable, str(PROJECT_ROOT / "scripts" / "build_ark_knowledge_base.py")]
         print("rebuilding knowledge base", flush=True)
         completed = subprocess.run(command, cwd=str(PROJECT_ROOT), text=True, encoding="utf-8", errors="replace")
         if completed.returncode != 0:
             return completed.returncode
-        record_asset_results(LEDGER_DB, results, knowledge_status="imported")
+        record_results(results, knowledge_status="imported")
     else:
-        record_asset_results(LEDGER_DB, results, knowledge_status="captured")
+        record_results(results, knowledge_status="captured")
 
     print(f"wrote {out_md}")
     return 0
