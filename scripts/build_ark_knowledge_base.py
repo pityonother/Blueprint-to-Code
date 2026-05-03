@@ -136,6 +136,90 @@ PRIORITY_NATIVE_KEYWORDS = (
     "XP",
 )
 
+DEEP_READ_GROUPS = {
+    "primal_game_data": {
+        "title": "PrimalGameData：全局规则、资源注册、物品/生物入口",
+        "asset_types": {"primal_game_data"},
+        "keywords": {
+            "PrimalGameData": 40,
+            "PrimalGameData_BP": 60,
+            "BASE": 20,
+            "CORE": 20,
+            "CoreBlueprints": 25,
+            "ASA": 10,
+        },
+        "limit": 60,
+    },
+    "status_component_blueprint": {
+        "title": "StatusComponent：生物属性、成长、经验和状态值",
+        "asset_types": {"status_component_blueprint"},
+        "keywords": {
+            "Gigantoraptor": 80,
+            "DinoCharacterStatusComponent": 45,
+            "StatusComponent": 35,
+            "Baby": 25,
+            "Experience": 35,
+            "XP": 35,
+            "Level": 30,
+            "Stat": 35,
+            "Imprint": 30,
+            "Maturation": 25,
+            "Taming": 25,
+        },
+        "limit": 120,
+    },
+    "primal_item_blueprint": {
+        "title": "PrimalItem：物品描述、使用逻辑、消耗与显示数据",
+        "asset_types": {"primal_item_blueprint"},
+        "keywords": {
+            "Gigantoraptor": 80,
+            "Feather": 70,
+            "Treasure": 50,
+            "Experience": 35,
+            "XP": 35,
+            "Resource": 20,
+            "Egg": 25,
+            "Consumable": 20,
+            "Artifact": 15,
+        },
+        "limit": 160,
+    },
+    "buff_blueprint": {
+        "title": "Buff：临时效果、训练、继承概率、状态覆盖",
+        "asset_types": {"buff_blueprint"},
+        "keywords": {
+            "Gigantoraptor": 90,
+            "Baby": 40,
+            "Call": 30,
+            "Training": 45,
+            "Imprint": 45,
+            "Feather": 50,
+            "Stat": 40,
+            "Claim": 35,
+            "Taming": 35,
+            "Parent": 25,
+            "Pride": 25,
+        },
+        "limit": 160,
+    },
+    "loot_or_supply_crate": {
+        "title": "Loot/SupplyCrate：宝箱、掉落和奖励池",
+        "asset_types": {"loot_or_supply_crate"},
+        "keywords": {
+            "Treasure": 80,
+            "Loot": 45,
+            "SupplyCrate": 45,
+            "Reward": 35,
+            "Experience": 35,
+            "XP": 35,
+            "Gigantoraptor": 50,
+            "ItemSet": 25,
+            "Quality": 20,
+        },
+        "limit": 160,
+    },
+}
+
 
 def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
@@ -476,6 +560,161 @@ def render_global_asset_report(index: dict[str, Any]) -> str:
     lines.append("- `loot_or_supply_crate`：宝箱、掉落和奖励池。")
     lines.append("")
     return "\n".join(lines)
+
+
+def priority_text_for_asset(item: dict[str, Any]) -> str:
+    return " ".join(
+        [
+            str(item.get("asset_name") or ""),
+            str(item.get("object_path") or ""),
+            str(item.get("relative_path") or ""),
+            str(item.get("asset_type") or ""),
+            str(item.get("domain") or ""),
+        ]
+    )
+
+
+def score_priority_asset(item: dict[str, Any], group: dict[str, Any]) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    asset_type = item.get("asset_type")
+    if asset_type in group["asset_types"]:
+        score += 100
+        reasons.append(f"类型匹配：{asset_type}")
+    text = priority_text_for_asset(item)
+    for keyword, weight in group["keywords"].items():
+        if contains_keyword(text, keyword):
+            score += int(weight)
+            reasons.append(f"命中关键词：{keyword}")
+    rel = str(item.get("relative_path") or "")
+    if rel.startswith("ASA/"):
+        score += 10
+        reasons.append("ASA 路径")
+    if "/Dinos/" in rel or rel.startswith("ASA/Dinos/"):
+        score += 10
+        reasons.append("Dinos 路径")
+    if item.get("captured"):
+        score += 15
+        reasons.append("已有 captures，可直接做交叉验证")
+    if item.get("has_uexp"):
+        reasons.append("存在 .uexp，深读时需要一起定位")
+    return score, reasons
+
+
+def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
+    assets = global_index.get("assets", [])
+    groups: dict[str, Any] = {}
+    all_queue: list[str] = []
+    for group_id, group in DEEP_READ_GROUPS.items():
+        candidates: list[dict[str, Any]] = []
+        total_count = 0
+        captured_count = 0
+        for item in assets:
+            if item.get("asset_type") not in group["asset_types"]:
+                continue
+            total_count += 1
+            if item.get("captured"):
+                captured_count += 1
+            score, reasons = score_priority_asset(item, group)
+            if score <= 0:
+                continue
+            candidates.append(
+                {
+                    "asset_name": item.get("asset_name"),
+                    "object_path": item.get("object_path"),
+                    "asset_type": item.get("asset_type"),
+                    "domain": item.get("domain"),
+                    "relative_path": item.get("relative_path"),
+                    "captured": item.get("captured"),
+                    "has_uexp": item.get("has_uexp"),
+                    "score": score,
+                    "reasons": reasons[:8],
+                }
+            )
+        candidates.sort(key=lambda item: (-int(item["score"]), bool(item["captured"]), str(item["object_path"]).lower()))
+        limit = int(group.get("limit") or 100)
+        first_batch = [item for item in candidates if not item.get("captured")][:25]
+        for item in first_batch:
+            object_path = str(item.get("object_path") or "")
+            if object_path and object_path not in all_queue:
+                all_queue.append(object_path)
+        groups[group_id] = {
+            "title": group["title"],
+            "total_count": total_count,
+            "captured_count": captured_count,
+            "candidate_count": len(candidates),
+            "first_batch_count": len(first_batch),
+            "first_batch": first_batch,
+            "candidates": candidates[:limit],
+        }
+    return {
+        "schema": "ark-devkit-knowledge.priority-targets.v1",
+        "generated": now_iso(),
+        "source_global_asset_count": global_index.get("asset_count", 0),
+        "groups": groups,
+        "deep_read_queue": all_queue,
+    }
+
+
+def render_priority_targets_report(priority: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append("# 五类重点资产补读清单")
+    lines.append("")
+    lines.append(f"生成时间：{priority.get('generated')}")
+    lines.append("")
+    lines.append("这份清单从全局 DevKit 索引里挑出下一批最值得深度解析的资产。")
+    lines.append("目标是补齐：全局规则、属性状态、物品逻辑、Buff 效果、宝箱/掉落。")
+    lines.append("")
+    lines.append("## 一键队列")
+    lines.append("")
+    lines.append("队列文件：`knowledge_base/priorities/deep_read_queue.txt`")
+    lines.append("")
+    lines.append(f"- 队列资产数：{len(priority.get('deep_read_queue', []))}")
+    lines.append("")
+    for group_id, group in priority.get("groups", {}).items():
+        lines.append(f"## {group['title']}")
+        lines.append("")
+        lines.append(f"- 全局数量：{group.get('total_count', 0)}")
+        lines.append(f"- 已深度解析：{group.get('captured_count', 0)}")
+        lines.append(f"- 本轮候选：{group.get('candidate_count', 0)}")
+        lines.append("")
+        lines.append("### 第一批建议深读")
+        lines.append("")
+        first_batch = group.get("first_batch", [])
+        if not first_batch:
+            lines.append("暂无未深读候选。")
+        else:
+            for idx, item in enumerate(first_batch[:25], start=1):
+                reasons = "；".join(item.get("reasons", [])[:4])
+                lines.append(f"{idx}. `{item.get('asset_name')}`")
+                lines.append(f"   - Object Path：`{item.get('object_path')}`")
+                lines.append(f"   - 分数：{item.get('score')}；原因：{reasons}")
+        lines.append("")
+        lines.append("### 候选 Top 15")
+        lines.append("")
+        lines.append("| 资产 | 类型 | 分数 | 已深读 |")
+        lines.append("| --- | --- | ---: | --- |")
+        for item in group.get("candidates", [])[:15]:
+            captured = "是" if item.get("captured") else "否"
+            lines.append(
+                f"| `{item.get('asset_name')}` | `{item.get('asset_type')}` | {item.get('score')} | {captured} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def write_priority_outputs(out_dir: Path, priority: dict[str, Any]) -> None:
+    write_json(out_dir / "priorities" / "priority_targets.json", priority)
+    write_text(out_dir / "priorities" / "priority_targets.md", render_priority_targets_report(priority))
+    queue = "\n".join(priority.get("deep_read_queue", []))
+    if queue:
+        queue += "\n"
+    write_text(out_dir / "priorities" / "deep_read_queue.txt", queue)
+    for group_id, group in priority.get("groups", {}).items():
+        group_queue = "\n".join(str(item.get("object_path") or "") for item in group.get("first_batch", []) if item.get("object_path"))
+        if group_queue:
+            group_queue += "\n"
+        write_text(out_dir / "priorities" / f"{group_id}_queue.txt", group_queue)
 
 
 def infer_asset_role(name: str) -> str:
@@ -1214,6 +1453,8 @@ def build_knowledge_base(
     )
     global_index_path = ""
     global_report_path = ""
+    priority_report_path = ""
+    priority_targets_path = ""
     global_summary: dict[str, Any] = {
         "exists": False,
         "content_root": "",
@@ -1230,8 +1471,12 @@ def build_knowledge_base(
             write_global_asset_database(out_dir / "global" / "asset_index.sqlite", global_index)
             write_json(out_dir / "global" / "asset_index_summary.json", global_index_summary(global_index))
             write_text(out_dir / "global" / "asset_index_report.md", render_global_asset_report(global_index))
+            priority_targets = build_priority_targets(global_index)
+            write_priority_outputs(out_dir, priority_targets)
             global_index_path = "global/asset_index.sqlite"
             global_report_path = "global/asset_index_report.md"
+            priority_report_path = "priorities/priority_targets.md"
+            priority_targets_path = "priorities/priority_targets.json"
             global_summary = {
                 "exists": True,
                 "content_root": global_index["content_root"],
@@ -1239,6 +1484,9 @@ def build_knowledge_base(
                 "captured_asset_count": global_index["captured_asset_count"],
                 "database": global_index_path,
                 "summary": "global/asset_index_summary.json",
+                "priority_report": priority_report_path,
+                "priority_targets": priority_targets_path,
+                "deep_read_queue": "priorities/deep_read_queue.txt",
             }
         else:
             global_summary = {
@@ -1255,6 +1503,8 @@ def build_knowledge_base(
         "focus": focus,
         "global_asset_index": global_index_path,
         "global_asset_report": global_report_path,
+        "priority_report": priority_report_path,
+        "priority_targets": priority_targets_path,
         "global": global_summary,
         "assets": [
             {

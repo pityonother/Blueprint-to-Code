@@ -25,6 +25,8 @@ runtime\python\python.exe scripts\build_ark_knowledge_base.py
 knowledge_base/
 ```
 
+这一步只是建立全局索引和专题知识库，不需要你手动解析资产。
+
 ## 先看哪个文件
 
 先看全局资产索引：
@@ -51,6 +53,9 @@ knowledge_base/index.json
 - `knowledge_base/global/asset_index.sqlite`：整个 ARK DevKit Content 目录下的 `.uasset` 文件索引数据库。
 - `knowledge_base/global/asset_index_summary.json`：全局索引摘要，适合直接交给 AI 看。
 - `knowledge_base/global/asset_index_report.md`：全局索引的人读版报告。
+- `knowledge_base/priorities/priority_targets.md`：五类重点资产的自动解析优先清单。
+- `knowledge_base/priorities/deep_read_queue.txt`：工具用的自动解析队列，不是让用户手动复制。
+- `knowledge_base/priorities/priority_read_results.md`：自动解析队列跑完后的结果报告。
 - `knowledge_base/assets/*.json`：单个蓝图资产摘要，包括默认变量、图页、函数调用、变量读写、外部引用和证据。
 - `knowledge_base/systems/gigantoraptor.json`：把巨盗龙相关资产按主题聚合，例如羽毛继承、幼崽训练、Buff、巢穴驯养、XP/宝箱。
 - `knowledge_base/native_functions.json`：记录蓝图里看得到调用、但看不到内部实现的 native/父类函数。
@@ -71,6 +76,22 @@ runtime\python\python.exe scripts\build_ark_knowledge_base.py --asset Gigantorap
 ```bat
 runtime\python\python.exe scripts\build_ark_knowledge_base.py --focus gigantoraptor
 ```
+
+## 怎么自动解析五类重点资产
+
+GUI 里点：
+
+```text
+自动解析第一批重点资产
+```
+
+或者命令行运行：
+
+```bat
+runtime\python\python.exe scripts\read_priority_assets.py --limit 25 --no-analyze --rebuild-knowledge
+```
+
+这里的 `--limit 25` 表示先自动读 25 个重点资产。不是让用户去 DevKit 手动复制；程序会直接读取 `.uasset/.uexp`。如果某些资产二进制解析失败，才会在结果里标出来。
 
 ## 目前第一版的定位
 

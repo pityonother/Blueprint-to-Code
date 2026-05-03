@@ -92,6 +92,12 @@ interface KnowledgeBaseSummary {
   reportExists: boolean;
   globalReportPath: string;
   globalReportExists: boolean;
+  priorityReportPath: string;
+  priorityReportExists: boolean;
+  priorityResultsPath: string;
+  priorityResultsExists: boolean;
+  priorityQueuePath: string;
+  priorityQueueExists: boolean;
   generated: string;
   focus: string;
   assetCount: number;
@@ -1036,6 +1042,9 @@ function renderKnowledgeBaseSection(): string {
       </div>
       <div class="button-row">
         ${actionButton('生成/更新全局知识库', 'build-knowledge-base', 'primary', busy)}
+        ${actionButton('自动解析第一批重点资产', 'read-priority-assets', 'primary', busy || !kb?.priorityQueueExists)}
+        ${actionButton('打开五类补读清单', 'open-knowledge-priority-report', 'secondary', !kb?.priorityReportExists)}
+        ${actionButton('打开自动解析结果', 'open-knowledge-priority-results', 'secondary', !kb?.priorityResultsExists)}
         ${actionButton('打开知识库报告', 'open-knowledge-report', 'secondary', !kb?.reportExists)}
         ${actionButton('打开全局资产索引', 'open-knowledge-global-report', 'secondary', !kb?.globalReportExists)}
         ${actionButton('打开知识库目录', 'open-knowledge-folder', 'ghost', !kb?.exists)}
@@ -1813,7 +1822,47 @@ async function buildKnowledgeBase(): Promise<void> {
   }
 }
 
-async function openKnowledgeBase(target: 'report' | 'folder' | 'index' | 'global_report' = 'report'): Promise<void> {
+async function readPriorityAssets(): Promise<void> {
+  busy = true;
+  appendLog('开始自动解析五类重点资产的第一批候选。');
+  try {
+    const payload = await api<ApiResult & { job: JobInfo }>(
+      '/api/knowledge-base/read-priority',
+      {
+        method: 'POST',
+        body: JSON.stringify({ limit: 25, analyze: false }),
+      },
+    );
+    activeJobId = payload.job.id;
+    activeJobLabel = '重点资产自动解析';
+    appendLog(`重点资产解析后台任务已创建：${payload.job.id}`);
+    render();
+    const job = await waitForJob(payload.job.id, '重点资产自动解析');
+    const outcome = job.status === 'succeeded' ? '完成' : `${job.status}，退出码 ${job.returnCode ?? '-'}`;
+    appendLog(`重点资产自动解析${outcome}，耗时 ${job.durationSeconds}s。`);
+    if (job.error) {
+      appendLog(job.error);
+    }
+    if (job.stderr) {
+      appendLog(job.stderr.trim().slice(-1200));
+    }
+    if (job.stdout) {
+      appendLog(job.stdout.trim().slice(-1200));
+    }
+    await refreshState(false);
+  } catch (error) {
+    appendLog(error instanceof Error ? error.message : String(error));
+  } finally {
+    busy = false;
+    activeJobId = '';
+    activeJobLabel = '';
+    render();
+  }
+}
+
+async function openKnowledgeBase(
+  target: 'report' | 'folder' | 'index' | 'global_report' | 'priority_report' | 'priority_results' = 'report',
+): Promise<void> {
   try {
     const payload = await api<ApiResult & { path: string }>('/api/knowledge-base/open', {
       method: 'POST',
@@ -1864,12 +1913,24 @@ async function handleAction(action: string): Promise<void> {
     await buildKnowledgeBase();
     return;
   }
+  if (action === 'read-priority-assets') {
+    await readPriorityAssets();
+    return;
+  }
   if (action === 'open-knowledge-report') {
     await openKnowledgeBase('report');
     return;
   }
   if (action === 'open-knowledge-global-report') {
     await openKnowledgeBase('global_report');
+    return;
+  }
+  if (action === 'open-knowledge-priority-report') {
+    await openKnowledgeBase('priority_report');
+    return;
+  }
+  if (action === 'open-knowledge-priority-results') {
+    await openKnowledgeBase('priority_results');
     return;
   }
   if (action === 'open-knowledge-folder') {

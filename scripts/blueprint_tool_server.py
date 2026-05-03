@@ -94,6 +94,9 @@ KNOWLEDGE_TARGETS = {
     "global_report": ("global", "asset_index_report.md"),
     "global_index": ("global", "asset_index.sqlite"),
     "global_summary": ("global", "asset_index_summary.json"),
+    "priority_report": ("priorities", "priority_targets.md"),
+    "priority_results": ("priorities", "priority_read_results.md"),
+    "priority_queue": ("priorities", "deep_read_queue.txt"),
     "system": ("systems", "gigantoraptor.json"),
     "native_functions": ("native_functions.json",),
     "evidence": ("evidence.json",),
@@ -1139,6 +1142,9 @@ def knowledge_base_summary() -> dict[str, object]:
     index_path = KNOWLEDGE_ROOT / "index.json"
     report_path = KNOWLEDGE_ROOT / "reports" / "gigantoraptor_knowledge_base.md"
     global_report_path = KNOWLEDGE_ROOT / "global" / "asset_index_report.md"
+    priority_report_path = KNOWLEDGE_ROOT / "priorities" / "priority_targets.md"
+    priority_results_path = KNOWLEDGE_ROOT / "priorities" / "priority_read_results.md"
+    priority_queue_path = KNOWLEDGE_ROOT / "priorities" / "deep_read_queue.txt"
     index = read_json_file(index_path)
     assets = index.get("assets", []) if isinstance(index, dict) else []
     systems = index.get("systems", []) if isinstance(index, dict) else []
@@ -1153,6 +1159,12 @@ def knowledge_base_summary() -> dict[str, object]:
         "reportExists": report_path.is_file(),
         "globalReportPath": str(global_report_path),
         "globalReportExists": global_report_path.is_file(),
+        "priorityReportPath": str(priority_report_path),
+        "priorityReportExists": priority_report_path.is_file(),
+        "priorityResultsPath": str(priority_results_path),
+        "priorityResultsExists": priority_results_path.is_file(),
+        "priorityQueuePath": str(priority_queue_path),
+        "priorityQueueExists": priority_queue_path.is_file(),
         "generated": generated,
         "focus": focus,
         "assetCount": len(assets) if isinstance(assets, list) else 0,
@@ -1184,6 +1196,31 @@ def start_knowledge_base_job(focus: str = "gigantoraptor", assets: list[str] | N
         }
 
     return create_background_job("knowledge_base", f"{focus or 'gigantoraptor'} 背景知识库", command, complete)
+
+
+def priority_read_command(limit: int = 25, *, analyze: bool = False, rebuild_knowledge: bool = True) -> list[str]:
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "read_priority_assets.py"),
+        "--limit",
+        str(max(limit, 0)),
+    ]
+    if not analyze:
+        command.append("--no-analyze")
+    if rebuild_knowledge:
+        command.append("--rebuild-knowledge")
+    return command
+
+
+def start_priority_read_job(limit: int = 25, *, analyze: bool = False) -> dict[str, object]:
+    command = priority_read_command(limit, analyze=analyze)
+
+    def complete(_return_code: int) -> dict[str, object]:
+        return {
+            "knowledgeBase": knowledge_base_summary(),
+        }
+
+    return create_background_job("priority_read", f"自动解析重点资产前 {limit} 个", command, complete)
 
 
 def resolve_knowledge_target(target: str) -> Path:
@@ -1350,6 +1387,12 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 raw_assets = body.get("assets", [])
                 assets = [str(item) for item in raw_assets] if isinstance(raw_assets, list) else None
                 job = start_knowledge_base_job(str(body.get("focus") or "gigantoraptor"), assets)
+                self.send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
+                return
+            if self.path == "/api/knowledge-base/read-priority":
+                limit = int(body.get("limit") or 25)
+                analyze = bool(body.get("analyze") or False)
+                job = start_priority_read_job(limit, analyze=analyze)
                 self.send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
                 return
             if self.path == "/api/knowledge-base/open":
