@@ -13,7 +13,7 @@ import json
 import os
 import re
 import struct
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
@@ -2137,6 +2137,124 @@ def graph_coverage(nodes: list[NodeInfo]) -> dict[str, object]:
     }
 
 
+def synthetic_pin_type(category: str) -> dict[str, object]:
+    return {
+        "PinCategory": category,
+        "PinSubCategory": "",
+        "PinSubCategoryObject": "",
+        "ContainerType": "None",
+        "bIsReference": False,
+        "bIsConst": False,
+        "source": "uasset_reverse_link_synthesis",
+        "confidence": "medium",
+    }
+
+
+def synthetic_boundary_pin_name(category: str, source_pin: PinInfo, used_names: set[str]) -> str:
+    if category == "exec":
+        base = "then"
+    else:
+        base = source_pin.name or category or "value"
+    name = base
+    suffix = 2
+    while name in used_names:
+        name = f"{base}_{suffix}"
+        suffix += 1
+    used_names.add(name)
+    return name
+
+
+def synthesize_boundary_pins_from_incoming_links(nodes: list[NodeInfo]) -> list[str]:
+    by_name = {node.name: node for node in nodes if node.name}
+    incoming: dict[str, list[tuple[NodeInfo, PinInfo, dict[str, object]]]] = defaultdict(list)
+    for source_node in nodes:
+        for source_pin in source_node.pins:
+            for link in source_pin.links:
+                target = by_name.get(str(link.get("target_node") or ""))
+                if not target or target is source_node or target.pins:
+                    continue
+                incoming[target.name].append((source_node, source_pin, link))
+
+    warnings: list[str] = []
+    for target_name, refs in sorted(incoming.items()):
+        target = by_name.get(target_name)
+        if not target or target.pins:
+            continue
+        used_names: set[str] = set()
+        synthesized: list[PinInfo] = []
+        seen: set[tuple[str, str, str]] = set()
+        for source_node, source_pin, _link in refs[:16]:
+            category = source_pin.category or ("exec" if source_pin.name in {"execute", "then"} else "wildcard")
+            marker = (category, source_node.name, source_pin.name)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            pin_name = synthetic_boundary_pin_name(category, source_pin, used_names)
+            pin_id = f"{target.name}_synth_pin_{len(synthesized) + 1}"
+            reverse_link = {
+                "target_node": source_node.name,
+                "target_pin_id": source_pin.id,
+                "target_pin": source_pin.name,
+                "target_package_index": 0,
+                "source_offset": 0,
+                "source": "uasset_reverse_link_synthesis",
+                "confidence": "medium",
+                "resolution_status": "resolved_pin" if source_pin.id else "resolved_pin_heuristic",
+                "status": "resolved_node",
+                "kind": "exec" if category == "exec" else "data",
+                "target_node_guid": source_node.node_guid,
+            }
+            synthesized.append(
+                PinInfo(
+                    id=pin_id,
+                    name=pin_name,
+                    direction="EGPD_Output",
+                    category=category,
+                    pin_type=synthetic_pin_type(category),
+                    linked_to_raw=source_node.name,
+                    links=[reverse_link],  # type: ignore[list-item]
+                    source="uasset_reverse_link_synthesis",
+                    confidence="medium",
+                    warnings=[
+                        "Pin was synthesized from an incoming LinkedTo reference because this boundary node did not expose decoded pins."
+                    ],
+                    resolution={"status": "synthesized_from_incoming_link", "link_count": 1},
+                )
+            )
+        if synthesized:
+            target.pins.extend(synthesized)
+            target.semantic = build_node_semantic(
+                class_name=target.class_name,
+                properties=target.properties if isinstance(target.properties, dict) else {},
+                pins=target.pins,
+            )
+            target.confidence = confidence_floor(target.confidence, "medium")
+            message = f"{target.name}: Synthesized {len(synthesized)} boundary pins from incoming LinkedTo references."
+            target.warnings.append(message)
+            warnings.append(message)
+    return warnings
+
+
+def is_complete_empty_graph(
+    nodes: list[NodeInfo],
+    node_refs: list[int],
+    graph_warnings: list[str],
+    *,
+    graph_name: str,
+    graph_type: str,
+) -> bool:
+    if not graph_warnings and not nodes and not node_refs:
+        return True
+    if len(nodes) != 1:
+        return False
+    node = nodes[0]
+    if node.pins or node.link_count:
+        return False
+    if node.class_name != "K2Node_FunctionEntry":
+        return False
+    return graph_type == "ConstructionScript" or graph_name == "UserConstructionScript" or node.function == "UserConstructionScript"
+
+
 def target_pin_candidates(target: NodeInfo, source_pin: PinInfo) -> list[PinInfo]:
     wants_exec = source_pin.category == "exec"
     input_pins = [pin for pin in target.pins if pin.direction != "EGPD_Output"]
@@ -2377,9 +2495,27 @@ def parse_graph_export_payload(
                 "properties": list((cached.get("properties", {}) if isinstance(cached.get("properties"), dict) else {}).keys()),
             }
         )
+    synthesis_warnings = synthesize_boundary_pins_from_incoming_links(nodes)
+    node_by_name = {node.name: node for node in nodes}
+    for record in parsed_node_records:
+        node = node_by_name.get(str(record.get("name") or ""))
+        if not node:
+            continue
+        record["pin_count"] = len(node.pins)
+        record["link_count"] = node.link_count
+        record["confidence"] = node.confidence
+        record["semantic"] = node.semantic
+        record["warnings"] = node.warnings
     link_resolution_counts = resolve_graph_link_target_pins(nodes)
     graph_name = str(graph_export.get("object_name") or graph_export.get("display_name") or f"Graph_{graph_export.get('index')}")
     graph_type = graph_type_from_export(graph_export)
+    empty_graph_complete = is_complete_empty_graph(
+        nodes,
+        node_refs,
+        graph_warnings,
+        graph_name=graph_name,
+        graph_type=graph_type,
+    )
     payload = build_blueprint_payload_from_nodes(
         nodes=nodes,
         raw_text="",
@@ -2398,9 +2534,11 @@ def parse_graph_export_payload(
     payload["metadata"]["graph_type"] = graph_type
     pin_count = sum(len(node.pins) for node in nodes)
     link_count = sum(node.link_count for node in nodes)
-    all_warnings = graph_warnings + node_warnings[:120]
-    status = classify_graph_status(nodes, all_warnings)
+    all_warnings = graph_warnings + node_warnings[:120] + synthesis_warnings
+    status = "complete" if empty_graph_complete else classify_graph_status(nodes, all_warnings)
     confidence = graph_confidence(nodes, all_warnings)
+    if empty_graph_complete:
+        confidence = "medium" if not nodes else confidence_floor(confidence, "medium")
     payload["metadata"]["uasset_read_status"] = status
     payload["metadata"]["confidence"] = confidence
     payload["metadata"]["coverage"] = graph_coverage(nodes)

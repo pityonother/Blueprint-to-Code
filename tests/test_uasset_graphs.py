@@ -22,6 +22,8 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
     render_candidate_text,
     render_uasset_class_defaults_report,
     render_pin_link_report,
+    synthesize_boundary_pins_from_incoming_links,
+    is_complete_empty_graph,
 )
 
 
@@ -337,6 +339,55 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(counts["resolved_pin_heuristic"], 1)
         self.assertEqual(source_pin.links[0]["target_pin_id"], "target_execute")
         self.assertEqual(source_pin.links[0]["resolution_status"], "resolved_pin_heuristic")
+
+    def test_incoming_links_synthesize_boundary_pins(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        call = NodeInfo(index=1, class_name="K2Node_CallFunction", node_type="K2Node_CallFunction", name="Call")
+        entry = NodeInfo(index=2, class_name="K2Node_FunctionEntry", node_type="K2Node_FunctionEntry", name="Entry")
+        call_pin = PinInfo(id="call_execute", name="execute", direction="EGPD_Input", category="exec")
+        call_pin.links.append({"target_node": "Entry", "target_pin_id": "", "confidence": "medium"})
+        call.pins.append(call_pin)
+
+        warnings = synthesize_boundary_pins_from_incoming_links([call, entry])
+        counts = resolve_graph_link_target_pins([call, entry])
+
+        self.assertEqual(len(entry.pins), 1)
+        self.assertEqual(entry.pins[0].source, "uasset_reverse_link_synthesis")
+        self.assertEqual(entry.pins[0].category, "exec")
+        self.assertIn("Synthesized 1 boundary pins", warnings[0])
+        self.assertEqual(counts["resolved_pin_heuristic"], 1)
+        self.assertEqual(call_pin.links[0]["target_pin_id"], entry.pins[0].id)
+
+    def test_empty_event_and_construction_graphs_are_complete(self):
+        from blueprint_translator.models import NodeInfo
+
+        self.assertTrue(
+            is_complete_empty_graph(
+                [],
+                [],
+                [],
+                graph_name="EventGraph",
+                graph_type="EventGraph",
+            )
+        )
+        self.assertTrue(
+            is_complete_empty_graph(
+                [
+                    NodeInfo(
+                        index=1,
+                        class_name="K2Node_FunctionEntry",
+                        node_type="K2Node_FunctionEntry",
+                        name="K2Node_FunctionEntry_728",
+                        function="UserConstructionScript",
+                    )
+                ],
+                [1],
+                [],
+                graph_name="UserConstructionScript",
+                graph_type="ConstructionScript",
+            )
+        )
 
     def test_partial_triage_and_quality_gates_are_structured(self):
         payload = {
