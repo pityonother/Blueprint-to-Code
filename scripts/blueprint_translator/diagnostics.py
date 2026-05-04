@@ -47,6 +47,25 @@ def node_labels_from_payload(payload: dict[str, object], key: str) -> list[str]:
     return [str(node.get("label") or node.get("name") or node.get("node_type") or "") for node in payload.get(key, [])]
 
 
+def is_confirmed_empty_uasset_graph(metadata: dict[str, object], node_count: int) -> bool:
+    if node_count != 0:
+        return False
+    if str(metadata.get("source_kind") or "") != "uasset_binary":
+        return False
+    return str(metadata.get("uasset_read_status") or "") in {"complete", "complete_empty"}
+
+
+def asset_likely_needs_component_context(asset_name: str) -> bool:
+    lowered = str(asset_name or "").lower()
+    if not lowered:
+        return True
+    if lowered.startswith(("primalitem", "primalgamedata", "core_primalgamedata", "base_primalgamedata")):
+        return False
+    if "statuscomponent" in lowered:
+        return False
+    return True
+
+
 def build_diagnostic_findings(payload: dict[str, object]) -> list[dict[str, object]]:
     diagnostics = payload.get("diagnostics", {})
     metadata = payload.get("metadata", {})
@@ -54,7 +73,8 @@ def build_diagnostic_findings(payload: dict[str, object]) -> list[dict[str, obje
     findings: list[dict[str, object]] = []
 
     node_count = int(metadata.get("node_count") or 0)
-    if node_count == 0:
+    empty_uasset_graph = is_confirmed_empty_uasset_graph(metadata if isinstance(metadata, dict) else {}, node_count)
+    if node_count == 0 and not empty_uasset_graph:
         findings.append(
             diagnostic_finding(
                 "BP000",
@@ -66,7 +86,7 @@ def build_diagnostic_findings(payload: dict[str, object]) -> list[dict[str, obje
             )
         )
 
-    if diagnostics.get("missing_entry_points"):
+    if diagnostics.get("missing_entry_points") and node_count > 0:
         findings.append(
             diagnostic_finding(
                 "BP001",
@@ -153,18 +173,20 @@ def build_diagnostic_findings(payload: dict[str, object]) -> list[dict[str, obje
             )
         )
 
+    needs_components = asset_likely_needs_component_context(str(metadata.get("asset_name") or ""))
     if not str(context.get("components_text", "")).strip():
-        findings.append(
-            diagnostic_finding(
-                "BP041",
-                "info",
-                "Component defaults are not available",
-                "ARK Blueprint behavior is often driven by component configuration, but no component sidecar was supplied.",
-                [],
-                "Export or write a component sidecar and pass it with --components-file.",
+        if needs_components:
+            findings.append(
+                diagnostic_finding(
+                    "BP041",
+                    "info",
+                    "Component defaults are not available",
+                    "ARK Blueprint behavior is often driven by component configuration, but no component sidecar was supplied.",
+                    [],
+                    "Export or write a component sidecar and pass it with --components-file.",
+                )
             )
-        )
-    else:
+    if str(context.get("components_text", "")).strip() and needs_components:
         component_context = payload.get("component_defaults", {})
         component_parse_error = str(component_context.get("parse_error", "")).strip() if isinstance(component_context, dict) else ""
         parsed_components = component_context.get("components", []) if isinstance(component_context, dict) else []

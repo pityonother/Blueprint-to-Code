@@ -163,6 +163,7 @@ NODE_SEMANTICS: dict[str, str] = {
     "K2Node_SwitchString": "Exec switch based on String value.",
     "K2Node_SwitchAuthority": "Branches execution by network authority, separating server-authoritative and remote/client paths.",
     "K2Node_Select": "Selects a value from multiple data inputs based on an index/condition.",
+    "K2Node_FormatText": "Formats localized/text output from named argument pins.",
     "K2Node_Knot": "Reroute node used for graph layout; it forwards exec or data.",
     "K2Node_Self": "Reference to the current Blueprint instance.",
     "K2Node_Tunnel": "Entry/exit tunnel for collapsed graphs, macros, or function-like graph boundaries.",

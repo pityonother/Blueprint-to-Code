@@ -251,6 +251,7 @@ def evaluate_asset_quality(result: dict[str, Any]) -> dict[str, Any]:
     diagnostic_summary = diagnostic_counts(diagnostics)
     missing_graphs = markdown_table_after_heading(capture_quality, "Likely Missing Blueprint Graphs", limit=12)
     next_capture_actions = markdown_table_after_heading(capture_quality, "Next Capture Actions", limit=12)
+    component_candidates = markdown_table_after_heading(capture_quality, "Component Candidates", limit=12)
     asset_name = str(result.get("asset_name") or result.get("asset_path") or "")
     default_object = summary_value(defaults, "Default object")
     class_defaults_mismatch = bool(default_object) and not default_object_matches_asset(default_object, asset_name)
@@ -287,7 +288,7 @@ def evaluate_asset_quality(result: dict[str, Any]) -> dict[str, Any]:
         quality_flags.append("graphs_need_attention")
     if missing_graphs:
         quality_flags.append("missing_or_external_calls")
-    if summary_int(diagnostics, "Parsed components") == 0:
+    if summary_int(diagnostics, "Parsed components") == 0 and component_candidates:
         quality_flags.append("components_missing")
     if "UASSET021" in diagnostics:
         quality_flags.append("pin_links_heuristic")
@@ -324,6 +325,7 @@ def evaluate_asset_quality(result: dict[str, Any]) -> dict[str, Any]:
         "quality_flags": quality_flags,
         "graphs_needing_attention": next_capture_actions,
         "missing_or_external_calls": missing_graphs,
+        "component_candidates": component_candidates,
         "parsed_default_variables": 0 if class_defaults_mismatch else summary_int(diagnostics, "Parsed default variables") or summary_int(defaults, "Usable variables"),
         "parsed_components": summary_int(diagnostics, "Parsed components"),
         "key_defaults": [] if class_defaults_mismatch else top_class_defaults(defaults),

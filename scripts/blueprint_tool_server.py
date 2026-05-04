@@ -42,6 +42,7 @@ from blueprint_translator.capture import (
 from blueprint_translator.graph_queue import graph_queue_summary, graph_queue_text_for_mode
 from blueprint_translator.utils import read_clipboard, safe_filename
 from blueprint_translator.uasset_graphs import (
+    current_uasset_graph_payload_files,
     mine_graph_candidates,
     object_path_to_uasset_path,
     read_uasset_graph_content,
@@ -509,9 +510,7 @@ def captured_graph_keys(asset_dir: Path) -> set[str]:
 
 def graph_count(asset_dir: Path) -> int:
     keys = captured_graph_keys(asset_dir)
-    uasset_graphs_dir = asset_dir / "graphs_from_uasset"
-    if uasset_graphs_dir.is_dir():
-        keys.update(graph_name_key(path.stem.rsplit("_", 1)[0]) for path in uasset_graphs_dir.glob("*.json"))
+    keys.update(graph_name_key(path.stem.rsplit("_", 1)[0]) for path in current_uasset_graph_payload_files(asset_dir))
     return len({key for key in keys if key})
 
 

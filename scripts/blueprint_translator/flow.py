@@ -9,6 +9,19 @@ from .config import NODE_SEMANTICS
 from .models import NodeInfo, PinInfo
 from .utils import is_exec_pin, is_input_pin, is_output_pin, label_for, node_key
 
+OPTIONAL_UNCONNECTED_PINS = {
+    "bispurefunc",
+    "coordinatesize",
+    "customdatanames",
+    "d",
+    "multicast",
+    "outputdelegate",
+    "propertytooltip",
+    "roundingmode",
+    "worldcontextobject",
+}
+
+
 def build_node_indices(nodes: list[NodeInfo]) -> tuple[dict[str, NodeInfo], dict[str, tuple[NodeInfo, PinInfo]]]:
     nodes_by_name = {node.name: node for node in nodes if node.name}
     pins_by_id: dict[str, tuple[NodeInfo, PinInfo]] = {}
@@ -347,6 +360,8 @@ def source_expression_for_pin(
         return " | ".join(dict.fromkeys(sources)), unknown
     if pin.default:
         return pin.default, unknown
+    if pin.default_object and pin.category in {"object", "class", "softobject", "softclass"}:
+        return pin.default_object, unknown
     return "<unknown>", unknown
 
 
@@ -377,13 +392,15 @@ def build_data_flow(nodes: list[NodeInfo]) -> dict[str, object]:
                 "linked_to": pin.links,
             }
             dependencies.append(dep)
-            if source == "<unknown>" and pin.name not in {"self", "WorldContextObject"}:
+            pin_key = pin.name.lower().strip()
+            is_optional_unconnected = pin_key in OPTIONAL_UNCONNECTED_PINS
+            if source == "<unknown>" and pin.name not in {"self", "WorldContextObject"} and not is_optional_unconnected:
                 pins_with_unknown_source.append({"node": node.name, "node_label": node.label, "pin": pin.name, "pin_id": pin.id})
             if node.node_type == "K2Node_IfThenElse" and pin.name == "Condition":
                 branch_conditions.append(dep)
-            if "VariableSet" in node.node_type and pin.name not in {"execute", "then", "self"}:
+            if "VariableSet" in node.node_type and pin.name not in {"execute", "then", "self"} and not is_optional_unconnected:
                 set_values.append(dep)
-            if node.function and pin.name not in {"execute", "then", "self", "WorldContextObject"}:
+            if node.function and pin.name not in {"execute", "then", "self", "WorldContextObject"} and not is_optional_unconnected:
                 call_parameters.append(dep)
 
     return {

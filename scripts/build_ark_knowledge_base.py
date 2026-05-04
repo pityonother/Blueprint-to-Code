@@ -22,6 +22,7 @@ from blueprint_translator.asset_ledger import (
     replace_deferred_assets,
     restore_ledger_snapshot,
 )
+from blueprint_translator.uasset_graphs import current_uasset_graph_payload_files
 from import_captures_to_knowledge_dbs import import_captures_to_business_databases
 
 
@@ -1670,12 +1671,9 @@ def summarize_graph_file(path: Path, root: Path) -> dict[str, Any]:
 
 
 def summarize_graphs(asset_dir: Path, root: Path) -> list[dict[str, Any]]:
-    graph_dir = asset_dir / "graphs_from_uasset"
-    if not graph_dir.exists():
-        return []
     return [
         summarize_graph_file(path, root)
-        for path in sorted(graph_dir.glob("*.json"))
+        for path in current_uasset_graph_payload_files(asset_dir)
     ]
 
 

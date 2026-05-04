@@ -16,13 +16,20 @@ from .behavior_report import render_behavior_summary
 from .context import context_from_args, function_note_for_name, parse_components_context, parse_defaults_context, parse_notes_context
 from .context_review import build_context_review, render_context_review
 from .core import parse_blueprint_text
-from .diagnostics import build_diagnostic_findings, diagnostic_counts, diagnostic_finding, render_diagnostics_report
+from .diagnostics import (
+    asset_likely_needs_component_context,
+    build_diagnostic_findings,
+    diagnostic_counts,
+    diagnostic_finding,
+    render_diagnostics_report,
+)
 from .output import resolve_output_paths, write_glossary
 from .quality import (
     behavior_area,
     build_components_suggestions,
     build_defaults_suggestions,
     classify_function_call,
+    component_class_hint,
     collect_asset_quality,
     infer_asset_graph_type,
     render_capture_quality_report,
@@ -31,6 +38,7 @@ from .quality import (
 from .renderers import format_component_refs, format_default_refs, render_report
 from .uasset_graphs import (
     compare_uasset_with_clipboard,
+    current_uasset_graph_payload_files,
     object_path_to_uasset_path,
     read_uasset_graph_content,
     write_uasset_clipboard_compare_files,
@@ -86,6 +94,51 @@ def defaults_sidecar_has_values(path: Path | None) -> bool:
     return bool(isinstance(variables, dict) and variables) or bool(isinstance(class_defaults, dict) and class_defaults)
 
 
+def looks_like_component_name(name: str) -> bool:
+    lowered = name.lower()
+    exact_names = {"charactermovement", "mycharacterstatuscomponent", "myinventorycomponent", "mesh", "rootcomponent", "capsulecomponent"}
+    terms = ("component", "camera", "mesh", "movement", "inventory", "status", "niagara", "particle", "audio")
+    return lowered in exact_names or lowered.endswith("component") or any(term in lowered for term in terms)
+
+
+def synthesize_components_text_from_defaults(defaults_text: str) -> str:
+    if not defaults_text.strip():
+        return ""
+    try:
+        data = json.loads(defaults_text)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    variables = data.get("variables", {})
+    if not isinstance(variables, dict):
+        return ""
+    components = []
+    for name, entry in variables.items():
+        component_name = str(name)
+        if not looks_like_component_name(component_name):
+            continue
+        metadata = entry if isinstance(entry, dict) else {}
+        components.append(
+            {
+                "name": component_name,
+                "class": component_class_hint(component_name),
+                "defaults": {"object_ref": metadata.get("value", entry)},
+                "purpose": "Synthesized from uasset class defaults; verify exact component class in ARK DevKit.",
+            }
+        )
+    if not components:
+        return ""
+    return json.dumps(
+        {
+            "source": "uasset_class_defaults component-like ObjectProperty names",
+            "components": components,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 def asset_context_from_args(args: argparse.Namespace, asset_dir: Path, manifest: dict[str, object]) -> dict[str, object]:
     context = context_from_args(args)
     context["parent_class"] = args.parent_class or str(manifest.get("parent_class", ""))
@@ -105,11 +158,18 @@ def asset_context_from_args(args: argparse.Namespace, asset_dir: Path, manifest:
         asset_dir / name for name in ("notes.md", "notes.txt")
     )
 
-    context["defaults_text"] = read_sidecar_text(defaults_path)
-    context["components_text"] = read_sidecar_text(components_path)
+    defaults_text = read_sidecar_text(defaults_path)
+    components_text = read_sidecar_text(components_path)
+    components_source = str(components_path) if components_path else ""
+    if not components_text and defaults_path == uasset_defaults_path:
+        components_text = synthesize_components_text_from_defaults(defaults_text)
+        if components_text:
+            components_source = f"{uasset_defaults_path} (component-like defaults synthesized)"
+    context["defaults_text"] = defaults_text
+    context["components_text"] = components_text
     context["notes_text"] = read_sidecar_text(notes_path)
     context["defaults_source"] = str(defaults_path) if defaults_path else ""
-    context["components_source"] = str(components_path) if components_path else ""
+    context["components_source"] = components_source
     context["notes_source"] = str(notes_path) if notes_path else ""
     return context
 
@@ -175,8 +235,7 @@ def discover_asset_graphs(asset_dir: Path, manifest: dict[str, object]) -> list[
         records = [{"graph_name": path.stem, "graph_type": "Unknown", "path": str(path)} for path in candidates]
 
     seen = {graph_record_key(str(record.get("graph_name") or Path(record.get("path", "")).stem)) for record in records}
-    uasset_graphs_dir = asset_dir / "graphs_from_uasset"
-    uasset_candidates = sorted(uasset_graphs_dir.glob("*.json")) if uasset_graphs_dir.exists() else []
+    uasset_candidates = current_uasset_graph_payload_files(asset_dir)
     for path in uasset_candidates:
         record = uasset_graph_record_from_path(path)
         key = graph_record_key(record["graph_name"])
@@ -456,6 +515,15 @@ def build_asset_diagnostics(asset_payload: dict[str, object]) -> dict[str, objec
     metadata = asset_payload.get("metadata", {})
     graphs = list(asset_payload.get("graphs", []))
     context = asset_payload.get("context", {})
+    def complete_empty_uasset_graph(graph: dict[str, object]) -> bool:
+        payload = graph.get("payload", {}) if isinstance(graph.get("payload", {}), dict) else {}
+        metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata", {}), dict) else {}
+        return (
+            str(graph.get("source_kind") or metadata.get("source_kind") or "") == "uasset_binary"
+            and str(metadata.get("uasset_read_status") or "") in {"complete", "complete_empty"}
+            and int(metadata.get("node_count") or 0) == 0
+        )
+
     if not graphs:
         findings.append(
             diagnostic_finding(
@@ -467,7 +535,7 @@ def build_asset_diagnostics(asset_payload: dict[str, object]) -> dict[str, objec
                 "Create graphs/*.txt files or add manifest.json with graph entries.",
             )
         )
-    elif len(graphs) == 1:
+    elif len(graphs) == 1 and not complete_empty_uasset_graph(graphs[0]):
         findings.append(
             diagnostic_finding(
                 "ASSET010",
@@ -554,18 +622,21 @@ def build_asset_diagnostics(asset_payload: dict[str, object]) -> dict[str, objec
                 "Add defaults.json, defaults.md, or defaults.txt to the asset directory.",
             )
         )
-    if not str(context.get("components_text", "")).strip():
-        findings.append(
-            diagnostic_finding(
-                "ASSET021",
-                "warning",
-                "Components sidecar is missing",
-                "ARK behavior often depends on component defaults, but no component context was supplied.",
-                [],
-                "Add components.json, components.md, or components.txt to the asset directory.",
+    needs_components = asset_likely_needs_component_context(str(metadata.get("asset_name") or ""))
+    components_text_present = bool(str(context.get("components_text", "")).strip())
+    if not components_text_present:
+        if needs_components:
+            findings.append(
+                diagnostic_finding(
+                    "ASSET021",
+                    "warning",
+                    "Components sidecar is missing",
+                    "ARK behavior often depends on component defaults, but no component context was supplied.",
+                    [],
+                    "Add components.json, components.md, or components.txt to the asset directory.",
+                )
             )
-        )
-    else:
+    elif needs_components:
         component_context = asset_payload.get("component_defaults", {})
         component_parse_error = str(component_context.get("parse_error", "")).strip() if isinstance(component_context, dict) else ""
         components = component_context.get("components", []) if isinstance(component_context, dict) else []
