@@ -42,6 +42,25 @@ When reviewing a captured Blueprint asset output directory, read these files fir
 
 For asset compare output, read `behavior_impact_report.md` before the full `compare_report.md`. It groups changes by likely ARK behavior area and points to the graph/default/component evidence first.
 
+## Small Batch Knowledge Reads
+
+When running priority knowledge-base reads, use a small-batch loop instead of treating the queue summary as the result.
+
+Required loop:
+
+1. Read a small batch with analysis enabled. Use `scripts/read_priority_assets.py --limit N --rebuild-knowledge` and do not add `--no-analyze` unless only debugging queue mechanics.
+2. Open `knowledge_base/priorities/priority_read_results.md` for the batch counts.
+3. Open `knowledge_base/priorities/priority_batch_quality_report.md` and use it as the main quality gate.
+4. For every newly read asset, actually read its generated reports, especially `behavior_summary.md`, `capture_quality_report.md`, `diagnostics_report.md`, and `uasset_class_defaults_report.md`.
+5. If the quality report shows missing graphs, low confidence, heuristic pin links, parser errors, unknown properties, or suspicious defaults, continue investigating in the same turn:
+   - inspect the named graph reports or `uasset_graph_nodes.json`;
+   - decide whether the call is local Blueprint, parent/native, component/presentation, or parser noise;
+   - add notes only when the evidence supports parent/native classification;
+   - improve parser rules and rerun the same batch when the gap is machine-fixable;
+   - tell the user exactly what remains manual only when it cannot be recovered from local assets.
+
+Do not answer "the batch is done" after only checking graph/node counts. A batch is reviewed only after the actual reports have been read and the missing pieces have either been resolved, classified, or carried forward as explicit follow-up work.
+
 ## Files Usually Safe To Ignore
 
 Do not read these by default unless debugging parser internals:

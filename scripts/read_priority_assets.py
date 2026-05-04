@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -25,6 +26,8 @@ CAPTURE_ROOT = PROJECT_ROOT / "captures"
 DEFAULT_QUEUE = PROJECT_ROOT / "knowledge_base" / "priorities" / "deep_read_queue.txt"
 CATALOG_DB = PROJECT_ROOT / "knowledge_base" / "db" / "asset_catalog.sqlite"
 LEGACY_LEDGER_DB = PROJECT_ROOT / "knowledge_base" / "global" / "asset_index.sqlite"
+QUALITY_JSON = PROJECT_ROOT / "knowledge_base" / "priorities" / "priority_batch_quality_report.json"
+QUALITY_MD = PROJECT_ROOT / "knowledge_base" / "priorities" / "priority_batch_quality_report.md"
 
 
 def ledger_db_path() -> Path:
@@ -146,6 +149,270 @@ def analyze_asset(asset_dir: Path, report_level: str) -> dict[str, Any]:
     }
 
 
+def read_text(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def summary_int(text: str, label: str) -> int:
+    match = re.search(rf"^- {re.escape(label)}:\s*([0-9]+)", text, flags=re.MULTILINE)
+    return int(match.group(1)) if match else 0
+
+
+def summary_value(text: str, label: str) -> str:
+    match = re.search(rf"^- {re.escape(label)}:\s*(.+)$", text, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def default_object_matches_asset(default_object: str, asset_name: str) -> bool:
+    if not default_object or not asset_name:
+        return True
+    normalized_default = default_object.strip("`").strip()
+    normalized_asset = asset_name.strip("`").strip()
+    if normalized_default.startswith("Default__"):
+        normalized_default = normalized_default[len("Default__") :]
+    normalized_default = normalized_default.removesuffix("_C").lower()
+    normalized_asset = normalized_asset.removesuffix("_C").lower()
+    return normalized_default == normalized_asset
+
+
+def diagnostic_counts(text: str) -> dict[str, int]:
+    match = re.search(
+        r"^- Findings:\s*(?:(\d+)\s+error)?(?:,\s*)?(?:(\d+)\s+warning)?(?:,\s*)?(?:(\d+)\s+info)?",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not match:
+        return {"error": 0, "warning": 0, "info": 0}
+    return {
+        "error": int(match.group(1) or 0),
+        "warning": int(match.group(2) or 0),
+        "info": int(match.group(3) or 0),
+    }
+
+
+def markdown_table_after_heading(text: str, heading: str, *, limit: int = 20) -> list[dict[str, str]]:
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip() == f"## {heading}":
+            start = index + 1
+            break
+    if start is None:
+        return []
+    table_lines: list[str] = []
+    table_started = False
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not table_started and not stripped:
+            continue
+        if not table_started and not stripped.startswith("|"):
+            return []
+        if stripped.startswith("## ") and table_lines:
+            break
+        if stripped.startswith("|"):
+            table_started = True
+            table_lines.append(stripped)
+        elif table_lines:
+            break
+    if len(table_lines) < 2:
+        return []
+    headers = [cell.strip() for cell in table_lines[0].strip("|").split("|")]
+    rows: list[dict[str, str]] = []
+    for line in table_lines[2:]:
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != len(headers):
+            continue
+        rows.append(dict(zip(headers, cells)))
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def top_class_defaults(report_text: str, *, limit: int = 8) -> list[dict[str, str]]:
+    return markdown_table_after_heading(report_text, "Variables", limit=limit)
+
+
+def diagnostic_errors_are_empty_graph_only(text: str) -> bool:
+    error_lines = [line.strip() for line in text.splitlines() if line.strip().startswith("### [ERROR]")]
+    return bool(error_lines) and all("BP000" in line for line in error_lines)
+
+
+def evaluate_asset_quality(result: dict[str, Any]) -> dict[str, Any]:
+    asset_dir = Path(str(result.get("asset_dir") or ""))
+    output_dir = asset_dir / "output"
+    behavior = read_text(output_dir / "behavior_summary.md")
+    diagnostics = read_text(output_dir / "diagnostics_report.md")
+    capture_quality = read_text(output_dir / "capture_quality_report.md")
+    defaults = read_text(asset_dir / "uasset_class_defaults_report.md")
+    graph_status_counts = result.get("status_counts") or {}
+    analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+    diagnostic_summary = diagnostic_counts(diagnostics)
+    missing_graphs = markdown_table_after_heading(capture_quality, "Likely Missing Blueprint Graphs", limit=12)
+    next_capture_actions = markdown_table_after_heading(capture_quality, "Next Capture Actions", limit=12)
+    asset_name = str(result.get("asset_name") or result.get("asset_path") or "")
+    default_object = summary_value(defaults, "Default object")
+    class_defaults_mismatch = bool(default_object) and not default_object_matches_asset(default_object, asset_name)
+    diagnostic_error_count_for_verdict = diagnostic_summary["error"]
+    if diagnostic_error_count_for_verdict and diagnostic_errors_are_empty_graph_only(diagnostics) and int(result.get("node_count") or 0) == 0:
+        diagnostic_error_count_for_verdict = 0
+    report_files = {
+        "behavior_summary": bool(behavior),
+        "diagnostics_report": bool(diagnostics),
+        "capture_quality_report": bool(capture_quality),
+        "asset_report": (output_dir / "asset_report.md").is_file(),
+    }
+    incomplete_graphs = {
+        key: value
+        for key, value in graph_status_counts.items()
+        if key not in {"complete", "complete_empty"}
+    }
+    report_missing = not all(report_files.values())
+    analysis_failed = bool(analysis.get("error")) or (int(analysis.get("return_code") or 0) != 0 if analysis else False)
+    quality_flags: list[str] = []
+    if str(result.get("status")) not in {"read", "skipped_existing", "skipped_processed"}:
+        quality_flags.append("read_failed")
+    if report_missing:
+        quality_flags.append("reports_missing")
+    if analysis_failed:
+        quality_flags.append("analysis_failed")
+    if incomplete_graphs:
+        quality_flags.append("incomplete_graphs")
+    if diagnostic_error_count_for_verdict:
+        quality_flags.append("diagnostic_errors")
+    if class_defaults_mismatch:
+        quality_flags.append("class_defaults_mismatch")
+    if next_capture_actions:
+        quality_flags.append("graphs_need_attention")
+    if missing_graphs:
+        quality_flags.append("missing_or_external_calls")
+    if summary_int(diagnostics, "Parsed components") == 0:
+        quality_flags.append("components_missing")
+    if "UASSET021" in diagnostics:
+        quality_flags.append("pin_links_heuristic")
+    confidence = summary_value(behavior, "Confidence") or summary_value(diagnostics, "Confidence")
+    if confidence == "low":
+        quality_flags.append("low_confidence")
+    if not quality_flags:
+        verdict = "good"
+    elif any(flag in quality_flags for flag in ("read_failed", "reports_missing", "analysis_failed", "incomplete_graphs", "diagnostic_errors", "class_defaults_mismatch")):
+        verdict = "needs_immediate_followup"
+    elif any(flag in quality_flags for flag in ("graphs_need_attention", "missing_or_external_calls", "low_confidence")):
+        verdict = "needs_review"
+    else:
+        verdict = "usable_with_notes"
+    return {
+        "asset_name": asset_name,
+        "asset_path": result.get("asset_path"),
+        "asset_dir": str(asset_dir),
+        "status": result.get("status"),
+        "verdict": verdict,
+        "confidence": confidence,
+        "graph_count": result.get("graph_count", 0),
+        "node_count": result.get("node_count", 0),
+        "pin_count": result.get("pin_count", 0),
+        "link_count": result.get("link_count", 0),
+        "graph_status_counts": graph_status_counts,
+        "report_files": report_files,
+        "diagnostics": diagnostic_summary,
+        "diagnostic_error_count_for_verdict": diagnostic_error_count_for_verdict,
+        "class_defaults": {
+            "default_object": default_object,
+            "matches_asset": not class_defaults_mismatch,
+        },
+        "quality_flags": quality_flags,
+        "graphs_needing_attention": next_capture_actions,
+        "missing_or_external_calls": missing_graphs,
+        "parsed_default_variables": 0 if class_defaults_mismatch else summary_int(diagnostics, "Parsed default variables") or summary_int(defaults, "Usable variables"),
+        "parsed_components": summary_int(diagnostics, "Parsed components"),
+        "key_defaults": [] if class_defaults_mismatch else top_class_defaults(defaults),
+        "behavior_path": str(output_dir / "behavior_summary.md") if behavior else "",
+        "diagnostics_path": str(output_dir / "diagnostics_report.md") if diagnostics else "",
+        "capture_quality_path": str(output_dir / "capture_quality_report.md") if capture_quality else "",
+    }
+
+
+def build_quality_payload(results: list[dict[str, Any]]) -> dict[str, Any]:
+    assets = [evaluate_asset_quality(result) for result in results]
+    verdict_counts: dict[str, int] = {}
+    flag_counts: dict[str, int] = {}
+    for item in assets:
+        verdict_counts[str(item["verdict"])] = verdict_counts.get(str(item["verdict"]), 0) + 1
+        for flag in item.get("quality_flags") or []:
+            flag_counts[str(flag)] = flag_counts.get(str(flag), 0) + 1
+    return {
+        "schema": "ark-devkit-knowledge.priority-batch-quality.v1",
+        "generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "asset_count": len(assets),
+        "verdict_counts": verdict_counts,
+        "flag_counts": flag_counts,
+        "assets": assets,
+    }
+
+
+def write_quality_report(out_path: Path, payload: dict[str, Any], *, title: str = "小批量读取质量评估") -> None:
+    lines = [
+        f"# {title}",
+        "",
+        f"- 生成时间：`{payload.get('generated')}`",
+        f"- 本轮资产数：{payload.get('asset_count', 0)}",
+        f"- 结论分布：{json.dumps(payload.get('verdict_counts') or {}, ensure_ascii=False)}",
+        f"- 问题标记：{json.dumps(payload.get('flag_counts') or {}, ensure_ascii=False)}",
+        "",
+        "| 资产 | 结论 | 置信度 | 图页 | 节点 | 诊断 | 主要缺口 |",
+        "| --- | --- | --- | ---: | ---: | --- | --- |",
+    ]
+    for item in payload.get("assets") or []:
+        diagnostics = item.get("diagnostics") or {}
+        diag_label = "E{}/W{}/I{}".format(
+            diagnostics.get("error", 0),
+            diagnostics.get("warning", 0),
+            diagnostics.get("info", 0),
+        )
+        flags = ", ".join((item.get("quality_flags") or [])[:5]) or "-"
+        lines.append(
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {} |".format(
+                item.get("asset_name"),
+                item.get("verdict"),
+                item.get("confidence") or "-",
+                item.get("graph_count", 0),
+                item.get("node_count", 0),
+                diag_label,
+                flags,
+            )
+        )
+    for item in payload.get("assets") or []:
+        lines.extend(["", f"## {item.get('asset_name')}", ""])
+        lines.append(f"- 报告：`{item.get('behavior_path') or item.get('asset_dir')}`")
+        lines.append(f"- 默认值数量：{item.get('parsed_default_variables', 0)}；组件数量：{item.get('parsed_components', 0)}")
+        class_defaults = item.get("class_defaults") or {}
+        if class_defaults.get("default_object") and not class_defaults.get("matches_asset", True):
+            lines.append(f"- 默认对象疑似错位：`{class_defaults.get('default_object')}`，本轮不把这些默认值当作可靠结论")
+        attention = item.get("graphs_needing_attention") or []
+        if attention:
+            lines.append("- 需要继续看的图页：")
+            for row in attention[:8]:
+                lines.append(
+                    f"  - `{row.get('Graph', '')}`：{row.get('Reason', '')}，节点 {row.get('Nodes', '')}，置信度 {row.get('Confidence', '')}"
+                )
+        missing = item.get("missing_or_external_calls") or []
+        if missing:
+            lines.append("- 需要判定 native/父类/本地图的调用：")
+            for row in missing[:8]:
+                lines.append(f"  - `{row.get('Source Graph', '')}` -> `{row.get('Function', '')}`")
+            if len(missing) > 8:
+                lines.append(f"  - ... 另外 {len(missing) - 8} 个")
+        defaults = item.get("key_defaults") or []
+        if defaults:
+            lines.append("- 关键默认值预览：")
+            for row in defaults[:6]:
+                lines.append(f"  - `{row.get('Name', '')}` = `{row.get('Value', '')}` ({row.get('Type', '')})")
+    lines.append("")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level: str, force: bool) -> dict[str, Any]:
     asset_name = asset_name_from_object_path(object_path)
     asset_dir = CAPTURE_ROOT / safe_filename(asset_name, "BlueprintAsset")
@@ -169,7 +436,13 @@ def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level
 
     existing = asset_dir / "uasset_graph_nodes.json"
     if existing.is_file() and not force:
-        return existing_capture_result(object_path, asset_name, asset_dir, uasset_path)
+        result = existing_capture_result(object_path, asset_name, asset_dir, uasset_path)
+        if analyze:
+            try:
+                result["analysis"] = analyze_asset(asset_dir, report_level)
+            except Exception as exc:
+                result["analysis"] = {"error": str(exc)}
+        return result
 
     started = time.time()
     payload = read_uasset_graph_content(object_path, uasset_path, max_graphs=max_graphs)
@@ -286,11 +559,14 @@ def main() -> int:
         "skipped_current": skipped_current,
         "results": results,
     }
+    quality_payload = build_quality_payload(results)
     out_json = PROJECT_ROOT / "knowledge_base" / "priorities" / "priority_read_results.json"
     out_md = PROJECT_ROOT / "knowledge_base" / "priorities" / "priority_read_results.md"
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_batch_report(out_md, payload)
+    QUALITY_JSON.write_text(json.dumps(quality_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_quality_report(QUALITY_MD, quality_payload)
 
     if args.rebuild_knowledge:
         record_results(results, knowledge_status="captured")
@@ -304,6 +580,7 @@ def main() -> int:
         record_results(results, knowledge_status="captured")
 
     print(f"wrote {out_md}")
+    print(f"wrote {QUALITY_MD}")
     return 0
 
 

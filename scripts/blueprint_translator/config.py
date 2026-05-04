@@ -170,6 +170,7 @@ NODE_SEMANTICS: dict[str, str] = {
     "K2Node_InputAction": "Input action event entry point from Unreal input bindings.",
     "K2Node_InputKey": "Input key event entry point from Unreal input bindings.",
     "K2Node_EnumEquality": "Pure enum comparison; behaves like an equality condition in data flow.",
+    "K2Node_EnumInequality": "Pure enum comparison; behaves like an inequality condition in data flow.",
     "K2Node_PromotableOperator": "Math or comparison operator that may be pure data-flow logic.",
     "K2Node_CommutativeAssociativeBinaryOperator": "Math/boolean operator combining multiple inputs.",
     "K2Node_MakeArray": "Builds an array value from input elements.",

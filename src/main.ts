@@ -1824,13 +1824,13 @@ async function buildKnowledgeBase(): Promise<void> {
 
 async function readPriorityAssets(): Promise<void> {
   busy = true;
-  appendLog('开始自动解析五类重点资产的第一批候选。');
+  appendLog('开始小批量读取重点资产，并生成行为报告与质量评估。');
   try {
     const payload = await api<ApiResult & { job: JobInfo }>(
       '/api/knowledge-base/read-priority',
       {
         method: 'POST',
-        body: JSON.stringify({ limit: 25, analyze: false }),
+        body: JSON.stringify({ limit: 25, analyze: true }),
       },
     );
     activeJobId = payload.job.id;

@@ -1198,7 +1198,7 @@ def start_knowledge_base_job(focus: str = "gigantoraptor", assets: list[str] | N
     return create_background_job("knowledge_base", f"{focus or 'gigantoraptor'} 背景知识库", command, complete)
 
 
-def priority_read_command(limit: int = 25, *, analyze: bool = False, rebuild_knowledge: bool = True) -> list[str]:
+def priority_read_command(limit: int = 25, *, analyze: bool = True, rebuild_knowledge: bool = True) -> list[str]:
     command = [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "read_priority_assets.py"),
@@ -1212,7 +1212,7 @@ def priority_read_command(limit: int = 25, *, analyze: bool = False, rebuild_kno
     return command
 
 
-def start_priority_read_job(limit: int = 25, *, analyze: bool = False) -> dict[str, object]:
+def start_priority_read_job(limit: int = 25, *, analyze: bool = True) -> dict[str, object]:
     command = priority_read_command(limit, analyze=analyze)
 
     def complete(_return_code: int) -> dict[str, object]:
@@ -1391,7 +1391,7 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/knowledge-base/read-priority":
                 limit = int(body.get("limit") or 25)
-                analyze = bool(body.get("analyze") or False)
+                analyze = bool(body.get("analyze", True))
                 job = start_priority_read_job(limit, analyze=analyze)
                 self.send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
                 return

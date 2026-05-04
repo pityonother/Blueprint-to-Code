@@ -16,6 +16,7 @@ from blueprint_tool_server import (
     get_job,
     missing_functions_from_report,
     normalize_asset_path,
+    priority_read_command,
 )
 
 
@@ -114,6 +115,16 @@ class ToolServerTests(unittest.TestCase):
         self.assertEqual(final["returnCode"], 0)
         self.assertIn("job-ok", final["stdout"])
         self.assertEqual(final["result"]["done"], True)
+
+    def test_priority_read_command_analyzes_by_default(self):
+        command = priority_read_command(3)
+
+        self.assertNotIn("--no-analyze", command)
+
+    def test_priority_read_command_can_skip_analysis_for_queue_debugging(self):
+        command = priority_read_command(3, analyze=False)
+
+        self.assertIn("--no-analyze", command)
 
     def test_background_job_can_be_cancelled(self):
         job = create_background_job(

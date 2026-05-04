@@ -187,6 +187,7 @@ SEMANTIC_NODE_CLASSES = {
     "K2Node_Self",
     "K2Node_Tunnel",
     "K2Node_EnumEquality",
+    "K2Node_EnumInequality",
     "K2Node_MakeStruct",
     "K2Node_GetArrayItem",
     "K2Node_MakeArray",
@@ -445,19 +446,26 @@ def parse_uasset_summary(data: bytes) -> tuple[dict[str, object], list[str]]:
     import_offset = 0
     depends_offset = 0
     try:
-        soft_object_paths_count = _read_i32(data, offset)
-        soft_object_paths_offset = _read_i32(data, offset + 4)
-        offset += 8
-        maybe_length = _read_i32(data, offset)
-        if 0 < maybe_length < 512 and offset + 4 + maybe_length <= len(data):
-            localization_id, offset = _read_fstring(data, offset)
-        gatherable_text_data_count = _read_i32(data, offset)
-        gatherable_text_data_offset = _read_i32(data, offset + 4)
-        export_count = _read_i32(data, offset + 8)
-        export_offset = _read_i32(data, offset + 12)
-        import_count = _read_i32(data, offset + 16)
-        import_offset = _read_i32(data, offset + 20)
-        depends_offset = _read_i32(data, offset + 24)
+        if file_version_ue4 < 500:
+            export_count = _read_i32(data, offset)
+            export_offset = _read_i32(data, offset + 4)
+            import_count = _read_i32(data, offset + 8)
+            import_offset = _read_i32(data, offset + 12)
+            depends_offset = _read_i32(data, offset + 16)
+        else:
+            soft_object_paths_count = _read_i32(data, offset)
+            soft_object_paths_offset = _read_i32(data, offset + 4)
+            offset += 8
+            maybe_length = _read_i32(data, offset)
+            if 0 < maybe_length < 512 and offset + 4 + maybe_length <= len(data):
+                localization_id, offset = _read_fstring(data, offset)
+            gatherable_text_data_count = _read_i32(data, offset)
+            gatherable_text_data_offset = _read_i32(data, offset + 4)
+            export_count = _read_i32(data, offset + 8)
+            export_offset = _read_i32(data, offset + 12)
+            import_count = _read_i32(data, offset + 16)
+            import_offset = _read_i32(data, offset + 20)
+            depends_offset = _read_i32(data, offset + 24)
     except Exception as exc:
         warnings.append(f"Could not parse full package summary: {exc}")
     return (
@@ -496,13 +504,14 @@ def parse_uasset_name_map(data: bytes, summary: dict[str, object]) -> tuple[list
     if count <= 0 or offset <= 0 or offset >= len(data):
         return names, ["Package summary does not include a usable NameMap."]
     pos = offset
+    hash_bytes = 0 if int(summary.get("file_version_ue4") or 0) < 500 else 4
     try:
         for _index in range(count):
             name, pos = _read_fstring(data, pos)
             # UE4/UE5 serialized NameMap entries include a 32-bit non-case hash
-            # after the string. This is enough for the ARK DevKit assets tested
-            # locally; if it fails we report structure parsing as experimental.
-            pos += 4
+            # after the string in newer assets. Older Genesis-era ARK assets
+            # store only the FString entries.
+            pos += hash_bytes
             names.append(name)
     except Exception as exc:
         warnings.append(f"Could not parse complete NameMap: {exc}")
