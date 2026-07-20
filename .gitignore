@@ -18,6 +18,12 @@ captures/
 output/
 .tmp_*/
 knowledge_base/
+analysis/
+.playwright-cli/
+
+# Machine-local ARK DevKit configuration
+devkit_content_root.txt
+devkit_path_mappings.txt
 
 # Unreal plugin build output
 devkit_plugins/**/Binaries/
@@ -28,6 +34,15 @@ node_modules
 dist
 dist-ssr
 *.local
+
+# Reproducible release packages are generated locally, not committed.
+release/*.zip
+
+# Local review/session notes are preserved on this workstation, not published.
+docs/GPT_PRO_*.md
+docs/SESSION_HANDOFF_zh.md
+docs/NEXT_CHAT_HANDOFF_zh.md
+docs/*_OPTIMIZED_REPORT_zh.md
 
 # Editor directories and files
 .vscode/*

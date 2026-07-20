@@ -1,0 +1,13 @@
+# Optional Unreal virtual path mappings for external ARK DevKit mod folders.
+#
+# Keep devkit_content_root.txt for the base game Content directory:
+# C:\Program Files\Epic Games\ARKDevkit\Projects\ShooterGame\Content
+#
+# Add one mapping per external mod Content root when assets live outside
+# ShooterGame\Content\Mods\<ModName>.
+#
+# Format:
+# /Game/Mods/<ModName>=<absolute path to that mod's Content directory>
+#
+# Example:
+/Game/Mods/Kaminan_server=G:\ARKDevkit\Projects\ShooterGame\Mods\Kaminan_server\Content
