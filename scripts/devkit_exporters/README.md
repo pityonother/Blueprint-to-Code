@@ -9,7 +9,7 @@ into the sidecar files consumed by the local Blueprint translator.
 Run this from Windows PowerShell:
 
 ```powershell
-cd "C:\Users\ac\Documents\project gaming\Blueprint to Code"
+cd "<your Blueprint to Code folder>"
 .\scripts\devkit_exporters\run_devkit_export_path_gui.ps1
 ```
 
@@ -17,7 +17,7 @@ Paste the Blueprint reference or Object Path copied from ARK DevKit, then click
 `Save Path`. The GUI writes:
 
 ```text
-C:\Users\ac\Documents\project gaming\Blueprint to Code\captures\_devkit_export_request.json
+<your Blueprint to Code folder>\captures\_devkit_export_request.json
 ```
 
 It also copies the Python Console command to your clipboard.
@@ -49,20 +49,20 @@ python scripts\devkit_exporters\devkit_export_path_gui.py
 2. Run this in the DevKit Python Console:
 
 ```python
-exec(open(r"C:\Users\ac\Documents\project gaming\Blueprint to Code\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
+BLUEPRINT_TO_CODE_PROJECT_ROOT = r"<your Blueprint to Code folder>"; exec(open(r"<your Blueprint to Code folder>\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
 ```
 
 If you are in the normal Output Log / command mode, prefix the Python code with
 `py`:
 
 ```text
-py exec(open(r"C:\Users\ac\Documents\project gaming\Blueprint to Code\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
+py BLUEPRINT_TO_CODE_PROJECT_ROOT = r"<your Blueprint to Code folder>"; exec(open(r"<your Blueprint to Code folder>\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
 ```
 
 3. The exporter writes files under:
 
 ```text
-C:\Users\ac\Documents\project gaming\Blueprint to Code\captures\<BlueprintName>\
+<your Blueprint to Code folder>\captures\<BlueprintName>\
   defaults.json
   components.json
   devkit_export_report.md
@@ -72,7 +72,7 @@ C:\Users\ac\Documents\project gaming\Blueprint to Code\captures\<BlueprintName>\
 4. Back in Windows PowerShell, rerun the asset analyzer:
 
 ```powershell
-cd "C:\Users\ac\Documents\project gaming\Blueprint to Code"
+cd "<your Blueprint to Code folder>"
 python scripts\bp_clipboard_to_prompt.py --asset-dir captures\<BlueprintName>
 ```
 

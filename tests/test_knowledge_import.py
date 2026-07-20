@@ -76,9 +76,158 @@ def create_common_tables(connection: sqlite3.Connection, asset_table: str) -> No
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE formula_candidates (
+            id TEXT PRIMARY KEY,
+            object_path TEXT NOT NULL,
+            asset_name TEXT NOT NULL DEFAULT '',
+            asset_type TEXT NOT NULL DEFAULT '',
+            domain TEXT NOT NULL DEFAULT '',
+            mechanism_type TEXT NOT NULL DEFAULT '',
+            mechanism TEXT NOT NULL DEFAULT '',
+            player_meaning TEXT NOT NULL DEFAULT '',
+            graph TEXT NOT NULL DEFAULT '',
+            visible_rule TEXT NOT NULL DEFAULT '',
+            formula_text TEXT NOT NULL DEFAULT '',
+            formula_ast_json TEXT NOT NULL DEFAULT '{}',
+            inputs_json TEXT NOT NULL DEFAULT '[]',
+            outputs_json TEXT NOT NULL DEFAULT '[]',
+            conditions_json TEXT NOT NULL DEFAULT '[]',
+            math_nodes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            link_quality_json TEXT NOT NULL DEFAULT '{}',
+            external_dependencies_json TEXT NOT NULL DEFAULT '[]',
+            missing_evidence_json TEXT NOT NULL DEFAULT '[]',
+            next_probe_json TEXT NOT NULL DEFAULT '[]',
+            confidence TEXT NOT NULL DEFAULT 'unknown',
+            status TEXT NOT NULL DEFAULT 'candidate',
+            source_capture TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE unresolved_formulas (
+            id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL DEFAULT '',
+            object_path TEXT NOT NULL,
+            asset_name TEXT NOT NULL DEFAULT '',
+            asset_type TEXT NOT NULL DEFAULT '',
+            domain TEXT NOT NULL DEFAULT '',
+            mechanism_type TEXT NOT NULL DEFAULT '',
+            mechanism TEXT NOT NULL DEFAULT '',
+            known_visible_part TEXT NOT NULL DEFAULT '',
+            blocked_by_json TEXT NOT NULL DEFAULT '[]',
+            missing_evidence_json TEXT NOT NULL DEFAULT '[]',
+            required_next_probe_json TEXT NOT NULL DEFAULT '[]',
+            priority INTEGER NOT NULL DEFAULT 50,
+            status TEXT NOT NULL DEFAULT 'open',
+            confidence TEXT NOT NULL DEFAULT 'unresolved_formula',
+            source_capture TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
 
 
 class KnowledgeCaptureImportTests(unittest.TestCase):
+    def test_imports_formula_candidates_and_unresolved_formulas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_dir = root / "db"
+            capture_root = root / "captures"
+            db_dir.mkdir()
+            capture_dir = capture_root / "PrimalItem_TestFormula"
+            write_json(
+                capture_dir / "output" / "formula_candidates.json",
+                {
+                    "schema": "ark.blueprint.formula_candidates.v1",
+                    "asset_name": "PrimalItem_TestFormula",
+                    "asset_path": "/Game/Test/PrimalItem_TestFormula.PrimalItem_TestFormula",
+                    "asset_type": "primal_item_blueprint",
+                    "generated_at": "2026-05-05T00:00:00",
+                    "summary": {"candidate_count": 1, "unresolved_count": 1, "confidence_counts": {"low": 1}},
+                    "candidates": [
+                        {
+                            "id": "test_formula_candidate",
+                            "domain": "item",
+                            "mechanism_type": "stat_weight",
+                            "mechanism": "Test stat weight",
+                            "player_meaning": "Visible test candidate.",
+                            "graph": "BPOverrideInheritedStatWeight",
+                            "trigger_graphs": ["BPOverrideInheritedStatWeight"],
+                            "visible_rule": "DistributionForMaxWeight = 0.5",
+                            "formula_text": "Candidate only.",
+                            "formula_ast": {},
+                            "inputs": [{"name": "DistributionForMaxWeight", "value": 0.5}],
+                            "outputs": [],
+                            "conditions": [],
+                            "math_nodes": ["MapRangeClamped"],
+                            "evidence": [{"source": "test"}],
+                            "link_quality": {"resolution_counts": {"resolved_pin_heuristic": 1}},
+                            "external_dependencies": [{"name": "GetCustomItemData"}],
+                            "missing_evidence": ["Pin/LinkedTo includes resolved_pin_heuristic links"],
+                            "confidence": "low",
+                            "status": "candidate",
+                            "db_targets": ["formula_candidates", "primal_items.sqlite"],
+                            "next_probe": [{"kind": "pin_resolution", "detail": "decode exact pin ids"}],
+                        }
+                    ],
+                    "unresolved_formulas": [
+                        {
+                            "id": "test_formula_unresolved",
+                            "candidate_id": "test_formula_candidate",
+                            "mechanism_type": "stat_weight",
+                            "mechanism": "Test stat weight",
+                            "known_visible_part": "DistributionForMaxWeight = 0.5",
+                            "blocked_by": ["GetCustomItemData"],
+                            "missing_evidence": ["native body unavailable"],
+                            "required_next_probe": [{"kind": "native", "detail": "inspect visible caller evidence"}],
+                            "priority": 50,
+                            "status": "open",
+                            "confidence": "unresolved_formula",
+                        }
+                    ],
+                },
+            )
+
+            db_path = db_dir / "primal_items.sqlite"
+            connection = sqlite3.connect(db_path)
+            create_common_tables(connection, "item_assets")
+            connection.execute(
+                """
+                INSERT INTO item_assets (
+                    object_path, asset_name, asset_type, captured, processed_current,
+                    capture_dir, read_status, knowledge_status
+                )
+                VALUES (?, ?, 'primal_item_blueprint', 1, 1, ?, 'read', 'imported')
+                """,
+                ("/Game/Test/PrimalItem_TestFormula.PrimalItem_TestFormula", "PrimalItem_TestFormula", str(capture_dir)),
+            )
+            connection.commit()
+            connection.close()
+
+            payload = import_captures_to_business_databases(db_dir, capture_root, None)
+
+            self.assertEqual(payload["totals"]["formula_candidates_imported"], 1)
+            self.assertEqual(payload["totals"]["unresolved_formulas_imported"], 1)
+            connection = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM formula_candidates").fetchone()[0], 1)
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM unresolved_formulas").fetchone()[0], 1)
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM unresolved_work WHERE work_type = 'formula_unresolved_dependency'"
+                    ).fetchone()[0],
+                    1,
+                )
+            finally:
+                connection.close()
+
     def test_imports_buff_defaults_graphs_and_unresolved_work(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -365,6 +514,152 @@ class KnowledgeCaptureImportTests(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM item_properties").fetchone()[0], 3)
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM item_grants").fetchone()[0], 1)
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM item_use_logic").fetchone()[0], 1)
+            finally:
+                connection.close()
+
+    def test_loot_import_marks_property_parser_needed_when_sets_are_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_dir = root / "db"
+            capture_root = root / "captures"
+            db_dir.mkdir()
+            capture_dir = capture_root / "SupplyCrate_Test"
+            write_json(
+                capture_dir / "uasset_class_defaults.json",
+                {
+                    "variables": {},
+                    "properties": [
+                        {
+                            "name": "LootItemSets",
+                            "type": "ArrayProperty",
+                            "value": [],
+                            "array_parse": {
+                                "parsed": False,
+                                "element_kind": "unknown",
+                                "raw_size": 96,
+                            },
+                            "confidence": "low",
+                        },
+                        {
+                            "name": "ItemSetWeights",
+                            "type": "StructProperty",
+                            "value": {"parsed": False, "raw_size": 48},
+                            "struct_parse": {
+                                "parsed": False,
+                                "struct_name": "MysteryLootStruct",
+                                "raw_size": 48,
+                            },
+                            "confidence": "low",
+                        },
+                    ],
+                },
+            )
+            write_json(capture_dir / "uasset_graph_nodes.json", {"graphs": [{"graph": "EventGraph", "nodes": []}]})
+
+            db_path = db_dir / "loot.sqlite"
+            connection = sqlite3.connect(db_path)
+            create_common_tables(connection, "loot_assets")
+            connection.execute(
+                """
+                CREATE TABLE loot_crates (
+                    object_path TEXT PRIMARY KEY,
+                    crate_type TEXT NOT NULL DEFAULT '',
+                    quality_min TEXT NOT NULL DEFAULT '',
+                    quality_max TEXT NOT NULL DEFAULT '',
+                    level_requirement TEXT NOT NULL DEFAULT '',
+                    confidence TEXT NOT NULL DEFAULT 'unknown'
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE loot_item_sets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    object_path TEXT NOT NULL,
+                    set_name TEXT NOT NULL,
+                    set_weight TEXT NOT NULL DEFAULT '',
+                    confidence TEXT NOT NULL DEFAULT 'unknown',
+                    source_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE loot_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    object_path TEXT NOT NULL,
+                    item_path TEXT NOT NULL,
+                    entry_weight TEXT NOT NULL DEFAULT '',
+                    quantity_min TEXT NOT NULL DEFAULT '',
+                    quantity_max TEXT NOT NULL DEFAULT '',
+                    quality_min TEXT NOT NULL DEFAULT '',
+                    quality_max TEXT NOT NULL DEFAULT '',
+                    blueprint_chance TEXT NOT NULL DEFAULT '',
+                    confidence TEXT NOT NULL DEFAULT 'unknown'
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE loot_conditions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    object_path TEXT NOT NULL,
+                    condition_key TEXT NOT NULL,
+                    condition_value TEXT NOT NULL DEFAULT '',
+                    confidence TEXT NOT NULL DEFAULT 'unknown'
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE loot_rewards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    object_path TEXT NOT NULL,
+                    reward_type TEXT NOT NULL,
+                    reward_value TEXT NOT NULL DEFAULT '',
+                    confidence TEXT NOT NULL DEFAULT 'unknown',
+                    source_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE loot_references (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    object_path TEXT NOT NULL,
+                    reference_path TEXT NOT NULL,
+                    reference_type TEXT NOT NULL DEFAULT '',
+                    source_property TEXT NOT NULL DEFAULT '',
+                    confidence TEXT NOT NULL DEFAULT 'unknown'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO loot_assets (
+                    object_path, asset_name, captured, processed_current,
+                    capture_dir, read_status, knowledge_status
+                )
+                VALUES (?, ?, 1, 1, ?, 'read', 'imported')
+                """,
+                ("/Game/Test/SupplyCrate_Test.SupplyCrate_Test", "SupplyCrate_Test", str(capture_dir)),
+            )
+            connection.commit()
+            connection.close()
+
+            payload = import_captures_to_business_databases(db_dir, capture_root, None)
+
+            self.assertEqual(payload["totals"]["unresolved_imported"], 2)
+            connection = sqlite3.connect(db_path)
+            try:
+                rows = connection.execute(
+                    "SELECT detail, source_json FROM unresolved_work WHERE work_type = 'property_parser_needed'"
+                ).fetchall()
+                self.assertEqual(len(rows), 2)
+                self.assertTrue(any("LootItemSets" in row[0] for row in rows))
+                self.assertTrue(any("ItemSetWeights" in row[0] for row in rows))
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM loot_item_sets").fetchone()[0], 0)
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM loot_entries").fetchone()[0], 0)
             finally:
                 connection.close()
 

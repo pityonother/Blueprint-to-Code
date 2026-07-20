@@ -17,6 +17,8 @@ from blueprint_translator.uasset_graphs import (
     read_uasset_graph_content,
     write_uasset_graph_read_files,
 )
+from blueprint_translator.artifact_modes import ARTIFACT_MODES, normalize_artifact_mode
+from blueprint_translator.evidence_repository import open_asset_repository
 from blueprint_translator.asset_ledger import (
     processed_current_for_path,
     record_asset_results,
@@ -75,6 +77,14 @@ def load_graph_summary(path: Path) -> dict[str, Any]:
         "link_count": int(payload.get("link_count") or 0),
         "status_counts": payload.get("status_counts") or {},
     }
+
+
+def repository_graph_status_counts(repository: Any) -> dict[str, int]:
+    status_counts: dict[str, int] = {}
+    for graph in repository.graph_summaries():
+        status = str(graph.get("status") or "unknown").casefold()
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return status_counts
 
 
 def existing_capture_result(object_path: str, asset_name: str, asset_dir: Path, uasset_path: Path) -> dict[str, Any]:
@@ -258,21 +268,29 @@ def evaluate_asset_quality(result: dict[str, Any]) -> dict[str, Any]:
     diagnostic_error_count_for_verdict = diagnostic_summary["error"]
     if diagnostic_error_count_for_verdict and diagnostic_errors_are_empty_graph_only(diagnostics) and int(result.get("node_count") or 0) == 0:
         diagnostic_error_count_for_verdict = 0
-    report_files = {
+    legacy_report_files = {
         "behavior_summary": bool(behavior),
         "diagnostics_report": bool(diagnostics),
         "capture_quality_report": bool(capture_quality),
         "asset_report": (output_dir / "asset_report.md").is_file(),
     }
+    indexed_report_files = {
+        "evidence_store": (asset_dir / "evidence" / "evidence.sqlite").is_file(),
+        "agent_index": (output_dir / "agent_index.md").is_file(),
+    }
+    report_files = {**legacy_report_files, **indexed_report_files}
     incomplete_graphs = {
         key: value
         for key, value in graph_status_counts.items()
         if key not in {"complete", "complete_empty"}
     }
-    report_missing = not all(report_files.values())
+    report_missing = not (
+        all(indexed_report_files.values())
+        or all(legacy_report_files.values())
+    )
     analysis_failed = bool(analysis.get("error")) or (int(analysis.get("return_code") or 0) != 0 if analysis else False)
     quality_flags: list[str] = []
-    if str(result.get("status")) not in {"read", "skipped_existing", "skipped_processed"}:
+    if str(result.get("status")) not in {"read", "existing_indexed", "skipped_existing", "skipped_processed"}:
         quality_flags.append("read_failed")
     if report_missing:
         quality_flags.append("reports_missing")
@@ -415,7 +433,15 @@ def write_quality_report(out_path: Path, payload: dict[str, Any], *, title: str 
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level: str, force: bool) -> dict[str, Any]:
+def read_asset(
+    object_path: str,
+    *,
+    max_graphs: int,
+    analyze: bool,
+    report_level: str,
+    force: bool,
+    artifact_mode: str | None = None,
+) -> dict[str, Any]:
     asset_name = asset_name_from_object_path(object_path)
     asset_dir = CAPTURE_ROOT / safe_filename(asset_name, "BlueprintAsset")
     uasset_path, attempted = object_path_to_uasset_path(object_path)
@@ -436,7 +462,26 @@ def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level
             "uasset_path": str(uasset_path),
         }
 
+    indexed = asset_dir / "evidence" / "evidence.sqlite"
     existing = asset_dir / "uasset_graph_nodes.json"
+    if indexed.is_file() and not force:
+        with open_asset_repository(asset_dir) as repository:
+            overview = repository.query({"operation": "overview", "budgetTokens": 800})
+            status_counts = repository_graph_status_counts(repository)
+        summary = overview.get("summary", {})
+        return {
+            "asset_path": object_path,
+            "asset_name": asset_name,
+            "status": "existing_indexed",
+            "asset_dir": str(asset_dir),
+            "uasset_path": str(uasset_path),
+            "graph_count": summary.get("graphCount", 0),
+            "node_count": summary.get("nodeCount", 0),
+            "pin_count": summary.get("pinCount", 0),
+            "link_count": summary.get("linkObservationCount", 0),
+            "status_counts": status_counts,
+            "revision_id": overview.get("asset", {}).get("revisionId", ""),
+        }
     if existing.is_file() and not force:
         result = existing_capture_result(object_path, asset_name, asset_dir, uasset_path)
         if analyze:
@@ -448,7 +493,8 @@ def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level
 
     started = time.time()
     payload = read_uasset_graph_content(object_path, uasset_path, max_graphs=max_graphs)
-    paths = write_uasset_graph_read_files(object_path, CAPTURE_ROOT, payload)
+    mode = normalize_artifact_mode(artifact_mode)
+    paths = write_uasset_graph_read_files(object_path, CAPTURE_ROOT, payload, artifact_mode=mode)
     result: dict[str, Any] = {
         "asset_path": object_path,
         "asset_name": payload.get("asset_name") or asset_name,
@@ -461,8 +507,10 @@ def read_asset(object_path: str, *, max_graphs: int, analyze: bool, report_level
         "link_count": payload.get("link_count", 0),
         "status_counts": payload.get("status_counts", {}),
         "duration_seconds": round(time.time() - started, 2),
+        "artifact_mode": mode,
+        "revision_id": paths.get("revision_id", ""),
     }
-    if analyze:
+    if analyze and mode != "indexed":
         try:
             result["analysis"] = analyze_asset(Path(paths["asset_dir"]), report_level)
         except Exception as exc:
@@ -527,6 +575,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-level", default="standard", choices=["compact", "standard", "debug"])
     parser.add_argument("--rebuild-knowledge", action="store_true", help="Rebuild the knowledge base after reading.")
     parser.add_argument("--include-current", action="store_true", help="Let already processed current assets consume the batch limit.")
+    parser.add_argument("--artifact-mode", choices=sorted(ARTIFACT_MODES), default=None)
     return parser.parse_args()
 
 
@@ -547,6 +596,7 @@ def main() -> int:
             analyze=not args.no_analyze,
             report_level=args.report_level,
             force=args.force,
+            artifact_mode=args.artifact_mode,
         )
         results.append(result)
         print(f"  -> {result.get('status')} graphs={result.get('graph_count', 0)} nodes={result.get('node_count', 0)}", flush=True)

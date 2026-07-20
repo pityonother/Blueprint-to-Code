@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from blueprint_translator.evidence_values import downstream_default_metadata, default_value_is_usable
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_DIR = PROJECT_ROOT / "knowledge_base" / "db"
@@ -79,7 +81,13 @@ CATEGORY_DATABASES: dict[str, dict[str, Any]] = {
     },
 }
 
-COMMON_IMPORT_TABLES = {"read_sources", "unresolved_work", "asset_references"}
+COMMON_IMPORT_TABLES = {
+    "read_sources",
+    "unresolved_work",
+    "asset_references",
+    "formula_candidates",
+    "unresolved_formulas",
+}
 
 BENIGN_UNKNOWN_PROPERTIES = {
     "AdvancedPinDisplay",
@@ -245,7 +253,103 @@ def load_capture(capture_dir: Path) -> dict[str, Any]:
         "failed_graphs": capture_dir / "uasset_failed_graph_queue.json",
         "partial_graphs": capture_dir / "uasset_partial_graph_triage.json",
         "unknown_properties": capture_dir / "uasset_unknown_properties.json",
+        "formula_candidates": capture_dir / "output" / "formula_candidates.json",
+        "asset_memory_card": capture_dir / "output" / "asset_memory_card.json",
+        "context_pack": capture_dir / "output" / "context_pack.json",
+        "evidence_store": capture_dir / "evidence" / "evidence.sqlite",
+        "agent_index": capture_dir / "output" / "agent_index.md",
     }
+    if paths["evidence_store"].is_file():
+        from blueprint_translator.evidence_repository import open_asset_repository
+
+        with open_asset_repository(capture_dir) as repository:
+            overview = repository.query({"operation": "overview", "budgetTokens": 800})
+            identity = repository.identity()
+            graph_rows = repository.graph_summaries()
+            node_rows = repository.node_summaries()
+            defaults = repository.default_summaries(include_values=True)
+            gaps = repository.gap_summaries()
+        nodes_by_graph: dict[str, list[dict[str, object]]] = {}
+        for node in node_rows:
+            nodes_by_graph.setdefault(str(node.get("graph_ref") or ""), []).append(node)
+        graphs = [
+            {
+                "graph": row.get("name"),
+                "graph_type": row.get("graph_type"),
+                "export_index": row.get("export_index"),
+                "status": row.get("status"),
+                "confidence": row.get("confidence"),
+                "node_count": row.get("node_count"),
+                "pin_count": row.get("pin_count"),
+                "link_count": row.get("link_count"),
+                "coverage": row.get("coverage", {}),
+                "nodes": nodes_by_graph.get(str(row.get("ref") or ""), []),
+                "evidence_ref": row.get("ref"),
+            }
+            for row in graph_rows
+        ]
+        summary = overview.get("summary", {})
+        graph_nodes = {
+            "asset_name": identity.get("asset_name"),
+            "asset_path": identity.get("object_path"),
+            "uasset_path": identity.get("uasset_path"),
+            "revision_id": identity.get("revision_id"),
+            "graph_count": summary.get("graphCount", 0),
+            "node_count": summary.get("nodeCount", 0),
+            "pin_count": summary.get("pinCount", 0),
+            "link_count": summary.get("linkObservationCount", 0),
+            "graphs": graphs,
+        }
+        class_defaults = {
+            "asset_name": identity.get("asset_name"),
+            "variables": {
+                str(row["name"]): {
+                    "value": row.get("value"),
+                    "type": row.get("type"),
+                    "source": row.get("source"),
+                    "confidence": row.get("confidence"),
+                    "evidence_ref": row.get("ref"),
+                    **downstream_default_metadata(row),
+                }
+                for row in defaults
+            },
+        }
+        partial_graphs = {
+            "graphs": [
+                {
+                    "evidence_ref": row.get("ref"),
+                    "scope_kind": row.get("scope_kind"),
+                    "scope_ref": row.get("scope_ref"),
+                    "name": row.get("name"),
+                    "status": row.get("status"),
+                    "primary_reason": row.get("reason_code"),
+                    "reasons": [row.get("reason_code")],
+                    "detail": row.get("detail"),
+                    "next_probe": row.get("next_probe"),
+                    "next_action": row.get("next_probe"),
+                }
+                for row in gaps
+            ]
+        }
+        return {
+            "capture_dir": capture_dir,
+            "paths": paths,
+            "package": {
+                "uasset_path": identity.get("uasset_path"),
+                "summary": {"package_name": str(identity.get("object_path") or "").split(".", 1)[0]},
+            },
+            "graph_nodes": graph_nodes,
+            "class_defaults": class_defaults,
+            # A structured evidence gap is one fact, not both a failed and a
+            # partial graph. Keep it in the partial/triage channel so downstream
+            # imports do not create two contradictory rows for the same ref.
+            "failed_graphs": {"graphs": []},
+            "partial_graphs": partial_graphs,
+            "unknown_properties": {},
+            "formula_candidates": read_json(paths["formula_candidates"], {}),
+            "asset_memory_card": read_json(paths["asset_memory_card"], {}),
+            "context_pack": read_json(paths["context_pack"], {}),
+        }
     return {
         "capture_dir": capture_dir,
         "paths": paths,
@@ -255,6 +359,9 @@ def load_capture(capture_dir: Path) -> dict[str, Any]:
         "failed_graphs": read_json(paths["failed_graphs"], {}),
         "partial_graphs": read_json(paths["partial_graphs"], {}),
         "unknown_properties": read_json(paths["unknown_properties"], {}),
+        "formula_candidates": read_json(paths["formula_candidates"], {}),
+        "asset_memory_card": read_json(paths["asset_memory_card"], {}),
+        "context_pack": read_json(paths["context_pack"], {}),
     }
 
 
@@ -263,7 +370,36 @@ def variables_from_capture(capture: dict[str, Any]) -> dict[str, dict[str, Any]]
     variables = payload.get("variables") or {}
     if not isinstance(variables, dict):
         return {}
-    return {str(key): value for key, value in variables.items() if isinstance(value, dict)}
+    return {
+        str(key): value
+        for key, value in variables.items()
+        if isinstance(value, dict) and default_value_is_usable(value)
+    }
+
+
+def has_unresolved_payload(capture: dict[str, Any]) -> bool:
+    """Return whether importing this capture would preserve actionable gaps."""
+
+    for section_name in ("failed_graphs", "partial_graphs"):
+        section = capture.get(section_name) or {}
+        if isinstance(section, dict) and any(
+            isinstance(row, dict) for row in section.get("graphs") or []
+        ):
+            return True
+    unknown = capture.get("unknown_properties") or {}
+    unknown_items = (
+        unknown.get("unknown_properties") or unknown.get("items") or []
+        if isinstance(unknown, dict)
+        else []
+    )
+    return any(
+        isinstance(item, dict)
+        and not is_benign_unknown_property(
+            item,
+            str(item.get("name") or item.get("property") or item.get("class") or ""),
+        )
+        for item in unknown_items
+    )
 
 
 def iter_graphs(capture: dict[str, Any]) -> list[dict[str, Any]]:
@@ -416,14 +552,20 @@ def insert_unresolved_work(connection: sqlite3.Connection, object_path: str, cap
     for graph in partial.get("graphs") or []:
         if not isinstance(graph, dict):
             continue
-        detail = str(graph.get("graph") or "")
+        scope_kind = str(graph.get("scope_kind") or "graph")
+        detail = str(graph.get("graph") or graph.get("name") or graph.get("detail") or graph.get("scope_ref") or "")
         reason = str(graph.get("primary_reason") or ",".join(graph.get("reasons") or []) or "unknown")
         connection.execute(
             """
             INSERT INTO unresolved_work (object_path, work_type, detail, source_json, status)
             VALUES (?, ?, ?, ?, 'open')
             """,
-            (object_path, "partial_graph", f"{detail}: {reason}", json_dumps(graph)),
+            (
+                object_path,
+                "default_value_gap" if scope_kind == "default" else "partial_graph",
+                f"{detail}: {reason}",
+                json_dumps(graph),
+            ),
         )
         count += 1
 
@@ -442,6 +584,227 @@ def insert_unresolved_work(connection: sqlite3.Connection, object_path: str, cap
             """,
             (object_path, "unknown_property", detail, json_dumps(item)),
         )
+        count += 1
+    return count
+
+
+def object_row_count(connection: sqlite3.Connection, table: str, object_path: str) -> int:
+    if not table or not table_exists(connection, table):
+        return 0
+    return int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE object_path = ?",
+            (object_path,),
+        ).fetchone()[0]
+    )
+
+
+def property_parser_blockers(capture: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = capture.get("class_defaults") or {}
+    properties = payload.get("properties") or []
+    blockers: list[dict[str, Any]] = []
+    if not isinstance(properties, list):
+        return blockers
+    for prop in properties:
+        if not isinstance(prop, dict):
+            continue
+        type_name = str(prop.get("type") or "")
+        name = str(prop.get("name") or "")
+        if type_name == "ArrayProperty":
+            array_parse = prop.get("array_parse", {})
+            parsed = bool(isinstance(array_parse, dict) and array_parse.get("parsed"))
+            if not parsed:
+                blockers.append(
+                    {
+                        "name": name,
+                        "type": type_name,
+                        "parse": array_parse if isinstance(array_parse, dict) else {},
+                        "reason": "ArrayProperty did not resolve element references.",
+                        "source_property": prop,
+                    }
+                )
+        elif type_name == "StructProperty":
+            struct_parse = prop.get("struct_parse", {})
+            value = prop.get("value")
+            parsed = bool(isinstance(struct_parse, dict) and struct_parse.get("parsed"))
+            if not parsed or (isinstance(value, dict) and value.get("parsed") is False):
+                blockers.append(
+                    {
+                        "name": name,
+                        "type": type_name,
+                        "parse": struct_parse if isinstance(struct_parse, dict) else {},
+                        "reason": "StructProperty is present but not decoded into usable fields.",
+                        "source_property": prop,
+                    }
+                )
+        elif type_name == "MapProperty":
+            blockers.append(
+                {
+                    "name": name,
+                    "type": type_name,
+                    "parse": prop.get("value") if isinstance(prop.get("value"), dict) else {},
+                    "reason": "MapProperty parser is not implemented for this field.",
+                    "source_property": prop,
+                }
+            )
+    return blockers
+
+
+def insert_loot_property_parser_needed(
+    connection: sqlite3.Connection,
+    object_path: str,
+    capture: dict[str, Any],
+    config: dict[str, Any],
+) -> int:
+    tables = config.get("tables") or {}
+    item_set_count = object_row_count(connection, str(tables.get("item_sets") or ""), object_path)
+    entry_count = object_row_count(connection, str(tables.get("entries") or ""), object_path)
+    if item_set_count or entry_count or not table_exists(connection, "unresolved_work"):
+        return 0
+
+    blockers = property_parser_blockers(capture)
+    count = 0
+    for blocker in blockers:
+        detail = (
+            f"ArrayProperty/StructProperty for loot item sets: "
+            f"{blocker.get('name') or 'unknown'} ({blocker.get('type') or 'unknown'})"
+        )
+        connection.execute(
+            """
+            INSERT INTO unresolved_work (object_path, work_type, detail, source_json, status)
+            VALUES (?, 'property_parser_needed', ?, ?, 'open')
+            """,
+            (object_path, detail, json_dumps(blocker)),
+        )
+        count += 1
+    return count
+
+
+def insert_formula_candidates(
+    connection: sqlite3.Connection,
+    object_path: str,
+    asset: dict[str, Any],
+    capture: dict[str, Any],
+) -> int:
+    if not table_exists(connection, "formula_candidates"):
+        return 0
+    payload = capture.get("formula_candidates") or {}
+    if not isinstance(payload, dict):
+        return 0
+    candidates = [item for item in payload.get("candidates", []) if isinstance(item, dict)]
+    generated_at = str(payload.get("generated_at") or now_iso())
+    source_capture = str(capture.get("capture_dir") or "")
+    asset_name = str(payload.get("asset_name") or asset.get("asset_name") or "")
+    asset_type = str(payload.get("asset_type") or asset.get("asset_type") or "")
+    count = 0
+    for index, candidate in enumerate(candidates, start=1):
+        candidate_id = str(candidate.get("id") or f"{asset_name}_{index}_formula_candidate")
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO formula_candidates (
+                id, object_path, asset_name, asset_type, domain, mechanism_type,
+                mechanism, player_meaning, graph, visible_rule, formula_text,
+                formula_ast_json, inputs_json, outputs_json, conditions_json,
+                math_nodes_json, evidence_json, link_quality_json,
+                external_dependencies_json, missing_evidence_json, next_probe_json,
+                confidence, status, source_capture, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                object_path,
+                asset_name,
+                asset_type,
+                str(candidate.get("domain") or ""),
+                str(candidate.get("mechanism_type") or ""),
+                str(candidate.get("mechanism") or ""),
+                str(candidate.get("player_meaning") or ""),
+                str(candidate.get("graph") or ""),
+                str(candidate.get("visible_rule") or ""),
+                str(candidate.get("formula_text") or ""),
+                json_dumps(candidate.get("formula_ast") or {}),
+                json_dumps(candidate.get("inputs") or []),
+                json_dumps(candidate.get("outputs") or []),
+                json_dumps(candidate.get("conditions") or []),
+                json_dumps(candidate.get("math_nodes") or []),
+                json_dumps(candidate.get("evidence") or []),
+                json_dumps(candidate.get("link_quality") or {}),
+                json_dumps(candidate.get("external_dependencies") or []),
+                json_dumps(candidate.get("missing_evidence") or []),
+                json_dumps(candidate.get("next_probe") or []),
+                str(candidate.get("confidence") or "unknown"),
+                str(candidate.get("status") or "candidate"),
+                source_capture,
+                generated_at,
+                now_iso(),
+            ),
+        )
+        count += 1
+    return count
+
+
+def insert_unresolved_formulas(
+    connection: sqlite3.Connection,
+    object_path: str,
+    asset: dict[str, Any],
+    capture: dict[str, Any],
+) -> int:
+    if not table_exists(connection, "unresolved_formulas"):
+        return 0
+    payload = capture.get("formula_candidates") or {}
+    if not isinstance(payload, dict):
+        return 0
+    unresolved = [item for item in payload.get("unresolved_formulas", []) if isinstance(item, dict)]
+    generated_at = str(payload.get("generated_at") or now_iso())
+    source_capture = str(capture.get("capture_dir") or "")
+    asset_name = str(payload.get("asset_name") or asset.get("asset_name") or "")
+    asset_type = str(payload.get("asset_type") or asset.get("asset_type") or "")
+    count = 0
+    for index, item in enumerate(unresolved, start=1):
+        unresolved_id = str(item.get("id") or f"{asset_name}_{index}_unresolved_formula")
+        mechanism_type = str(item.get("mechanism_type") or "")
+        mechanism = str(item.get("mechanism") or "")
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO unresolved_formulas (
+                id, candidate_id, object_path, asset_name, asset_type, domain,
+                mechanism_type, mechanism, known_visible_part, blocked_by_json,
+                missing_evidence_json, required_next_probe_json, priority, status,
+                confidence, source_capture, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                unresolved_id,
+                str(item.get("candidate_id") or ""),
+                object_path,
+                asset_name,
+                asset_type,
+                str(item.get("domain") or ""),
+                mechanism_type,
+                mechanism,
+                str(item.get("known_visible_part") or ""),
+                json_dumps(item.get("blocked_by") or []),
+                json_dumps(item.get("missing_evidence") or []),
+                json_dumps(item.get("required_next_probe") or []),
+                int(item.get("priority") or 50),
+                str(item.get("status") or "open"),
+                str(item.get("confidence") or "unresolved_formula"),
+                source_capture,
+                generated_at,
+                now_iso(),
+            ),
+        )
+        if table_exists(connection, "unresolved_work"):
+            detail = f"{mechanism_type}: {mechanism}".strip(": ")
+            connection.execute(
+                """
+                INSERT INTO unresolved_work (object_path, work_type, detail, source_json, status)
+                VALUES (?, 'formula_unresolved_dependency', ?, ?, 'open')
+                """,
+                (object_path, detail, json_dumps(item)),
+            )
         count += 1
     return count
 
@@ -472,6 +835,8 @@ def upsert_metadata(connection: sqlite3.Connection, summary: dict[str, Any]) -> 
         "capture_import_variables": str(summary.get("variables_imported", 0)),
         "capture_import_references": str(summary.get("references_imported", 0)),
         "capture_import_unresolved": str(summary.get("unresolved_imported", 0)),
+        "capture_import_formula_candidates": str(summary.get("formula_candidates_imported", 0)),
+        "capture_import_unresolved_formulas": str(summary.get("unresolved_formulas_imported", 0)),
     }
     connection.executemany("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", rows.items())
 
@@ -950,6 +1315,8 @@ def import_business_database(
         "variables_imported": 0,
         "references_imported": 0,
         "unresolved_imported": 0,
+        "formula_candidates_imported": 0,
+        "unresolved_formulas_imported": 0,
         "semantic_rows_imported": 0,
         "skipped_no_capture": 0,
         "skipped_no_payload": 0,
@@ -975,18 +1342,30 @@ def import_business_database(
             capture = load_capture(capture_dir)
             variables = variables_from_capture(capture)
             has_graph_nodes = bool((capture.get("graph_nodes") or {}).get("graphs"))
-            if not variables and not has_graph_nodes:
+            formula_payload = capture.get("formula_candidates") or {}
+            has_formula_payload = bool(
+                formula_payload.get("candidates") or formula_payload.get("unresolved_formulas")
+            ) if isinstance(formula_payload, dict) else False
+            has_unresolved = has_unresolved_payload(capture)
+            if not variables and not has_graph_nodes and not has_formula_payload and not has_unresolved:
                 summary["skipped_no_payload"] += 1
                 continue
 
             insert_read_sources(connection, object_path, asset, capture)
             ref_count = insert_common_references(connection, object_path, variables, config.get("reference_table"))
             unresolved_count = insert_unresolved_work(connection, object_path, capture)
+            formula_count = insert_formula_candidates(connection, object_path, asset, capture)
+            unresolved_formula_count = insert_unresolved_formulas(connection, object_path, asset, capture)
             semantic_count = import_category_asset(connection, group_id, object_path, variables, capture)
+            parser_needed_count = 0
+            if group_id == "loot_or_supply_crate":
+                parser_needed_count = insert_loot_property_parser_needed(connection, object_path, capture, config)
             summary["assets_imported"] += 1
             summary["variables_imported"] += len(variables)
             summary["references_imported"] += ref_count
-            summary["unresolved_imported"] += unresolved_count
+            summary["unresolved_imported"] += unresolved_count + unresolved_formula_count + parser_needed_count
+            summary["formula_candidates_imported"] += formula_count
+            summary["unresolved_formulas_imported"] += unresolved_formula_count
             summary["semantic_rows_imported"] += semantic_count
         summary["generated"] = now_iso()
         upsert_metadata(connection, summary)
@@ -1022,6 +1401,8 @@ def import_captures_to_business_databases(
             "variables_imported",
             "references_imported",
             "unresolved_imported",
+            "formula_candidates_imported",
+            "unresolved_formulas_imported",
             "semantic_rows_imported",
             "skipped_no_capture",
             "skipped_no_payload",
@@ -1055,21 +1436,25 @@ def render_import_report(payload: dict[str, Any]) -> str:
         f"- Imported variables: {totals.get('variables_imported', 0)}",
         f"- Imported references: {totals.get('references_imported', 0)}",
         f"- Imported unresolved work: {totals.get('unresolved_imported', 0)}",
+        f"- Imported formula candidates: {totals.get('formula_candidates_imported', 0)}",
+        f"- Imported unresolved formulas: {totals.get('unresolved_formulas_imported', 0)}",
         f"- Semantic rows: {totals.get('semantic_rows_imported', 0)}",
         "",
-        "| Category | Seen | Imported | Variables | References | Unresolved | Semantic rows | Skipped |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Category | Seen | Imported | Variables | References | Unresolved | Formulas | Unresolved formulas | Semantic rows | Skipped |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for group_id, summary in (payload.get("categories") or {}).items():
         skipped = int(summary.get("skipped_no_capture") or 0) + int(summary.get("skipped_no_payload") or 0)
         lines.append(
-            "| {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 group_id,
                 summary.get("assets_seen", 0),
                 summary.get("assets_imported", 0),
                 summary.get("variables_imported", 0),
                 summary.get("references_imported", 0),
                 summary.get("unresolved_imported", 0),
+                summary.get("formula_candidates_imported", 0),
+                summary.get("unresolved_formulas_imported", 0),
                 summary.get("semantic_rows_imported", 0),
                 skipped,
             )

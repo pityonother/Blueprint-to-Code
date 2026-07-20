@@ -39,11 +39,22 @@ from blueprint_translator.capture import (
     upsert_graph_record,
     write_capture_manifest,
 )
+from blueprint_translator.artifact_modes import normalize_artifact_mode
 from blueprint_translator.graph_queue import graph_queue_summary, graph_queue_text_for_mode
+from blueprint_translator.evidence_repository import open_asset_repository
+from blueprint_translator.report_query import (
+    DEFAULT_REPORT_QUERY_BUDGET,
+    MAX_REPORT_CONTEXT_LINES,
+    MAX_REPORT_QUERY_BUDGET,
+    REPORT_FILES,
+    build_report_view,
+    resolve_report_path,
+)
 from blueprint_translator.utils import read_clipboard, safe_filename
 from blueprint_translator.uasset_graphs import (
     current_uasset_graph_payload_files,
     mine_graph_candidates,
+    normalize_blueprint_object_path,
     object_path_to_uasset_path,
     read_uasset_graph_content,
     write_graph_candidate_files,
@@ -57,28 +68,37 @@ DIST_ROOT = PROJECT_ROOT / "dist"
 KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge_base"
 EXPORT_SCRIPT = PROJECT_ROOT / "scripts" / "devkit_exporters" / "export_current_blueprint_defaults.py"
 DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
+DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
+
+
+def configured_devkit_content_root() -> Path | None:
+    for env_name in ("ARK_DEVKIT_CONTENT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT"):
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            return Path(value.strip().strip("\"'")).expanduser()
+    if DEVKIT_CONTENT_ROOT_FILE.is_file():
+        try:
+            for line in DEVKIT_CONTENT_ROOT_FILE.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+                value = line.strip().strip("\"'")
+                if value and not value.startswith("#"):
+                    return Path(value).expanduser()
+        except OSError:
+            return None
+    return None
+
+
+_CONFIGURED_DEVKIT_CONTENT_ROOT = configured_devkit_content_root()
+if _CONFIGURED_DEVKIT_CONTENT_ROOT:
+    os.environ.setdefault("BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT", str(_CONFIGURED_DEVKIT_CONTENT_ROOT))
 
 REPORT_TARGETS = {
-    "next_actions": ("output", "next_actions.md"),
-    "notes_todo": ("output", "notes_todo.md"),
-    "behavior_summary": ("output", "behavior_summary.md"),
-    "context_review": ("output", "context_review.md"),
-    "capture_quality_report": ("output", "capture_quality_report.md"),
-    "diagnostics_report": ("output", "diagnostics_report.md"),
-    "asset_report": ("output", "asset_report.md"),
-    "call_graph_summary": ("output", "call_graph_summary.md"),
+    **REPORT_FILES,
+    "formula_candidates_json": ("output", "formula_candidates.json"),
+    "unresolved_formulas": ("output", "formula_candidates.md"),
     "notes": ("notes.md",),
     "defaults": ("defaults.json",),
     "components": ("components.json",),
     "devkit_report": ("devkit_export_report.md",),
-    "uasset_graph_read_report": ("uasset_graph_read_report.md",),
-    "uasset_property_parse_report": ("uasset_property_parse_report.md",),
-    "uasset_link_resolution_report": ("uasset_link_resolution_report.md",),
-    "uasset_partial_graph_triage": ("uasset_partial_graph_triage.md",),
-    "uasset_quality_gates": ("uasset_quality_gates.md",),
-    "uasset_vs_clipboard_compare": ("uasset_vs_clipboard_compare.md",),
-    "uasset_structure_report": ("uasset_structure_report.md",),
-    "uasset_class_defaults_report": ("uasset_class_defaults_report.md",),
 }
 
 OPEN_TARGETS = {
@@ -566,7 +586,37 @@ def uasset_structure_counts(asset_dir: Path) -> dict[str, int]:
     }
 
 
+def indexed_asset_metrics(asset_dir: Path) -> tuple[dict[str, int], int, str]:
+    with open_asset_repository(asset_dir) as repository:
+        overview = repository.query({"operation": "overview", "budgetTokens": 800})
+        graph_rows = repository.graph_summaries()
+    summary = overview.get("summary", {})
+    status_rows = [
+        (str(row.get("status") or "").casefold(), graph_name_key(str(row.get("name") or "")))
+        for row in graph_rows
+    ]
+    captured_keys = captured_graph_keys(asset_dir)
+    graph_counts = {
+        "graphs": len(graph_rows),
+        "nodes": int(summary.get("nodeCount") or 0),
+        "pins": int(summary.get("pinCount") or 0),
+        "links": int(summary.get("linkObservationCount") or 0),
+        "complete": sum(status in {"complete", "complete_empty", "confirmed"} for status, _ in status_rows),
+        "partial": sum(status in {"partial", "heuristic", "ambiguous"} for status, _ in status_rows),
+        "needs": sum(
+            status in {"needs_clipboard", "failed", "not_recovered"} and graph_key not in captured_keys
+            for status, graph_key in status_rows
+        ),
+    }
+    default_count = int(summary.get("defaultCount") or 0)
+    revision = str(overview.get("asset", {}).get("revisionId") or "")
+    return graph_counts, default_count, revision
+
+
 def uasset_graph_read_counts(asset_dir: Path) -> dict[str, int]:
+    if (asset_dir / "evidence" / "evidence.sqlite").is_file():
+        graph_counts, _, _ = indexed_asset_metrics(asset_dir)
+        return graph_counts
     payload = read_json_file(asset_dir / "uasset_graph_nodes.json")
     if not isinstance(payload, dict):
         return {"graphs": 0, "nodes": 0, "pins": 0, "links": 0, "complete": 0, "partial": 0, "needs": 0}
@@ -602,24 +652,42 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
     graph_candidates_path = asset_dir / "graph_candidates_uasset.json"
     uasset_structure_path = asset_dir / "uasset_structure.json"
     uasset_graph_read_path = asset_dir / "uasset_graph_nodes.json"
+    formula_candidates_path = output_dir / "formula_candidates.json"
+    asset_memory_card_path = output_dir / "asset_memory_card.json"
+    context_pack_path = output_dir / "context_pack.json"
     queue_counts = graph_queue_counts(asset_dir)
     structure_counts = uasset_structure_counts(asset_dir)
-    graph_read_counts = uasset_graph_read_counts(asset_dir)
+    evidence_database_path = asset_dir / "evidence" / "evidence.sqlite"
+    if evidence_database_path.is_file():
+        graph_read_counts, evidence_default_count, evidence_revision = indexed_asset_metrics(asset_dir)
+    else:
+        graph_read_counts = uasset_graph_read_counts(asset_dir)
+        evidence_default_count = 0
+        evidence_revision = ""
     defaults_data = read_json_file(defaults_path)
     uasset_defaults_data = read_json_file(uasset_defaults_path)
     defaults_count = count_defaults(defaults_data)
     if not defaults_count:
-        defaults_count = count_defaults(uasset_defaults_data)
+        defaults_count = count_defaults(uasset_defaults_data) or evidence_default_count
     components_data = read_json_file(components_path)
+    formula_data = read_json_file(formula_candidates_path)
+    formula_summary = formula_data.get("summary", {}) if isinstance(formula_data, dict) and isinstance(formula_data.get("summary", {}), dict) else {}
     reports = {
         key: (asset_dir / Path(*parts)).is_file()
         for key, parts in REPORT_TARGETS.items()
     }
+    preserved_legacy_reports = bool(
+        evidence_database_path.is_file()
+        and any(
+            reports.get(key, False)
+            for key in ("behavior_summary", "asset_report", "diagnostics_report", "call_graph_summary")
+        )
+    )
     report_mtime = newest_mtime(output_dir)
     return {
         "name": asset_dir.name,
         "path": str(asset_dir),
-        "graphs": graph_count(asset_dir),
+        "graphs": graph_read_counts["graphs"] if evidence_database_path.is_file() else graph_count(asset_dir),
         "hasGraphQueue": graph_queue_path.is_file(),
         "graphQueueCount": queue_counts["total"],
         "graphQueueCompactCount": queue_counts["compact"],
@@ -635,7 +703,9 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
         "uassetCollapsedGraphCount": structure_counts["collapsed"],
         "uassetStandaloneGraphCount": structure_counts["standalone"],
         "uassetFunctionCount": structure_counts["function"],
-        "hasUassetGraphRead": uasset_graph_read_path.is_file(),
+        "hasUassetGraphRead": uasset_graph_read_path.is_file() or evidence_database_path.is_file(),
+        "hasEvidenceStore": evidence_database_path.is_file(),
+        "evidenceRevision": evidence_revision,
         "uassetReadGraphCount": graph_read_counts["graphs"],
         "uassetReadNodeCount": graph_read_counts["nodes"],
         "uassetReadPinCount": graph_read_counts["pins"],
@@ -643,7 +713,7 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
         "uassetReadCompleteCount": graph_read_counts["complete"],
         "uassetReadPartialCount": graph_read_counts["partial"],
         "uassetReadNeedsClipboardCount": graph_read_counts["needs"],
-        "hasDefaults": defaults_path.is_file() or uasset_defaults_path.is_file(),
+        "hasDefaults": defaults_path.is_file() or uasset_defaults_path.is_file() or evidence_default_count > 0,
         "defaultsCount": defaults_count,
         "hasComponents": components_path.is_file(),
         "componentsCount": count_components(components_data),
@@ -651,6 +721,11 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
         "hasOutput": output_dir.is_dir(),
         "lastOutputAt": iso_time(report_mtime),
         "reports": reports,
+        "preservedLegacyReports": preserved_legacy_reports,
+        "formulaCandidateCount": int(formula_summary.get("candidate_count") or 0),
+        "unresolvedFormulaCount": int(formula_summary.get("unresolved_count") or 0),
+        "assetMemoryCardExists": asset_memory_card_path.is_file(),
+        "contextPackExists": context_pack_path.is_file(),
         "exportQuality": devkit_export_quality(asset_dir, components_data),
     }
 
@@ -669,30 +744,14 @@ def list_assets() -> list[dict[str, object]]:
             or (path / "uasset_class_defaults.json").is_file()
             or (path / "graph_candidates_uasset.json").is_file()
             or (path / "uasset_graph_nodes.json").is_file()
+            or (path / "evidence" / "evidence.sqlite").is_file()
         ):
             assets.append(asset_summary(path))
     return assets
 
 
 def normalize_asset_path(raw_text: str) -> str:
-    text = str(raw_text or "").strip().replace("\\", "/").strip("\"'")
-    quoted = re.search(r"['\"](?P<path>/Game/[^'\"]+)['\"]", text)
-    if quoted:
-        text = quoted.group("path").strip()
-    path_match = re.search(r"(?P<path>/Game/[^\s,'\"]+)", text)
-    if path_match:
-        text = path_match.group("path").strip()
-    text = text.strip("\"'")
-    if not text.startswith("/Game/"):
-        return ""
-    if "." in text and text.endswith("_C"):
-        package, obj = text.rsplit(".", 1)
-        text = package + "." + obj[:-2]
-    if "." not in text:
-        object_name = text.rsplit("/", 1)[-1]
-        if object_name:
-            text = text + "." + object_name
-    return text
+    return normalize_blueprint_object_path(raw_text)
 
 
 def read_devkit_request() -> str:
@@ -736,7 +795,13 @@ def mine_uasset_graph_candidates_for_request(asset_path: str, max_candidates: in
     }
 
 
-def read_uasset_graphs_for_request(asset_path: str, max_graphs: int = 0, report_level: str = "standard", analyze_after: bool = True) -> dict[str, object]:
+def read_uasset_graphs_for_request(
+    asset_path: str,
+    max_graphs: int = 0,
+    report_level: str = "standard",
+    analyze_after: bool = True,
+    artifact_mode: str | None = None,
+) -> dict[str, object]:
     normalized = normalize_asset_path(asset_path)
     if not normalized:
         raise ValueError("Paste an ARK DevKit Object Path that starts with /Game/.")
@@ -747,12 +812,13 @@ def read_uasset_graphs_for_request(asset_path: str, max_graphs: int = 0, report_
             {
                 "ok": False,
                 "code": "uasset_not_found",
-                "error": "本地 .uasset 没有找到，请检查 DevKit Content root 或对象路径。",
+                "error": "本地 .uasset 没有找到，请检查 DevKit Content root、devkit_path_mappings.txt 或对象路径。",
                 "attemptedPaths": attempted,
             },
         )
+    mode = normalize_artifact_mode(artifact_mode)
     payload = read_uasset_graph_content(normalized, uasset_path, max_graphs=max_graphs)
-    paths = write_uasset_graph_read_files(normalized, CAPTURE_ROOT, payload)
+    paths = write_uasset_graph_read_files(normalized, CAPTURE_ROOT, payload, artifact_mode=mode)
     write_devkit_request(normalized)
     result: dict[str, object] = {
         "assetPath": normalized,
@@ -769,6 +835,11 @@ def read_uasset_graphs_for_request(asset_path: str, max_graphs: int = 0, report_
         "failedQueuePath": paths.get("failed_queue", ""),
         "failedQueueJsonPath": paths.get("failed_queue_json", ""),
         "graphsDir": paths.get("graphs_dir", ""),
+        "artifactMode": mode,
+        "evidenceDatabasePath": paths.get("evidence_database", ""),
+        "evidenceManifestPath": paths.get("evidence_manifest", ""),
+        "agentIndexPath": paths.get("agent_index", ""),
+        "revisionId": paths.get("revision_id", ""),
         "graphCount": int(payload.get("graph_count") or 0),
         "nodeCount": int(payload.get("node_count") or 0),
         "pinCount": int(payload.get("pin_count") or 0),
@@ -777,8 +848,10 @@ def read_uasset_graphs_for_request(asset_path: str, max_graphs: int = 0, report_
         "attemptedPaths": attempted,
         "asset": asset_summary(Path(paths.get("asset_dir", ""))),
     }
-    if analyze_after:
+    if analyze_after and mode != "indexed":
         result["analysisJob"] = start_analyzer_job(Path(paths["asset_dir"]), report_level, keep_stale_output=True)
+    elif analyze_after:
+        result["analysisSkipped"] = "indexed mode already produced bounded evidence; legacy report analysis was not run"
     return result
 
 
@@ -919,11 +992,11 @@ def append_notes_for_functions(asset_dir: Path, kind: str, functions: list[objec
 
 
 def devkit_python_command() -> str:
-    return 'exec(open(r"{}", encoding="utf-8").read())'.format(EXPORT_SCRIPT)
+    return 'BLUEPRINT_TO_CODE_PROJECT_ROOT = r"{}"; exec(open(r"{}", encoding="utf-8").read())'.format(PROJECT_ROOT, EXPORT_SCRIPT)
 
 
 def devkit_output_log_command() -> str:
-    return 'py exec(open(r"{}", encoding="utf-8").read())'.format(EXPORT_SCRIPT)
+    return 'py BLUEPRINT_TO_CODE_PROJECT_ROOT = r"{}"; exec(open(r"{}", encoding="utf-8").read())'.format(PROJECT_ROOT, EXPORT_SCRIPT)
 
 
 def resolve_asset_dir(raw_path: str) -> Path:
@@ -950,6 +1023,70 @@ def resolve_target(asset_dir: Path, target: str, mapping: dict[str, tuple[str, .
     return path
 
 
+def query_asset_evidence(
+    capture_root: Path,
+    asset_identifier: str,
+    request: dict[str, object],
+) -> dict[str, object]:
+    """Run a bounded evidence query without accepting a caller-supplied DB path."""
+
+    identifier = str(asset_identifier or "").strip()
+    candidate_part = Path(identifier)
+    if (
+        not identifier
+        or candidate_part.is_absolute()
+        or candidate_part.name != identifier
+        or identifier in {".", ".."}
+        or "/" in identifier
+        or "\\" in identifier
+        or ":" in identifier
+    ):
+        raise ValueError("asset identifier must be one directory name inside the capture root")
+    root = Path(capture_root).expanduser().resolve()
+    asset_dir = (root / identifier).resolve()
+    if not is_within(asset_dir, root) or not asset_dir.is_dir():
+        raise ValueError("asset identifier does not resolve to a capture directory")
+    if not isinstance(request, dict):
+        raise ValueError("evidence query request must be an object")
+    with open_asset_repository(asset_dir) as repository:
+        return repository.query(request)
+
+
+def query_report_for_request(
+    asset_dir: Path,
+    target: str,
+    *,
+    mode: str = "outline",
+    query: str = "",
+    section: str = "",
+    section_start_line: int | None = None,
+    cursor: int = 0,
+    budget: int = DEFAULT_REPORT_QUERY_BUDGET,
+    context_lines: int = 2,
+) -> dict[str, object]:
+    report_path = resolve_report_path(asset_dir, target)
+    result = build_report_view(
+        report_path.read_text(encoding="utf-8-sig", errors="replace"),
+        mode=mode,
+        query=query,
+        section=section,
+        section_start_line=section_start_line,
+        cursor=max(int(cursor or 0), 0),
+        token_budget=min(max(int(budget or 0), 1), MAX_REPORT_QUERY_BUDGET),
+        context_lines=min(max(int(context_lines or 0), 0), MAX_REPORT_CONTEXT_LINES),
+    )
+    return {"path": str(report_path), **result}
+
+
+def parse_report_query_int(raw_value: str, name: str, default: int) -> int:
+    if not str(raw_value or "").strip():
+        return default
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
 def open_path(path: Path) -> None:
     if not path.exists():
         raise FileNotFoundError(str(path))
@@ -971,6 +1108,45 @@ def analyzer_command(asset_dir: Path, report_level: str, *, keep_stale_output: b
         str(asset_dir),
         "--output-dir",
         str(output_dir),
+        "--report-level",
+        report_level,
+    ]
+    if keep_stale_output:
+        command.append("--keep-stale-output")
+    return command
+
+
+def report_generation_command(
+    asset_dir: Path,
+    report_level: str,
+    *,
+    keep_stale_output: bool = False,
+) -> list[str]:
+    """Build current human reports, refreshing indexed sources in dual mode first."""
+
+    root = asset_dir.expanduser().resolve()
+    if not (root / "evidence" / "evidence.sqlite").is_file():
+        return analyzer_command(root, report_level, keep_stale_output=keep_stale_output)
+    if report_level not in {"compact", "standard", "debug"}:
+        raise ValueError("Invalid report level.")
+    with open_asset_repository(root) as repository:
+        overview = repository.query({"operation": "overview", "budgetTokens": 800})
+    asset = overview.get("asset", {})
+    object_path = normalize_asset_path(str(asset.get("objectPath") or "")) if isinstance(asset, dict) else ""
+    if not object_path:
+        raise ValueError("Indexed evidence does not contain a valid /Game Object Path for report refresh.")
+    target_name = safe_filename(object_path.rsplit(".", 1)[-1], "BlueprintAsset")
+    if (root.parent / target_name).resolve() != root:
+        raise ValueError("Indexed Object Path does not map back to the selected capture directory.")
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
+        "--asset-binary",
+        object_path,
+        "--capture-root",
+        str(root.parent),
+        "--artifact-mode",
+        "dual",
         "--report-level",
         report_level,
     ]
@@ -1011,6 +1187,32 @@ def start_analyzer_job(asset_dir: Path, report_level: str, *, keep_stale_output:
         }
 
     return create_background_job("analyze", f"{asset_dir.name} {report_level} 分析", command, complete)
+
+
+def start_report_generation_job(
+    asset_dir: Path,
+    report_level: str,
+    *,
+    keep_stale_output: bool = False,
+) -> dict[str, object]:
+    command = report_generation_command(
+        asset_dir,
+        report_level,
+        keep_stale_output=keep_stale_output,
+    )
+
+    def complete(_return_code: int) -> dict[str, object]:
+        return {
+            "asset": asset_summary(asset_dir),
+            "outputDir": str(asset_dir / "output"),
+        }
+
+    return create_background_job(
+        "report_generation",
+        f"{asset_dir.name} {report_level} 当前 revision 人类报告",
+        command,
+        complete,
+    )
 
 
 def resolve_capture_target(body: dict[str, object]) -> tuple[Path, str]:
@@ -1180,6 +1382,9 @@ def knowledge_command(focus: str = "gigantoraptor", assets: list[str] | None = N
         "--focus",
         focus or "gigantoraptor",
     ]
+    content_root = configured_devkit_content_root()
+    if content_root:
+        command.extend(["--content-root", str(content_root)])
     for asset in assets or []:
         if str(asset).strip():
             command.extend(["--asset", str(asset).strip()])
@@ -1281,6 +1486,9 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/report":
                 self.handle_report(parsed.query)
                 return
+            if parsed.path == "/api/report-query":
+                self.handle_report_query(parsed.query)
+                return
             if parsed.path == "/api/missing-functions":
                 values = parse_qs(parsed.query)
                 asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
@@ -1354,7 +1562,7 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             body = self.read_json_body()
             if self.path == "/api/analyze":
                 asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
-                job = start_analyzer_job(asset_dir, str(body.get("reportLevel") or "standard"))
+                job = start_report_generation_job(asset_dir, str(body.get("reportLevel") or "standard"))
                 self.send_json({"ok": True, "job": job}, HTTPStatus.ACCEPTED)
                 return
             if self.path == "/api/capture-graph":
@@ -1426,13 +1634,30 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 max_graphs = int(body.get("maxGraphs") or 0)
                 analyze_after = bool(body.get("analyzeAfter", True))
                 report_level = str(body.get("reportLevel") or "standard")
+                artifact_mode = str(body.get("artifactMode") or "") or None
                 result = read_uasset_graphs_for_request(
                     asset_path,
                     max_graphs=max_graphs,
                     report_level=report_level,
                     analyze_after=analyze_after,
+                    artifact_mode=artifact_mode,
                 )
-                self.send_json({"ok": True, **result}, HTTPStatus.ACCEPTED if analyze_after else HTTPStatus.OK)
+                accepted = analyze_after and result.get("analysisJob") is not None
+                self.send_json({"ok": True, **result}, HTTPStatus.ACCEPTED if accepted else HTTPStatus.OK)
+                return
+            if self.path == "/api/evidence-queries":
+                asset_identifier = str(body.get("asset") or body.get("assetName") or "")
+                request = body.get("request")
+                if request is None:
+                    request = {
+                        key: value
+                        for key, value in body.items()
+                        if key not in {"asset", "assetName"}
+                    }
+                if not isinstance(request, dict):
+                    raise ValueError("request must be an object")
+                result = query_asset_evidence(CAPTURE_ROOT, asset_identifier, request)
+                self.send_json({"ok": True, **result})
                 return
             if self.path == "/api/notes-append":
                 asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
@@ -1467,6 +1692,46 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "path": str(target_path), "content": content})
         except Exception as exc:
             self.send_error_json(str(exc))
+
+    def handle_report_query(self, query: str) -> None:
+        values = parse_qs(query)
+        try:
+            asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
+            section_line_value = (
+                values.get("sectionStartLine", [""])[0]
+                or values.get("sectionLine", [""])[0]
+            )
+            result = query_report_for_request(
+                asset_dir,
+                values.get("target", ["asset_report"])[0],
+                mode=values.get("mode", ["outline"])[0],
+                query=values.get("query", [""])[0],
+                section=values.get("section", [""])[0],
+                section_start_line=(
+                    parse_report_query_int(section_line_value, "sectionStartLine", 0)
+                    if section_line_value
+                    else None
+                ),
+                cursor=parse_report_query_int(values.get("cursor", [""])[0], "cursor", 0),
+                budget=parse_report_query_int(
+                    values.get("budget", [""])[0],
+                    "budget",
+                    DEFAULT_REPORT_QUERY_BUDGET,
+                ),
+                context_lines=parse_report_query_int(
+                    values.get("contextLines", [""])[0],
+                    "contextLines",
+                    2,
+                ),
+            )
+            self.send_json({"ok": True, **result})
+        except FileNotFoundError as exc:
+            self.send_error_json(str(exc), HTTPStatus.NOT_FOUND)
+        except ValueError as exc:
+            self.send_error_json(str(exc), HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            self.log_message("report query failed: %s", exc)
+            self.send_error_json("Report query failed.", HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def serve_static(self, request_path: str) -> None:
         if request_path in {"", "/"}:

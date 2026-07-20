@@ -316,6 +316,34 @@ code {
   font-size: 0.86rem;
 }
 
+.action-notice {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  color: #dbe8e4;
+  background: rgba(255, 255, 255, 0.04);
+  overflow-wrap: anywhere;
+}
+
+.action-notice.good {
+  border-color: rgba(87, 199, 167, 0.42);
+  background: #142421;
+  color: #a9ead5;
+}
+
+.action-notice.warn {
+  border-color: rgba(229, 183, 108, 0.45);
+  background: #2a2218;
+  color: #f0cf92;
+}
+
+.action-notice.danger {
+  border-color: rgba(228, 112, 112, 0.52);
+  background: #2c1c1c;
+  color: #ffb1a6;
+}
+
 .result-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

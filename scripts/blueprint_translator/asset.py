@@ -8,12 +8,20 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Iterable
 
+from .artifact_modes import normalize_artifact_mode
 from .behavior_report import render_behavior_summary
 from .context import context_from_args, function_note_for_name, parse_components_context, parse_defaults_context, parse_notes_context
+from .context_pack import (
+    build_asset_memory_card,
+    build_default_context_pack,
+    render_asset_memory_card,
+    render_context_pack,
+)
 from .context_review import build_context_review, render_context_review
 from .core import parse_blueprint_text
 from .diagnostics import (
@@ -23,6 +31,7 @@ from .diagnostics import (
     diagnostic_finding,
     render_diagnostics_report,
 )
+from .formulas import build_formula_candidates, render_formula_candidates
 from .output import resolve_output_paths, write_glossary
 from .quality import (
     behavior_area,
@@ -59,10 +68,41 @@ ASSET_OUTPUT_FILE_KEYS = (
     "behavior_summary",
     "context_review",
     "context_review_json",
+    "formula_candidates",
+    "formula_candidates_json",
+    "asset_memory_card",
+    "asset_memory_card_json",
+    "context_pack",
+    "context_pack_json",
     "notes_todo",
     "defaults_suggestions",
     "components_suggestions",
     "next_actions",
+)
+
+UASSET_LEGACY_FILE_NAMES = (
+    "uasset_package.json",
+    "uasset_exports.json",
+    "uasset_structure.json",
+    "uasset_structure_report.md",
+    "uasset_class_defaults.json",
+    "uasset_class_defaults_report.md",
+    "uasset_properties.json",
+    "uasset_unknown_properties.json",
+    "uasset_property_parse_report.md",
+    "uasset_pin_links.json",
+    "uasset_link_resolution_report.md",
+    "uasset_partial_graph_triage.json",
+    "uasset_partial_graph_triage.md",
+    "uasset_quality_gates.json",
+    "uasset_quality_gates.md",
+    "uasset_graph_nodes.json",
+    "uasset_graph_read_report.md",
+    "uasset_failed_graph_queue.txt",
+    "uasset_failed_graph_queue.json",
+    "graphs_from_uasset_manifest.json",
+    "uasset_compare_matrix.json",
+    "uasset_vs_clipboard_compare.md",
 )
 
 def load_manifest(asset_dir: Path) -> dict[str, object]:
@@ -492,6 +532,9 @@ def load_uasset_binary_quality(asset_dir: Path) -> dict[str, object]:
         return {"present": False}
     return {
         "present": True,
+        "asset_path": str(graph_nodes.get("asset_path") or ""),
+        "uasset_path": str(graph_nodes.get("uasset_path") or ""),
+        "asset_name": str(graph_nodes.get("asset_name") or class_defaults.get("asset_name") or ""),
         "graph_count": int(graph_nodes.get("graph_count") or 0),
         "node_count": int(graph_nodes.get("node_count") or 0),
         "pin_count": int(graph_nodes.get("pin_count") or 0),
@@ -1294,30 +1337,134 @@ def clean_asset_outputs(paths: dict[str, Path]) -> None:
         shutil.rmtree(graph_reports)
 
 
+def prune_legacy_uasset_outputs(asset_dir: Path) -> list[str]:
+    """Delete only known generated legacy artifacts after explicit opt-in."""
+
+    root = asset_dir.resolve()
+    database_path = root / "evidence" / "evidence.sqlite"
+    if not database_path.is_file():
+        raise ValueError("refusing to prune legacy artifacts before indexed evidence exists")
+    manifest_path = root / "evidence" / "manifest.json"
+    agent_index_path = root / "output" / "agent_index.md"
+    try:
+        evidence_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("refusing to prune without a valid evidence manifest") from exc
+    if not isinstance(evidence_manifest, dict) or evidence_manifest.get("database") != "evidence.sqlite":
+        raise ValueError("refusing to prune because the evidence manifest contract is invalid")
+    revision_id = str(evidence_manifest.get("revision_id") or "")
+    if not revision_id or not agent_index_path.is_file():
+        raise ValueError("refusing to prune because the indexed artifact set is incomplete")
+    connection = sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+        revision_row = connection.execute(
+            "SELECT revision_id FROM asset_revisions WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+        database_counts = {
+            table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in ("graphs", "nodes", "pins", "edges", "edge_observations")
+        }
+    finally:
+        connection.close()
+    expected_counts = evidence_manifest.get("counts")
+    if integrity != "ok" or foreign_key_errors or revision_row is None:
+        raise ValueError("refusing to prune because indexed evidence integrity validation failed")
+    if not isinstance(expected_counts, dict) or any(
+        int(expected_counts.get(table) or 0) != count
+        for table, count in database_counts.items()
+    ):
+        raise ValueError("refusing to prune because manifest and database counts do not match")
+    if revision_id not in agent_index_path.read_text(encoding="utf-8", errors="replace"):
+        raise ValueError("refusing to prune because agent_index.md has a different revision")
+    removed: list[str] = []
+    for name in UASSET_LEGACY_FILE_NAMES:
+        path = (root / name).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"unsafe legacy artifact path: {path}") from exc
+        if path.is_file():
+            path.unlink()
+            removed.append(name)
+    graphs_dir = (root / "graphs_from_uasset").resolve()
+    try:
+        graphs_dir.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"unsafe legacy graph directory: {graphs_dir}") from exc
+    if graphs_dir.is_dir():
+        shutil.rmtree(graphs_dir)
+        removed.append("graphs_from_uasset/")
+    return removed
+
+
 def run_asset_binary_translate(args: argparse.Namespace) -> int:
     asset_path = str(getattr(args, "asset_binary", "") or "").strip()
+    max_graphs = int(getattr(args, "uasset_max_graphs", 0) or 0)
+    prune_requested = bool(getattr(args, "prune_legacy", False))
+    artifact_mode = normalize_artifact_mode(getattr(args, "artifact_mode", None))
+    if prune_requested and artifact_mode == "legacy":
+        print("--prune-legacy requires dual or indexed mode.", file=sys.stderr)
+        return 2
+    if prune_requested and max_graphs > 0:
+        print("--prune-legacy cannot be combined with --uasset-max-graphs.", file=sys.stderr)
+        return 2
     uasset_path, attempted = object_path_to_uasset_path(asset_path, getattr(args, "content_root", []))
     if uasset_path is None:
         print(f"Could not resolve local .uasset for: {asset_path}", file=sys.stderr)
         for item in attempted:
             print(f"- attempted: {item}", file=sys.stderr)
         return 2
-    max_graphs = int(getattr(args, "uasset_max_graphs", 0) or 0)
     payload = read_uasset_graph_content(asset_path, uasset_path, max_graphs=max_graphs)
+    if prune_requested:
+        if not bool(payload.get("loaded")):
+            print("Refusing to prune because the source asset did not load completely.", file=sys.stderr)
+            return 2
+        structure = payload.get("structure")
+        if isinstance(structure, dict) and "graph_exports_count" in structure:
+            expected_graphs = int(structure.get("graph_exports_count") or 0)
+            if int(payload.get("graph_count") or 0) != expected_graphs:
+                print("Refusing to prune because the current graph read is incomplete.", file=sys.stderr)
+                return 2
+        status_counts = payload.get("status_counts")
+        if isinstance(status_counts, dict) and any(
+            int(count or 0) > 0 and str(status) not in {"complete", "complete_empty"}
+            for status, count in status_counts.items()
+        ):
+            print("Refusing to prune because one or more graphs are not completely recovered.", file=sys.stderr)
+            return 2
     capture_root = Path(os.path.expandvars(getattr(args, "capture_root", "") or "captures")).expanduser()
-    paths = write_uasset_graph_read_files(asset_path, capture_root, payload)
+    paths = write_uasset_graph_read_files(
+        asset_path,
+        capture_root,
+        payload,
+        artifact_mode=artifact_mode,
+    )
     print(f"Wrote uasset graph read directory: {paths['asset_dir']}")
-    print(f"- graph report: {paths['graph_report']}")
-    print(f"- graph nodes: {paths['graph_nodes_json']}")
-    print(f"- pin links: {paths.get('pin_links_json', '')}")
+    if paths.get("graph_report"):
+        print(f"- graph report: {paths['graph_report']}")
+    if paths.get("graph_nodes_json"):
+        print(f"- graph nodes: {paths['graph_nodes_json']}")
+    if paths.get("pin_links_json"):
+        print(f"- pin links: {paths['pin_links_json']}")
+    if paths.get("evidence_database"):
+        print(f"- evidence database: {paths['evidence_database']}")
+        print(f"- agent index: {paths.get('agent_index', '')}")
     if paths.get("compare_report"):
         print(f"- uasset vs clipboard compare: {paths['compare_report']}")
-    print(f"- graph payloads: {paths['graphs_dir']}")
+    if paths.get("graphs_dir"):
+        print(f"- graph payloads: {paths['graphs_dir']}")
     print(f"Read graphs: {payload.get('graph_count', 0)}")
     print(f"Read nodes: {payload.get('node_count', 0)}")
     print(f"Recovered pins: {payload.get('pin_count', 0)}")
     print(f"Recovered links: {payload.get('link_count', 0)}")
-    if bool(getattr(args, "asset_binary_no_report", False)):
+    if prune_requested:
+        removed = prune_legacy_uasset_outputs(Path(paths["asset_dir"]))
+        print(f"Explicitly pruned legacy artifacts: {len(removed)}")
+        return 0
+    if bool(getattr(args, "asset_binary_no_report", False)) or artifact_mode == "indexed":
         return 0
     args.asset_dir = paths["asset_dir"]
     if not getattr(args, "output_dir", None):
@@ -1345,6 +1492,13 @@ def run_asset_translate(args: argparse.Namespace) -> int:
     manifest = load_manifest(asset_dir)
     graph_records = discover_asset_graphs(asset_dir, manifest)
     if not graph_records:
+        evidence_database = asset_dir / "evidence" / "evidence.sqlite"
+        agent_index = asset_dir / "output" / "agent_index.md"
+        if evidence_database.is_file() and agent_index.is_file():
+            print(f"Indexed evidence is ready: {evidence_database}")
+            print(f"Agent index: {agent_index}")
+            print("Use scripts/query_blueprint_evidence.py for bounded analysis; no legacy reports were generated.")
+            return 0
         print(f"No graph .txt files found in asset directory: {asset_dir}", file=sys.stderr)
         return 2
     paths = resolve_output_paths(args)
@@ -1370,6 +1524,24 @@ def run_asset_translate(args: argparse.Namespace) -> int:
     write_output("capture_quality_report", render_capture_quality_report(asset_payload))
     write_output("behavior_summary", render_behavior_summary(asset_payload))
     write_output("context_review", render_context_review(asset_payload))
+    formula_payload = build_formula_candidates(asset_payload)
+    write_output(
+        "formula_candidates_json",
+        json.dumps(formula_payload, ensure_ascii=False, indent=2, default=list),
+    )
+    write_output("formula_candidates", render_formula_candidates(formula_payload))
+    memory_card = build_asset_memory_card(asset_payload, formula_payload)
+    write_output(
+        "asset_memory_card_json",
+        json.dumps(memory_card, ensure_ascii=False, indent=2, default=list),
+    )
+    write_output("asset_memory_card", render_asset_memory_card(memory_card))
+    context_pack = build_default_context_pack(asset_payload, formula_payload, memory_card)
+    write_output(
+        "context_pack_json",
+        json.dumps(context_pack, ensure_ascii=False, indent=2, default=list),
+    )
+    write_output("context_pack", render_context_pack(context_pack))
     if report_level in {"standard", "debug"}:
         write_output("context_review_json", json.dumps(build_context_review(asset_payload), ensure_ascii=False, indent=2, default=list))
     write_output("next_actions", render_next_actions(asset_payload), encoding="utf-8-sig")

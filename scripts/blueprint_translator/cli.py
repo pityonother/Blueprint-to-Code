@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from .artifact_modes import ARTIFACT_MODES
 from .asset import run_asset_binary_translate, run_asset_translate
 from .capture import CAPTURE_GRAPH_TYPES, run_capture_asset
 from .compare import run_asset_compare, run_compare
@@ -18,6 +19,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--asset-binary-no-report", action="store_true", help="Only write uasset graph extraction files; do not run the asset report afterward.")
     parser.add_argument("--content-root", action="append", default=[], help="Extra ARK DevKit Content root for --asset-binary or uasset lookup.")
     parser.add_argument("--uasset-max-graphs", type=int, default=0, help="Debug limit for --asset-binary graph reads. 0 means all graphs.")
+    parser.add_argument(
+        "--artifact-mode",
+        choices=sorted(ARTIFACT_MODES),
+        default=None,
+        help="Capture outputs: legacy, dual, or indexed (validated default).",
+    )
+    parser.add_argument(
+        "--prune-legacy",
+        action="store_true",
+        help="Explicitly remove legacy capture artifacts only after indexed evidence commits successfully.",
+    )
     parser.add_argument("--capture-asset", metavar="ASSET_DIR_OR_NAME", help="Start a clipboard capture workflow that builds an asset directory with graphs/*.txt and manifest.json.")
     parser.add_argument("--capture-root", help="Root directory for --capture-asset when a simple asset name is provided. Default: captures/ under the current directory.")
     parser.add_argument("--capture-once", metavar="GRAPH_NAME", help="Capture one graph from --input or clipboard, update manifest.json, then optionally run the asset report.")

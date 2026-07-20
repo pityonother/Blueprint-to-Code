@@ -14,11 +14,17 @@ from __future__ import annotations
 import json
 import os
 import re
-import tkinter as tk
-from tkinter import messagebox
+from pathlib import Path
+
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except Exception:
+    tk = None
+    messagebox = None
 
 
-PROJECT_ROOT = r"C:\Users\ac\Documents\project gaming\Blueprint to Code"
+PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 CAPTURE_ROOT = os.path.join(PROJECT_ROOT, "captures")
 REQUEST_PATH = os.path.join(CAPTURE_ROOT, "_devkit_export_request.json")
 EXPORT_SCRIPT = os.path.join(PROJECT_ROOT, "scripts", "devkit_exporters", "export_current_blueprint_defaults.py")
@@ -70,14 +76,25 @@ def load_existing() -> str:
 
 
 def devkit_python_console_command() -> str:
-    return 'exec(open(r"{}", encoding="utf-8").read())'.format(EXPORT_SCRIPT)
+    return 'BLUEPRINT_TO_CODE_PROJECT_ROOT = r"{}"; exec(open(r"{}", encoding="utf-8").read())'.format(PROJECT_ROOT, EXPORT_SCRIPT)
 
 
 def devkit_output_log_command() -> str:
-    return 'py exec(open(r"{}", encoding="utf-8").read())'.format(EXPORT_SCRIPT)
+    return 'py BLUEPRINT_TO_CODE_PROJECT_ROOT = r"{}"; exec(open(r"{}", encoding="utf-8").read())'.format(PROJECT_ROOT, EXPORT_SCRIPT)
 
 
 def main() -> int:
+    if tk is None:
+        print("tkinter is not available in this Python runtime.")
+        print("Use START_HERE.bat and save the Object Path in the web control center instead.")
+        print("")
+        print("DevKit Python Console command:")
+        print(devkit_python_console_command())
+        print("")
+        print("Output Log / command mode alternative:")
+        print(devkit_output_log_command())
+        return 2
+
     root = tk.Tk()
     root.title("ARK Blueprint Defaults Export Path")
     root.geometry("820x330")

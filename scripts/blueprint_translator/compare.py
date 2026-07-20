@@ -6,6 +6,7 @@ import argparse
 import datetime as _dt
 import json
 import os
+import sqlite3
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -19,6 +20,11 @@ from .asset import (
     normalize_graph_lookup,
 )
 from .core import parse_blueprint_text
+from .evidence_values import (
+    canonical_default_value,
+    default_value_is_comparable,
+    downstream_default_metadata,
+)
 from .output import resolve_output_paths, write_glossary
 from .quality import behavior_area
 from .utils import label_for, node_key, profile_keywords, table_row
@@ -334,10 +340,359 @@ def render_compare_compact(diff: dict[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _decode_evidence_json(value: object, fallback: object = "") -> object:
+    try:
+        return json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback
+
+
+def _read_v2_compare_tables(database_path: Path) -> dict[str, list[dict[str, object]]]:
+    """Read canonical compare rows through a SQLite read-only connection."""
+
+    connection = sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        queries = {
+            "nodes": (
+                "SELECT node_ref, graph_ref, local_index, node_identity, name, label, class_name, node_type, "
+                "control_kind, function_name, variable_name, event_name, delegate_name, macro_name, comment, "
+                "x, y, confidence FROM nodes ORDER BY graph_ref, local_index"
+            ),
+            "pins": (
+                "SELECT pin_ref, node_ref, ordinal, native_pin_id, persistent_guid, name, direction, category, "
+                "subcategory, default_value_json, default_object, confidence FROM pins ORDER BY node_ref, ordinal"
+            ),
+            "edges": (
+                "SELECT edge_ref, graph_ref, source_pin_ref, target_pin_ref, kind, confidence, resolution_status "
+                "FROM edges ORDER BY graph_ref, source_pin_ref, target_pin_ref, kind"
+            ),
+            "observations": (
+                "SELECT observation_ref, graph_ref, source_node_ref, source_pin_ref, target_node_ref, target_pin_ref, "
+                "target_node_name, target_native_pin_id, target_pin_name, kind, status, resolution_status, confidence "
+                "FROM edge_observations ORDER BY graph_ref, observation_ref"
+            ),
+        }
+        return {
+            key: [dict(row) for row in connection.execute(sql).fetchall()]
+            for key, sql in queries.items()
+        }
+    finally:
+        connection.close()
+
+
+def _stable_pin_id(row: dict[str, object]) -> str:
+    return str(
+        row.get("native_pin_id")
+        or row.get("persistent_guid")
+        or f"{row.get('ordinal', 0)}:{row.get('name', '')}"
+    )
+
+
+def _project_v2_graphs(
+    graph_rows: list[dict[str, object]],
+    tables: dict[str, list[dict[str, object]]],
+    keywords: list[str],
+) -> list[dict[str, object]]:
+    nodes_by_ref: dict[str, dict[str, object]] = {}
+    node_graph_refs: dict[str, str] = {}
+    nodes_by_graph: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in tables["nodes"]:
+        stable_identity = str(
+            row.get("node_identity")
+            or "|".join(
+                str(row.get(key) or "")
+                for key in ("node_type", "function_name", "variable_name", "event_name", "name", "local_index")
+            )
+        )
+        node = {
+            "evidence_ref": str(row.get("node_ref") or ""),
+            "key": stable_identity,
+            "node_guid": stable_identity,
+            "index": int(row.get("local_index") or 0),
+            "name": str(row.get("name") or ""),
+            "label": str(row.get("label") or ""),
+            "class": str(row.get("class_name") or ""),
+            "class_name": str(row.get("class_name") or ""),
+            "node_type": str(row.get("node_type") or row.get("class_name") or ""),
+            "control_kind": str(row.get("control_kind") or ""),
+            "function": str(row.get("function_name") or ""),
+            "variable": str(row.get("variable_name") or ""),
+            "event": str(row.get("event_name") or ""),
+            "delegate": str(row.get("delegate_name") or ""),
+            "macro": str(row.get("macro_name") or ""),
+            "comment": str(row.get("comment") or ""),
+            "x": row.get("x"),
+            "y": row.get("y"),
+            "confidence": str(row.get("confidence") or ""),
+            "pins": [],
+        }
+        node_ref = str(row.get("node_ref") or "")
+        graph_ref = str(row.get("graph_ref") or "")
+        nodes_by_ref[node_ref] = node
+        node_graph_refs[node_ref] = graph_ref
+        nodes_by_graph[graph_ref].append(node)
+
+    pins_by_ref: dict[str, dict[str, object]] = {}
+    pin_nodes: dict[str, dict[str, object]] = {}
+    pin_graph_refs: dict[str, str] = {}
+    for row in tables["pins"]:
+        node_ref = str(row.get("node_ref") or "")
+        node = nodes_by_ref.get(node_ref)
+        if node is None:
+            continue
+        pin = {
+            "evidence_ref": str(row.get("pin_ref") or ""),
+            "id": _stable_pin_id(row),
+            "persistent_guid": str(row.get("persistent_guid") or ""),
+            "name": str(row.get("name") or ""),
+            "direction": str(row.get("direction") or ""),
+            "category": str(row.get("category") or ""),
+            "subcategory": str(row.get("subcategory") or ""),
+            "default": _decode_evidence_json(row.get("default_value_json"), ""),
+            "default_object": str(row.get("default_object") or ""),
+            "confidence": str(row.get("confidence") or ""),
+            "links": [],
+        }
+        pin_ref = str(row.get("pin_ref") or "")
+        pins = node["pins"]
+        assert isinstance(pins, list)
+        pins.append(pin)
+        pins_by_ref[pin_ref] = pin
+        pin_nodes[pin_ref] = node
+        pin_graph_refs[pin_ref] = node_graph_refs.get(node_ref, "")
+
+    links_by_graph: dict[str, list[dict[str, object]]] = defaultdict(list)
+    exec_by_graph: dict[str, list[dict[str, object]]] = defaultdict(list)
+    data_by_graph: dict[str, list[dict[str, object]]] = defaultdict(list)
+    observations_by_graph: dict[str, list[dict[str, object]]] = defaultdict(list)
+    canonical_pairs: set[tuple[str, str]] = set()
+
+    def append_link(
+        *,
+        graph_ref: str,
+        source_pin_ref: str,
+        target_pin_ref: str = "",
+        target_node_name: str = "",
+        target_pin_name: str = "",
+        kind: str = "data",
+        observation_ref: str = "",
+        resolution_status: str = "",
+    ) -> None:
+        source_pin = pins_by_ref.get(source_pin_ref)
+        source_node = pin_nodes.get(source_pin_ref)
+        if source_pin is None or source_node is None:
+            return
+        target_pin = pins_by_ref.get(target_pin_ref)
+        target_node = pin_nodes.get(target_pin_ref)
+        source_node_key = str(source_node.get("node_guid") or source_node.get("key") or source_node.get("name") or "")
+        target_node_key = str(
+            (target_node or {}).get("node_guid")
+            or (target_node or {}).get("key")
+            or target_node_name
+        )
+        target_pin_id = str((target_pin or {}).get("id") or target_pin_name)
+        if not target_node_key and not target_pin_id:
+            return
+        link = {
+            "source_node_guid": source_node_key,
+            "source_node": source_node_key,
+            "source_pin_id": str(source_pin.get("id") or ""),
+            "target_node": target_node_key,
+            "target_pin_id": target_pin_id,
+            "kind": kind or "data",
+            "resolution_status": resolution_status,
+            **({"observation_ref": observation_ref} if observation_ref else {}),
+        }
+        links_by_graph[graph_ref].append(link)
+        pin_links = source_pin["links"]
+        assert isinstance(pin_links, list)
+        pin_links.append(
+            {
+                "target_node": target_node_key,
+                "target_pin_id": target_pin_id,
+                "kind": kind or "data",
+                "resolution_status": resolution_status,
+            }
+        )
+        if str(kind).casefold() == "exec":
+            exec_by_graph[graph_ref].append(
+                {
+                    "source_node": source_node_key,
+                    "source_pin": str(source_pin.get("id") or ""),
+                    "target_node": target_node_key,
+                    "target_pin_id": target_pin_id,
+                }
+            )
+        else:
+            data_by_graph[graph_ref].append(
+                {
+                    "node": target_node_key,
+                    "pin": target_pin_id,
+                    "source": f"{source_node_key}:{source_pin.get('id', '')}",
+                }
+            )
+
+    for row in tables["edges"]:
+        source_pin_ref = str(row.get("source_pin_ref") or "")
+        target_pin_ref = str(row.get("target_pin_ref") or "")
+        canonical_pairs.add((source_pin_ref, target_pin_ref))
+        append_link(
+            graph_ref=str(row.get("graph_ref") or pin_graph_refs.get(source_pin_ref, "")),
+            source_pin_ref=source_pin_ref,
+            target_pin_ref=target_pin_ref,
+            kind=str(row.get("kind") or "data"),
+            resolution_status=str(row.get("resolution_status") or "resolved_pin"),
+        )
+
+    for row in tables["observations"]:
+        source_pin_ref = str(row.get("source_pin_ref") or "")
+        target_pin_ref = str(row.get("target_pin_ref") or "")
+        if target_pin_ref and (source_pin_ref, target_pin_ref) in canonical_pairs:
+            continue
+        graph_ref = str(row.get("graph_ref") or pin_graph_refs.get(source_pin_ref, ""))
+        append_link(
+            graph_ref=graph_ref,
+            source_pin_ref=source_pin_ref,
+            target_pin_ref=target_pin_ref,
+            target_node_name=str(row.get("target_node_name") or ""),
+            target_pin_name=str(row.get("target_native_pin_id") or row.get("target_pin_name") or ""),
+            kind=str(row.get("kind") or "data"),
+            observation_ref=str(row.get("observation_ref") or ""),
+            resolution_status=str(row.get("resolution_status") or row.get("status") or ""),
+        )
+        observations_by_graph[graph_ref].append(
+            {
+                "ref": str(row.get("observation_ref") or ""),
+                "source_pin_ref": source_pin_ref,
+                "target_pin_ref": target_pin_ref,
+                "target_node": str(row.get("target_node_name") or ""),
+                "target_pin": str(row.get("target_native_pin_id") or row.get("target_pin_name") or ""),
+                "kind": str(row.get("kind") or "data"),
+                "status": str(row.get("resolution_status") or row.get("status") or ""),
+            }
+        )
+
+    graphs = []
+    for graph in graph_rows:
+        graph_ref = str(graph.get("ref") or "")
+        graph_nodes = nodes_by_graph.get(graph_ref, [])
+        links = links_by_graph.get(graph_ref, [])
+        keyword_text = json.dumps({"nodes": graph_nodes, "links": links}, ensure_ascii=False, default=str).casefold()
+        keyword_hits = {
+            keyword: keyword_text.count(keyword.casefold())
+            for keyword in keywords
+            if keyword and keyword.casefold() in keyword_text
+        }
+        payload = {
+            "metadata": {
+                "source": graph_ref,
+                "graph_name": graph.get("name"),
+                "graph_type": graph.get("graph_type"),
+                "node_count": len(graph_nodes),
+                "pin_count": sum(len(node.get("pins", [])) for node in graph_nodes),
+                "link_count": len(links),
+            },
+            "nodes": graph_nodes,
+            "links": links,
+            "exec_flow": {"edges": exec_by_graph.get(graph_ref, [])},
+            "data_flow": {"dependencies": data_by_graph.get(graph_ref, [])},
+            "observations": observations_by_graph.get(graph_ref, []),
+            "function_calls": [node for node in graph_nodes if node.get("function")],
+            "variable_gets": [
+                node
+                for node in graph_nodes
+                if node.get("variable") and "variableget" in str(node.get("node_type") or "").casefold()
+            ],
+            "variable_sets": [
+                node
+                for node in graph_nodes
+                if node.get("variable") and "variableset" in str(node.get("node_type") or "").casefold()
+            ],
+            "keyword_hits": keyword_hits,
+        }
+        graphs.append(
+            {
+                "graph_name": graph.get("name"),
+                "graph_type": graph.get("graph_type"),
+                "node_count": len(graph_nodes),
+                "pin_count": payload["metadata"]["pin_count"],  # type: ignore[index]
+                "link_count": len(links),
+                "confidence": graph.get("confidence"),
+                "source": graph_ref,
+                "source_kind": "evidence_store",
+                "payload": payload,
+            }
+        )
+    return graphs
+
+
 def load_asset_payload_input(args: argparse.Namespace, asset_dir_text: str, keywords: list[str]) -> dict[str, object]:
     asset_dir = Path(os.path.expandvars(asset_dir_text)).expanduser()
     if not asset_dir.exists() or not asset_dir.is_dir():
         raise FileNotFoundError(f"Asset directory not found: {asset_dir}")
+    if (asset_dir / "evidence" / "evidence.sqlite").is_file():
+        from .evidence_repository import open_asset_repository
+
+        with open_asset_repository(asset_dir) as repository:
+            identity = repository.identity()
+            overview = repository.query({"operation": "overview", "budgetTokens": 800})
+            graph_rows = repository.graph_summaries()
+            defaults = repository.default_summaries(include_values=True)
+            gaps = repository.gap_summaries()
+            database_path = Path(repository.database_path)
+        tables = _read_v2_compare_tables(database_path)
+        graphs = _project_v2_graphs(graph_rows, tables, keywords)
+        graph_name_by_ref = {
+            str(graph.get("source") or ""): str(graph.get("graph_name") or "")
+            for graph in graphs
+        }
+        graph_names = {str(graph.get("graph_name") or "") for graph in graphs}
+        calls = [
+            {
+                "source_graph": graph_name_by_ref.get(str(graph.get("source") or ""), ""),
+                "function": node.get("function"),
+                "target_graph": str(node.get("function") or "") if str(node.get("function") or "") in graph_names else "",
+            }
+            for graph in graphs
+            for node in (
+                graph.get("payload", {}).get("nodes", [])
+                if isinstance(graph.get("payload"), dict)
+                else []
+            )
+            if isinstance(node, dict) and node.get("function")
+        ]
+        summary = overview.get("summary") if isinstance(overview.get("summary"), dict) else {}
+        return {
+            "metadata": {
+                "asset_dir": str(asset_dir),
+                "asset_name": identity.get("asset_name"),
+                "asset_path": identity.get("object_path"),
+                "revision_id": identity.get("revision_id"),
+                "graph_count": int(summary.get("graphCount") or 0),
+                "node_count": int(summary.get("nodeCount") or 0),
+                "pin_count": int(summary.get("pinCount") or 0),
+                "wire_count": int(summary.get("wireCount") or 0),
+                "link_count": int(summary.get("linkObservationCount") or 0),
+                "default_count": int(summary.get("defaultCount") or 0),
+            },
+            "class_defaults": {
+                "variables": {
+                    str(row["name"]): {
+                        "value": row.get("value"),
+                        "type": row.get("type"),
+                        "confidence": row.get("confidence"),
+                        "source": row.get("source"),
+                        **downstream_default_metadata(row),
+                    }
+                    for row in defaults
+                }
+            },
+            "graphs": graphs,
+            "call_graph": {"calls": calls, "delegate_bindings": [], "macro_usages": [], "missing_macro_links": []},
+            "component_defaults": {},
+            "diagnostics": {"evidence_gaps": gaps},
+        }
     manifest = load_manifest(asset_dir)
     graph_records = discover_asset_graphs(asset_dir, manifest)
     if not graph_records:
@@ -466,9 +821,37 @@ def compare_asset_payloads(old: dict[str, object], new: dict[str, object]) -> di
 
     old_defaults = old.get("class_defaults", {}).get("variables", {}) if isinstance(old.get("class_defaults", {}), dict) else {}
     new_defaults = new.get("class_defaults", {}).get("variables", {}) if isinstance(new.get("class_defaults", {}), dict) else {}
-    defaults_delta = dict_value_delta(old_defaults if isinstance(old_defaults, dict) else {}, new_defaults if isinstance(new_defaults, dict) else {})
+    old_defaults = old_defaults if isinstance(old_defaults, dict) else {}
+    new_defaults = new_defaults if isinstance(new_defaults, dict) else {}
+    blocked_default_names = {
+        name
+        for name in set(old_defaults) | set(new_defaults)
+        if (
+            name in old_defaults
+            and not default_value_is_comparable(old_defaults[name])
+        )
+        or (
+            name in new_defaults
+            and not default_value_is_comparable(new_defaults[name])
+        )
+    }
+    comparable_old_defaults = {
+        name: canonical_default_value(value)
+        for name, value in old_defaults.items()
+        if name not in blocked_default_names
+    }
+    comparable_new_defaults = {
+        name: canonical_default_value(value)
+        for name, value in new_defaults.items()
+        if name not in blocked_default_names
+    }
+    defaults_delta = dict_value_delta(comparable_old_defaults, comparable_new_defaults)
     if has_delta(defaults_delta):
         likely_behavior_changes.append("Class default variables changed.")
+    if blocked_default_names:
+        unknown_changes.append(
+            "Class default comparison unavailable for: " + ", ".join(sorted(blocked_default_names))
+        )
 
     components_delta = dict_value_delta(component_defaults_by_name(old), component_defaults_by_name(new))
     if has_delta(components_delta):

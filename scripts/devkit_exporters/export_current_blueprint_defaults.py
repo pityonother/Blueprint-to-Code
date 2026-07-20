@@ -1,9 +1,10 @@
 r"""Export defaults from the current ARK DevKit / Unreal Blueprint.
 
 Run this inside ARK DevKit's Python Console after opening or selecting a
-Blueprint asset:
+Blueprint asset. The local control center/export GUI prints the exact command
+for your current project folder; prefer copying it from there.
 
-exec(open(r"C:\Users\ac\Documents\project gaming\Blueprint to Code\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
+BLUEPRINT_TO_CODE_PROJECT_ROOT = r"<Blueprint to Code project folder>"; exec(open(r"<Blueprint to Code project folder>\scripts\devkit_exporters\export_current_blueprint_defaults.py", encoding="utf-8").read())
 
 The script writes defaults.json, components.json, graph_pages.json,
 graph_queue.txt, and diagnostic reports under captures/<BlueprintName>/ so the
@@ -24,7 +25,46 @@ except Exception:
     unreal = None
 
 
-PROJECT_ROOT = r"C:\Users\ac\Documents\project gaming\Blueprint to Code"
+def _clean_path(value):
+    if not value:
+        return ""
+    return os.path.abspath(os.path.expanduser(str(value).strip().strip("\"'")))
+
+
+def _looks_like_project_root(path):
+    if not path:
+        return False
+    marker = os.path.join(path, "scripts", "devkit_exporters", "export_current_blueprint_defaults.py")
+    return os.path.isfile(marker)
+
+
+def _root_from_file_global():
+    script_path = globals().get("__file__")
+    if not script_path:
+        return ""
+    return os.path.abspath(os.path.join(os.path.dirname(script_path), "..", ".."))
+
+
+def resolve_project_root():
+    """Find the local project root even when this file is run via exec(open())."""
+    candidates = [
+        globals().get("BLUEPRINT_TO_CODE_PROJECT_ROOT"),
+        os.environ.get("BLUEPRINT_TO_CODE_PROJECT_ROOT"),
+        _root_from_file_global(),
+        os.getcwd(),
+    ]
+    for candidate in candidates:
+        root = _clean_path(candidate)
+        if _looks_like_project_root(root):
+            return root
+    for candidate in candidates:
+        root = _clean_path(candidate)
+        if root:
+            return root
+    return os.getcwd()
+
+
+PROJECT_ROOT = resolve_project_root()
 CAPTURE_ROOT = os.path.join(PROJECT_ROOT, "captures")
 REQUEST_PATH = os.path.join(CAPTURE_ROOT, "_devkit_export_request.json")
 

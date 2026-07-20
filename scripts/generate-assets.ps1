@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.Drawing
 
-$root = "C:\Users\ac\Documents\project gaming"
+$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $assetsRoot = Join-Path $root "public\assets"
 $bgDir = Join-Path $assetsRoot "bg"
 $spritesDir = Join-Path $assetsRoot "sprites"

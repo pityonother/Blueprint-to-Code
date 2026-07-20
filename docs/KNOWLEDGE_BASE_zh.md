@@ -133,3 +133,15 @@ runtime\python\python.exe scripts\read_priority_assets.py --limit 25 --no-analyz
 - 全部 DevKit 资产都已经完成深度反序列化。全局索引只是底座，深度理解要逐步补读重点资产。
 
 这些会作为下一轮知识库建设目标。
+
+## 报告总结和公式化标准
+
+通用规则不要放在某一个生物报告里。项目级标准现在统一看：
+
+```text
+docs/REPORT_SUMMARY_AND_FORMULA_STANDARD_zh.md
+```
+
+简单说，任何资产里只要涉及概率、继承、属性点、上下限、阈值、时间、XP、宝箱、掉落、消耗、伤害倍率、Buff 强度、随机权重、数学节点，都要尝试整理成候选公式或规则表。
+
+但只有蓝图默认值、节点、Pin、连线、已解析关联资产能提供证据时，才写成明确公式。native/C++、父类函数、缺图、未解析连线只能标成 `unresolved_formula`，不能为了回答得完整而编数值。

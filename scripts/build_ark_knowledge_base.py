@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -23,6 +24,8 @@ from blueprint_translator.asset_ledger import (
     restore_ledger_snapshot,
 )
 from blueprint_translator.uasset_graphs import current_uasset_graph_payload_files
+from blueprint_translator.evidence_repository import open_asset_repository
+from blueprint_translator.evidence_values import downstream_default_metadata, default_value_is_usable
 from import_captures_to_knowledge_dbs import import_captures_to_business_databases
 
 
@@ -32,9 +35,55 @@ DEFAULT_ASSETS = [
     "PrimalItemResource_GigantoraptorFeather",
     "Buff_GigantoraptorCallPlayer",
 ]
+
+FIXED_PRIORITY_OBJECT_PATHS = {
+    "/Game/ASA/Dinos/Gigantoraptor/PrimalItemResource_GigantoraptorFeather.PrimalItemResource_GigantoraptorFeather",
+    "/Game/ASA/Dinos/ShoulderDragon/Chest/PrimalItem_TreasureMap_ShoulderDragon.PrimalItem_TreasureMap_ShoulderDragon",
+    "/Game/ASA/Dinos/ShoulderDragon/Chest/Buff_PingTreasureLocationPOI_ShoulderDragon.Buff_PingTreasureLocationPOI_ShoulderDragon",
+    "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+    "/Game/ASA/Dinos/ShoulderDragon/Buff_ShoulderDragonXPTaming.Buff_ShoulderDragonXPTaming",
+    "/Game/Packs/Frontier/Structures/TreasureCache/SupplyCrate/SupplyCrate_BuriedTreasureBase.SupplyCrate_BuriedTreasureBase",
+    "/Game/Packs/Frontier/Structures/TreasureCache/SupplyCrate/SupplyCrate_BuriedTreasureBase_Primitive.SupplyCrate_BuriedTreasureBase_Primitive",
+    "/Game/Packs/Frontier/Structures/TreasureCache/SupplyCrate/SupplyCrate_BuriedTreasureBase_Journeyman.SupplyCrate_BuriedTreasureBase_Journeyman",
+    "/Game/Packs/Frontier/Structures/TreasureCache/SupplyCrate/SupplyCrate_BuriedTreasureBase_Ascendant.SupplyCrate_BuriedTreasureBase_Ascendant",
+    "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+}
+FIXED_PRIORITY_ASSET_NAMES = {
+    "PrimalItemResource_GigantoraptorFeather",
+    "Buff_Archelon_BabyDryLand_ASA",
+    "Buff_HiddenInNest",
+    "Buff_YiLingPoison",
+    "Buff_YiLingFeathered",
+    "PrimalItem_TreasureMap_ShoulderDragon",
+    "Buff_PingTreasureLocationPOI_ShoulderDragon",
+    "SupplyCrate_BuriedTreasure_ShoulderDragon",
+    "Buff_ShoulderDragonXPTaming",
+    "SupplyCrate_BuriedTreasureBase",
+    "SupplyCrate_BuriedTreasureBase_Primitive",
+    "SupplyCrate_BuriedTreasureBase_Journeyman",
+    "SupplyCrate_BuriedTreasureBase_Ascendant",
+    "DinoCharacterStatusComponent_BP",
+}
+RELATED_PRIORITY_REFERENCE_TABLES = (
+    "asset_references",
+    "item_references",
+    "buff_references",
+    "loot_references",
+)
+RELATED_PRIORITY_FORMULA_TABLES = (
+    ("formula_candidates", "next_probe_json", "formula_candidates.next_probe"),
+    ("unresolved_formulas", "required_next_probe_json", "unresolved_formulas.required_next_probe"),
+)
+UE_OBJECT_PATH_PATTERN = re.compile(r"/Game/[A-Za-z0-9_./]+")
 DEFAULT_CONTENT_ROOTS = [
     Path(r"C:\Program Files\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
     Path(r"C:\Program Files\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
+    Path(r"D:\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
+    Path(r"D:\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
+    Path(r"E:\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
+    Path(r"E:\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
+    Path(r"G:\ARKDevkit\Projects\ShooterGame\Content"),
+    Path(r"G:\ARKDevKit\Projects\ShooterGame\Content"),
 ]
 
 KEYWORD_GROUPS = {
@@ -83,6 +132,57 @@ KEYWORD_GROUPS = {
         "MinStored",
         "MaxStored",
     ],
+    "archelon_algae_cycle": [
+        "Algae",
+        "CollectAlgae",
+        "GetAlgaePercentage",
+        "SetAlgaePercentage",
+        "UpdateAlgaeMaterial",
+        "AlgaeGrowthInterval",
+        "GenerateAlgaeInterval",
+        "SwimmingAlgaeInterval_Multi",
+        "ARKTransferAlgaePercentage",
+        "LastTimeHarvested",
+        "LastTimeSwimming_Algae",
+    ],
+    "archelon_swim_and_raft": [
+        "Swim",
+        "Swimming",
+        "Raft",
+        "CheckRaftMode",
+        "CheckFullyInWater",
+        "BPOverrideCharacterNewSwimVelocity",
+        "BP_InterceptMoveForward",
+        "BPModifyDesiredRotation",
+        "bIsInRaftMode",
+        "bIsFullyInWater",
+        "bWaterVolume",
+        "Buoyancy",
+        "GravityScale",
+    ],
+    "archelon_multiuse_inventory": [
+        "MultiUse",
+        "BPGetMultiUseEntries",
+        "BPTryMultiUse",
+        "MakeUseEntryString",
+        "CollectAlgae",
+        "AddNewItem",
+        "MyInventoryComponent",
+        "AlgaeQuantity",
+    ],
+    "archelon_jellyfish_damage": [
+        "Jellyfish",
+        "IsJellyfish",
+        "JellyfishBuffClass",
+        "BlueprintAdjustOutputDamage",
+        "BPAdjustDamage",
+        "BPModifyHarvestingQuantity",
+        "BPKilledSomethingEvent",
+        "outputDamageMultiplierJellyfish",
+        "receivedDamageMultiplierInsects",
+        "finalDamage",
+        "finalAmount",
+    ],
 }
 
 EVIDENCE_KEYWORDS = sorted(
@@ -99,6 +199,11 @@ EVIDENCE_KEYWORDS = sorted(
         "属性",
         "繁殖",
         "驯养",
+        "藻类",
+        "水母",
+        "木筏",
+        "游泳",
+        "采集",
         "收益",
         "native",
     }
@@ -150,6 +255,11 @@ PRIORITY_NATIVE_KEYWORDS = (
     "Stat",
     "Taming",
     "XP",
+    "Algae",
+    "Jellyfish",
+    "MultiUse",
+    "Raft",
+    "Swim",
 )
 
 DEEP_READ_GROUPS = {
@@ -171,7 +281,7 @@ DEEP_READ_GROUPS = {
     "status_component_blueprint": {
         "title": "StatusComponent：生物属性、成长、经验和状态值",
         "asset_types": {"status_component_blueprint"},
-        "queue_include_asset_names": {"PlayerCharacterStatusComponent_BP"},
+        "queue_include_asset_names": {"PlayerCharacterStatusComponent_BP", "DinoCharacterStatusComponent_BP"},
         "defer_name_patterns": {
             r"StatusComponent_BP_.+",
             r"^DinoCharacterStatusComponent_(?!BP$).+",
@@ -196,7 +306,7 @@ DEEP_READ_GROUPS = {
     "primal_item_blueprint": {
         "title": "PrimalItem：物品描述、使用逻辑、消耗与显示数据",
         "asset_types": {"primal_item_blueprint"},
-        "include_asset_names": {"PrimalItem_TreasureMap_ShoulderDragon"},
+        "include_asset_names": {"PrimalItem_TreasureMap_ShoulderDragon", "PrimalItemResource_GigantoraptorFeather"},
         "exclude_keywords": {"Egg", "Saddle", "Costume", "Skin", "Chibi"},
         "keywords": {
             "Treasure": 50,
@@ -596,8 +706,30 @@ def short_path(path: Path, root: Path) -> str:
         return str(path).replace("\\", "/")
 
 
+def configured_content_roots() -> list[Path]:
+    roots: list[Path] = []
+    for env_name in ("ARK_DEVKIT_CONTENT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT"):
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            roots.append(Path(value.strip().strip("\"'")).expanduser())
+    for env_name in ("ARK_DEVKIT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_ROOT"):
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            roots.append(Path(value.strip().strip("\"'")).expanduser() / "Projects" / "ShooterGame" / "Content")
+    roots.extend(DEFAULT_CONTENT_ROOTS)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root).lower()
+        if key not in seen:
+            unique.append(root)
+            seen.add(key)
+    return unique
+
+
 def default_content_root() -> Path | None:
-    for path in DEFAULT_CONTENT_ROOTS:
+    for path in configured_content_roots():
         if path.is_dir():
             return path
     return None
@@ -918,6 +1050,256 @@ def global_index_summary(index: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_related_path_token(token: str) -> str:
+    value = str(token or "").strip().strip("\"'`")
+    value = value.rstrip(".,;)]}'\"")
+    if not value.startswith("/Game/"):
+        return ""
+    if "." in value:
+        package, asset_name = value.rsplit(".", 1)
+        asset_name = asset_name.split(":", 1)[0].rstrip(".")
+        if asset_name.endswith("_C"):
+            asset_name = asset_name[:-2]
+        if not asset_name:
+            asset_name = package.rsplit("/", 1)[-1]
+        return f"{package}.{asset_name}"
+    package = value
+    asset_name = package.rsplit("/", 1)[-1]
+    if asset_name.endswith("_C"):
+        asset_name = asset_name[:-2]
+        package = package[:-2]
+    if not asset_name:
+        return ""
+    return f"{package}.{asset_name}"
+
+
+def related_paths_from_text(text: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in UE_OBJECT_PATH_PATTERN.finditer(str(text or "")):
+        path = normalize_related_path_token(match.group(0))
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def related_paths_from_value(value: Any) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def add(path: str) -> None:
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+
+    def visit(item: Any) -> None:
+        if isinstance(item, str):
+            for path in related_paths_from_text(item):
+                add(path)
+        elif isinstance(item, dict):
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, (list, tuple, set)):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return paths
+
+
+def related_asset_name(object_path: str) -> str:
+    path = normalize_related_path_token(object_path)
+    if not path:
+        return ""
+    return path.rsplit(".", 1)[-1]
+
+
+def add_related_priority_value(
+    related: dict[str, Any],
+    value: Any,
+    source_type: str,
+    source_detail: str = "",
+) -> int:
+    assets = related.setdefault("assets", {})
+    added = 0
+    for object_path in related_paths_from_value(value):
+        info = assets.setdefault(
+            object_path,
+            {
+                "object_path": object_path,
+                "asset_name": related_asset_name(object_path),
+                "sources": [],
+            },
+        )
+        source = {
+            "source_type": source_type,
+            "source_detail": source_detail,
+        }
+        if source not in info["sources"]:
+            info["sources"].append(source)
+        added += 1
+    return added
+
+
+def sqlite_table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
+def parse_json_column(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def collect_related_priority_from_capture_file(path: Path, related: dict[str, Any]) -> int:
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        return 0
+    source_detail = path.parent.parent.name
+    count = 0
+    for candidate in payload.get("candidates") or []:
+        if isinstance(candidate, dict):
+            count += add_related_priority_value(
+                related,
+                candidate.get("next_probe"),
+                "formula_candidates.next_probe",
+                source_detail,
+            )
+    for unresolved in payload.get("unresolved_formulas") or []:
+        if isinstance(unresolved, dict):
+            count += add_related_priority_value(
+                related,
+                unresolved.get("required_next_probe"),
+                "unresolved_formulas.required_next_probe",
+                source_detail,
+            )
+    return count
+
+
+def collect_related_priority_from_database(path: Path, related: dict[str, Any]) -> int:
+    if not path.is_file():
+        return 0
+    count = 0
+    connection = sqlite3.connect(path)
+    try:
+        for table_name in RELATED_PRIORITY_REFERENCE_TABLES:
+            if not sqlite_table_exists(connection, table_name):
+                continue
+            rows = connection.execute(
+                f"""
+                SELECT object_path, reference_path, reference_type, source_property
+                FROM {table_name}
+                WHERE reference_path LIKE '%/Game/%'
+                """
+            ).fetchall()
+            for source_path, reference_path, reference_type, source_property in rows:
+                detail = f"{path.name}:{table_name}:{source_path}:{reference_type}:{source_property}"
+                count += add_related_priority_value(
+                    related,
+                    reference_path,
+                    table_name,
+                    detail,
+                )
+        for table_name, column_name, source_type in RELATED_PRIORITY_FORMULA_TABLES:
+            if not sqlite_table_exists(connection, table_name):
+                continue
+            rows = connection.execute(
+                f"SELECT object_path, mechanism_type, {column_name} FROM {table_name}"
+            ).fetchall()
+            for source_path, mechanism_type, raw_value in rows:
+                detail = f"{path.name}:{table_name}:{source_path}:{mechanism_type}"
+                count += add_related_priority_value(
+                    related,
+                    parse_json_column(raw_value),
+                    source_type,
+                    detail,
+                )
+    finally:
+        connection.close()
+    return count
+
+
+def collect_related_priority_sources(captures: Path, db_dir: Path) -> dict[str, Any]:
+    related: dict[str, Any] = {
+        "schema": "ark-devkit-knowledge.related-priority.v1",
+        "generated": now_iso(),
+        "assets": {},
+        "source_counts": {},
+    }
+    source_counts: Counter[str] = Counter()
+    if captures.is_dir():
+        for formula_path in sorted(captures.glob("*/output/formula_candidates.json")):
+            before = sum(len(info.get("sources") or []) for info in related["assets"].values())
+            collect_related_priority_from_capture_file(formula_path, related)
+            after = sum(len(info.get("sources") or []) for info in related["assets"].values())
+            if after > before:
+                source_counts["capture_formula_candidates"] += after - before
+    if db_dir.is_dir():
+        for db_path in sorted(db_dir.glob("*.sqlite")):
+            before = sum(len(info.get("sources") or []) for info in related["assets"].values())
+            collect_related_priority_from_database(db_path, related)
+            after = sum(len(info.get("sources") or []) for info in related["assets"].values())
+            if after > before:
+                source_counts[f"db:{db_path.name}"] += after - before
+    related["source_counts"] = dict(source_counts)
+    related["path_count"] = len(related["assets"])
+    return related
+
+
+def related_priority_lookup(related_priority: dict[str, Any] | None) -> dict[str, Any]:
+    assets = (related_priority or {}).get("assets") or {}
+    paths = {str(path) for path in assets.keys() if path}
+    names: dict[str, set[str]] = defaultdict(set)
+    for path in paths:
+        name = related_asset_name(path)
+        if name:
+            names[name].add(path)
+    return {
+        "assets": assets,
+        "paths": paths,
+        "names": names,
+    }
+
+
+def related_priority_paths_for_item(item: dict[str, Any], lookup: dict[str, Any] | None) -> list[str]:
+    if not lookup:
+        return []
+    paths: set[str] = set()
+    object_path = normalize_related_path_token(str(item.get("object_path") or ""))
+    if object_path and object_path in lookup.get("paths", set()):
+        paths.add(object_path)
+    name = str(item.get("asset_name") or "")
+    for path in (lookup.get("names") or {}).get(name, set()):
+        paths.add(path)
+    return sorted(paths)
+
+
+def related_priority_match(item: dict[str, Any], lookup: dict[str, Any] | None) -> bool:
+    return bool(related_priority_paths_for_item(item, lookup))
+
+
+def related_priority_sources_for_item(item: dict[str, Any], lookup: dict[str, Any] | None) -> list[str]:
+    sources: list[str] = []
+    assets = (lookup or {}).get("assets") or {}
+    for path in related_priority_paths_for_item(item, lookup):
+        info = assets.get(path) or {}
+        for source in info.get("sources") or []:
+            source_type = str(source.get("source_type") or "")
+            source_detail = str(source.get("source_detail") or "")
+            text = source_type if not source_detail else f"{source_type}: {source_detail}"
+            if text and text not in sources:
+                sources.append(text)
+    return sources
+
+
 def render_global_asset_report(index: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("# ARK DevKit 全局资产索引")
@@ -981,12 +1363,41 @@ def priority_text_for_asset(item: dict[str, Any]) -> str:
     )
 
 
-def priority_asset_allowed(item: dict[str, Any], group: dict[str, Any]) -> bool:
+def priority_include_asset_names(group: dict[str, Any]) -> set[str]:
+    return {str(value) for value in group.get("include_asset_names") or []}
+
+
+def queue_include_asset_names(group: dict[str, Any]) -> set[str]:
+    return {str(value) for value in group.get("queue_include_asset_names") or []}
+
+
+def fixed_priority_match(item: dict[str, Any]) -> bool:
     name = str(item.get("asset_name") or "")
     object_path = str(item.get("object_path") or "")
-    include_names = {str(value) for value in group.get("include_asset_names") or []}
-    if include_names and name not in include_names and object_path not in include_names:
-        return False
+    return name in FIXED_PRIORITY_ASSET_NAMES or object_path in FIXED_PRIORITY_OBJECT_PATHS
+
+
+def explicit_priority_match(item: dict[str, Any], group: dict[str, Any]) -> bool:
+    name = str(item.get("asset_name") or "")
+    object_path = str(item.get("object_path") or "")
+    include_names = priority_include_asset_names(group)
+    queue_include_names = queue_include_asset_names(group)
+    return (
+        fixed_priority_match(item)
+        or name in include_names
+        or object_path in include_names
+        or name in queue_include_names
+        or object_path in queue_include_names
+    )
+
+
+def priority_asset_allowed(
+    item: dict[str, Any],
+    group: dict[str, Any],
+    related_lookup: dict[str, Any] | None = None,
+) -> bool:
+    if explicit_priority_match(item, group) or related_priority_match(item, related_lookup):
+        return True
 
     text = priority_text_for_asset(item)
     for keyword in group.get("exclude_keywords") or []:
@@ -1003,10 +1414,16 @@ def priority_asset_defer_reason(item: dict[str, Any], group: dict[str, Any]) -> 
     return None
 
 
-def queue_asset_allowed(item: dict[str, Any], group: dict[str, Any]) -> bool:
+def queue_asset_allowed(
+    item: dict[str, Any],
+    group: dict[str, Any],
+    related_lookup: dict[str, Any] | None = None,
+) -> bool:
+    if fixed_priority_match(item) or related_priority_match(item, related_lookup):
+        return True
     name = str(item.get("asset_name") or "")
     object_path = str(item.get("object_path") or "")
-    include_names = {str(value) for value in group.get("queue_include_asset_names") or []}
+    include_names = queue_include_asset_names(group)
     if include_names and name not in include_names and object_path not in include_names:
         return False
     return True
@@ -1019,9 +1436,19 @@ def first_batch_limit(group: dict[str, Any]) -> int | None:
     return max(int(value), 0)
 
 
-def score_priority_asset(item: dict[str, Any], group: dict[str, Any]) -> tuple[int, list[str]]:
+def score_priority_asset(
+    item: dict[str, Any],
+    group: dict[str, Any],
+    related_lookup: dict[str, Any] | None = None,
+) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
+    if fixed_priority_match(item):
+        score += 1000
+        reasons.append("固定高优先级样本")
+    if related_priority_match(item, related_lookup):
+        score += 700
+        reasons.append("related asset probe")
     asset_type = item.get("asset_type")
     if asset_type in group["asset_types"]:
         score += 100
@@ -1047,10 +1474,15 @@ def score_priority_asset(item: dict[str, Any], group: dict[str, Any]) -> tuple[i
     return score, reasons
 
 
-def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
+def build_priority_targets(
+    global_index: dict[str, Any],
+    related_priority: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     assets = global_index.get("knowledge_assets") or global_index.get("assets", [])
+    lookup = related_priority_lookup(related_priority)
     groups: dict[str, Any] = {}
     all_queue: list[str] = []
+    related_match_count = 0
     for category_order, (group_id, group) in enumerate(DEEP_READ_GROUPS.items(), start=1):
         candidates: list[dict[str, Any]] = []
         deferred_candidates: list[dict[str, Any]] = []
@@ -1062,31 +1494,36 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
         for item in assets:
             if item.get("asset_type") not in group["asset_types"]:
                 continue
+            related_paths = related_priority_paths_for_item(item, lookup)
+            related_match = bool(related_paths)
+            force_include = explicit_priority_match(item, group) or related_match
             total_count += 1
             if item.get("captured"):
                 captured_count += 1
             if item.get("processed_current"):
                 processed_count += 1
-                continue
+                if not force_include:
+                    continue
             if item.get("failed_current"):
                 failed_count += 1
-                failed_candidates.append(
-                    {
-                        "asset_name": item.get("asset_name"),
-                        "object_path": item.get("object_path"),
-                        "asset_type": item.get("asset_type"),
-                        "domain": item.get("domain"),
-                        "relative_path": item.get("relative_path"),
-                        "captured": item.get("captured"),
-                        "has_uexp": item.get("has_uexp"),
-                        "failure_count": item.get("failure_count", 0),
-                        "last_failed_at": item.get("last_failed_at", ""),
-                    }
-                )
+                if not force_include:
+                    failed_candidates.append(
+                        {
+                            "asset_name": item.get("asset_name"),
+                            "object_path": item.get("object_path"),
+                            "asset_type": item.get("asset_type"),
+                            "domain": item.get("domain"),
+                            "relative_path": item.get("relative_path"),
+                            "captured": item.get("captured"),
+                            "has_uexp": item.get("has_uexp"),
+                            "failure_count": item.get("failure_count", 0),
+                            "last_failed_at": item.get("last_failed_at", ""),
+                        }
+                    )
+                    continue
+            if not priority_asset_allowed(item, group, lookup):
                 continue
-            if not priority_asset_allowed(item, group):
-                continue
-            score, reasons = score_priority_asset(item, group)
+            score, reasons = score_priority_asset(item, group, lookup)
             if score <= 0:
                 continue
             candidate = {
@@ -1099,7 +1536,13 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
                 "has_uexp": item.get("has_uexp"),
                 "score": score,
                 "reasons": reasons[:8],
+                "force_include": force_include,
             }
+            if related_match:
+                related_match_count += 1
+                candidate["related_priority"] = True
+                candidate["related_priority_paths"] = related_paths[:8]
+                candidate["related_priority_sources"] = related_priority_sources_for_item(item, lookup)[:8]
             defer_reason = priority_asset_defer_reason(item, group)
             if defer_reason:
                 candidate["deferred"] = True
@@ -1117,13 +1560,18 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
             item
             for item in candidates
             if (
-                queue_asset_allowed(item, group)
+                queue_asset_allowed(item, group, lookup)
                 and (include_captured or not item.get("captured"))
                 and int(item.get("score") or 0) >= queue_min_score
             )
         ]
         batch_limit = first_batch_limit(group)
-        first_batch = batch_candidates if batch_limit is None else batch_candidates[:batch_limit]
+        if batch_limit is None:
+            first_batch = batch_candidates
+        else:
+            forced_batch = [item for item in batch_candidates if item.get("force_include")]
+            regular_batch = [item for item in batch_candidates if not item.get("force_include")]
+            first_batch = forced_batch + regular_batch[: max(batch_limit - len(forced_batch), 0)]
         for item in first_batch:
             object_path = str(item.get("object_path") or "")
             if object_path and object_path not in all_queue:
@@ -1151,6 +1599,12 @@ def build_priority_targets(global_index: dict[str, Any]) -> dict[str, Any]:
         "generated": now_iso(),
         "source_global_asset_count": global_index.get("asset_count", 0),
         "source_knowledge_asset_count": global_index.get("knowledge_asset_count", 0),
+        "related_priority": {
+            "path_count": len(lookup.get("paths") or []),
+            "matched_asset_count": related_match_count,
+            "source_counts": (related_priority or {}).get("source_counts") or {},
+            "sample_paths": sorted(lookup.get("paths") or [])[:50],
+        },
         "groups": groups,
         "deep_read_queue": all_queue,
     }
@@ -1335,6 +1789,56 @@ BUSINESS_ASSET_COLUMNS = """
     last_read_at TEXT NOT NULL DEFAULT ''
 """
 
+FORMULA_CANDIDATES_TABLE = """
+    id TEXT PRIMARY KEY,
+    object_path TEXT NOT NULL,
+    asset_name TEXT NOT NULL DEFAULT '',
+    asset_type TEXT NOT NULL DEFAULT '',
+    domain TEXT NOT NULL DEFAULT '',
+    mechanism_type TEXT NOT NULL DEFAULT '',
+    mechanism TEXT NOT NULL DEFAULT '',
+    player_meaning TEXT NOT NULL DEFAULT '',
+    graph TEXT NOT NULL DEFAULT '',
+    visible_rule TEXT NOT NULL DEFAULT '',
+    formula_text TEXT NOT NULL DEFAULT '',
+    formula_ast_json TEXT NOT NULL DEFAULT '{}',
+    inputs_json TEXT NOT NULL DEFAULT '[]',
+    outputs_json TEXT NOT NULL DEFAULT '[]',
+    conditions_json TEXT NOT NULL DEFAULT '[]',
+    math_nodes_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    link_quality_json TEXT NOT NULL DEFAULT '{}',
+    external_dependencies_json TEXT NOT NULL DEFAULT '[]',
+    missing_evidence_json TEXT NOT NULL DEFAULT '[]',
+    next_probe_json TEXT NOT NULL DEFAULT '[]',
+    confidence TEXT NOT NULL DEFAULT 'unknown',
+    status TEXT NOT NULL DEFAULT 'candidate',
+    source_capture TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+"""
+
+UNRESOLVED_FORMULAS_TABLE = """
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL DEFAULT '',
+    object_path TEXT NOT NULL,
+    asset_name TEXT NOT NULL DEFAULT '',
+    asset_type TEXT NOT NULL DEFAULT '',
+    domain TEXT NOT NULL DEFAULT '',
+    mechanism_type TEXT NOT NULL DEFAULT '',
+    mechanism TEXT NOT NULL DEFAULT '',
+    known_visible_part TEXT NOT NULL DEFAULT '',
+    blocked_by_json TEXT NOT NULL DEFAULT '[]',
+    missing_evidence_json TEXT NOT NULL DEFAULT '[]',
+    required_next_probe_json TEXT NOT NULL DEFAULT '[]',
+    priority INTEGER NOT NULL DEFAULT 50,
+    status TEXT NOT NULL DEFAULT 'open',
+    confidence TEXT NOT NULL DEFAULT 'unresolved_formula',
+    source_capture TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+"""
+
 
 def business_asset_row(item: dict[str, Any]) -> tuple[Any, ...]:
     return (
@@ -1450,6 +1954,14 @@ def write_business_database(
             )
             """
         )
+        connection.execute(f"CREATE TABLE formula_candidates ({FORMULA_CANDIDATES_TABLE})")
+        connection.execute("CREATE INDEX idx_formula_candidates_object_path ON formula_candidates(object_path)")
+        connection.execute("CREATE INDEX idx_formula_candidates_type ON formula_candidates(mechanism_type)")
+        connection.execute("CREATE INDEX idx_formula_candidates_confidence ON formula_candidates(confidence)")
+        connection.execute(f"CREATE TABLE unresolved_formulas ({UNRESOLVED_FORMULAS_TABLE})")
+        connection.execute("CREATE INDEX idx_unresolved_formulas_object_path ON unresolved_formulas(object_path)")
+        connection.execute("CREATE INDEX idx_unresolved_formulas_status ON unresolved_formulas(status)")
+        connection.execute("CREATE INDEX idx_unresolved_formulas_priority ON unresolved_formulas(priority)")
         for table_name, columns in (config.get("tables") or {}).items():
             connection.execute(f"CREATE TABLE {table_name} ({columns})")
             if table_name.endswith("_references") or table_name == "asset_references":
@@ -1560,6 +2072,7 @@ def summarize_default_variables(defaults: dict[str, Any]) -> dict[str, Any]:
             "confidence": info.get("confidence", "unknown"),
             "source": info.get("source", "uasset_cdo"),
             "keyword_hits": keyword_hits(name),
+            **downstream_default_metadata(info),
         }
     return summary
 
@@ -1677,10 +2190,263 @@ def summarize_graphs(asset_dir: Path, root: Path) -> list[dict[str, Any]]:
     ]
 
 
+def summarize_asset_from_repository(asset_dir: Path, root: Path) -> dict[str, Any]:
+    """Build the knowledge projection without reopening legacy graph JSON."""
+
+    with open_asset_repository(asset_dir) as repository:
+        overview = repository.query({"operation": "overview", "budgetTokens": 800})
+        identity = repository.identity()
+        graph_rows = repository.graph_summaries()
+        node_rows = repository.node_summaries()
+        default_rows = repository.default_summaries(include_values=True)
+        gap_projection = repository.gap_summary()
+
+    gap_groups = (
+        gap_projection.get("groups", [])
+        if isinstance(gap_projection.get("groups"), list)
+        else []
+    )
+    gap_example_rows = [
+        example
+        for group in gap_groups
+        if isinstance(group, dict)
+        for example in (
+            group.get("examples", [])
+            if isinstance(group.get("examples"), list)
+            else []
+        )
+        if isinstance(example, dict)
+    ]
+
+    nodes_by_graph: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for node in node_rows:
+        nodes_by_graph[str(node.get("graph_ref") or "")].append(node)
+    graphs: list[dict[str, Any]] = []
+    calls: Counter[str] = Counter()
+    variables_used: Counter[str] = Counter()
+    keyword_group_counts: Counter[str] = Counter()
+    for graph in graph_rows:
+        graph_nodes = nodes_by_graph.get(str(graph.get("ref") or ""), [])
+        graph_calls = Counter(str(node.get("function")) for node in graph_nodes if node.get("function"))
+        graph_variables = Counter(str(node.get("variable")) for node in graph_nodes if node.get("variable"))
+        node_classes = Counter(str(node.get("class_name")) for node in graph_nodes if node.get("class_name"))
+        calls.update(graph_calls)
+        variables_used.update(graph_variables)
+        groups = [
+            group
+            for group, words in KEYWORD_GROUPS.items()
+            if matches_keywords(str(graph.get("name") or ""), words)
+            or any(matches_keywords(name, words) for name in [*graph_calls, *graph_variables])
+        ]
+        keyword_group_counts.update(groups)
+        semantic = [
+            {
+                "ref": node.get("ref"),
+                "name": node.get("name"),
+                "class_name": node.get("class_name"),
+                "function": node.get("function"),
+                "variable": node.get("variable"),
+                "x": node.get("x"),
+                "y": node.get("y"),
+            }
+            for node in graph_nodes
+            if node.get("function") or node.get("variable") or node.get("event")
+        ][:80]
+        graphs.append(
+            {
+                "name": graph.get("name"),
+                "graph_type": graph.get("graph_type"),
+                "source": graph.get("ref"),
+                "read_status": graph.get("status"),
+                "confidence": graph.get("confidence"),
+                "node_count": graph.get("node_count", 0),
+                "pin_count": graph.get("pin_count", 0),
+                "link_count": graph.get("link_count", 0),
+                "coverage": graph.get("coverage", {}),
+                "calls": dict(graph_calls.most_common()),
+                "variables": dict(graph_variables.most_common()),
+                "node_classes": dict(node_classes.most_common()),
+                "semantic_nodes_sample": semantic,
+                "keyword_groups": groups,
+            }
+        )
+
+    default_vars = {
+        str(row["name"]): {
+            "value": row.get("value"),
+            "type": row.get("type"),
+            "confidence": row.get("confidence") or "unknown",
+            "source": row.get("source") or "uasset_cdo",
+            "ref": row.get("ref"),
+            "keyword_hits": keyword_hits(str(row["name"])),
+            **downstream_default_metadata(row),
+        }
+        for row in default_rows
+    }
+    status_counts = Counter(str(graph.get("status") or "unknown") for graph in graph_rows)
+    confidence_counts = Counter(str(graph.get("confidence") or "unknown") for graph in graph_rows)
+    graph_name_by_ref = {
+        str(graph.get("ref") or ""): str(graph.get("name") or "")
+        for graph in graph_rows
+    }
+    local_graph_names = {name for name in graph_name_by_ref.values() if name}
+    unresolved_calls = [
+        {
+            "function": str(node.get("function")),
+            "graph": graph_name_by_ref.get(str(node.get("graph_ref") or ""), ""),
+            "category": "indexed_external_or_native_call",
+            "line": 0,
+            "evidence_ref": str(node.get("ref") or ""),
+        }
+        for node in node_rows
+        if node.get("function")
+        and str(node.get("function")) not in local_graph_names
+        and not is_utility_function(str(node.get("function")))
+    ]
+    summary = overview.get("summary", {}) if isinstance(overview.get("summary"), dict) else {}
+    agent_index = read_text(asset_dir / "output" / "agent_index.md")
+    evidence = [
+        {
+            "source": str(row.get("ref") or ""),
+            "line": 0,
+            "keywords": keyword_hits(str(row.get("name") or "")),
+            "text": f"Graph {row.get('name')} ({row.get('status')})",
+        }
+        for row in graph_rows[:80]
+    ]
+    evidence.extend(
+        {
+            "source": str(row.get("ref") or ""),
+            "line": 0,
+            "keywords": keyword_hits(str(row.get("name") or "")),
+            "text": f"Default {row.get('name')} ({row.get('type')})",
+        }
+        for row in default_rows[:40]
+    )
+    evidence.extend(
+        {
+            "source": str(row.get("ref") or ""),
+            "line": 0,
+            "keywords": keyword_hits(str(row.get("reason_code") or "")),
+            "text": f"{row.get('status')}: {row.get('reason_code')} — {row.get('next_probe')}",
+        }
+        for row in gap_example_rows[:40]
+    )
+    return {
+        "schema": "ark-blueprint-knowledge.asset.v1",
+        "asset_name": str(identity.get("asset_name") or asset_dir.name),
+        "role": infer_asset_role(asset_dir.name),
+        "capture_dir": short_path(asset_dir, root),
+        "generated": now_iso(),
+        "sources": {
+            "evidence_store": short_path(asset_dir / "evidence" / "evidence.sqlite", root),
+            "agent_index": short_path(asset_dir / "output" / "agent_index.md", root),
+            "revision": str(identity.get("revision_id") or ""),
+        },
+        "package": {
+            "asset_path": str(identity.get("object_path") or ""),
+            "uasset_path": str(identity.get("uasset_path") or ""),
+            "package_name": str(identity.get("object_path") or "").split(".", 1)[0],
+            "uasset_size": None,
+            "uexp_path": "",
+        },
+        "metrics": {
+            "default_variable_count": len(default_vars),
+            "usable_default_variable_count": sum(default_value_is_usable(info) for info in default_vars.values()),
+            "not_recovered_default_variable_count": sum(
+                not default_value_is_usable(info) for info in default_vars.values()
+            ),
+            "graph_count": int(summary.get("graphCount") or 0),
+            "node_count": int(summary.get("nodeCount") or 0),
+            "pin_count": int(summary.get("pinCount") or 0),
+            "link_count": int(summary.get("linkObservationCount") or 0),
+            "status_counts": dict(status_counts),
+            "confidence_counts": dict(confidence_counts),
+            "unresolved_call_count": len(unresolved_calls),
+            "link_resolution_counts": {},
+            "link_kind_counts": {},
+            "context_missing_function_count": 0,
+            "missing_graph_candidate_count": 0,
+            "context_default_candidate_count": 0,
+            "evidence_gap_count": int(gap_projection.get("total") or 0),
+            "evidence_gap_returned_count": int(gap_projection.get("returned") or 0),
+            "evidence_gap_omitted_count": int(gap_projection.get("omitted") or 0),
+        },
+        "quality_caveats": [
+            {
+                "kind": str(group.get("reason_code") or "evidence_gap"),
+                "status": str(group.get("status") or ""),
+                "count": int(group.get("count") or 0),
+                "meaning": str(examples[0].get("detail") or "") if examples else "",
+                "recommended_use": (
+                    str(examples[0].get("next_probe") or "") if examples else ""
+                ),
+                "evidence_ref": str(examples[0].get("ref") or "") if examples else "",
+                "examples": [
+                    {
+                        "ref": str(example.get("ref") or ""),
+                        "scope_kind": str(example.get("scope_kind") or ""),
+                        "scope_ref": str(example.get("scope_ref") or ""),
+                        "name": str(example.get("name") or ""),
+                        "detail": str(example.get("detail") or ""),
+                        "next_probe": str(example.get("next_probe") or ""),
+                    }
+                    for example in examples
+                ],
+            }
+            for group in gap_groups
+            if isinstance(group, dict)
+            for examples in [
+                group.get("examples", [])
+                if isinstance(group.get("examples"), list)
+                else []
+            ]
+        ],
+        "gap_summary": {
+            "total": int(gap_projection.get("total") or 0),
+            "returned": int(gap_projection.get("returned") or 0),
+            "omitted": int(gap_projection.get("omitted") or 0),
+            "truncated": bool(gap_projection.get("truncated")),
+            "by_status": gap_projection.get("by_status", {}),
+            "by_reason": gap_projection.get("by_reason", {}),
+            "groups": [
+                {
+                    "status": str(group.get("status") or ""),
+                    "reason_code": str(group.get("reason_code") or ""),
+                    "count": int(group.get("count") or 0),
+                }
+                for group in gap_groups
+                if isinstance(group, dict)
+            ],
+        },
+        "default_variables": default_vars,
+        "top_calls": dict(calls.most_common(80)),
+        "top_variables_used": dict(variables_used.most_common(80)),
+        "graphs": graphs,
+        "keyword_group_counts": dict(keyword_group_counts.most_common()),
+        "external_asset_paths": extract_game_paths(
+            {name: info for name, info in default_vars.items() if default_value_is_usable(info)}
+        ),
+        "unresolved_calls": unresolved_calls,
+        "evidence": evidence[:160],
+        "report_snippets": {
+            "behavior_summary_head": "\n".join(agent_index.splitlines()[:80]),
+            "diagnostics_head": "\n".join(
+                f"- {row.get('status')}: {row.get('reason_code')} — {row.get('next_probe')}"
+                for row in gap_example_rows[:80]
+            ),
+        },
+    }
+
+
 def summarize_asset(asset_dir: Path, root: Path) -> dict[str, Any]:
+    if (asset_dir / "evidence" / "evidence.sqlite").is_file():
+        return summarize_asset_from_repository(asset_dir, root)
     name = asset_dir.name
     defaults = read_json(asset_dir / "uasset_class_defaults.json", {})
     graph_nodes = read_json(asset_dir / "uasset_graph_nodes.json", {})
+    pin_links = read_json(asset_dir / "uasset_pin_links.json", {})
+    context_review = read_json(asset_dir / "output" / "context_review.json", {})
     structure = read_json(asset_dir / "uasset_structure.json", {})
     package = read_json(asset_dir / "uasset_package.json", {})
     export_map = read_json(asset_dir / "uasset_exports.json", [])
@@ -1706,6 +2472,32 @@ def summarize_asset(asset_dir: Path, root: Path) -> dict[str, Any]:
         "exports_sample": export_map[:250] if isinstance(export_map, list) else export_map,
     }
     unresolved = parse_markdown_table_unresolved(asset_report_text)
+    pin_link_summary = pin_links.get("summary", {}) if isinstance(pin_links, dict) else {}
+    link_resolution_counts = (
+        pin_link_summary.get("resolution_counts", {}) if isinstance(pin_link_summary, dict) else {}
+    )
+    link_kind_counts = pin_link_summary.get("kind_counts", {}) if isinstance(pin_link_summary, dict) else {}
+    quality_caveats: list[dict[str, Any]] = []
+    heuristic_links = int(link_resolution_counts.get("resolved_pin_heuristic") or 0) if isinstance(link_resolution_counts, dict) else 0
+    if heuristic_links:
+        quality_caveats.append(
+            {
+                "kind": "pin_level_heuristic",
+                "count": heuristic_links,
+                "meaning": "Target nodes are recovered, but many target pins are inferred by direction/category fallback.",
+                "recommended_use": "Use for behavior and dependency knowledge; verify exact pin-level diffs before gameplay-sensitive rewrites.",
+            }
+        )
+    missing_functions = context_review.get("missing_functions", []) if isinstance(context_review, dict) else []
+    if isinstance(missing_functions, list) and missing_functions:
+        quality_caveats.append(
+            {
+                "kind": "missing_function_candidates",
+                "count": len(missing_functions),
+                "meaning": "Some graph-like calls still need local graph capture or notes.md classification.",
+                "recommended_use": "Resolve notes before treating the call graph as complete.",
+            }
+        )
 
     return {
         "schema": "ark-blueprint-knowledge.asset.v1",
@@ -1729,6 +2521,12 @@ def summarize_asset(asset_dir: Path, root: Path) -> dict[str, Any]:
             "diagnostics_report": short_path(asset_dir / "output" / "diagnostics_report.md", root)
             if (asset_dir / "output" / "diagnostics_report.md").exists()
             else "",
+            "pin_links": short_path(asset_dir / "uasset_pin_links.json", root)
+            if (asset_dir / "uasset_pin_links.json").exists()
+            else "",
+            "context_review": short_path(asset_dir / "output" / "context_review.json", root)
+            if (asset_dir / "output" / "context_review.json").exists()
+            else "",
         },
         "package": {
             "asset_path": graph_nodes.get("asset_path") if isinstance(graph_nodes, dict) else "",
@@ -1746,7 +2544,15 @@ def summarize_asset(asset_dir: Path, root: Path) -> dict[str, Any]:
             "status_counts": graph_nodes.get("status_counts", {}) if isinstance(graph_nodes, dict) else {},
             "confidence_counts": graph_nodes.get("confidence_counts", {}) if isinstance(graph_nodes, dict) else {},
             "unresolved_call_count": len(unresolved),
+            "link_resolution_counts": link_resolution_counts if isinstance(link_resolution_counts, dict) else {},
+            "link_kind_counts": link_kind_counts if isinstance(link_kind_counts, dict) else {},
+            "context_missing_function_count": len(missing_functions) if isinstance(missing_functions, list) else 0,
+            "missing_graph_candidate_count": len(missing_functions) if isinstance(missing_functions, list) else 0,
+            "context_default_candidate_count": len(context_review.get("default_candidates", []))
+            if isinstance(context_review, dict) and isinstance(context_review.get("default_candidates", []), list)
+            else 0,
         },
+        "quality_caveats": quality_caveats,
         "default_variables": default_vars,
         "top_calls": dict(calls.most_common(80)),
         "top_variables_used": dict(variables_used.most_common(80)),
@@ -1876,15 +2682,35 @@ def make_fact(
     }
 
 
+def keyword_groups_for_focus(focus: str) -> dict[str, list[str]]:
+    lowered = focus.lower()
+    if "archelon" in lowered:
+        return {
+            key: words
+            for key, words in KEYWORD_GROUPS.items()
+            if key.startswith("archelon_")
+        }
+    if "gigantoraptor" in lowered:
+        return {
+            key: words
+            for key, words in KEYWORD_GROUPS.items()
+            if not key.startswith("archelon_")
+        }
+    return KEYWORD_GROUPS
+
+
 def build_system_focus(focus: str, assets: dict[str, dict[str, Any]]) -> dict[str, Any]:
     facts: list[dict[str, Any]] = []
     themes: dict[str, dict[str, Any]] = {}
+    keyword_groups = keyword_groups_for_focus(focus)
 
     for asset_name, asset in assets.items():
         source = asset.get("sources", {}).get("class_defaults") or asset.get("capture_dir")
         for variable, info in asset.get("default_variables", {}).items():
+            if not default_value_is_usable(info):
+                continue
             value_text = f"{variable} {info.get('value')}"
-            for group, words in KEYWORD_GROUPS.items():
+            for group, words in keyword_groups.items():
                 if matches_keywords(value_text, words):
                     facts.append(
                         make_fact(
@@ -1901,7 +2727,7 @@ def build_system_focus(focus: str, assets: dict[str, dict[str, Any]]) -> dict[st
                         )
                     )
 
-    for group, words in KEYWORD_GROUPS.items():
+    for group, words in keyword_groups.items():
         functions: Counter[str] = Counter()
         variables: Counter[str] = Counter()
         graphs: list[dict[str, Any]] = []
@@ -1931,6 +2757,8 @@ def build_system_focus(focus: str, assets: dict[str, dict[str, Any]]) -> dict[st
                     functions.update(graph.get("calls") or {})
                     variables.update(graph.get("variables") or {})
             for variable, info in asset.get("default_variables", {}).items():
+                if not default_value_is_usable(info):
+                    continue
                 if matches_keywords(f"{variable} {info.get('value')}", words):
                     defaults.append(
                         {
@@ -1982,6 +2810,10 @@ def describe_theme(group: str) -> str:
         "bonding_buff": "亲密/绑定 Buff、层数、持续时间和父母/骑手相关状态。",
         "nest_taming": "巢穴、驯养、认领、多用途交互和巢穴生成。",
         "xp_treasure": "经验、宝箱、StoredXP 等收益相关线索。",
+        "archelon_algae_cycle": "Archelon 的藻类生成、百分比同步、采集、材质表现和转移状态。",
+        "archelon_swim_and_raft": "Archelon 的游泳速度、浮力/重力、水体检测、木筏模式和移动输入覆盖。",
+        "archelon_multiuse_inventory": "Archelon 的 MultiUse 菜单、采集执行、物品加入库存和交互文本。",
+        "archelon_jellyfish_damage": "Archelon 的水母判定、带电 Buff、伤害调整和采集/击杀相关条件。",
     }.get(group, group)
 
 
@@ -1997,6 +2829,10 @@ def infer_theme_confidence(
     if graphs or defaults:
         return "medium"
     return "low"
+
+
+def theme_has_evidence(theme: dict[str, Any]) -> bool:
+    return bool(theme.get("graphs") or theme.get("default_variables") or theme.get("native_or_parent_refs"))
 
 
 def build_open_questions(themes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2016,7 +2852,11 @@ def build_open_questions(themes: dict[str, dict[str, Any]]) -> list[dict[str, An
             }
         )
     xp = themes.get("xp_treasure", {})
-    if not xp.get("default_variables") and not xp.get("graphs"):
+    has_gigantoraptor_context = any(
+        theme_has_evidence(themes.get(group, {}))
+        for group in ("feather_inheritance", "baby_training", "bonding_buff", "nest_taming")
+    )
+    if has_gigantoraptor_context and not xp.get("default_variables") and not xp.get("graphs"):
         questions.append(
             {
                 "topic": "XP 与宝箱收益",
@@ -2029,37 +2869,100 @@ def build_open_questions(themes: dict[str, dict[str, Any]]) -> list[dict[str, An
                 ],
             }
         )
+    algae = themes.get("archelon_algae_cycle", {})
+    if theme_has_evidence(algae):
+        questions.append(
+            {
+                "topic": "Archelon 藻类生成与采集",
+                "question": "藻类百分比、采集数量、库存物品和材质表现之间的精确公式是什么？",
+                "why_open": "当前图页能串起本资产的状态流，但 AddNewItem 等库存调用在父类/组件侧，物品类与数量的最终落点仍需交叉资产确认。",
+                "next_steps": [
+                    "补读或索引与 AlgaeQuantity、AddNewItem、TamedInventoryComponentTemplate 相关的物品/库存资产。",
+                    "用 GetAlgaePercentage、CollectAlgae、SetAlgaePercentage 三个图页交叉确认百分比和数量边界。",
+                    "把 UpdateAlgaeMaterial 的材质参数与实际材质资产对应起来。",
+                ],
+            }
+        )
+    swim = themes.get("archelon_swim_and_raft", {})
+    if theme_has_evidence(swim):
+        questions.append(
+            {
+                "topic": "Archelon 游泳与木筏模式",
+                "question": "木筏模式、完全入水检测和游泳速度覆盖如何影响玩家输入与服务器校正？",
+                "why_open": "本资产图页已经覆盖移动分支，但 GetInputDirectionVector、AddMovementInput、CurrentlyHasRider 等调用属于父类/引擎边界。",
+                "next_steps": [
+                    "将 BP_InterceptMoveForward、CheckRaftMode、BPOverrideCharacterNewSwimVelocity 作为移动改动前的核心复查图页。",
+                    "追父类 Character movement 相关函数，确认服务端/客户端分支是否还有隐藏条件。",
+                ],
+            }
+        )
     return questions
 
 
 def build_player_answer_support(themes: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "player_question": "巨盗龙对玩家有什么用？",
-            "kb_support": [
-                "nest_taming",
-                "baby_training",
-                "bonding_buff",
-                "feather_inheritance",
-            ],
-            "answer_style": "先说玩家能做什么，再说收益条件，最后列不确定机制。",
-        },
-        {
-            "player_question": "羽毛具体影响哪个属性、概率怎么算？",
-            "kb_support": ["feather_inheritance", "native_functions"],
-            "answer_style": "区分已知：最高属性会影响羽毛属性；未知：native 公式和上下限。",
-        },
-        {
-            "player_question": "怎么最大化收益？",
-            "kb_support": [
-                "feather_inheritance",
-                "baby_training",
-                "bonding_buff",
-                "xp_treasure",
-            ],
-            "answer_style": "按可操作步骤回答，并把尚未证实的宝箱/XP部分标为待验证。",
-        },
-    ]
+    items: list[dict[str, Any]] = []
+    if any(
+        theme_has_evidence(themes.get(group, {}))
+        for group in ("nest_taming", "baby_training", "bonding_buff", "feather_inheritance")
+    ):
+        items.extend(
+            [
+                {
+                    "player_question": "巨盗龙对玩家有什么用？",
+                    "kb_support": [
+                        "nest_taming",
+                        "baby_training",
+                        "bonding_buff",
+                        "feather_inheritance",
+                    ],
+                    "answer_style": "先说玩家能做什么，再说收益条件，最后列不确定机制。",
+                },
+                {
+                    "player_question": "羽毛具体影响哪个属性、概率怎么算？",
+                    "kb_support": ["feather_inheritance", "native_functions"],
+                    "answer_style": "区分已知：最高属性会影响羽毛属性；未知：native 公式和上下限。",
+                },
+                {
+                    "player_question": "怎么最大化收益？",
+                    "kb_support": [
+                        "feather_inheritance",
+                        "baby_training",
+                        "bonding_buff",
+                        "xp_treasure",
+                    ],
+                    "answer_style": "按可操作步骤回答，并把尚未证实的宝箱/XP部分标为待验证。",
+                },
+            ]
+        )
+    if any(
+        theme_has_evidence(themes.get(group, {}))
+        for group in (
+            "archelon_algae_cycle",
+            "archelon_swim_and_raft",
+            "archelon_multiuse_inventory",
+            "archelon_jellyfish_damage",
+        )
+    ):
+        items.extend(
+            [
+                {
+                    "player_question": "Archelon 的藻类机制怎么运作？",
+                    "kb_support": ["archelon_algae_cycle", "archelon_multiuse_inventory"],
+                    "answer_style": "先讲藻类百分比和时间/游泳条件，再讲 MultiUse 采集与库存落点，最后列父类边界。",
+                },
+                {
+                    "player_question": "改 Archelon 移动或木筏模式要注意什么？",
+                    "kb_support": ["archelon_swim_and_raft", "native_functions"],
+                    "answer_style": "按客户端输入、服务器校正、水体检测、骑乘状态分层说明风险。",
+                },
+                {
+                    "player_question": "Archelon 和水母/伤害有什么关系？",
+                    "kb_support": ["archelon_jellyfish_damage", "archelon_algae_cycle"],
+                    "answer_style": "区分本资产能看到的 IsJellyfish/伤害调整和仍在父类/软类判断里的部分。",
+                },
+            ]
+        )
+    return items
 
 
 def render_report(
@@ -2095,16 +2998,36 @@ def render_report(
         lines.append("")
     lines.append("## 已纳入资产")
     lines.append("")
-    lines.append("| 资产 | 角色 | 图页 | 节点 | 默认变量 | 未解析调用 |")
-    lines.append("| --- | --- | ---: | ---: | ---: | ---: |")
+    lines.append("| 资产 | 角色 | 图页 | 节点 | 默认变量 | Pin 启发式 | 未确认图候选 |")
+    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
     for name, asset in assets.items():
         metrics = asset.get("metrics", {})
+        link_resolution = metrics.get("link_resolution_counts", {}) if isinstance(metrics, dict) else {}
+        heuristic_links = link_resolution.get("resolved_pin_heuristic", 0) if isinstance(link_resolution, dict) else 0
         lines.append(
             f"| `{name}` | {asset.get('role')} | {metrics.get('graph_count', 0)} | "
             f"{metrics.get('node_count', 0)} | {metrics.get('default_variable_count', 0)} | "
-            f"{metrics.get('unresolved_call_count', 0)} |"
+            f"{heuristic_links} | {metrics.get('missing_graph_candidate_count', 0)} |"
         )
     lines.append("")
+    caveat_lines: list[str] = []
+    for name, asset in assets.items():
+        for caveat in asset.get("quality_caveats", []):
+            if not isinstance(caveat, dict):
+                continue
+            caveat_lines.append(
+                "- `{}` {} x{}：{}".format(
+                    name,
+                    caveat.get("kind", "caveat"),
+                    caveat.get("count", 0),
+                    caveat.get("recommended_use", caveat.get("meaning", "")),
+                )
+            )
+    if caveat_lines:
+        lines.append("## 质量标注")
+        lines.append("")
+        lines.extend(caveat_lines)
+        lines.append("")
     lines.append("## 关键主题")
     lines.append("")
     for group, theme in system.get("themes", {}).items():
@@ -2176,7 +3099,7 @@ def render_report(
     lines.append("")
     lines.append("- `knowledge_base/index.json`：知识库入口。")
     lines.append("- `knowledge_base/assets/*.json`：单个资产的结构化摘要。")
-    lines.append("- `knowledge_base/systems/gigantoraptor.json`：巨盗龙主题知识。")
+    lines.append(f"- `knowledge_base/systems/{focus}.json`：`{focus}` 主题知识。")
     lines.append("- `knowledge_base/native_functions.json`：native/父类函数缺口。")
     lines.append("- `knowledge_base/evidence.json`：报告行级证据。")
     lines.append("")
@@ -2250,7 +3173,8 @@ def build_knowledge_base(
             write_global_asset_database(catalog_db_path, global_index)
             write_json(out_dir / "global" / "asset_index_summary.json", global_index_summary(global_index))
             write_text(out_dir / "global" / "asset_index_report.md", render_global_asset_report(global_index))
-            priority_targets = build_priority_targets(global_index)
+            related_priority = collect_related_priority_sources(captures, out_dir / "db")
+            priority_targets = build_priority_targets(global_index, related_priority=related_priority)
             write_priority_outputs(out_dir, priority_targets)
             write_priority_database_tables(catalog_db_path, priority_targets)
             replace_deferred_assets(catalog_db_path, priority_targets)

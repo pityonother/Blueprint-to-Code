@@ -18,7 +18,7 @@ Tools -> Blueprint to Code -> Export Selected Blueprint Graph Queue
 The plugin writes these files under:
 
 ```text
-C:\Users\ac\Documents\project gaming\Blueprint to Code\captures\<BlueprintName>\
+<your Blueprint to Code folder>\captures\<BlueprintName>\
 ```
 
 - `graph_queue.txt` - queue format already understood by the web control center.
@@ -31,7 +31,7 @@ is somewhere else:
 ```powershell
 [Environment]::SetEnvironmentVariable(
   "BLUEPRINT_TO_CODE_ROOT",
-  "C:\Users\ac\Documents\project gaming\Blueprint to Code",
+  "<your Blueprint to Code folder>",
   "User"
 )
 ```

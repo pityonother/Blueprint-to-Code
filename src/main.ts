@@ -1,10 +1,16 @@
 import './styles.css';
 
 type ReportKey =
+  | 'agent_index'
   | 'next_actions'
   | 'notes_todo'
   | 'behavior_summary'
   | 'context_review'
+  | 'asset_memory_card'
+  | 'context_pack'
+  | 'formula_candidates'
+  | 'formula_candidates_json'
+  | 'unresolved_formulas'
   | 'capture_quality_report'
   | 'diagnostics_report'
   | 'asset_report'
@@ -66,6 +72,9 @@ interface AssetSummary {
   uassetStandaloneGraphCount: number;
   uassetFunctionCount: number;
   hasUassetGraphRead: boolean;
+  hasEvidenceStore?: boolean;
+  evidenceRevision?: string;
+  preservedLegacyReports?: boolean;
   uassetReadGraphCount: number;
   uassetReadNodeCount: number;
   uassetReadPinCount: number;
@@ -81,6 +90,10 @@ interface AssetSummary {
   hasOutput: boolean;
   lastOutputAt: string;
   reports: ReportMap;
+  formulaCandidateCount: number;
+  unresolvedFormulaCount: number;
+  assetMemoryCardExists: boolean;
+  contextPackExists: boolean;
   exportQuality: ExportQuality;
 }
 
@@ -184,14 +197,20 @@ class ApiFailure extends Error {
 }
 
 const reportLabels: Record<ReportKey, string> = {
+  agent_index: 'AI 证据索引',
   next_actions: '下一步',
   notes_todo: '缺失函数',
-  behavior_summary: '行为说明',
+  behavior_summary: '行为说明（legacy）',
   context_review: '上下文复查',
+  asset_memory_card: '资产小卡片',
+  context_pack: '问题上下文包',
+  formula_candidates: '公式候选',
+  formula_candidates_json: '公式候选 JSON',
+  unresolved_formulas: 'unresolved formulas',
   capture_quality_report: '采集质量',
-  diagnostics_report: '诊断',
-  asset_report: '完整报告',
-  call_graph_summary: '调用摘要',
+  diagnostics_report: '诊断（legacy）',
+  asset_report: '完整报告（legacy）',
+  call_graph_summary: '调用摘要（legacy）',
   uasset_graph_read_report: '.uasset 图内容',
   uasset_property_parse_report: '.uasset 属性',
   uasset_link_resolution_report: '.uasset 连线',
@@ -204,10 +223,12 @@ const reportLabels: Record<ReportKey, string> = {
 
 const graphTypes = ['EventGraph', 'Function', 'Macro', 'ConstructionScript', 'Unknown'];
 const reportTargets = Object.keys(reportLabels) as ReportKey[];
+const defaultReport: ReportKey = 'agent_index';
+const DEFAULT_ARTIFACT_MODE = 'indexed' as const;
 
 let state: AppState | null = null;
 let selectedPath = window.localStorage.getItem('blueprint-tool.selected') || '';
-let selectedReport: ReportKey = 'next_actions';
+let selectedReport: ReportKey = defaultReport;
 let reportContent = '';
 let reportPath = '';
 let reportLoading = false;
@@ -225,6 +246,8 @@ let comparePath = '';
 let logs: string[] = ['控制中心已就绪。请选择资产、采集图页，或重新生成分析报告。'];
 let activeJobId = '';
 let activeJobLabel = '';
+let mainNotice = '';
+let mainNoticeTone: 'info' | 'good' | 'warn' | 'danger' = 'info';
 let missingFunctions: MissingFunctionItem[] = [];
 let selectedMissingFunctions = new Set<string>();
 let graphQueueSummary: GraphQueueSummary | null = null;
@@ -243,6 +266,23 @@ function appendLog(message: string): void {
   const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   logs = [`[${timestamp}] ${message}`, ...logs].slice(0, 90);
   render();
+}
+
+function setMainNotice(message: string, tone: 'info' | 'good' | 'warn' | 'danger' = 'info'): void {
+  mainNotice = message;
+  mainNoticeTone = tone;
+  appendLog(message);
+}
+
+function readableError(error: unknown): string {
+  if (error instanceof ApiFailure) {
+    const attempted = error.payload.attemptedPaths;
+    if (Array.isArray(attempted) && attempted.length) {
+      return `${error.message} 尝试路径：${attempted.slice(0, 3).join('；')}`;
+    }
+    return error.message;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function api<T extends ApiResult>(path: string, options?: RequestInit): Promise<T> {
@@ -297,6 +337,73 @@ function selectedAsset(): AssetSummary | undefined {
   const byPath = state?.assets.find((asset) => asset.path === selectedPath);
   const ready = state?.assets.find((asset) => asset.graphs > 0 && asset.hasOutput);
   return byPath || ready || state?.assets[0];
+}
+
+function normalizeObjectPathInput(rawText: string): string {
+  let text = (rawText || '').trim().replace(/\\/g, '/').replace(/^["']|["']$/g, '');
+  const quoted = text.match(/['"](?<path>[^'"]+)['"]/);
+  if (quoted?.groups?.path) {
+    text = quoted.groups.path.trim();
+  }
+  const pathMatch = text.match(/(?<path>\/Game\/[^\s,'"]+)/);
+  if (pathMatch?.groups?.path) {
+    text = pathMatch.groups.path.trim();
+  } else {
+    const shorthandMatch = text.match(/(?<path>(?:\/?Game|\/?Mods)\/[^\s,'"]+|[A-Za-z0-9_][\w.-]*\/[^\s,'"]+)/);
+    if (shorthandMatch?.groups?.path) {
+      text = shorthandMatch.groups.path.trim();
+    }
+  }
+  text = text.replace(/^["']|["']$/g, '');
+  const lowered = text.toLowerCase();
+  if (lowered.startsWith('/game/')) {
+    text = `/Game/${text.slice(6)}`;
+  } else if (lowered.startsWith('game/')) {
+    text = `/Game/${text.slice(5)}`;
+  } else if (lowered.startsWith('/mods/')) {
+    text = `/Game${text}`;
+  } else if (lowered.startsWith('mods/')) {
+    text = `/Game/${text}`;
+  } else if (/^[A-Za-z0-9_][\w.-]*\//.test(text)) {
+    text = `/Game/Mods/${text.replace(/^\/+/, '')}`;
+  } else {
+    return '';
+  }
+  if (text.includes('.') && text.endsWith('_C')) {
+    const dot = text.lastIndexOf('.');
+    text = `${text.slice(0, dot + 1)}${text.slice(dot + 1, -2)}`;
+  }
+  if (!text.includes('.')) {
+    const objectName = text.split('/').pop() || '';
+    if (objectName) {
+      text = `${text}.${objectName}`;
+    }
+  }
+  return text;
+}
+
+function assetNameFromObjectPath(rawText: string): string {
+  const normalized = normalizeObjectPathInput(rawText);
+  if (!normalized) {
+    return '';
+  }
+  return normalized.split('.').pop() || normalized.split('/').pop() || '';
+}
+
+function preferredReportForAsset(asset?: AssetSummary): ReportKey {
+  if (asset?.reports?.[defaultReport]) {
+    return defaultReport;
+  }
+  if (asset?.reports?.next_actions) {
+    return 'next_actions';
+  }
+  if (asset?.reports?.asset_memory_card) {
+    return 'asset_memory_card';
+  }
+  if (asset?.reports?.formula_candidates) {
+    return 'formula_candidates';
+  }
+  return defaultReport;
 }
 
 function assetStatus(asset: AssetSummary): string {
@@ -793,7 +900,11 @@ function renderTopbar(): string {
 
 function readStatusBadge(asset?: AssetSummary): string {
   if (!asset) {
-    return '<span class="status-line muted">未识别。粘贴一个 Object Path，或从下方“历史资产”里挑一个。</span>';
+    const typedPath = normalizeObjectPathInput(devkitInput || state?.devkitAssetPath || '');
+    if (typedPath) {
+      return '<span class="status-line muted">路径格式已识别，但这个资产还没有读取进历史列表。点下面绿色按钮开始读取。</span>';
+    }
+    return '<span class="status-line muted">未识别。粘贴 /Game/... Object Path，或 Kaminan_server/... 这种 mod 相对路径。</span>';
   }
   if (!asset.hasUassetGraphRead) {
     return `<span class="status-line muted">这个资产还没有从 .uasset 读取过。点下面的“从 .uasset 读取图内容”开始。</span>`;
@@ -812,19 +923,20 @@ function readStatusBadge(asset?: AssetSummary): string {
 
 function renderStepPath(asset?: AssetSummary): string {
   const value = devkitInput || state?.devkitAssetPath || '';
+  const typedAssetName = assetNameFromObjectPath(value);
   return `
     <section class="panel step-panel">
       <div class="step-head">
         <span class="step-num">1</span>
         <div class="step-title">
           <h2>粘贴蓝图 Object Path</h2>
-          <p class="hint">在 ARK DevKit 里右键资产 → <code>Copy Reference</code>，把整段路径粘贴到下面。例如 <code>/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP</code>。</p>
+          <p class="hint">在 ARK DevKit 里右键资产 → <code>Copy Reference</code>，把整段路径粘贴到下面。例如 <code>/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP</code>，或 <code>Kaminan_server/.../Asset.Asset</code>。</p>
         </div>
       </div>
-      <textarea id="devkit-path" spellcheck="false" placeholder="/Game/ASA/.../Asset.Asset">${escapeHtml(value)}</textarea>
+      <textarea id="devkit-path" spellcheck="false" placeholder="/Game/ASA/.../Asset.Asset 或 Kaminan_server/.../Asset.Asset">${escapeHtml(value)}</textarea>
       <div class="status-row">
         <strong>已选资产：</strong>
-        <span class="asset-name">${escapeHtml(asset?.name || '无')}</span>
+        <span class="asset-name">${escapeHtml(asset?.name || typedAssetName || '无')}</span>
         ${readStatusBadge(asset)}
       </div>
     </section>
@@ -841,17 +953,17 @@ function renderStepActions(asset?: AssetSummary): string {
         <span class="step-num">2</span>
         <div class="step-title">
           <h2>读取并生成报告</h2>
-          <p class="hint">第一次操作只需要点左边那个绿色按钮，它会自动解析 .uasset 并跑出完整报告。右边只有想重新刷一次报告时再用。</p>
+          <p class="hint">第一次操作只需要点左边绿色按钮，生成当前 revision 的 Evidence Store 和 AI 索引。右边只在需要人类长报告时使用。</p>
         </div>
       </div>
       <div class="big-action-row">
         <button class="big-btn primary" data-action="read-uasset-graphs" ${canRead ? '' : 'disabled'}>
           <strong>从 .uasset 读取图内容</strong>
-          <small>解析 .uasset / .uexp 里的节点和连线，自动生成完整报告。</small>
+          <small>解析 .uasset / .uexp，默认生成低 token 证据库和 AI 索引。</small>
         </button>
         <button class="big-btn secondary" data-action="analyze-standard" ${canAnalyze ? '' : 'disabled'}>
-          <strong>重新生成完整报告</strong>
-          <small>已经读过的资产，重跑一次分析以更新 asset_report 等。</small>
+          <strong>生成 / 刷新人类报告</strong>
+          <small>按同一 Object Path 以 dual 模式重读，再生成匹配当前 revision 的 asset_report 等。</small>
         </button>
       </div>
       ${
@@ -859,6 +971,7 @@ function renderStepActions(asset?: AssetSummary): string {
           ? `<div class="job-bar"><span>正在后台执行：${escapeHtml(activeJobLabel || '任务')}……可以等它跑完，也可以取消。</span>${actionButton('取消任务', 'cancel-job', 'danger')}</div>`
           : ''
       }
+      ${mainNotice ? `<div class="action-notice ${mainNoticeTone}">${escapeHtml(mainNotice)}</div>` : ''}
     </section>
   `;
 }
@@ -916,22 +1029,32 @@ function reportTile(
   title: string,
   hint: string,
   asset?: AssetSummary,
+  missingHint = '尚未生成 — 先完成第 2 步“读取图内容”。',
 ): string {
   const exists = Boolean(asset?.reports?.[key]);
   return `
     <button class="report-tile ${exists ? '' : 'missing'}" data-action="open-report-${key}" ${exists ? '' : 'disabled'}>
       <strong>${escapeHtml(title)}</strong>
-      <small>${escapeHtml(exists ? hint : '尚未生成 — 先完成第 2 步“读取图内容”。')}</small>
+      <small>${escapeHtml(exists ? hint : missingHint)}</small>
     </button>
   `;
 }
 
 function renderStepReports(asset?: AssetSummary): string {
+  const legacyHint = asset?.preservedLegacyReports
+    ? '这是保留的 legacy 文件，可能早于当前 evidence revision；需要最新人类报告时请点“生成 / 刷新人类报告”。'
+    : 'legacy 人类报告；indexed 默认不生成，需要时请显式重新分析。';
+  const legacyMissing = 'indexed 默认只生成 AI 证据索引；需要这份人类报告时请点“生成 / 刷新人类报告”。';
   const tiles = [
-    reportTile('asset_report', '完整报告 (asset_report)', '一个 .md 里看资产的整体情况、节点伪代码、注释、调用关系。', asset),
-    reportTile('behavior_summary', '行为说明 (behavior_summary)', '把图页翻译成中文的行为段落，给非程序的同事看。', asset),
-    reportTile('diagnostics_report', '诊断报告 (diagnostics_report)', '哪里靠猜、哪里缺数据、哪些图页要补采。', asset),
-    reportTile('call_graph_summary', '调用关系摘要 (call_graph_summary)', '函数互相调用的关系，找入口和影响面。', asset),
+    reportTile('agent_index', 'AI 证据索引 (agent_index)', `默认给 AI 的低 token 入口；按 Evidence ID 搜索和下钻，revision ${asset?.evidenceRevision || '-'}。`, asset),
+    reportTile('context_pack', '问题上下文包 (context_pack)', `默认给 GPT 的小上下文，候选 ${asset?.formulaCandidateCount || 0} 个，未解析 ${asset?.unresolvedFormulaCount || 0} 个。`, asset),
+    reportTile('asset_memory_card', '资产小卡片 (asset_memory_card)', '几 KB 级资产记忆卡，只保留身份、摘要、关键默认值和证据指针。', asset),
+    reportTile('formula_candidates', '公式候选 (formula_candidates)', '概率、属性、XP、掉落、Buff 等机制候选；不会写成最终公式。', asset),
+    reportTile('unresolved_formulas', 'unresolved formulas', '查看 native、父类、heuristic 连线等公式阻塞原因和下一步验证。', asset),
+    reportTile('asset_report', '完整报告（历史/按需报告）', legacyHint, asset, legacyMissing),
+    reportTile('behavior_summary', '行为说明（历史/按需报告）', legacyHint, asset, legacyMissing),
+    reportTile('diagnostics_report', '诊断报告（历史/按需报告）', legacyHint, asset, legacyMissing),
+    reportTile('call_graph_summary', '调用关系摘要（历史/按需报告）', legacyHint, asset, legacyMissing),
   ].join('');
   const allTabs = reportTargets.map((k) => reportButton(k, asset)).join('');
   return `
@@ -939,8 +1062,8 @@ function renderStepReports(asset?: AssetSummary): string {
       <div class="step-head">
         <span class="step-num">4</span>
         <div class="step-title">
-          <h2>打开报告</h2>
-          <p class="hint">点卡片会用系统默认编辑器打开本地 <code>.md</code> 文件。这些都是中文报告。</p>
+          <h2>打开索引 / 按需报告</h2>
+          <p class="hint">AI 默认读当前 revision 的证据索引；保留的 legacy Markdown 可能来自旧 revision，卡片会明确标注。</p>
         </div>
       </div>
       <div class="report-tile-grid">${tiles}</div>
@@ -1167,6 +1290,7 @@ function bindEvents(): void {
       devkitInput = selectedPath;
       window.localStorage.setItem('blueprint-tool.selected', selectedPath);
       captureAssetName = selectedAsset()?.name || captureAssetName;
+      selectedReport = preferredReportForAsset(selectedAsset());
       reportContent = '';
       reportPath = '';
       void loadReport(selectedReport);
@@ -1247,6 +1371,10 @@ async function refreshState(keepReport = true): Promise<void> {
   }
   if (!compareNewPath) {
     compareNewPath = state.assets[1]?.path || state.assets[0]?.path || '';
+  }
+  const asset = selectedAsset();
+  if (asset && (previousSelectedPath !== selectedPath || !asset.reports[selectedReport])) {
+    selectedReport = preferredReportForAsset(asset);
   }
   if (selectedPath) {
     await loadMissingFunctions(false);
@@ -1390,7 +1518,7 @@ async function runAnalysis(reportLevel: 'compact' | 'standard' | 'debug'): Promi
     return;
   }
   busy = true;
-  appendLog(`开始为 ${asset.name} 生成 ${reportLevel} 报告。`);
+  appendLog(`开始为 ${asset.name} 刷新来源并生成 ${reportLevel} 人类报告。`);
   try {
     const payload = await api<ApiResult & { job: JobInfo }>(
       '/api/analyze',
@@ -1417,7 +1545,8 @@ async function runAnalysis(reportLevel: 'compact' | 'standard' | 'debug'): Promi
     }
     await refreshState(false);
     if (job.status === 'succeeded') {
-      await loadReport('next_actions');
+      selectedReport = 'context_pack';
+      await loadReport('context_pack');
     }
   } catch (error) {
     appendLog(error instanceof Error ? error.message : String(error));
@@ -1496,7 +1625,8 @@ async function capturePage(analyzeAfter: boolean, allowOverwrite = false, fromQu
       }
       await refreshState(false);
       if (job.status === 'succeeded') {
-        await loadReport('next_actions');
+        selectedReport = 'context_pack';
+        await loadReport('context_pack');
       }
     }
   } catch (error) {
@@ -1649,10 +1779,12 @@ async function mineUassetCandidates(copyCommand: boolean): Promise<void> {
 async function readUassetGraphs(): Promise<void> {
   syncInputs();
   if (!devkitInput) {
-    appendLog('请先粘贴目标蓝图 Object Path。');
+    setMainNotice('请先粘贴目标蓝图 Object Path。', 'warn');
     return;
   }
   busy = true;
+  mainNotice = `正在读取：${normalizeObjectPathInput(devkitInput) || devkitInput}`;
+  mainNoticeTone = 'info';
   render();
   try {
     const payload = await api<
@@ -1664,17 +1796,30 @@ async function readUassetGraphs(): Promise<void> {
         pinCount: number;
         linkCount: number;
         graphReportPath: string;
+        agentIndexPath?: string;
+        artifactMode?: string;
         analysisJob?: JobInfo;
       }
     >('/api/uasset-graphs', {
       method: 'POST',
-      body: JSON.stringify({ assetPath: devkitInput, analyzeAfter: true, reportLevel: 'standard' }),
+      body: JSON.stringify({
+        assetPath: devkitInput,
+        analyzeAfter: true,
+        reportLevel: 'standard',
+        artifactMode: DEFAULT_ARTIFACT_MODE,
+      }),
     });
     devkitInput = payload.assetPath;
-    appendLog(
+    setMainNotice(
       `已从 .uasset 读取 ${payload.graphCount} 个图、${payload.nodeCount} 个节点、${payload.pinCount} 个 pin、${payload.linkCount} 条候选连线。`,
+      'good',
     );
-    appendLog(`资产解析报告：${payload.graphReportPath}`);
+    if (payload.graphReportPath) {
+      appendLog(`资产解析报告：${payload.graphReportPath}`);
+    }
+    if (payload.agentIndexPath) {
+      appendLog(`AI 证据索引：${payload.agentIndexPath}`);
+    }
     await refreshState(false);
     if (payload.analysisJob) {
       activeJobId = payload.analysisJob.id;
@@ -1688,11 +1833,15 @@ async function readUassetGraphs(): Promise<void> {
       }
       await refreshState(false);
       if (job.status === 'succeeded') {
-        await loadReport('asset_report');
+        selectedReport = 'agent_index';
+        await loadReport('agent_index');
       }
+    } else if (payload.agentIndexPath) {
+      selectedReport = 'agent_index';
+      await loadReport('agent_index');
     }
   } catch (error) {
-    appendLog(error instanceof Error ? error.message : String(error));
+    setMainNotice(readableError(error), 'danger');
   } finally {
     busy = false;
     activeJobId = '';

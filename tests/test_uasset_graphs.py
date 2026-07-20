@@ -14,6 +14,7 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
     build_quality_gate_payload,
     node_info_from_export,
     mine_graph_candidates,
+    normalize_blueprint_object_path,
     object_path_to_uasset_path,
     parse_custom_pins,
     read_uasset_class_defaults,
@@ -38,6 +39,45 @@ class UAssetGraphCandidateTests(unittest.TestCase):
             found, attempted = object_path_to_uasset_path(
                 "/Game/Genesis2/Dinos/LionfishLion/LionfishLion_Character_BP.LionfishLion_Character_BP",
                 extra_roots=[content_root],
+            )
+
+        self.assertEqual(found, asset)
+        self.assertIn(str(asset), attempted)
+
+    def test_normalize_accepts_mod_relative_reference(self):
+        raw = "Kaminan_server/SkinBuff/SkinBuffHuman/MetalShield/BuffSkin_MetalShield.BuffSkin_MetalShield"
+        self.assertEqual(
+            normalize_blueprint_object_path(raw),
+            "/Game/Mods/Kaminan_server/SkinBuff/SkinBuffHuman/MetalShield/BuffSkin_MetalShield.BuffSkin_MetalShield",
+        )
+
+    def test_object_path_maps_to_external_mod_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            shooter_game = Path(temp_dir) / "ShooterGame"
+            content_root = shooter_game / "Content"
+            mod_content_root = shooter_game / "Mods" / "Kaminan_server" / "Content"
+            asset = mod_content_root / "Dinos" / "Wyvern" / "MyWyvern_BP.uasset"
+            asset.parent.mkdir(parents=True)
+            asset.write_bytes(b"EventGraph\x00")
+
+            found, attempted = object_path_to_uasset_path(
+                "/Game/Mods/Kaminan_server/Dinos/Wyvern/MyWyvern_BP.MyWyvern_BP",
+                extra_roots=[content_root],
+            )
+
+        self.assertEqual(found, asset)
+        self.assertIn(str(asset), attempted)
+
+    def test_object_path_maps_to_explicit_mod_content_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mod_content_root = Path(temp_dir) / "Mods" / "Kaminan_server" / "Content"
+            asset = mod_content_root / "Weapons" / "LightningGun_BP.uasset"
+            asset.parent.mkdir(parents=True)
+            asset.write_bytes(b"EventGraph\x00")
+
+            found, attempted = object_path_to_uasset_path(
+                "/Game/Mods/Kaminan_server/Weapons/LightningGun_BP.LightningGun_BP",
+                extra_roots=[mod_content_root],
             )
 
         self.assertEqual(found, asset)
@@ -265,7 +305,615 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(variables["StoredXPTreasureQualityMinMax"]["value"]["y"], 10.000001)
         self.assertEqual(variables["TreasureSupplyCrateClass"]["value"], "/Game/Fixture/SupplyCrate.SupplyCrate_C")
         self.assertEqual(variables["ExTreasureItemEveryNumLevels"]["value"], 75)
+        properties = {item["name"]: item for item in payload["properties"]}
+        self.assertTrue(properties["StoredXPTreasureQualityMinMax"]["struct_parse"]["parsed"])
+        self.assertEqual(properties["StoredXPTreasureQualityMinMax"]["struct_parse"]["struct_name"], "Vector2D")
+        self.assertEqual(properties["TreasureSupplyCrateClass"]["object"], "/Game/Fixture/SupplyCrate.SupplyCrate_C")
         self.assertIn("MinStoredXPForTreasure", report)
+
+    def test_cdo_array_and_unparsed_struct_keep_parser_metadata(self):
+        names = [
+            "/Game/Fixture",
+            "Fixture",
+            "/Script/CoreUObject",
+            "TreasureItemSets",
+            "ItemSetWeights",
+            "ArrayProperty",
+            "ObjectProperty",
+            "StructProperty",
+            "MysteryStruct",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        refs = [2, 3]
+        array_value = struct.pack("<i", len(refs)) + b"".join(struct.pack("<i", ref) for ref in refs)
+        array_prop = (
+            fname("TreasureItemSets")
+            + fname("ArrayProperty")
+            + struct.pack("<i", 0)
+            + fname("ObjectProperty")
+            + struct.pack("<i", 0)
+            + struct.pack("<iB", len(array_value), 2)
+            + (b"A" * 16)
+            + array_value
+        )
+        struct_value = b"not-parsed-yet"
+        struct_prop = (
+            fname("ItemSetWeights")
+            + fname("StructProperty")
+            + struct.pack("<i", 1)
+            + fname("MysteryStruct")
+            + struct.pack("<i", 1)
+            + fname("/Script/CoreUObject")
+            + struct.pack("<iiB", 0, len(struct_value), 2)
+            + (b"B" * 16)
+            + struct_value
+        )
+        cdo_data = array_prop + struct_prop
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {"file": "uasset", "offset": 0, "size": len(cdo_data), "available": True},
+                },
+                {"object_name": "ItemSetA"},
+                {"object_name": "ItemSetB"},
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        properties = {item["name"]: item for item in payload["properties"]}
+
+        self.assertEqual(properties["TreasureItemSets"]["value"], refs)
+        self.assertEqual(properties["TreasureItemSets"]["array_parse"]["parsed"], True)
+        self.assertEqual(properties["TreasureItemSets"]["array_parse"]["element_kind"], "FPackageIndex")
+        self.assertEqual(properties["TreasureItemSets"]["objects"], ["ItemSetA", "ItemSetB"])
+        self.assertEqual(payload["variables"]["TreasureItemSets"]["value"], refs)
+        self.assertEqual(properties["ItemSetWeights"]["struct_parse"]["parsed"], False)
+        self.assertEqual(properties["ItemSetWeights"]["struct_parse"]["struct_name"], "MysteryStruct")
+        self.assertNotIn("ItemSetWeights", payload["variables"])
+
+    def test_cdo_ark_tagged_struct_array_preserves_element_boundaries(self):
+        names = [
+            "None",
+            "HarvestResourceEntries",
+            "ArrayProperty",
+            "StructProperty",
+            "OverrideQuantityMax",
+            "IntProperty",
+            "EntryWeight",
+            "FloatProperty",
+            "ResourceItem",
+            "ObjectProperty",
+            "MaxHarvestHealth",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def ark_tag(name: str, type_name: str, value: bytes, *, type_meta: bytes = b"") -> bytes:
+            return (
+                fname(name)
+                + fname(type_name)
+                + struct.pack("<ii", len(value), 0)
+                + type_meta
+                + value
+            )
+
+        first_entry = b"".join(
+            [
+                ark_tag("OverrideQuantityMax", "IntProperty", struct.pack("<i", 3)),
+                ark_tag("EntryWeight", "FloatProperty", struct.pack("<f", 2.5)),
+                ark_tag("ResourceItem", "ObjectProperty", struct.pack("<i", -1)),
+                fname("None"),
+            ]
+        )
+        second_entry = b"".join(
+            [
+                ark_tag("OverrideQuantityMax", "IntProperty", struct.pack("<i", 1)),
+                ark_tag("EntryWeight", "FloatProperty", struct.pack("<f", 0.25)),
+                ark_tag("ResourceItem", "ObjectProperty", struct.pack("<i", -2)),
+                fname("None"),
+            ]
+        )
+        entries_value = struct.pack("<i", 2) + first_entry + second_entry
+        cdo_data = b"".join(
+            [
+                ark_tag(
+                    "HarvestResourceEntries",
+                    "ArrayProperty",
+                    entries_value,
+                    type_meta=fname("StructProperty"),
+                ),
+                ark_tag("MaxHarvestHealth", "FloatProperty", struct.pack("<f", 620.0)),
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [
+                {"object_name": "PrimalItemResource_Metal_C"},
+                {"object_name": "PrimalItemResource_Stone_C"},
+            ],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        properties = {item["name"]: item for item in payload["properties"]}
+        entries = properties["HarvestResourceEntries"]
+
+        self.assertEqual(payload["property_count"], 2)
+        self.assertNotIn("EntryWeight", properties)
+        self.assertEqual(properties["MaxHarvestHealth"]["value"], 620.0)
+        self.assertTrue(entries["array_parse"]["parsed"])
+        self.assertEqual(entries["array_parse"]["element_kind"], "StructProperty")
+        self.assertEqual(entries["array_parse"]["count"], 2)
+        self.assertEqual(entries["value"][0]["OverrideQuantityMax"], 3)
+        self.assertEqual(entries["value"][1]["EntryWeight"], 0.25)
+        self.assertEqual(
+            entries["array_parse"]["elements"][0]["properties"][2]["object"],
+            "PrimalItemResource_Metal_C",
+        )
+        self.assertEqual(
+            entries["array_parse"]["elements"][1]["properties"][2]["object"],
+            "PrimalItemResource_Stone_C",
+        )
+        self.assertEqual(
+            payload["variables"]["HarvestResourceEntries"]["value"],
+            entries["value"],
+        )
+
+    def test_cdo_ue5_property_type_name_array_is_recovered_from_native_wrapping(self):
+        names = [
+            "None",
+            "AttackInfos",
+            "ArrayProperty",
+            "StructProperty",
+            "DinoAttackInfo",
+            "/Script/ShooterGame",
+            "AttackName",
+            "NameProperty",
+            "Bite",
+            "Claw",
+            "MeleeDamageType",
+            "ObjectProperty",
+            "MeleeDamageAmount",
+            "IntProperty",
+            "AttackInterval",
+            "FloatProperty",
+            "bBasicAttack",
+            "BoolProperty",
+            "TailValue",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def property_type(name: str, parameters=()) -> bytes:
+            return fname(name) + struct.pack("<i", len(parameters)) + b"".join(
+                property_type(child_name, child_parameters)
+                for child_name, child_parameters in parameters
+            )
+
+        def ue5_tag(name: str, type_name: str, value: bytes, *, parameters=()) -> bytes:
+            return (
+                fname(name)
+                + property_type(type_name, parameters)
+                + struct.pack("<i", len(value))
+                + b"\x00"
+                + value
+            )
+
+        def ue5_bool(name: str, value: bool) -> bytes:
+            return fname(name) + property_type("BoolProperty") + struct.pack("<i", 0) + bytes([value])
+
+        def attack(name: str, damage_type: int, damage: int, interval: float, basic: bool) -> bytes:
+            return b"".join(
+                [
+                    ue5_tag("AttackName", "NameProperty", fname(name)),
+                    ue5_tag("MeleeDamageType", "ObjectProperty", struct.pack("<i", damage_type)),
+                    ue5_tag("MeleeDamageAmount", "IntProperty", struct.pack("<i", damage)),
+                    ue5_tag("AttackInterval", "FloatProperty", struct.pack("<f", interval)),
+                    ue5_bool("bBasicAttack", basic),
+                    fname("None"),
+                ]
+            )
+
+        attacks_value = struct.pack("<i", 2) + attack("Bite", -1, 120, 0.5, True) + attack(
+            "Claw", -2, 80, 0.75, False
+        )
+        attack_type_parameters = (
+            (
+                "StructProperty",
+                (("DinoAttackInfo", (("/Script/ShooterGame", ()),)),),
+            ),
+        )
+        attack_array = ue5_tag(
+            "AttackInfos",
+            "ArrayProperty",
+            attacks_value,
+            parameters=attack_type_parameters,
+        )
+        tail = ue5_tag("TailValue", "IntProperty", struct.pack("<i", 7))
+        native_prefix = b"native-prefix"
+        native_suffix = b"native-suffix"
+        cdo_data = native_prefix + attack_array + tail + fname("None") + native_suffix
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [
+                {"object_name": "DmgType_Melee_MineStone_C"},
+                {"object_name": "DmgType_Melee_Claw_C"},
+            ],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        properties = {item["name"]: item for item in payload["properties"]}
+        attacks = properties["AttackInfos"]
+
+        self.assertEqual(payload["property_count"], 2)
+        self.assertNotIn("AttackName", properties)
+        self.assertEqual(properties["TailValue"]["value"], 7)
+        self.assertEqual(attacks["array_parse"]["count"], 2)
+        self.assertEqual(attacks["value"][0]["AttackName"], "Bite")
+        self.assertEqual(attacks["value"][0]["MeleeDamageAmount"], 120)
+        self.assertIs(attacks["value"][0]["bBasicAttack"], True)
+        self.assertIs(attacks["value"][1]["bBasicAttack"], False)
+        self.assertEqual(
+            attacks["array_parse"]["elements"][0]["properties"][1]["object"],
+            "DmgType_Melee_MineStone_C",
+        )
+
+    def test_cdo_compact_tags_with_guid_marker_decode_object_arrays(self):
+        names = [
+            "None",
+            "InvalidHarvestOverrideDamageType",
+            "ObjectProperty",
+            "OverrideDamageForResourceHarvestingItems",
+            "ArrayProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def tagged(name: str, type_name: str, value: bytes, *, type_meta: bytes = b"") -> bytes:
+            return (
+                fname(name)
+                + fname(type_name)
+                + struct.pack("<ii", len(value), 0)
+                + type_meta
+                + b"\x00"
+                + value
+            )
+
+        refs = [-2, -3, -4]
+        array_value = struct.pack("<i", len(refs)) + b"".join(struct.pack("<i", ref) for ref in refs)
+        cdo_data = b"".join(
+            [
+                tagged("InvalidHarvestOverrideDamageType", "ObjectProperty", struct.pack("<i", -1)),
+                tagged(
+                    "OverrideDamageForResourceHarvestingItems",
+                    "ArrayProperty",
+                    array_value,
+                    type_meta=fname("ObjectProperty"),
+                ),
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [
+                {"object_name": "DmgType_MineStone_C"},
+                {"object_name": "PrimalItemResource_Metal_C"},
+                {"object_name": "PrimalItemResource_Obsidian_C"},
+                {"object_name": "PrimalItemResource_Crystal_C"},
+            ],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        properties = {item["name"]: item for item in payload["properties"]}
+
+        self.assertEqual(payload["property_count"], 2)
+        self.assertEqual(
+            properties["InvalidHarvestOverrideDamageType"]["object"],
+            "DmgType_MineStone_C",
+        )
+        self.assertEqual(
+            properties["OverrideDamageForResourceHarvestingItems"]["objects"],
+            [
+                "PrimalItemResource_Metal_C",
+                "PrimalItemResource_Obsidian_C",
+                "PrimalItemResource_Crystal_C",
+            ],
+        )
+        self.assertEqual(
+            properties["OverrideDamageForResourceHarvestingItems"]["array_parse"]["count"],
+            3,
+        )
+
+    def test_cdo_compact_guid_bool_consumes_marker_before_following_float(self):
+        names = [
+            "None",
+            "bUseHarvestingDamageType",
+            "BoolProperty",
+            "ArmorDurabilityDegradationMultiplier",
+            "FloatProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        bool_tag = (
+            fname("bUseHarvestingDamageType")
+            + fname("BoolProperty")
+            + struct.pack("<ii", 0, 0)
+            + b"\x01"  # bool value lives in the tag
+            + b"\x00"  # no property GUID follows
+        )
+        float_tag = (
+            fname("ArmorDurabilityDegradationMultiplier")
+            + fname("FloatProperty")
+            + struct.pack("<ii", 4, 0)
+            + b"\x00"  # no property GUID follows
+            + struct.pack("<f", 12.0)
+        )
+        # Real ARK CDO exports may keep four zero padding bytes after None.
+        cdo_data = bool_tag + float_tag + fname("None") + (b"\x00" * 4)
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        properties = {item["name"]: item for item in payload["properties"]}
+
+        self.assertEqual(payload["property_count"], 2)
+        self.assertIs(properties["bUseHarvestingDamageType"]["value"], True)
+        self.assertEqual(
+            properties["bUseHarvestingDamageType"]["tag_layout"],
+            "ark_compact_guid_marker",
+        )
+        self.assertAlmostEqual(
+            properties["ArmorDurabilityDegradationMultiplier"]["value"],
+            12.0,
+        )
+        self.assertEqual(
+            properties["ArmorDurabilityDegradationMultiplier"]["confidence"],
+            "high",
+        )
+
+    def test_cdo_compact_guid_bool_consumes_optional_property_guid(self):
+        names = ["None", "bGuidTagged", "BoolProperty"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        property_guid = bytes(range(16))
+        cdo_data = (
+            fname("bGuidTagged")
+            + fname("BoolProperty")
+            + struct.pack("<ii", 0, 0)
+            + b"\x01"
+            + b"\x01"
+            + property_guid
+            + fname("None")
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        prop = payload["properties"][0]
+
+        self.assertIs(prop["value"], True)
+        self.assertEqual(prop["tag_layout"], "ark_compact_guid_marker")
+        self.assertEqual(prop["raw_size"], 42)
+
+    def test_cdo_compact_scalar_does_not_read_past_declared_value_boundary(self):
+        names = ["None", "BrokenInt", "IntProperty", "TailValue"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        broken = (
+            fname("BrokenInt")
+            + fname("IntProperty")
+            + struct.pack("<ii", 1, 0)
+            + b"\x07"
+        )
+        tail = (
+            fname("TailValue")
+            + fname("IntProperty")
+            + struct.pack("<ii", 4, 0)
+            + struct.pack("<i", 42)
+        )
+        cdo_data = broken + tail + fname("None")
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        broken_prop = next(
+            item for item in payload["properties"] if item["name"] == "BrokenInt"
+        )
+
+        self.assertNotEqual(broken_prop.get("value"), 775)
+        self.assertEqual(broken_prop["confidence"], "low")
+
+    def test_cdo_invalid_object_package_index_is_explicitly_not_recovered(self):
+        names = ["None", "InvalidObject", "ObjectProperty"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        cdo_data = (
+            fname("InvalidObject")
+            + fname("ObjectProperty")
+            + struct.pack("<ii", 4, 0)
+            + struct.pack("<i", -99)
+            + fname("None")
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [{"object_name": "OnlyValidImport"}],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        invalid = payload["properties"][0]
+
+        self.assertIsNone(invalid["value"])
+        self.assertEqual(invalid["package_index"], -99)
+        self.assertEqual(invalid["confidence"], "low")
+        self.assertIn("outside package maps", invalid["error"])
+        self.assertNotIn("InvalidObject", payload["variables"])
+
+    def test_cdo_fixed_array_index_is_preserved_in_variable_projection(self):
+        names = ["None", "FixedValue", "IntProperty"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def tagged(value: int, array_index: int) -> bytes:
+            return (
+                fname("FixedValue")
+                + fname("IntProperty")
+                + struct.pack("<ii", 4, array_index)
+                + struct.pack("<i", value)
+            )
+
+        cdo_data = tagged(10, 0) + tagged(20, 1) + fname("None")
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+
+        self.assertEqual(
+            [item["array_index"] for item in payload["properties"]],
+            [0, 1],
+        )
+        self.assertEqual(payload["variables"]["FixedValue"]["value"], 10)
+        self.assertEqual(payload["variables"]["FixedValue[1]"]["value"], 20)
 
     def test_custom_pin_scan_recovers_pin_names_and_candidate_links(self):
         names = [f"Filler{i}" for i in range(100)] + ["NodePosX", "IntProperty", "None", "execute", "then", "exec", "object"]
@@ -307,6 +955,108 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(pins[0].links[0]["target_node"], "Target")
         self.assertEqual(pins[0].source, "uasset_custom_pin_scan")
         self.assertIn(pins[0].confidence, {"medium", "low"})
+
+    def test_legacy_exported_edgraphpin_objects_recover_links(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "Pins",
+            "ArrayProperty",
+            "ObjectProperty",
+            "None",
+            "PinName",
+            "StrProperty",
+            "Direction",
+            "ByteProperty",
+            "EEdGraphPinDirection",
+            "EGPD_Output",
+            "PinType",
+            "StructProperty",
+            "EdGraphPinType",
+            "LinkedTo",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def fstring(value: str) -> bytes:
+            raw = value.encode("utf-8") + b"\x00"
+            return struct.pack("<i", len(raw)) + raw
+
+        def str_prop(name: str, value: str) -> bytes:
+            payload = fstring(value)
+            return fname(name) + fname("StrProperty") + struct.pack("<ii", len(payload), 0) + payload
+
+        def byte_prop(name: str, value: str) -> bytes:
+            return fname(name) + fname("ByteProperty") + struct.pack("<ii", 8, 0) + fname("EEdGraphPinDirection") + fname(value)
+
+        def pin_type_prop(category: str) -> bytes:
+            payload = fname("EdGraphPinType") + fstring(category)
+            return fname("PinType") + fname("StructProperty") + struct.pack("<ii", len(payload), 0) + payload
+
+        def array_prop(name: str, refs: list[int]) -> bytes:
+            payload = struct.pack("<i", len(refs)) + b"".join(struct.pack("<i", ref) for ref in refs)
+            return fname(name) + fname("ArrayProperty") + struct.pack("<ii", len(payload), 0) + fname("ObjectProperty") + payload
+
+        source_pin_data = (
+            str_prop("PinName", "then")
+            + byte_prop("Direction", "EGPD_Output")
+            + pin_type_prop("exec")
+            + array_prop("LinkedTo", [4])
+            + fname("None")
+        )
+        target_pin_data = str_prop("PinName", "execute") + pin_type_prop("exec") + fname("None")
+        uasset_data = source_pin_data + target_pin_data
+        exports = [
+            {"display_name": "Source", "class_name": "K2Node_IfThenElse", "package_index": 1},
+            {"display_name": "Target", "class_name": "K2Node_CallFunction", "package_index": 2},
+            {
+                "display_name": "SourceThenPin",
+                "object_name": "EdGraphPin",
+                "class_name": "EdGraphPin",
+                "package_index": 3,
+                "serial_location": {"file": "uasset", "offset": 0, "size": len(source_pin_data), "available": True},
+            },
+            {
+                "display_name": "TargetExecutePin",
+                "object_name": "EdGraphPin",
+                "class_name": "EdGraphPin",
+                "package_index": 4,
+                "serial_location": {
+                    "file": "uasset",
+                    "offset": len(source_pin_data),
+                    "size": len(target_pin_data),
+                    "available": True,
+                },
+            },
+        ]
+        package = {"uasset_data": uasset_data, "uexp_data": b"", "names": names, "imports": [], "exports": exports}
+        node_data = array_prop("Pins", [3]) + fname("None")
+        properties, property_warnings = parse_export_properties(node_data, names, [], exports)
+
+        pins, pin_warnings = parse_custom_pins(
+            node_data,
+            names,
+            properties,
+            node_export=exports[0],
+            graph_refset={1, 2},
+            imports=[],
+            exports=exports,
+            package=package,
+            pin_owner_by_ref={
+                3: {"node_package_index": 1, "node_name": "Source", "pin_id": "SourceThenPin", "pin_name": "then"},
+                4: {"node_package_index": 2, "node_name": "Target", "pin_id": "TargetExecutePin", "pin_name": "execute"},
+            },
+        )
+
+        self.assertEqual(property_warnings, [])
+        self.assertEqual(pin_warnings, [])
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(pins[0].name, "then")
+        self.assertEqual(pins[0].category, "exec")
+        self.assertEqual(pins[0].direction, "EGPD_Output")
+        self.assertEqual(pins[0].source, "uasset_exported_pin_object")
+        self.assertEqual(pins[0].links[0]["target_node"], "Target")
+        self.assertEqual(pins[0].links[0]["target_pin_id"], "TargetExecutePin")
+        self.assertEqual(pins[0].links[0]["resolution_status"], "resolved_pin")
 
     def test_node_semantic_reader_emits_function_semantics(self):
         properties = {
@@ -410,6 +1160,49 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(counts["resolved_pin_heuristic"], 1)
         self.assertEqual(source_pin.links[0]["target_pin_id"], "target_execute")
         self.assertEqual(source_pin.links[0]["resolution_status"], "resolved_pin_heuristic")
+        self.assertEqual(source_pin.links[0]["resolution_method"], "heuristic_direction_category")
+
+    def test_link_resolution_marks_exact_existing_target_pin_id(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        source = NodeInfo(index=1, class_name="K2Node_CallFunction", node_type="K2Node_CallFunction", name="Source")
+        target = NodeInfo(index=2, class_name="K2Node_CallFunction", node_type="K2Node_CallFunction", name="Target")
+        source_pin = PinInfo(id="source_then", name="then", direction="EGPD_Output", category="exec")
+        source_pin.links.append({"target_node": "Target", "target_pin_id": "target_execute", "confidence": "medium"})
+        target_pin = PinInfo(id="target_execute", name="execute", direction="EGPD_Input", category="exec")
+        source.pins.append(source_pin)
+        target.pins.append(target_pin)
+
+        counts = resolve_graph_link_target_pins([source, target])
+
+        self.assertEqual(counts["resolved_pin"], 1)
+        self.assertEqual(source_pin.links[0]["resolution_status"], "resolved_pin")
+        self.assertEqual(source_pin.links[0]["resolution_method"], "exact_existing_target_pin_id")
+
+    def test_link_resolution_marks_exact_target_pin_id_candidate(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        source = NodeInfo(index=1, class_name="K2Node_CallFunction", node_type="K2Node_CallFunction", name="Source")
+        target = NodeInfo(index=2, class_name="K2Node_CallFunction", node_type="K2Node_CallFunction", name="Target")
+        source_pin = PinInfo(id="source_then", name="then", direction="EGPD_Output", category="exec")
+        source_pin.links.append(
+            {
+                "target_node": "Target",
+                "target_pin_id": "",
+                "target_pin_id_candidates": ["target_execute"],
+                "confidence": "medium",
+            }
+        )
+        target_pin = PinInfo(id="target_execute", name="execute", direction="EGPD_Input", category="exec")
+        source.pins.append(source_pin)
+        target.pins.append(target_pin)
+
+        counts = resolve_graph_link_target_pins([source, target])
+
+        self.assertEqual(counts["resolved_pin"], 1)
+        self.assertEqual(source_pin.links[0]["resolution_status"], "resolved_pin")
+        self.assertEqual(source_pin.links[0]["resolution_method"], "exact_target_pin_id_candidate")
+        self.assertEqual(source_pin.links[0]["confidence"], "high")
 
     def test_incoming_links_synthesize_boundary_pins(self):
         from blueprint_translator.models import NodeInfo, PinInfo
@@ -429,9 +1222,10 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertIn("Synthesized 1 boundary pins", warnings[0])
         self.assertEqual(counts["resolved_pin_heuristic"], 1)
         self.assertEqual(call_pin.links[0]["target_pin_id"], entry.pins[0].id)
+        self.assertEqual(call_pin.links[0]["resolution_method"], "heuristic_direction_category")
 
     def test_empty_event_and_construction_graphs_are_complete(self):
-        from blueprint_translator.models import NodeInfo
+        from blueprint_translator.models import NodeInfo, PinInfo
 
         self.assertTrue(
             is_complete_empty_graph(
@@ -457,6 +1251,23 @@ class UAssetGraphCandidateTests(unittest.TestCase):
                 [],
                 graph_name="UserConstructionScript",
                 graph_type="ConstructionScript",
+            )
+        )
+        self.assertTrue(
+            is_complete_empty_graph(
+                [
+                    NodeInfo(
+                        index=1,
+                        class_name="K2Node_FunctionEntry",
+                        node_type="K2Node_FunctionEntry",
+                        name="K2Node_FunctionEntry_1",
+                        pins=[PinInfo(name="then", direction="EGPD_Output", category="exec")],
+                    )
+                ],
+                [1],
+                [],
+                graph_name="EmptyFunction",
+                graph_type="Function",
             )
         )
 
