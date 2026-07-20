@@ -2,11 +2,12 @@
 
 ## 1. 这套系统解决什么问题
 
-这套系统不再让 AI 每次读取一份巨大的蓝图转储后自行猜测，而是把本地 ARK DevKit 资产预处理成三层结果：
+这套系统不再让 AI 每次读取一份巨大的蓝图转储后自行猜测，而是把本地 ARK DevKit 资产预处理成四层兼容结果：
 
 1. `.full.json` 保存完整、可追溯的解析结果；
 2. `.ai.json` 保存 AI 首轮判断所需的最小事实、缺口与源指纹；
-3. `.md` 保存便于人工复核的具体蓝图结论。
+3. `.query.json` 保存兼容 Component API 按需排行所需的最佳行索引；
+4. `.md` 保存便于人工复核的具体蓝图结论。
 
 排行依据来自当前本地 DevKit 中恢复出的攻击、伤害类型、采集组件和资源权重。网上的星级或经验榜单只用于选择候选和交叉检查，不进入系数计算。
 
@@ -20,24 +21,32 @@
 | `scripts/rank_ark_harvest.py` | 扫描 DevKit、解析生物和组件、追踪伤害类型继承与资源覆盖、生成报告 |
 | `scripts/blueprint_translator/harvest_report_validation.py` | 定义完整报告与压缩报告之间的验证合同 |
 | `scripts/verify_ark_harvest_report.py` | 从命令行执行压缩合同验证 |
+| `scripts/blueprint_translator/harvest_evaluation_catalog.py` | 全 Content 生物候选发现、祖先链确认、物种折叠和紧凑攻击事实目录 |
+| `scripts/blueprint_translator/harvest_catalog_sqlite.py` | 将 canonical 节点 JSON 构建成分页、搜索、过滤和详情用 SQLite 读模型 |
+| `scripts/blueprint_translator/harvest_node_repository.py` | 只读打开 SQLite，并校验其绑定的源 JSON SHA-256；不一致时失败关闭 |
+| `scripts/blueprint_translator/harvest_ranking_verifier.py` | 从底层事实独立抽样复算正向和反向排行 |
+| `scripts/build_ark_harvest_explorer.py` | 八个受控子命令、staging 验收、原子提升与失败回滚的总编排器 |
 | `analysis/harvest_rankings/resource_catalog.json` | 已发现资源类到 HarvestComponent 的索引 |
 | `analysis/harvest_rankings/harvest_ranking_*.full.json` | 所有攻击、组件、状态、缺口和源文件指纹 |
 | `analysis/harvest_rankings/harvest_ranking_*.ai.json` | 供 AI 优先读取的压缩视图 |
+| `analysis/harvest_rankings/harvest_ranking_*.query.json` | 供兼容 Component API 查询的运行时索引，不默认交给 AI |
 | `analysis/harvest_rankings/harvest_ranking_*.md` | 面向人的具体蓝图摘要 |
 
-当前实现读取以下固定范围：
+当前实现读取以下范围：
 
 - 内容根：`<DevKit>/Projects/ShooterGame/Content`；
-- 采集组件：`PrimalEarth/CoreBlueprints/HarvestComponents/**/*.uasset`；
+- 采集组件：标准 PrimalEarth 目录、可选的全 Content `*HarvestComponent*.uasset`，以及资源点精确引用清单；
 - 伤害类型：`PrimalEarth/CoreBlueprints/DamageTypes/*.uasset`，按实际攻击与父链有界展开；
 - 生物：由对象路径直接定位，可来自 `/Game` 下其他目录。
+
+这里有两个入口，不能混为一谈：`rank_ark_harvest.py` 不指定 `--creature` 时仍只生成四只代表生物的兼容 Component 报告；Resource Explorer 则自动发现 `*Character*.uasset` 和 `*Char_BP*.uasset`，再以 `PrimalDinoCharacter` 祖先证据筛选。2026-07-21 正式 evaluation 产物在 2,088 个候选中确认了 1,406 个生物资产，折叠为 280 个物种和 3,586 个攻击。它仍保留 `claimsAllCreatures=false`、`claimsAllDiscoveredCandidates=false` 和 `claimsGlobalTop=false`。
 
 ## 3. 精确系数的证据链
 
 每一条可排名记录都经过同一条链路：
 
 ```text
-Character_BP.AttackInfos
+PrimalDinoCharacter descendant.AttackInfos
   -> 攻击名、MeleeDamageAmount、AttackInterval、MeleeDamageType
   -> DamageType 的父类链
   -> 该 DamageType 针对目标资源的替换 DamageType
@@ -200,13 +209,25 @@ engineComparisonIndex    = harvestPressurePerSecond
 
 所以报告中的 `observedYieldPerSecond` 按设计保持 `null`。只有补齐运行时公式或可复现的受控实测后，才能新增真实产量指标；不能把当前指数改名成产量。
 
+### 5.1 Explorer 的确认层与条件静态估算
+
+Explorer 查询只针对当前选中的“节点定义 + HarvestComponent + 资源条目”复算，不把不同 Component 的指数直接合并成全局倍率：
+
+- `bSkipTamed`、`bOnlyOnWildDinos` 和 `bPreventWithRider` 是硬排除；命中后不进入可用排行；
+- `bUseBlueprintCanRiderAttack` 或 `bUseBlueprintAdjustOutputDamage` 依赖未恢复的蓝图运行时返回值，不会被假定为通过；
+- 如果后一类行的全部静态攻击和 Component 必需事实已经恢复，可以显示数值估算，但必须保持 `usageEligibilityStatus=CONDITIONAL`、`usageEstimateBasis=STATIC_ATTACK_FACTS_WITH_BLUEPRINT_RUNTIME_RESULT_NOT_RECOVERED`、`rankingTier=CONDITIONAL` 和 `evidence.status=PARTIAL`；
+- 只有没有条件原因、且生物和排行证据均确认的行，才进入 `CONFIRMED` 层。
+
+正向查询的 `relativeToNodeTopPercent` 是该行指数除以同一节点资源的第一名指数。反向“某只恐龙擅长什么”也使用“该恐龙在某节点资源上的指数 ÷ 该节点资源第一名指数”排序，再展开引用该精确 Component/resource/entry 组合的节点。这个百分比表示相对当前可评估候选的强弱，不是游戏中的掉落概率、采集率或实测资源/秒。
+
 ## 6. 报告压缩合同
 
-### 6.1 四个输出分别保留什么
+### 6.1 兼容 Component 报告的五类输出
 
-- `.full.json`：所有解析出的生物攻击、组件条目、DamageType 链、逐组合结果、166 个组件的扫描清单、失败项和每个来源文件的 `path/size/mtime/sha256`；
+- `.full.json`：所有解析出的生物攻击、组件条目、DamageType 链、逐组合结果、完整组件扫描清单、失败项和每个来源文件的 `path/size/mtime/sha256`；
 - `.ai.json`：每个资源各自的焦点组件、最多六条排行发现、候选/返回/省略计数、对全部组合行按原因聚合的未知项、有界组件索引、失败摘要以及两个来源集合指纹；
 - `.md`：人工可快速核验的重点组件表和口径说明；
+- `.query.json`：只保留 API 排行需要的最佳行、revision 和 coverage，不由 AI 整份读取；
 - `resource_catalog.json`：扫描到的资源类及其组件位置，用于下一轮选资源。
 
 推荐的读取顺序是：
@@ -214,9 +235,11 @@ engineComparisonIndex    = harvestPressurePerSecond
 1. AI 先读 `.ai.json`；
 2. 需要解释某一具体结论时读 `.md`；
 3. 需要所有攻击、完整不兼容原因、原始路径或精度时，按需读 `.full.json`；
-4. 需要找新资源时读 `resource_catalog.json`。
+4. 需要找新资源时读 `resource_catalog.json`；兼容 Component API 使用 `.query.json`。
 
 `componentIndex` 最多返回 16 项，但同时给出 `total/returned/omitted/truncated`。这不是静默删项；compact 顶层 `detailLocation` 会给出本次报告确切的同名 `.full.json` 文件名，需要剩余组件或 Top-K 之外的行时按它下钻，不再使用可能命中多份文件的通配符。同理，每个 `resourceView` 的 `rankedDiscoveryCoverage` 会告诉 AI Top-K 之外还省略了多少条。
+
+Resource Explorer 使用另一组正式运行产物：`harvest_ranking_all_resources.full.json/.ai.json` 提供全资源 Component 事实及有界 AI 入口，`harvest_evaluation_catalog.json` 提供扩展生物攻击事实，`resource_node_catalog.json` 保存 canonical 节点、资源、图片和三层地图证据，`harvest_catalog.sqlite` 是 API 的主查询读模型。`.query.json` 继续作为兼容产物存在，但 Explorer 的节点列表、详情、过滤和恐龙强项投影不需要把它或 canonical JSON 整份载入内存。SQLite 也不应交给 AI 阅读；AI 仍应从 `.ai.json` 开始，缺什么再走有界 API 或精确下钻。
 
 ### 6.2 验证器当前会检查什么
 
@@ -226,14 +249,14 @@ engineComparisonIndex    = harvestPressurePerSecond
 - 完整行数以及 `RANKED/INCOMPATIBLE/UNRANKED` 计数与 coverage 一致；
 - 从 full 唯一重算整份 compact 视图并逐字段相等比较，而不是只检查 compact 自己选择携带的字段；
 - 每个请求资源必须有独立 `resourceView`，包括焦点行、确定性 Top-K、候选状态和省略计数；
-- `bestRows` 与 `resourceCandidates` 必须从 full 的全部组合行独立重算，组件 gap 聚合、166 项扫描 manifest 的 SHA-256 和覆盖计数也从 full 重新计算；manifest 的文件路径与对象路径必须非空且各自唯一，所有组件和组合行也必须归属于该 manifest；
+- `bestRows` 与 `resourceCandidates` 必须从 full 的全部组合行独立重算，组件 gap 聚合、扫描 manifest 的 SHA-256 和覆盖计数也从 full 重新计算；manifest 的文件路径与对象路径必须非空且各自唯一，所有组件和组合行也必须归属于该 manifest；
 - `unknownSummaryScope` 必须是 `allRows`，`unknownSummary` 的状态、原因、缺失字段和示例必须与完整报告的全部组合行一致；
 - `failureSummary`、有界 `componentIndex`、来源文件数量及基于 `path|sha256` 生成的集合摘要一致；来源路径不得重复且每项必须有合法 SHA-256，生物、DamageType、组件、扫描清单及其 `sourceChain` 引用的每个文件都必须在来源集合中找到；
 - full 和 compact 都不能捏造 `observedYieldPerSecond`，非 `RANKED` 行也不能携带数值指数；
 - `tokenEstimate` 必须与实际 compact 文件长度一致，compact 必须小于 full，且硬上限为 12,000 估算 token；
 - compact 不允许缺少必需字段，也不允许在顶层或 `tokenEstimate` 等嵌套结构中加入未定义的结论字段；布尔值也不能冒充整数 token 计数。
 
-当前金属样例的验证结果是：
+以下是 2026-07-19 阶段一金属样例的历史验证基线，不是当前全资源报告：
 
 | 指标 | 值 |
 | --- | ---: |
@@ -253,7 +276,7 @@ engineComparisonIndex    = harvestPressurePerSecond
 
 三资源批量报告为 `2337269 → 47268` 字符（减少 `97.98%`，估算 `11817` token），Metal、Stone、Wood 分别保留 `36/56/72` 条 canonical 候选及各自的独立视图。第一次生成曾达到 `14593` token，并被 12,000 上限正确拒绝；改成有界组件索引和每资源 Top-K 后才通过。
 
-当前验证器不重新读取并哈希现场 DevKit 文件；它验证两份报告彼此一致，并验证 full 内的 166 项扫描清单与 compact 指纹一致。如果 DevKit 更新，仍必须重新运行排行脚本，才能取得新的现场 SHA-256。
+当前验证器不重新读取并哈希现场 DevKit 文件；它验证两份报告彼此一致，并验证 full 内完整扫描清单与 compact 指纹一致。如果 DevKit 更新，仍必须重新运行排行脚本，才能取得新的现场 SHA-256。当前全资源/Foliage Explorer 的生成结果和边界见 `ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`。
 
 ## 7. 运行与验证
 
@@ -274,6 +297,14 @@ runtime\python\python.exe scripts\rank_ark_harvest.py `
 ```
 
 `Metal` 会规范化为 `PrimalItemResource_Metal_C`。也可以直接传完整资源类名或对象路径。
+
+要生成全资源、节点清单、三层地图证据、缩略图和 SQLite，使用统一自动化入口：
+
+```powershell
+runtime\python\python.exe scripts\build_ark_harvest_explorer.py
+```
+
+编排器实际执行八个子命令：基础全资源 Component 报告、preliminary 节点与精确 Component manifest、带 manifest 的最终 Component 报告、扩展生物 evaluation、最终节点/地图/图片目录、SQLite、128 目标独立排行复算、full/AI 合同验证。所有输出先写入 staging；revision、SQLite 源 SHA-256、Repository smoke 和排行验证全部通过后才原子替换正式文件，失败时保留旧版。完整阶段表和构建安全边界见 [`ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`](ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)。
 
 ### 7.2 验证压缩报告
 
@@ -310,7 +341,9 @@ runtime\python\python.exe scripts\rank_ark_harvest.py `
 
 `--component` 和 `--max-components` 适合快速诊断。脚本会先用全部组件建立父类索引，再过滤待评估目标，因此子组件仍能继承父组件默认值；但 `--max-components` 只是按排序截断，不代表完整或随机样本，正式全量报告仍建议不限制组件。
 
-## 8. 扩展生物
+## 8. 扩展生物（兼容 Component 报告）
+
+本节的 `--creature` 和 `--creature-file` 只用于定向生成 `rank_ark_harvest.py` 兼容报告。正式 Explorer 已按文件候选模式自动发现，再用祖先链证明成员关系；不需要人工维护一份“所有恐龙”清单。自动发现仍不是 Asset Registry 的完整类枚举，所以未恢复父类或攻击目录的候选会保留为缺口，而不是静默排除。
 
 ### 8.1 命令行添加
 
@@ -358,7 +391,7 @@ runtime\python\python.exe scripts\rank_ark_harvest.py `
 - `AttackInfos` 中是否至少有一个攻击恢复出 DamageType、基础伤害和攻击间隔；
 - 新 DamageType 的资产、父类链和资源覆盖是否均能找到。
 
-## 9. 扩展资源
+## 9. 扩展资源（兼容 Component 报告）
 
 推荐流程：
 
@@ -369,26 +402,25 @@ runtime\python\python.exe scripts\rank_ark_harvest.py `
 5. 运行压缩合同验证；
 6. 只在同资源、同组件内解释指数差异。
 
-如果资源不在 catalog 中，不能立即解释为“游戏里不可采集”。它只说明当前固定的 HarvestComponent 扫描根中没有恢复出该资源。资源若位于其他 DLC 目录、特殊 Actor、Buff、Inventory 或原生代码路径，需要先扩展发现逻辑，再加入排名。
+如果资源不在 catalog 中，不能立即解释为“游戏里不可采集”。它只说明当前扫描和解析范围没有恢复出该资源。正式 Explorer 会扫描全 Content `*HarvestComponent*.uasset` 并加入节点精确引用的 Component，但特殊 Actor、Buff、Inventory、原生代码或尚未识别的节点定义类仍可能形成缺口，需要先扩展发现证据，再加入排名。
 
-## 10. ASE 与 ASA 的版本边界
+## 10. DevKit 与版本边界
 
-当前脚本按 `Projects/ShooterGame/Content` 和上述 PrimalEarth 目录布局工作，当前样例只绑定 `C:\Program Files\Epic Games\ARKDevkit` 中这一份本地资产快照。不要把结果自动视为 ASA 的系数，也不要把 ASE、ASA、不同补丁、不同地图或不同服务器倍率混在一张排行中。
+当前脚本按 `Projects/ShooterGame/Content` 布局工作，正式产物只绑定 `C:\Program Files\Epic Games\ARKDevkit` 中生成时的本地资产快照。目录名本身不能证明游戏产品、补丁 Build 或服务器运行条件；不要把不同 DevKit 快照、地图规则、模组或服务器倍率混在同一张排行中。
 
 版本隔离至少应做到：
 
-- ASE 与 ASA 使用不同的 DevKit 根和输出目录；
+- 不同产品或 DevKit Build 使用不同的 DevKit 根和输出目录；
 - 每次结果保留 `generatedAt` 及 `.full.json#sources` 中的源文件 SHA-256；
 - 补丁后重新生成，不用旧报告覆盖新结论；
 - 服务器倍率、模组和地图规则作为报告外部条件单独记录；
 - 跨版本对比时先比较资产路径、字段结构和源指纹，再比较系数；
-- ASA 若不符合当前固定目录布局，应先适配内容发现和解析流程，不能仅替换路径后假定结果可靠。
+- 新版本若改变目录、序列化或类结构，应先适配发现和解析流程，不能仅替换路径后假定结果可靠。
 
 建议目录示例：
 
 ```text
-analysis/harvest_rankings/ase_<build>/...
-analysis/harvest_rankings/asa_<build>/...
+analysis/harvest_rankings/<product>_<build>/...
 ```
 
 源文件集合指纹证明“这份报告使用了哪些具体文件”，但不会自动识别产品名称和游戏 Build；版本标签仍需由运行者明确保存。

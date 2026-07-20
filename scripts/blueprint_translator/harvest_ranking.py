@@ -20,6 +20,28 @@ _INFORMATIONAL_QUANTITY_GAPS = {
 }
 
 
+def normalize_unreal_object_identity(value: object) -> str:
+    """Normalize short and full Unreal object references to one comparable name.
+
+    ARK DevKit builds may expose the same class as either ``Foo_C`` or
+    ``/Game/Path/Foo.Foo_C``.  Raw string equality would make recovered
+    harvest overrides disappear after such a serialization-format change.
+    """
+
+    text = str(value or "").strip().replace("\\", "/")
+    if "'" in text:
+        quoted = text.split("'", 1)[1]
+        text = quoted.rsplit("'", 1)[0]
+    text = text.strip().strip("\"'")
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text.strip().strip("\"'")
+
+
 def _semantic_property_value(prop: dict[str, Any]) -> Any:
     type_name = str(prop.get("type") or prop.get("type_name") or "")
     if type_name == "ObjectProperty":
@@ -67,7 +89,14 @@ def extract_creature_attacks(properties: Iterable[dict[str, Any]]) -> list[dict[
                 return _semantic_property_value(fields[name]) if name in fields else None
 
             attack_name = value("AttackName")
-            damage_type = value("MeleeDamageType")
+            damage_type_property = fields.get("MeleeDamageType")
+            damage_type_reference = value("MeleeDamageType")
+            damage_type_object_path = (
+                damage_type_property.get("object_path")
+                if isinstance(damage_type_property, dict)
+                else None
+            )
+            damage_type = normalize_unreal_object_identity(damage_type_reference)
             base_damage = value("MeleeDamageAmount")
             attack_interval = value("AttackInterval")
             missing: list[str] = []
@@ -84,8 +113,27 @@ def extract_creature_attacks(properties: Iterable[dict[str, Any]]) -> list[dict[
                     "attackIndex": int(element.get("index", ordinal)),
                     "attackName": attack_name,
                     "damageType": damage_type,
+                    "damageTypeObjectPath": (
+                        damage_type_object_path
+                        if isinstance(damage_type_object_path, str)
+                        and damage_type_object_path
+                        else damage_type_reference
+                        if isinstance(damage_type_reference, str)
+                        else None
+                    ),
                     "baseDamage": base_damage,
                     "attackInterval": attack_interval,
+                    "riderAttackInterval": value("RiderAttackInterval"),
+                    "skipTamed": value("bSkipTamed"),
+                    "skipAI": value("bSkipAI"),
+                    "onlyOnWildDinos": value("bOnlyOnWildDinos"),
+                    "preventWithRider": value("bPreventWithRider"),
+                    "useBlueprintCanRiderAttack": value(
+                        "bUseBlueprintCanRiderAttack"
+                    ),
+                    "useBlueprintAdjustOutputDamage": value(
+                        "bUseBlueprintAdjustOutputDamage"
+                    ),
                     "meleeSwingRadius": value("MeleeSwingRadius"),
                     "basicAttack": value("bBasicAttack"),
                     "animations": value("AttackAnimations") or [],
@@ -123,7 +171,7 @@ def _aligned_override_map(
         gaps.append(gap_code)
         return {}
     return {
-        str(damage_type): value
+        normalize_unreal_object_identity(damage_type): value
         for damage_type, value in zip(damage_types, values)
         if isinstance(damage_type, str) and damage_type
     }
@@ -156,7 +204,8 @@ def extract_harvest_component(
                 continue
             nested = element.get("properties")
             fields = _property_map(nested if isinstance(nested, list) else [])
-            resource = _semantic_property_value(fields["ResourceItem"]) if "ResourceItem" in fields else None
+            raw_resource = _semantic_property_value(fields["ResourceItem"]) if "ResourceItem" in fields else None
+            resource = normalize_unreal_object_identity(raw_resource)
             damage_types = _decoded_array(fields.get("DamageTypeEntryValuesOverrides"))
             entry_gaps: list[str] = []
             weight_overrides = _aligned_override_map(
@@ -233,7 +282,7 @@ def extract_harvest_component(
             nested = element.get("properties")
             fields = _property_map(nested if isinstance(nested, list) else [])
             damage_type_parent = (
-                _semantic_property_value(fields["DamageTypeParent"])
+                normalize_unreal_object_identity(_semantic_property_value(fields["DamageTypeParent"]))
                 if "DamageTypeParent" in fields
                 else None
             )
@@ -309,25 +358,34 @@ def extract_resource_damage_overrides(
     if len(items) != len(replacements):
         gaps.append("RESOURCE_DAMAGE_OVERRIDE_LENGTH_MISMATCH")
         return {"damageType": damage_type, "overrides": {}, "gaps": gaps}
+    normalized_damage_type = normalize_unreal_object_identity(damage_type)
     overrides = {
-        (damage_type, str(resource)): str(replacement)
+        (
+            normalized_damage_type,
+            normalize_unreal_object_identity(resource),
+        ): normalize_unreal_object_identity(replacement)
         for resource, replacement in zip(items, replacements)
         if isinstance(resource, str)
         and resource
         and isinstance(replacement, str)
         and replacement
     }
-    return {"damageType": damage_type, "overrides": overrides, "gaps": gaps}
+    return {"damageType": normalized_damage_type, "overrides": overrides, "gaps": gaps}
 
 
 def damage_type_chain(damage_type: str, parents: dict[str, str]) -> list[str]:
     chain: list[str] = []
-    current = str(damage_type or "")
+    normalized_parents = {
+        normalize_unreal_object_identity(child): normalize_unreal_object_identity(parent)
+        for child, parent in parents.items()
+        if normalize_unreal_object_identity(child)
+    }
+    current = normalize_unreal_object_identity(damage_type)
     seen: set[str] = set()
     while current and current not in seen:
         chain.append(current)
         seen.add(current)
-        current = str(parents.get(current) or "")
+        current = normalized_parents.get(current, "")
     return chain
 
 
@@ -336,9 +394,15 @@ def _nearest_override(
     chain: list[str],
     fallback: Any,
 ) -> tuple[Any, str | None]:
+    normalized_overrides = {
+        normalize_unreal_object_identity(key): value
+        for key, value in overrides.items()
+        if normalize_unreal_object_identity(key)
+    }
     for damage_type in chain:
-        if damage_type in overrides:
-            return overrides[damage_type], damage_type
+        identity = normalize_unreal_object_identity(damage_type)
+        if identity in normalized_overrides:
+            return normalized_overrides[identity], identity
     return fallback, None
 
 
@@ -380,6 +444,7 @@ def evaluate_attack_resource(
     attack: dict[str, Any],
     component: dict[str, Any],
     resource: str,
+    resource_entry_index: int | None = None,
     damage_type_parents: dict[str, str],
     resource_damage_overrides: dict[tuple[str, str], str],
     damage_type_gaps: dict[str, list[str]] | None = None,
@@ -391,7 +456,13 @@ def evaluate_attack_resource(
     normalized selection weight. It is not resources per hit or per second.
     """
 
-    source_damage_type = attack.get("damageType")
+    source_damage_type = normalize_unreal_object_identity(attack.get("damageType"))
+    target_resource = normalize_unreal_object_identity(resource)
+    target_entry_index = (
+        int(resource_entry_index)
+        if isinstance(resource_entry_index, int) and not isinstance(resource_entry_index, bool)
+        else None
+    )
     base: dict[str, Any] = {
         "creature": creature,
         "creatureObjectPath": creature_object_path,
@@ -400,7 +471,8 @@ def evaluate_attack_resource(
         "sourceDamageType": source_damage_type,
         "component": component.get("component"),
         "componentObjectPath": component.get("objectPath"),
-        "resource": resource,
+        "resource": target_resource,
+        "resourceEntryIndex": target_entry_index,
         "observedYieldPerSecond": None,
     }
     component_warnings = sorted(set(component.get("informationalGaps") or []))
@@ -408,7 +480,7 @@ def evaluate_attack_resource(
         base["warnings"] = component_warnings
         base["warningsByScope"] = {"component": component_warnings}
     missing = list(attack.get("gaps") or [])
-    if not isinstance(source_damage_type, str) or not source_damage_type:
+    if not source_damage_type:
         missing.append("MeleeDamageType")
     if not isinstance(attack.get("baseDamage"), (int, float)):
         missing.append("MeleeDamageAmount")
@@ -458,8 +530,15 @@ def evaluate_attack_resource(
         }
     )
 
-    effective_damage_type = resource_damage_overrides.get(
-        (source_damage_type, resource), source_damage_type
+    normalized_resource_overrides = {
+        (
+            normalize_unreal_object_identity(source),
+            normalize_unreal_object_identity(candidate_resource),
+        ): normalize_unreal_object_identity(replacement)
+        for (source, candidate_resource), replacement in resource_damage_overrides.items()
+    }
+    effective_damage_type = normalized_resource_overrides.get(
+        (source_damage_type, target_resource), source_damage_type
     )
     chain = damage_type_chain(effective_damage_type, damage_type_parents)
     base.update(
@@ -469,7 +548,10 @@ def evaluate_attack_resource(
             "damageTypeChain": chain,
         }
     )
-    damage_type_gaps = damage_type_gaps or {}
+    damage_type_gaps = {
+        normalize_unreal_object_identity(key): list(value)
+        for key, value in (damage_type_gaps or {}).items()
+    }
     direct_damage_type_gaps = [
         gap
         for damage_type in {source_damage_type, effective_damage_type}
@@ -491,11 +573,23 @@ def evaluate_attack_resource(
             ["HarvestResourceEntries"],
             scope="component",
         )
+    has_indexed_resource_entries = any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("entryIndex"), int)
+        and not isinstance(entry.get("entryIndex"), bool)
+        for entry in resource_entries
+    )
     target_entry = next(
         (
             entry
             for entry in resource_entries
-            if isinstance(entry, dict) and str(entry.get("resource") or "") == resource
+            if isinstance(entry, dict)
+            and normalize_unreal_object_identity(entry.get("resource")) == target_resource
+            and (
+                target_entry_index is None
+                or not has_indexed_resource_entries
+                or entry.get("entryIndex") == target_entry_index
+            )
         ),
         None,
     )
@@ -549,7 +643,8 @@ def evaluate_attack_resource(
             (
                 entry
                 for entry in damage_entries
-                if isinstance(entry, dict) and str(entry.get("damageTypeParent") or "") == candidate
+                if isinstance(entry, dict)
+                and normalize_unreal_object_identity(entry.get("damageTypeParent")) == candidate
             ),
             None,
         )
@@ -610,7 +705,10 @@ def evaluate_attack_resource(
             "DAMAGE_TYPE_WEIGHT_OVERRIDE_NOT_RECOVERED" in entry_gaps
             and (
                 not isinstance(override_types, list)
-                or any(candidate in override_types for candidate in chain)
+                or any(
+                    normalize_unreal_object_identity(candidate) in chain
+                    for candidate in override_types
+                )
             )
         )
         if weight_override_unknown:
@@ -626,7 +724,11 @@ def evaluate_attack_resource(
             weight = float(value) if isinstance(value, (int, float)) else None
         weighted_entries.append((entry, weight, matched))
     target_weight_row = next(
-        (row for row in weighted_entries if str(row[0].get("resource") or "") == resource),
+        (
+            row
+            for row in weighted_entries
+            if row[0] is target_entry
+        ),
         None,
     )
     if target_weight_row is None or target_weight_row[1] is None:

@@ -30,10 +30,65 @@ EXPECTED_NOT_INCLUDED = [
 ]
 EXPECTED_METHODOLOGY_KEYS = {
     "scoreBasis",
+    "formulaVersion",
+    "usageScope",
     "observedYieldPerSecond",
     "formula",
     "notIncluded",
 }
+
+
+def _canonical_hash(value: Any) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def build_ranking_revision_fields(payload: dict[str, Any]) -> dict[str, str]:
+    failures = payload.get("failures") if isinstance(payload.get("failures"), dict) else {}
+    creatures = payload.get("creatures") if isinstance(payload.get("creatures"), list) else []
+    creature_manifest = {
+        "creatures": [
+            {
+                key: row.get(key)
+                for key in ("name", "objectPath", "attacks", "warnings")
+            }
+            for row in creatures
+            if isinstance(row, dict)
+        ],
+        "failures": failures.get("creatures") if isinstance(failures, dict) else [],
+    }
+    damage_types = (
+        payload.get("damageTypes") if isinstance(payload.get("damageTypes"), list) else []
+    )
+    source_hashes = sorted(
+        str(row.get("sha256") or "")
+        for row in payload.get("sources", [])
+        if isinstance(row, dict) and row.get("sha256")
+    ) if isinstance(payload.get("sources"), list) else []
+    creature_hash = _canonical_hash(creature_manifest)
+    damage_hash = _canonical_hash(damage_types)
+    revision = _canonical_hash(
+        {
+            "schema": payload.get("schema"),
+            "resources": payload.get("resources"),
+            "resourceSelectionMode": payload.get("resourceSelectionMode"),
+            "methodology": payload.get("methodology"),
+            "componentManifestHash": payload.get("scanManifestHash"),
+            "creatureManifestHash": creature_hash,
+            "damageTypeManifestHash": damage_hash,
+            "sourceHashes": source_hashes,
+        }
+    )
+    return {
+        "creatureScanManifestHash": creature_hash,
+        "damageTypeManifestHash": damage_hash,
+        "datasetRevision": revision,
+    }
 EXPECTED_COVERAGE_KEYS = {
     "creaturesRequested",
     "creaturesLoaded",
@@ -43,6 +98,7 @@ EXPECTED_COVERAGE_KEYS = {
     "componentsDecoded",
     "componentsSemanticGap",
     "componentsMatched",
+    "componentCatalogEntries",
     "componentSourceFingerprints",
     "resourceClassesDiscovered",
     "rows",
@@ -328,9 +384,47 @@ def _resource_views(resources: list[str], best_rows: list[dict[str, Any]]) -> li
     return views
 
 
+def _resource_index(resources: list[str], best_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for resource in resources:
+        candidates = [
+            row for row in best_rows if str(row.get("resource") or "") == resource
+        ]
+        items.append(
+            {
+                "resource": resource,
+                "discoveryStatus": _resource_discovery_status(candidates),
+                "rankedDiscoveryStatus": (
+                    "RANKED_ROWS_AVAILABLE"
+                    if any(row.get("rankingStatus") == "RANKED" for row in candidates)
+                    else "NO_RANKED_ROW"
+                ),
+                "candidateCounts": {
+                    "total": len(candidates),
+                    "ranked": sum(row.get("rankingStatus") == "RANKED" for row in candidates),
+                    "incompatible": sum(
+                        row.get("rankingStatus") == "INCOMPATIBLE" for row in candidates
+                    ),
+                    "unranked": sum(
+                        row.get("rankingStatus") == "UNRANKED" for row in candidates
+                    ),
+                },
+            }
+        )
+    return {
+        "total": len(items),
+        "returned": len(items),
+        "omitted": 0,
+        "truncated": False,
+        "items": items,
+    }
+
+
 def _component_index(
     component_rows: list[dict[str, Any]],
     resource_views: list[dict[str, Any]],
+    *,
+    max_items: int = MAX_COMPONENT_INDEX_ITEMS,
 ) -> dict[str, Any]:
     items = [
         {
@@ -363,7 +457,7 @@ def _component_index(
         if match is not None and match not in ordered:
             ordered.append(match)
     ordered.extend(item for item in items if item not in ordered)
-    returned = ordered[:MAX_COMPONENT_INDEX_ITEMS]
+    returned = ordered[: max(0, int(max_items))]
     return {
         "total": len(items),
         "returned": len(returned),
@@ -520,7 +614,9 @@ def build_canonical_ai_view(
 ) -> dict[str, Any]:
     """Derive every evidence-bearing compact field from the full payload."""
 
-    components = payload.get("components")
+    components = payload.get("componentCatalog")
+    if not isinstance(components, list):
+        components = payload.get("components")
     component_rows = (
         [row for row in components if isinstance(row, dict)]
         if isinstance(components, list)
@@ -542,13 +638,31 @@ def build_canonical_ai_view(
     )
     source_lines = "\n".join(f"{row.get('path')}|{row.get('sha256')}" for row in source_rows)
     resources = [str(item) for item in payload.get("resources", [])]
-    resource_views = _resource_views(resources, best_rows)
+    index_mode = payload.get("resourceSelectionMode") == "ALL_DISCOVERED"
+    resource_views = [] if index_mode else _resource_views(resources, best_rows)
+    resource_index = (
+        _resource_index(resources, best_rows)
+        if index_mode
+        else {
+            "total": len(resources),
+            "returned": 0,
+            "omitted": 0,
+            "truncated": False,
+            "items": [],
+        }
+    )
     return {
         "detailLocation": detail_location,
+        "viewMode": "RESOURCE_INDEX" if index_mode else "RESOURCE_DETAILS",
         "resourceViews": resource_views,
+        "resourceIndex": resource_index,
         "unknownSummaryScope": "allRows",
         "unknownSummary": summarize_unknown_rows(full_rows),
-        "componentIndex": _component_index(component_rows, resource_views),
+        "componentIndex": _component_index(
+            component_rows,
+            resource_views,
+            max_items=0 if index_mode else MAX_COMPONENT_INDEX_ITEMS,
+        ),
         "failureSummary": _failure_summary(payload),
         "scanManifest": {
             "count": len(manifest_rows),
@@ -578,6 +692,8 @@ def validate_harvest_report(
         errors.append("generatedAt mismatch")
     if full_payload.get("resources") != ai_payload.get("resources"):
         errors.append("resource scope mismatch")
+    if full_payload.get("resourceSelectionMode") not in {"EXPLICIT", "ALL_DISCOVERED"}:
+        errors.append("resourceSelectionMode mismatch")
     if full_payload.get("methodology") != ai_payload.get("methodology"):
         errors.append("methodology mismatch")
     methodology = (
@@ -587,6 +703,15 @@ def validate_harvest_report(
     )
     if methodology.get("scoreBasis") != EXPECTED_SCORE_BASIS:
         errors.append("full methodology scoreBasis mismatch")
+    if methodology.get("formulaVersion") != "harvest-engine-comparison-index/v1":
+        errors.append("full methodology formulaVersion mismatch")
+    if methodology.get("usageScope") not in {
+        "UNFILTERED_ENGINE_ATTACKS",
+        "TAMED_PLAYER",
+        "TAMED_AI",
+        "WILD",
+    }:
+        errors.append("full methodology usageScope mismatch")
     if methodology.get("observedYieldPerSecond") is not None:
         errors.append("full methodology must not invent observedYieldPerSecond")
     if methodology.get("formula") != EXPECTED_FORMULA:
@@ -687,6 +812,24 @@ def validate_harvest_report(
     if component_object_paths - manifest_object_path_set:
         errors.append("full components missing from componentScanManifest")
 
+    component_catalog_value = full_payload.get("componentCatalog")
+    component_catalog_rows = (
+        [row for row in component_catalog_value if isinstance(row, dict)]
+        if isinstance(component_catalog_value, list)
+        else []
+    )
+    if coverage.get("componentCatalogEntries") != len(component_catalog_rows):
+        errors.append("full componentCatalogEntries does not match componentCatalog")
+    component_catalog_paths = {
+        _normalized_object_path(row.get("objectPath") or row.get("componentObjectPath"))
+        for row in component_catalog_rows
+    }
+    if "" in component_catalog_paths:
+        errors.append("full componentCatalog contains a missing objectPath")
+        component_catalog_paths.discard("")
+    if component_catalog_paths - manifest_object_path_set:
+        errors.append("full componentCatalog missing from componentScanManifest")
+
     row_object_paths = {
         _normalized_object_path(row.get("componentObjectPath"))
         for row in full_rows
@@ -718,7 +861,13 @@ def validate_harvest_report(
         and _normalized_source_path(row.get("path"))
     }
     referenced_source_paths: set[str] = set()
-    for collection_name in ("creatures", "components", "damageTypes", "componentScanManifest"):
+    for collection_name in (
+        "creatures",
+        "components",
+        "componentCatalog",
+        "damageTypes",
+        "componentScanManifest",
+    ):
         collection = full_payload.get(collection_name)
         for row in collection if isinstance(collection, list) else []:
             if not isinstance(row, dict):
@@ -743,6 +892,11 @@ def validate_harvest_report(
     if expected_fingerprint_coverage.get("complete") is not True:
         errors.append("full componentSourceFingerprints must be complete")
 
+    expected_revision_fields = build_ranking_revision_fields(full_payload)
+    for field, expected_value in expected_revision_fields.items():
+        if full_payload.get(field) != expected_value:
+            errors.append(f"full {field} mismatch")
+
     if full_path is None:
         errors.append("full path is required to validate detailLocation")
         expected_detail_location = str(ai_payload.get("detailLocation") or "")
@@ -754,7 +908,9 @@ def validate_harvest_report(
     )
     evidence_fields = (
         "detailLocation",
+        "viewMode",
         "resourceViews",
+        "resourceIndex",
         "unknownSummaryScope",
         "unknownSummary",
         "componentIndex",

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from blueprint_translator.harvest_report_validation import (  # noqa: E402
+    build_ranking_revision_fields,
     build_canonical_ai_view,
     validate_harvest_report,
 )
@@ -28,8 +29,11 @@ class HarvestReportValidationTests(unittest.TestCase):
             "schema": "ark-harvest-ranking/v1",
             "generatedAt": "2026-07-20T00:00:00+00:00",
             "resources": ["Metal_C"],
+            "resourceSelectionMode": "EXPLICIT",
             "methodology": {
                 "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+                "formulaVersion": "harvest-engine-comparison-index/v1",
+                "usageScope": "UNFILTERED_ENGINE_ATTACKS",
                 "observedYieldPerSecond": None,
                 "formula": (
                     "baseDamage / attackInterval * DamageMultiplier * "
@@ -53,6 +57,7 @@ class HarvestReportValidationTests(unittest.TestCase):
                 "componentsDecoded": 1,
                 "componentsSemanticGap": 0,
                 "componentsMatched": 1,
+                "componentCatalogEntries": 1,
                 "componentSourceFingerprints": {
                     "attemptedPaths": 1,
                     "fingerprintedPaths": 1,
@@ -146,6 +151,7 @@ class HarvestReportValidationTests(unittest.TestCase):
                 {"path": "B.uasset", "sha256": "b" * 64},
             ],
         }
+        self.full["componentCatalog"] = [dict(row) for row in self.full["components"]]
         for index, row in enumerate(self.full["rows"]):
             row.setdefault("componentObjectPath", "/Game/Harvest/MetalHarvestComponent")
             row.setdefault("creatureObjectPath", f"/Game/Dinos/{row['creature']}")
@@ -182,6 +188,7 @@ class HarvestReportValidationTests(unittest.TestCase):
             separators=(",", ":"),
         )
         self.full["scanManifestHash"] = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+        self.full.update(build_ranking_revision_fields(self.full))
         self.ai = {
             "schema": "ark-harvest-ranking/v1",
             "compactSchema": "ark-harvest-compact/v2",
@@ -205,6 +212,7 @@ class HarvestReportValidationTests(unittest.TestCase):
         )
 
     def rebuild_ai(self):
+        self.full.update(build_ranking_revision_fields(self.full))
         self.ai["coverage"] = self.full["coverage"]
         self.ai.update(
             build_canonical_ai_view(
@@ -369,6 +377,58 @@ class HarvestReportValidationTests(unittest.TestCase):
         self.assertEqual(wood["discoveryStatus"], "RANKED_CANDIDATES_AVAILABLE")
         self.assertEqual(len(wood["rankedDiscoveries"]), 1)
         self.assertEqual(wood["rankedDiscoveryCoverage"]["omitted"], 0)
+
+    def test_all_resources_compact_view_is_an_index_not_ninety_two_detail_reports(self):
+        self.full["resourceSelectionMode"] = "ALL_DISCOVERED"
+        self.full["resources"] = [f"Resource_{index}_C" for index in range(92)]
+        self.full["resources"][0] = "Metal_C"
+
+        view = build_canonical_ai_view(
+            self.full,
+            detail_location="harvest_ranking_all_resources.full.json",
+        )
+        serialized = json.dumps(view, ensure_ascii=False, separators=(",", ":"))
+
+        self.assertEqual(view["viewMode"], "RESOURCE_INDEX")
+        self.assertEqual(view["resourceViews"], [])
+        self.assertEqual(view["resourceIndex"]["total"], 92)
+        self.assertEqual(len(view["resourceIndex"]["items"]), 92)
+        self.assertEqual(view["componentIndex"]["returned"], 0)
+        self.assertLess(len(serialized), 48_000)
+
+    def test_dataset_revision_changes_with_creatures_damage_types_or_usage_scope(self):
+        payload = {
+            "schema": "ark-harvest-ranking/v1",
+            "resources": ["Metal_C"],
+            "resourceSelectionMode": "EXPLICIT",
+            "methodology": dict(self.full["methodology"]),
+            "scanManifestHash": "a" * 64,
+            "creatures": [{"objectPath": "/Game/Dinos/Ankylo", "attacks": [{"damage": 10}]}],
+            "failures": {"creatures": []},
+            "damageTypes": [{"damageType": "MineStone_C", "multiplier": 1.0}],
+            "sources": [{"path": "A.uasset", "sha256": "b" * 64}],
+        }
+        original = build_ranking_revision_fields(payload)
+
+        creature_changed = json.loads(json.dumps(payload))
+        creature_changed["creatures"][0]["attacks"][0]["damage"] = 11
+        damage_changed = json.loads(json.dumps(payload))
+        damage_changed["damageTypes"][0]["multiplier"] = 2.0
+        scope_changed = json.loads(json.dumps(payload))
+        scope_changed["methodology"]["usageScope"] = "TAMED_PLAYER"
+
+        self.assertNotEqual(
+            original["datasetRevision"],
+            build_ranking_revision_fields(creature_changed)["datasetRevision"],
+        )
+        self.assertNotEqual(
+            original["datasetRevision"],
+            build_ranking_revision_fields(damage_changed)["datasetRevision"],
+        )
+        self.assertNotEqual(
+            original["datasetRevision"],
+            build_ranking_revision_fields(scope_changed)["datasetRevision"],
+        )
 
     def test_unexpected_compact_fields_are_rejected(self):
         self.ai["inventedConclusion"] = "Magmasaur always wins"
@@ -688,6 +748,9 @@ class HarvestReportValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             outputs = write_outputs(payload, Path(temporary_directory))
             ai_payload = json.loads(Path(outputs["ai"]).read_text(encoding="utf-8"))
+            query_payload = json.loads(
+                Path(outputs["query"]).read_text(encoding="utf-8")
+            )
 
         self.assertEqual(
             ai_payload["detailLocation"],
@@ -695,6 +758,21 @@ class HarvestReportValidationTests(unittest.TestCase):
         )
         self.assertNotIn("detailLocation", ai_payload["scanManifest"])
         self.assertNotIn("detailLocation", ai_payload["sourceSet"])
+        self.assertEqual(
+            set(query_payload),
+            {
+                "schema",
+                "querySchema",
+                "generatedAt",
+                "datasetRevision",
+                "scanManifestHash",
+                "methodology",
+                "coverage",
+                "bestRows",
+            },
+        )
+        self.assertNotIn("rows", query_payload)
+        self.assertNotIn("componentCatalog", query_payload)
 
     def test_validator_rejects_detail_location_not_matching_passed_full_file(self):
         self.ai["detailLocation"] = "wrong.full.json"

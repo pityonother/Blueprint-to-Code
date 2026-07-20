@@ -13,20 +13,94 @@ from blueprint_translator.harvest_ranking import (  # noqa: E402
     extract_creature_attacks,
     extract_harvest_component,
     extract_resource_damage_overrides,
+    normalize_unreal_object_identity,
     rank_harvest_rows,
 )
 from rank_ark_harvest import (  # noqa: E402
+    AssetReader,
     best_rows,
+    build_class_index,
     build_damage_context,
+    discover_damage_type_assets,
     build_resource_candidates,
     compact_row,
     discover_components,
+    parse_args,
+    resource_report_slug,
     scan_manifest_hash,
     summarize_component_gaps,
 )
 
 
 class HarvestRankingTests(unittest.TestCase):
+    def test_damage_type_discovery_filters_in_one_walk_without_pathlib_rglob(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expected = [
+                root / "DLC" / "DmgType_Custom.uasset",
+                root / "PrimalEarth" / "MyDmgTypeExtra.uasset",
+            ]
+            ignored = [root / "DLC" / "Other.uasset", root / "DLC" / "DmgType.txt"]
+            for path in [*expected, *ignored]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+
+            found, backend = discover_damage_type_assets(root, prefer_rg=False)
+
+        self.assertEqual(found, sorted(path.resolve() for path in expected))
+        self.assertEqual(backend, "OS_WALK")
+
+    def test_normalizes_updated_devkit_full_object_identity(self):
+        self.assertEqual(
+            normalize_unreal_object_identity(
+                "/Game/PrimalEarth/CoreBlueprints/DamageTypes/"
+                "DmgType_Melee_Dino_MineStone.DmgType_Melee_Dino_MineStone_C"
+            ),
+            "DmgType_Melee_Dino_MineStone_C",
+        )
+        self.assertEqual(
+            normalize_unreal_object_identity(
+                "BlueprintGeneratedClass'/Game/Test/Foo.Foo_C'"
+            ),
+            "Foo_C",
+        )
+
+    def test_updated_devkit_full_override_paths_match_short_damage_type(self):
+        component = self._metal_component()
+        full_damage_type = (
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/"
+            "DmgType_MineStone.DmgType_MineStone_C"
+        )
+        for entry in component["resourceEntries"]:
+            entry["weightOverrides"] = {
+                full_damage_type: 0.4
+                if entry["resource"] == "PrimalItemResource_Stone_C"
+                else 0.63
+            }
+            entry["damageTypeEntryValues"] = [full_damage_type]
+        component["damageEntries"][0]["damageTypeParent"] = full_damage_type
+
+        row = evaluate_attack_resource(
+            creature="Ankylosaurus",
+            creature_object_path="/Game/PrimalEarth/Dinos/Ankylo/Ankylo_Character_BP",
+            attack={
+                "attackIndex": 0,
+                "attackName": "Tail",
+                "damageType": "DmgType_MineStone_C",
+                "baseDamage": 50.0,
+                "attackInterval": 1.0,
+                "gaps": [],
+            },
+            component=component,
+            resource="PrimalItemResource_Metal_C",
+            damage_type_parents={},
+            resource_damage_overrides={},
+        )
+
+        self.assertEqual(row["rankingStatus"], "RANKED")
+        self.assertEqual(row["damageTypeMatch"], "DmgType_MineStone_C")
+        self.assertAlmostEqual(row["resourceWeight"], 0.63)
+
     def test_damage_context_indexes_non_dmgtype_blueprint_and_stops_at_native_parent(self):
         class FakeReader:
             def __init__(self):
@@ -82,6 +156,48 @@ class HarvestRankingTests(unittest.TestCase):
             )
         )
 
+    def test_damage_context_resolves_exact_damage_type_outside_primalearth_directory(self):
+        class FakeReader:
+            def generated_class_parent(self, path):
+                return "/Script/ShooterGame.ShooterDamageType"
+
+            def effective_defaults(self, path, class_index):
+                return [], [path]
+
+        creatures = [
+            {
+                "attacks": [
+                    {
+                        "damageType": "DmgType_DLCMine_C",
+                        "damageTypeObjectPath": (
+                            "/Game/DLC/DamageTypes/DmgType_DLCMine."
+                            "DmgType_DLCMine_C"
+                        ),
+                    }
+                ]
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir)
+            damage_path = content_root / "DLC" / "DamageTypes" / "DmgType_DLCMine.uasset"
+            damage_path.parent.mkdir(parents=True)
+            damage_path.touch()
+
+            parent_map, _overrides, facts, used_paths, gaps = build_damage_context(
+                creatures=creatures,
+                resources=["PrimalItemResource_Metal_C"],
+                content_root=content_root,
+                reader=FakeReader(),
+            )
+
+        self.assertEqual(
+            parent_map["DmgType_DLCMine_C"],
+            "/Script/ShooterGame.ShooterDamageType",
+        )
+        self.assertEqual(gaps["DmgType_DLCMine_C"], [])
+        self.assertEqual(used_paths, {damage_path.resolve()})
+        self.assertEqual(facts[0]["path"], str(damage_path.resolve()))
+
     def test_extract_creature_attacks_keeps_struct_elements_and_resolved_damage_type(self):
         properties = [
             {
@@ -101,9 +217,28 @@ class HarvestRankingTests(unittest.TestCase):
                                     "type": "ObjectProperty",
                                     "value": -4,
                                     "object": "DmgType_MineStone_C",
+                                    "object_path": (
+                                        "/Game/Test/Damage/DmgType_MineStone."
+                                        "DmgType_MineStone_C"
+                                    ),
                                 },
                                 {"name": "MeleeDamageAmount", "type": "IntProperty", "value": 120},
                                 {"name": "AttackInterval", "type": "FloatProperty", "value": 0.5},
+                                {"name": "RiderAttackInterval", "type": "FloatProperty", "value": 1.25},
+                                {"name": "bSkipTamed", "type": "BoolProperty", "value": False},
+                                {"name": "bSkipAI", "type": "BoolProperty", "value": True},
+                                {
+                                    "name": "bOnlyOnWildDinos",
+                                    "type": "BoolProperty",
+                                    "value": True,
+                                },
+                                {"name": "bPreventWithRider", "type": "BoolProperty", "value": False},
+                                {"name": "bUseBlueprintCanRiderAttack", "type": "BoolProperty", "value": True},
+                                {
+                                    "name": "bUseBlueprintAdjustOutputDamage",
+                                    "type": "BoolProperty",
+                                    "value": True,
+                                },
                                 {"name": "MeleeSwingRadius", "type": "FloatProperty", "value": 450.0},
                             ],
                         }
@@ -117,8 +252,19 @@ class HarvestRankingTests(unittest.TestCase):
         self.assertEqual(len(attacks), 1)
         self.assertEqual(attacks[0]["attackName"], "Bite")
         self.assertEqual(attacks[0]["damageType"], "DmgType_MineStone_C")
+        self.assertEqual(
+            attacks[0]["damageTypeObjectPath"],
+            "/Game/Test/Damage/DmgType_MineStone.DmgType_MineStone_C",
+        )
         self.assertEqual(attacks[0]["baseDamage"], 120)
         self.assertEqual(attacks[0]["attackInterval"], 0.5)
+        self.assertEqual(attacks[0]["riderAttackInterval"], 1.25)
+        self.assertFalse(attacks[0]["skipTamed"])
+        self.assertTrue(attacks[0]["skipAI"])
+        self.assertTrue(attacks[0]["onlyOnWildDinos"])
+        self.assertFalse(attacks[0]["preventWithRider"])
+        self.assertTrue(attacks[0]["useBlueprintCanRiderAttack"])
+        self.assertTrue(attacks[0]["useBlueprintAdjustOutputDamage"])
         self.assertEqual(attacks[0]["rawOffsets"], {"start": 100, "end": 300})
         self.assertEqual(attacks[0]["valueStatus"], "CONFIRMED")
 
@@ -695,6 +841,138 @@ class HarvestRankingTests(unittest.TestCase):
         self.assertEqual(manifest[0]["semanticGap"], True)
         self.assertEqual(manifest[0]["matched"], False)
         self.assertEqual(manifest[0]["discoveryStatus"], "SEMANTIC_GAP")
+
+    def test_component_discovery_can_include_content_wide_harvest_components(self):
+        class FakeReader:
+            @staticmethod
+            def effective_defaults(path, _class_index):
+                return [], [path]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir)
+            standard_root = (
+                content_root / "PrimalEarth" / "CoreBlueprints" / "HarvestComponents"
+            )
+            standard_root.mkdir(parents=True)
+            (standard_root / "BaseComponent.uasset").touch()
+            local_root = content_root / "Aberration" / "Environment" / "Local"
+            local_root.mkdir(parents=True)
+            (local_root / "LumaHarvestComponent.uasset").touch()
+            exact_node_component = local_root / "Palm_Pickup_Component.uasset"
+            exact_node_component.touch()
+            (local_root / "UnrelatedAsset.uasset").touch()
+
+            def fake_extract(_properties, *, component, object_path):
+                resource = (
+                    "PrimalItemResource_Wood_C"
+                    if component == "BaseComponent"
+                    else "PrimalItemResource_Gem_C"
+                )
+                return {
+                    "component": component,
+                    "objectPath": object_path,
+                    "resourceEntries": [{"resource": resource}],
+                    "damageEntries": [],
+                    "gaps": [],
+                    "rankingGaps": [],
+                }
+
+            with patch("rank_ark_harvest.extract_harvest_component", side_effect=fake_extract):
+                components, catalog, failures, manifest = discover_components(
+                    content_root=content_root,
+                    reader=FakeReader(),
+                    selected_names=set(),
+                    max_components=0,
+                    target_resources=None,
+                    discover_all_content=True,
+                    extra_component_paths=[exact_node_component],
+                )
+
+        self.assertEqual(
+            {component["component"] for component in components},
+            {"BaseComponent", "LumaHarvestComponent", "Palm_Pickup_Component"},
+        )
+        self.assertEqual(
+            set(catalog),
+            {"PrimalItemResource_Gem_C", "PrimalItemResource_Wood_C"},
+        )
+        self.assertEqual(failures, [])
+        self.assertTrue(all(record["matched"] for record in manifest))
+
+    def test_all_resources_mode_has_a_stable_bounded_output_slug(self):
+        args = parse_args(["--all-resources", "--discover-all-components"])
+
+        self.assertTrue(args.all_resources)
+        self.assertTrue(args.discover_all_components)
+        self.assertEqual(
+            resource_report_slug(
+                ["PrimalItemResource_Stone_C", "PrimalItemResource_Wood_C"],
+                selection_mode="ALL_DISCOVERED",
+            ),
+            "all_resources",
+        )
+
+    def test_class_index_uses_full_paths_and_does_not_pick_a_duplicate_short_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir) / "Content"
+            first = content_root / "Aberration" / "MushroomHarvestComponent.uasset"
+            second = content_root / "Genesis" / "MushroomHarvestComponent.uasset"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir(parents=True)
+            first.touch()
+            second.touch()
+
+            index = build_class_index([first, second], content_root=content_root)
+
+        self.assertNotIn("MushroomHarvestComponent_C", index)
+        self.assertEqual(
+            index[
+                "/Game/Aberration/MushroomHarvestComponent."
+                "MushroomHarvestComponent_C"
+            ],
+            first.resolve(),
+        )
+        self.assertEqual(
+            index[
+                "/Game/Genesis/MushroomHarvestComponent."
+                "MushroomHarvestComponent_C"
+            ],
+            second.resolve(),
+        )
+
+    def test_generated_class_parent_recovers_the_import_package_path(self):
+        reader = AssetReader()
+        child_path = Path("ChildHarvestComponent.uasset")
+        package = {
+            "exports": [
+                {
+                    "object_name": "ChildHarvestComponent_C",
+                    "class_name": "BlueprintGeneratedClass",
+                    "super_index": -1,
+                }
+            ],
+            "imports": [
+                {
+                    "object_name": "MushroomHarvestComponent_C",
+                    "outer_index": -2,
+                },
+                {
+                    "class_name": "Package",
+                    "object_name": "/Game/Aberration/CoreBlueprints/HarvestComponents/"
+                    "MushroomHarvestComponent",
+                    "outer_index": 0,
+                },
+            ],
+        }
+
+        with patch.object(reader, "package", return_value=package):
+            parent = reader.generated_class_parent(child_path)
+
+        self.assertEqual(
+            parent,
+            "/Game/Aberration/CoreBlueprints/HarvestComponents/"
+            "MushroomHarvestComponent.MushroomHarvestComponent_C",
+        )
 
     @staticmethod
     def _metal_component():

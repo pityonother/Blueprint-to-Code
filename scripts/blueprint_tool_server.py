@@ -42,6 +42,18 @@ from blueprint_translator.capture import (
 from blueprint_translator.artifact_modes import normalize_artifact_mode
 from blueprint_translator.graph_queue import graph_queue_summary, graph_queue_text_for_mode
 from blueprint_translator.evidence_repository import open_asset_repository
+from blueprint_translator.harvest_node_repository import (
+    HarvestDatasetInvalid,
+    HarvestDatasetNotBuilt,
+    HarvestNodeRepository,
+)
+from blueprint_translator.harvest_build_jobs import (
+    HarvestBuildAlreadyRunning,
+    HarvestBuildArgumentError,
+    HarvestBuildJobManager,
+    HarvestBuildJobNotFound,
+)
+from blueprint_translator.resource_nodes import NODE_PAGE_MAX_LIMIT
 from blueprint_translator.report_query import (
     DEFAULT_REPORT_QUERY_BUDGET,
     MAX_REPORT_CONTEXT_LINES,
@@ -69,6 +81,54 @@ KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge_base"
 EXPORT_SCRIPT = PROJECT_ROOT / "scripts" / "devkit_exporters" / "export_current_blueprint_defaults.py"
 DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
+HARVEST_CATALOG_PATH = (
+    PROJECT_ROOT / "analysis" / "harvest_nodes" / "resource_node_catalog.json"
+)
+HARVEST_IMAGE_ROOT = PROJECT_ROOT / "analysis" / "harvest_nodes" / "images"
+HARVEST_RANKING_PATH = (
+    PROJECT_ROOT
+    / "analysis"
+    / "harvest_rankings"
+    / "harvest_ranking_all_resources.query.json"
+)
+HARVEST_EVALUATION_CATALOG_PATH = (
+    PROJECT_ROOT
+    / "analysis"
+    / "harvest_rankings"
+    / "harvest_evaluation_catalog.json"
+)
+HARVEST_SQLITE_CATALOG_PATH = (
+    PROJECT_ROOT / "analysis" / "harvest_nodes" / "harvest_catalog.sqlite"
+)
+HARVEST_REPOSITORY = HarvestNodeRepository(
+    HARVEST_CATALOG_PATH,
+    HARVEST_RANKING_PATH,
+    evaluation_catalog_path=HARVEST_EVALUATION_CATALOG_PATH,
+    sqlite_catalog_path=(
+        HARVEST_SQLITE_CATALOG_PATH
+        if HARVEST_SQLITE_CATALOG_PATH.is_file()
+        else None
+    ),
+)
+HARVEST_BUILD_MANAGER = HarvestBuildJobManager(project_root=PROJECT_ROOT)
+
+_LOCAL_HTTP_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def resolve_harvest_image_path(image_identity: str, image_root: Path = HARVEST_IMAGE_ROOT) -> Path:
+    """Resolve one immutable image by lowercase SHA-256 identity only."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", str(image_identity or "")) is None:
+        raise ValueError("Invalid harvest image identity.")
+    resolved_root = Path(image_root).resolve()
+    candidate = (resolved_root / f"{image_identity}.jpg").resolve()
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError("Harvest image resolves outside the cache root.") from exc
+    if not candidate.is_file():
+        raise FileNotFoundError("Harvest image was not found.")
+    return candidate
 
 
 def configured_devkit_content_root() -> Path | None:
@@ -1437,6 +1497,338 @@ def resolve_knowledge_target(target: str) -> Path:
     return path
 
 
+def _harvest_dataset_problem(exc: Exception) -> ApiProblem:
+    if isinstance(exc, HarvestDatasetNotBuilt):
+        return ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "ok": False,
+                "code": exc.code,
+                "error": "资源节点索引尚未生成，请先运行 build_ark_resource_node_catalog.py。",
+            },
+        )
+    if isinstance(exc, HarvestDatasetInvalid):
+        return ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "ok": False,
+                "code": exc.code,
+                "error": "资源节点索引无效，请重新生成。",
+            },
+        )
+    raise exc
+
+
+def query_harvest_nodes_for_request(query: str) -> dict[str, object]:
+    values = parse_qs(query)
+    try:
+        offset = max(
+            0,
+            parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
+        )
+        limit = min(
+            NODE_PAGE_MAX_LIMIT,
+            max(
+                1,
+                parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
+            ),
+        )
+        return HARVEST_REPOSITORY.list_nodes(
+            q=values.get("q", [""])[0],
+            map_name=values.get("map", [""])[0],
+            resource=values.get("resource", [""])[0],
+            offset=offset,
+            limit=limit,
+        )
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def query_harvest_node_for_request(node_id: str) -> dict[str, object]:
+    if not node_id:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {"ok": False, "code": "RESOURCE_NODE_ID_REQUIRED", "error": "缺少资源节点 ID。"},
+        )
+    try:
+        return HARVEST_REPOSITORY.get_node(node_id)
+    except KeyError as exc:
+        raise ApiProblem(
+            HTTPStatus.NOT_FOUND,
+            {"ok": False, "code": "RESOURCE_NODE_NOT_FOUND", "error": "资源节点不存在。"},
+        ) from exc
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def query_harvest_ranking_for_request(query: str) -> dict[str, object]:
+    values = parse_qs(query)
+    node_id = values.get("nodeId", [""])[0].strip()
+    node_resource_id = values.get("nodeResourceId", [""])[0].strip()
+    if not node_id or not node_resource_id:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "NODE_RESOURCE_ID_REQUIRED",
+                "error": "排名查询必须同时提供 nodeId 和 nodeResourceId。",
+            },
+        )
+    limit = min(
+        10,
+        max(
+            1,
+            parse_report_query_int(values.get("limit", [""])[0], "limit", 10),
+        ),
+    )
+    try:
+        return HARVEST_REPOSITORY.rankings(
+            node_id,
+            node_resource_id,
+            limit=limit,
+        )
+    except KeyError as exc:
+        code = str(exc).strip("'")
+        raise ApiProblem(
+            HTTPStatus.NOT_FOUND,
+            {"ok": False, "code": code, "error": "资源节点或资源条目不存在。"},
+        ) from exc
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def query_harvest_creatures_for_request(query: str) -> dict[str, object]:
+    values = parse_qs(query)
+    offset = max(
+        0,
+        parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
+    )
+    limit = min(
+        100,
+        max(
+            1,
+            parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
+        ),
+    )
+    try:
+        return HARVEST_REPOSITORY.list_creatures(
+            q=values.get("q", [""])[0],
+            offset=offset,
+            limit=limit,
+        )
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def query_harvest_creature_specialties_for_request(
+    species_key: str,
+    query: str,
+) -> dict[str, object]:
+    if not species_key:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "HARVEST_SPECIES_KEY_REQUIRED",
+                "error": "A creature species key is required.",
+            },
+        )
+    values = parse_qs(query)
+    offset = max(
+        0,
+        parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
+    )
+    limit = min(
+        100,
+        max(
+            1,
+            parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
+        ),
+    )
+    try:
+        return HARVEST_REPOSITORY.creature_specialties(
+            species_key,
+            offset=offset,
+            limit=limit,
+        )
+    except KeyError as exc:
+        raise ApiProblem(
+            HTTPStatus.NOT_FOUND,
+            {
+                "ok": False,
+                "code": "HARVEST_SPECIES_NOT_FOUND",
+                "error": "The requested creature species was not found.",
+            },
+        ) from exc
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def _harvest_build_problem(exc: Exception) -> ApiProblem:
+    if isinstance(exc, HarvestBuildArgumentError):
+        status = HTTPStatus.BAD_REQUEST
+        message = "Invalid harvest build request."
+    elif isinstance(exc, HarvestBuildAlreadyRunning):
+        status = HTTPStatus.CONFLICT
+        message = "A harvest build is already running."
+    elif isinstance(exc, HarvestBuildJobNotFound):
+        status = HTTPStatus.NOT_FOUND
+        message = "The harvest build job was not found."
+    else:
+        raise exc
+    payload: dict[str, object] = {
+        "ok": False,
+        "code": exc.code,
+        "error": message,
+    }
+    job_id = getattr(exc, "job_id", None)
+    if job_id:
+        payload["jobId"] = job_id
+    return ApiProblem(status, payload)
+
+
+def query_harvest_build_for_request(query: str) -> dict[str, object] | None:
+    values = parse_qs(query)
+    job_id = values.get("jobId", [""])[0].strip() or None
+    try:
+        return HARVEST_BUILD_MANAGER.get(job_id)
+    except HarvestBuildJobNotFound as exc:
+        if job_id is None and exc.job_id is None:
+            return None
+        raise _harvest_build_problem(exc) from exc
+    except (
+        HarvestBuildArgumentError,
+        HarvestBuildAlreadyRunning,
+    ) as exc:
+        raise _harvest_build_problem(exc) from exc
+
+
+def start_harvest_build_for_request(body: dict[str, object]) -> dict[str, object]:
+    if set(body) != {"options"}:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_REQUEST_INVALID",
+                "error": "The harvest build request must contain only an options object.",
+            },
+        )
+    options = body.get("options")
+    if not isinstance(options, dict):
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_REQUEST_INVALID",
+                "error": "The harvest build options value must be an object.",
+            },
+        )
+    if options:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_OPTIONS_FORBIDDEN",
+                "error": "Public harvest builds do not accept configuration overrides.",
+            },
+        )
+    try:
+        return HARVEST_BUILD_MANAGER.start(options)
+    except (
+        HarvestBuildArgumentError,
+        HarvestBuildAlreadyRunning,
+        HarvestBuildJobNotFound,
+    ) as exc:
+        raise _harvest_build_problem(exc) from exc
+
+
+def validate_harvest_build_http_boundary(
+    headers: object,
+    *,
+    server_port: int,
+) -> None:
+    """Reject cross-origin or non-JSON requests before reading a build body."""
+
+    get_header = getattr(headers, "get", None)
+    if not callable(get_header):
+        raise ApiProblem(
+            HTTPStatus.FORBIDDEN,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_HOST_FORBIDDEN",
+                "error": "The harvest build request host is not allowed.",
+            },
+        )
+    content_type = str(get_header("Content-Type") or "").strip().casefold()
+    if content_type != "application/json":
+        raise ApiProblem(
+            HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_JSON_REQUIRED",
+                "error": "Harvest build requests require application/json.",
+            },
+        )
+
+    def authority(value: str, *, origin: bool) -> tuple[str, int] | None:
+        try:
+            parsed = urlparse(value if origin else f"http://{value}")
+            port = parsed.port or 80
+        except ValueError:
+            return None
+        if (
+            (origin and parsed.scheme.casefold() != "http")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            return None
+        hostname = str(parsed.hostname or "").casefold()
+        if hostname not in _LOCAL_HTTP_HOSTS:
+            return None
+        return hostname, int(port)
+
+    host = authority(str(get_header("Host") or "").strip(), origin=False)
+    if host is None or host[1] != int(server_port):
+        raise ApiProblem(
+            HTTPStatus.FORBIDDEN,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_HOST_FORBIDDEN",
+                "error": "The harvest build request host is not allowed.",
+            },
+        )
+    raw_origin = str(get_header("Origin") or "").strip()
+    if raw_origin:
+        request_origin = authority(raw_origin, origin=True)
+        if request_origin != host:
+            raise ApiProblem(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "ok": False,
+                    "code": "HARVEST_BUILD_ORIGIN_FORBIDDEN",
+                    "error": "Cross-origin harvest build requests are not allowed.",
+                },
+            )
+
+
+def cancel_harvest_build_for_request(job_id: str) -> dict[str, object]:
+    if not job_id:
+        raise _harvest_build_problem(
+            HarvestBuildArgumentError("A harvest build job id is required.")
+        )
+    try:
+        return HARVEST_BUILD_MANAGER.cancel(job_id)
+    except (
+        HarvestBuildArgumentError,
+        HarvestBuildAlreadyRunning,
+        HarvestBuildJobNotFound,
+    ) as exc:
+        raise _harvest_build_problem(exc) from exc
+
+
 def api_state() -> dict[str, object]:
     return {
         "projectRoot": str(PROJECT_ROOT),
@@ -1450,22 +1842,79 @@ def api_state() -> dict[str, object]:
     }
 
 
+def encode_json_response(payload: object) -> bytes:
+    """Encode API JSON without presentation whitespace to keep transport token-small."""
+
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def static_content_type(mime_type: str | None) -> str:
+    normalized = mime_type or "application/octet-stream"
+    if normalized.startswith("text/") or normalized in {
+        "application/javascript",
+        "application/json",
+        "image/svg+xml",
+    }:
+        return f"{normalized}; charset=utf-8"
+    return normalized
+
+
 class ControlCenterHandler(BaseHTTPRequestHandler):
     server_version = "BlueprintToolControlCenter/1.0"
 
     def log_message(self, format: str, *args: object) -> None:
         sys.stderr.write("[BlueprintTool] " + (format % args) + "\n")
 
+    def end_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+            "object-src 'none'; connect-src 'self'; img-src 'self' data:; "
+            "script-src 'self'; style-src 'self' 'unsafe-inline'",
+        )
+        super().end_headers()
+
     def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
-        encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        encoded = encode_json_response(payload)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(encoded)
 
     def send_error_json(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
         self.send_json({"ok": False, "error": message}, status)
+
+    def send_harvest_image(self, filename: str) -> None:
+        identity = filename.removesuffix(".jpg") if filename.endswith(".jpg") else ""
+        try:
+            image_path = resolve_harvest_image_path(identity)
+        except (ValueError, FileNotFoundError):
+            self.send_error_json("Harvest image was not found.", HTTPStatus.NOT_FOUND)
+            return
+        etag = f'"{identity}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            return
+        data = image_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(data)
 
     def read_json_body(self) -> dict[str, object]:
         length = int(self.headers.get("Content-Length") or "0")
@@ -1482,6 +1931,49 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             if parsed.path == "/api/state":
                 self.send_json({"ok": True, **api_state()})
+                return
+            if parsed.path == "/api/harvest/nodes":
+                self.send_json({"ok": True, **query_harvest_nodes_for_request(parsed.query)})
+                return
+            if parsed.path.startswith("/api/harvest/nodes/"):
+                node_id = unquote(parsed.path.removeprefix("/api/harvest/nodes/"))
+                self.send_json({"ok": True, "node": query_harvest_node_for_request(node_id)})
+                return
+            if parsed.path == "/api/harvest/rankings":
+                self.send_json({"ok": True, **query_harvest_ranking_for_request(parsed.query)})
+                return
+            if parsed.path == "/api/harvest/creatures":
+                self.send_json(
+                    {"ok": True, **query_harvest_creatures_for_request(parsed.query)}
+                )
+                return
+            if (
+                parsed.path.startswith("/api/harvest/creatures/")
+                and parsed.path.endswith("/specialties")
+            ):
+                species_key = unquote(
+                    parsed.path[
+                        len("/api/harvest/creatures/") : -len("/specialties")
+                    ]
+                ).strip("/")
+                self.send_json(
+                    {
+                        "ok": True,
+                        **query_harvest_creature_specialties_for_request(
+                            species_key,
+                            parsed.query,
+                        ),
+                    }
+                )
+                return
+            if parsed.path == "/api/harvest/build":
+                self.send_json(
+                    {"ok": True, "job": query_harvest_build_for_request(parsed.query)}
+                )
+                return
+            if parsed.path.startswith("/api/harvest/images/"):
+                filename = unquote(parsed.path.removeprefix("/api/harvest/images/"))
+                self.send_harvest_image(filename)
                 return
             if parsed.path == "/api/report":
                 self.handle_report(parsed.query)
@@ -1558,8 +2050,52 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             self.send_error_json(str(exc))
 
     def do_POST(self) -> None:
+        is_harvest_build_request = self.path == "/api/harvest/build"
+        is_harvest_cancel_request = (
+            self.path.startswith("/api/harvest/build/")
+            and self.path.endswith("/cancel")
+        )
         try:
-            body = self.read_json_body()
+            if is_harvest_build_request or is_harvest_cancel_request:
+                validate_harvest_build_http_boundary(
+                    self.headers,
+                    server_port=int(self.server.server_address[1]),
+                )
+                try:
+                    body = self.read_json_body()
+                except (UnicodeError, ValueError) as exc:
+                    raise ApiProblem(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "ok": False,
+                            "code": "HARVEST_BUILD_REQUEST_INVALID",
+                            "error": "Invalid harvest build JSON body.",
+                        },
+                    ) from exc
+            else:
+                body = self.read_json_body()
+            if self.path == "/api/harvest/build":
+                self.send_json(
+                    {"ok": True, "job": start_harvest_build_for_request(body)},
+                    HTTPStatus.ACCEPTED,
+                )
+                return
+            if (
+                self.path.startswith("/api/harvest/build/")
+                and self.path.endswith("/cancel")
+            ):
+                job_id = unquote(
+                    self.path[
+                        len("/api/harvest/build/") : -len("/cancel")
+                    ]
+                ).strip("/")
+                self.send_json(
+                    {
+                        "ok": True,
+                        "job": cancel_harvest_build_for_request(job_id),
+                    }
+                )
+                return
             if self.path == "/api/analyze":
                 asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
                 job = start_report_generation_job(asset_dir, str(body.get("reportLevel") or "standard"))
@@ -1678,7 +2214,18 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         except ApiProblem as exc:
             self.send_json(exc.payload, exc.status)
         except Exception as exc:
-            self.send_error_json(str(exc))
+            if is_harvest_build_request or is_harvest_cancel_request:
+                self.log_message("harvest build request failed: %s", exc)
+                self.send_json(
+                    {
+                        "ok": False,
+                        "code": "HARVEST_BUILD_FAILED",
+                        "error": "Harvest build request failed.",
+                    },
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            else:
+                self.send_error_json(str(exc))
 
     def handle_report(self, query: str) -> None:
         values = parse_qs(query)
@@ -1747,7 +2294,7 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         mime_type, _encoding = mimetypes.guess_type(str(static_path))
         data = static_path.read_bytes()
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", mime_type or "application/octet-stream")
+        self.send_header("Content-Type", static_content_type(mime_type))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

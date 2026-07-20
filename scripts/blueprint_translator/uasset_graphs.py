@@ -1296,6 +1296,41 @@ def object_ref_name(value: int, imports: list[dict[str, object]], exports: list[
     return ""
 
 
+def object_ref_path(
+    value: int,
+    imports: list[dict[str, object]],
+    exports: list[dict[str, object]],
+) -> str:
+    """Return a full package/object identity when the package outer is serialized."""
+
+    def row_for(package_index: int) -> dict[str, object] | None:
+        if package_index > 0:
+            index = package_index - 1
+            return exports[index] if 0 <= index < len(exports) else None
+        if package_index < 0:
+            index = -package_index - 1
+            return imports[index] if 0 <= index < len(imports) else None
+        return None
+
+    leaf = object_ref_name(value, imports, exports)
+    current = value
+    seen: set[int] = set()
+    while current and current not in seen:
+        seen.add(current)
+        row = row_for(current)
+        if not isinstance(row, dict):
+            break
+        name = str(row.get("object_name") or row.get("display_name") or "")
+        if name.startswith("/Game/"):
+            package_path = name.split(".", 1)[0]
+            return f"{package_path}.{leaf}" if leaf and leaf != package_path.rsplit("/", 1)[-1] else package_path
+        outer = row.get("outer_index")
+        if not isinstance(outer, int):
+            break
+        current = outer
+    return leaf
+
+
 def extract_object_ref_array(
     block: bytes,
     imports: list[dict[str, object]],
@@ -1529,6 +1564,7 @@ def parse_property_block_value(
             item["value"] = ref
             item["package_index"] = ref
             item["object"] = object_ref_name(int(ref or 0), imports, exports)
+            item["object_path"] = object_ref_path(int(ref or 0), imports, exports)
         elif type_name == "ArrayProperty":
             refs, array_offset = extract_object_ref_array(chunk, imports, exports)
             item["value"] = refs
@@ -1536,6 +1572,7 @@ def parse_property_block_value(
             item["element_kind"] = "FPackageIndex" if refs else "unknown"
             item["array_parse"] = array_parse_payload(refs, array_offset, len(chunk))
             item["objects"] = [object_ref_name(value, imports, exports) for value in refs[:500]]
+            item["object_paths"] = [object_ref_path(value, imports, exports) for value in refs[:500]]
         elif type_name == "StructProperty":
             struct_region = export_data[pos : min(len(export_data), max(end, pos + 192))]
             member_name = extract_member_reference_name(struct_region, names)
@@ -2207,6 +2244,7 @@ def _parse_cdo_array_value(
     cursor = value_offset + 4
     values: list[object] = []
     objects: list[str] = []
+    object_paths: list[str] = []
     elements: list[dict[str, object]] = []
 
     fixed_widths = {
@@ -2250,11 +2288,15 @@ def _parse_cdo_array_value(
                 resolved = object_ref_name(int(value), imports, exports)
                 element["object"] = resolved
                 objects.append(resolved)
+                resolved_path = object_ref_path(int(value), imports, exports)
+                element["object_path"] = resolved_path
+                object_paths.append(resolved_path)
             elif inner_type == "SoftObjectProperty":
                 soft_path = _soft_object_path_for_index(soft_object_paths, int(value))
                 resolved = str(soft_path.get("object_path") or "") if soft_path else ""
                 element["object"] = resolved
                 objects.append(resolved)
+                object_paths.append(resolved)
             values.append(value)
             elements.append(element)
     elif inner_type == "StructProperty":
@@ -2267,6 +2309,31 @@ def _parse_cdo_array_value(
                 else _ark_cdo_property_sequence
             )
         )
+        struct_envelope: dict[str, object] | None = None
+        if tag_layout == "ark_compact_guid_marker":
+            envelope = _ark_guid_cdo_property_tag_at(
+                export_data,
+                names,
+                cursor,
+                value_end,
+            )
+            if (
+                isinstance(envelope, dict)
+                and envelope.get("type") == "StructProperty"
+                and envelope.get("name") == block.get("name")
+                and int(envelope.get("end") or 0) == value_end
+            ):
+                envelope_value_offset = int(envelope.get("value_offset") or 0)
+                if cursor < envelope_value_offset <= value_end:
+                    cursor = envelope_value_offset
+                    struct_envelope = {
+                        "name": envelope.get("name"),
+                        "struct": envelope.get("struct"),
+                        "raw_offsets": raw_offsets(
+                            int(envelope.get("offset") or 0),
+                            envelope_value_offset,
+                        ),
+                    }
         for index in range(count):
             element_start = cursor
             nested_blocks, cursor_after, terminated = sequence_parser(
@@ -2302,6 +2369,7 @@ def _parse_cdo_array_value(
     return {
         "value": values,
         "objects": objects,
+        "object_paths": object_paths,
         "array_offset": value_offset,
         "element_kind": inner_type,
         "array_parse": {
@@ -2311,6 +2379,11 @@ def _parse_cdo_array_value(
             "raw_size": declared_size,
             "array_offset": value_offset,
             "elements": elements,
+            **(
+                {"struct_envelope": struct_envelope}
+                if inner_type == "StructProperty" and struct_envelope is not None
+                else {}
+            ),
         },
     }
 
@@ -2366,6 +2439,7 @@ def parse_cdo_property_value(
             if _valid_package_index(ref, imports, exports):
                 item["value"] = ref
                 item["object"] = object_ref_name(ref, imports, exports)
+                item["object_path"] = object_ref_path(ref, imports, exports)
             else:
                 item["value"] = None
                 item["object"] = ""
@@ -2450,6 +2524,9 @@ def parse_cdo_property_value(
                 item["element_kind"] = "FPackageIndex" if refs else "unknown"
                 item["array_parse"] = array_parse_payload(refs, array_offset, len(value_chunk))
                 item["objects"] = [object_ref_name(value, imports, exports) for value in refs[:500]]
+                item["object_paths"] = [
+                    object_ref_path(value, imports, exports) for value in refs[:500]
+                ]
         elif type_name == "MapProperty":
             item["value"] = {"raw_size": max(0, end - value_offset), "parsed": False}
         else:

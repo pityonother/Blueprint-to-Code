@@ -15,6 +15,7 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
     node_info_from_export,
     mine_graph_candidates,
     normalize_blueprint_object_path,
+    object_ref_path,
     object_path_to_uasset_path,
     parse_custom_pins,
     read_uasset_class_defaults,
@@ -29,6 +30,25 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
 
 
 class UAssetGraphCandidateTests(unittest.TestCase):
+    def test_object_property_reference_preserves_full_import_object_path(self):
+        imports = [
+            {
+                "object_name": "/Game/DLC/DamageTypes/DmgType_Shared",
+                "class_name": "Package",
+                "outer_index": 0,
+            },
+            {
+                "object_name": "DmgType_Shared_C",
+                "class_name": "BlueprintGeneratedClass",
+                "outer_index": -1,
+            },
+        ]
+
+        self.assertEqual(
+            object_ref_path(-2, imports, []),
+            "/Game/DLC/DamageTypes/DmgType_Shared.DmgType_Shared_C",
+        )
+
     def test_object_path_maps_to_devkit_uasset(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             content_root = Path(temp_dir) / "Content"
@@ -465,7 +485,7 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(payload["property_count"], 2)
         self.assertNotIn("EntryWeight", properties)
         self.assertEqual(properties["MaxHarvestHealth"]["value"], 620.0)
-        self.assertTrue(entries["array_parse"]["parsed"])
+        self.assertTrue(entries["array_parse"]["parsed"], entries)
         self.assertEqual(entries["array_parse"]["element_kind"], "StructProperty")
         self.assertEqual(entries["array_parse"]["count"], 2)
         self.assertEqual(entries["value"][0]["OverrideQuantityMax"], 3)
@@ -676,6 +696,111 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(
             properties["OverrideDamageForResourceHarvestingItems"]["array_parse"]["count"],
             3,
+        )
+
+    def test_cdo_compact_guid_struct_array_skips_the_struct_envelope(self):
+        names = [
+            "None",
+            "HarvestResourceEntries",
+            "ArrayProperty",
+            "StructProperty",
+            "HarvestResourceEntry",
+            "EntryWeight",
+            "FloatProperty",
+            "ResourceItem",
+            "ObjectProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def guid_tag(
+            name: str,
+            type_name: str,
+            value: bytes,
+            *,
+            type_meta: bytes = b"",
+            property_guid: bytes | None = None,
+        ) -> bytes:
+            return (
+                fname(name)
+                + fname(type_name)
+                + struct.pack("<ii", len(value), 0)
+                + type_meta
+                + (b"\x00" if property_guid is None else b"\x01" + property_guid)
+                + value
+            )
+
+        def entry(weight: float, resource_index: int) -> bytes:
+            return b"".join(
+                [
+                    guid_tag("EntryWeight", "FloatProperty", struct.pack("<f", weight)),
+                    guid_tag(
+                        "ResourceItem",
+                        "ObjectProperty",
+                        struct.pack("<i", resource_index),
+                    ),
+                    fname("None"),
+                ]
+            )
+
+        element_stream = entry(1.0, -1) + entry(0.5, -2)
+        envelope = guid_tag(
+            "HarvestResourceEntries",
+            "StructProperty",
+            element_stream,
+            type_meta=fname("HarvestResourceEntry") + bytes(16),
+        )
+        outer_value = struct.pack("<i", 2) + envelope
+        cdo_data = b"".join(
+            [
+                guid_tag(
+                    "HarvestResourceEntries",
+                    "ArrayProperty",
+                    outer_value,
+                    type_meta=fname("StructProperty"),
+                    property_guid=b"\xff" * 16,
+                ),
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [
+                {"object_name": "PrimalItemResource_Wood_C"},
+                {"object_name": "PrimalItemResource_Thatch_C"},
+            ],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        properties = {item["name"]: item for item in payload["properties"]}
+        entries = properties["HarvestResourceEntries"]
+
+        self.assertTrue(entries["array_parse"]["parsed"], entries)
+        self.assertEqual(entries["array_parse"]["count"], 2)
+        self.assertEqual(entries["value"][0]["EntryWeight"], 1.0)
+        self.assertEqual(entries["value"][1]["EntryWeight"], 0.5)
+        self.assertEqual(
+            entries["array_parse"]["elements"][0]["properties"][1]["object"],
+            "PrimalItemResource_Wood_C",
+        )
+        self.assertEqual(
+            entries["array_parse"]["elements"][1]["properties"][1]["object"],
+            "PrimalItemResource_Thatch_C",
         )
 
     def test_cdo_compact_guid_bool_consumes_marker_before_following_float(self):

@@ -1,4 +1,5 @@
 import './styles.css';
+import { HarvestExplorer } from './harvest/explorer';
 
 type ReportKey =
   | 'agent_index'
@@ -182,6 +183,11 @@ if (!app) {
   throw new Error('Missing #app root.');
 }
 const root = app;
+type WorkspaceView = 'blueprint' | 'harvest';
+let workspaceView: WorkspaceView = new URLSearchParams(window.location.search).get('view') === 'harvest'
+  ? 'harvest'
+  : 'blueprint';
+const harvestExplorer = new HarvestExplorer(() => render());
 
 class ApiFailure extends Error {
   payload: ApiResult;
@@ -887,12 +893,16 @@ function renderTopbar(): string {
   return `
     <header class="topbar">
       <div class="topbar-title">
-        <h1>蓝图分析工作台</h1>
-        <small>从 .uasset 还原 Unreal/ARK Blueprint，再生成中文行为说明。</small>
+        <h1>${workspaceView === 'harvest' ? 'ARK 资源点采集查询' : '蓝图分析工作台'}</h1>
+        <small>${workspaceView === 'harvest' ? '资源节点 → HarvestComponent → 产出资源 → 生物排行' : '从 .uasset 还原 Unreal/ARK Blueprint，再生成中文行为说明。'}</small>
       </div>
       <div class="top-actions">
-        ${actionButton('刷新状态', 'refresh', 'ghost', busy)}
-        ${actionButton('打开 captures 目录', 'open-capture-root', 'ghost')}
+        <nav class="workspace-tabs" aria-label="工作区">
+          <button class="workspace-tab ${workspaceView === 'blueprint' ? 'active' : ''}" type="button" data-workspace="blueprint" aria-current="${workspaceView === 'blueprint' ? 'page' : 'false'}">蓝图分析</button>
+          <button class="workspace-tab ${workspaceView === 'harvest' ? 'active' : ''}" type="button" data-workspace="harvest" aria-current="${workspaceView === 'harvest' ? 'page' : 'false'}">资源点采集排行</button>
+        </nav>
+        ${workspaceView === 'blueprint' ? actionButton('刷新状态', 'refresh', 'ghost', busy) : ''}
+        ${workspaceView === 'blueprint' ? actionButton('打开 captures 目录', 'open-capture-root', 'ghost') : ''}
       </div>
     </header>
   `;
@@ -1222,6 +1232,21 @@ function renderAdvancedSection(asset?: AssetSummary): string {
 }
 
 function renderMain(): void {
+  if (workspaceView === 'harvest') {
+    root.innerHTML = `
+      <div class="shell">
+        ${renderTopbar()}
+        <main class="workspace harvest-workspace">
+          ${harvestExplorer.render()}
+        </main>
+      </div>
+    `;
+    bindEvents();
+    harvestExplorer.bind();
+    harvestExplorer.ensureLoaded();
+    return;
+  }
+
   const asset = currentAsset();
   if (asset && asset.path !== selectedPath) {
     selectedPath = asset.path;
@@ -1260,6 +1285,10 @@ function renderLoading(): void {
 }
 
 function render(): void {
+  if (workspaceView === 'harvest') {
+    renderMain();
+    return;
+  }
   if (!state) {
     renderLoading();
     return;
@@ -1283,6 +1312,31 @@ function syncInputs(): void {
 }
 
 function bindEvents(): void {
+  document.querySelectorAll<HTMLButtonElement>('[data-workspace]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const nextView: WorkspaceView = button.dataset.workspace === 'harvest' ? 'harvest' : 'blueprint';
+      if (nextView === workspaceView) {
+        return;
+      }
+      syncInputs();
+      workspaceView = nextView;
+      const url = new URL(window.location.href);
+      if (workspaceView === 'harvest') {
+        url.searchParams.set('view', 'harvest');
+      } else {
+        url.searchParams.delete('view');
+        url.searchParams.delete('q');
+        url.searchParams.delete('node');
+        url.searchParams.delete('resource');
+      }
+      window.history.replaceState({}, '', url);
+      render();
+      if (workspaceView === 'blueprint' && !state) {
+        void refreshState();
+      }
+    });
+  });
+
   document.querySelectorAll<HTMLButtonElement>('[data-select-asset]').forEach((button) => {
     button.addEventListener('click', () => {
       syncInputs();
@@ -2245,7 +2299,9 @@ async function handleAction(action: string): Promise<void> {
 }
 
 render();
-refreshState().catch((error) => {
-  logs = [error instanceof Error ? error.message : String(error)];
-  render();
-});
+if (workspaceView === 'blueprint') {
+  refreshState().catch((error) => {
+    logs = [error instanceof Error ? error.message : String(error)];
+    render();
+  });
+}
