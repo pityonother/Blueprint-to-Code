@@ -38,11 +38,15 @@ The packaged toolkit does **not** include ARK DevKit or ARK `.uasset/.uexp/.ubul
 files. Reading real game assets requires a separately installed ARK DevKit on the
 developer's own Windows machine; only derived evidence may be included as a sample.
 
-If the ARK DevKit is installed outside the default Epic Games paths, copy
-`devkit_content_root.example.txt` to `devkit_content_root.txt` and put that
-machine's `ShooterGame\Content` directory on the first line. Unreal Object Paths
-such as `/Game/PrimalEarth/Dinos/Dodo/Dodo_Character_BP.Dodo_Character_BP` are
-relative to that Content root, not to this project's folder.
+On Windows the toolkit first reads the Epic Games Launcher manifests under
+`%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests` and automatically resolves
+custom install locations such as `E:\AKD\ARKDevkit`. An explicit environment
+variable or `devkit_content_root.txt` still takes priority. If the Launcher
+manifest is missing, copy `devkit_content_root.example.txt` to
+`devkit_content_root.txt` and put that machine's `ShooterGame\Content` directory
+on the first line. Unreal Object Paths such as
+`/Game/PrimalEarth/Dinos/Dodo/Dodo_Character_BP.Dodo_Character_BP` are relative
+to that Content root, not to this project's folder.
 
 For external mod folders, copy `devkit_path_mappings.example.txt` to
 `devkit_path_mappings.txt` and map the Unreal mount to the mod Content folder,

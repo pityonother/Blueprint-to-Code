@@ -40,6 +40,7 @@ from blueprint_translator.capture import (
     write_capture_manifest,
 )
 from blueprint_translator.artifact_modes import normalize_artifact_mode
+from blueprint_translator.devkit_paths import first_existing_devkit_content_root
 from blueprint_translator.graph_queue import graph_queue_summary, graph_queue_text_for_mode
 from blueprint_translator.evidence_repository import open_asset_repository
 from blueprint_translator.harvest_node_repository import (
@@ -132,24 +133,8 @@ def resolve_harvest_image_path(image_identity: str, image_root: Path = HARVEST_I
 
 
 def configured_devkit_content_root() -> Path | None:
-    for env_name in ("ARK_DEVKIT_CONTENT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT"):
-        value = os.environ.get(env_name)
-        if value and value.strip():
-            return Path(value.strip().strip("\"'")).expanduser()
-    if DEVKIT_CONTENT_ROOT_FILE.is_file():
-        try:
-            for line in DEVKIT_CONTENT_ROOT_FILE.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-                value = line.strip().strip("\"'")
-                if value and not value.startswith("#"):
-                    return Path(value).expanduser()
-        except OSError:
-            return None
-    return None
+    return first_existing_devkit_content_root(config_file=DEVKIT_CONTENT_ROOT_FILE)
 
-
-_CONFIGURED_DEVKIT_CONTENT_ROOT = configured_devkit_content_root()
-if _CONFIGURED_DEVKIT_CONTENT_ROOT:
-    os.environ.setdefault("BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT", str(_CONFIGURED_DEVKIT_CONTENT_ROOT))
 
 REPORT_TARGETS = {
     **REPORT_FILES,

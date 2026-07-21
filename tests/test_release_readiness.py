@@ -45,6 +45,18 @@ class ReleaseReadinessTests(unittest.TestCase):
                     )
                     self.assertEqual(process.returncode, 0, process.stderr.decode(errors="replace"))
 
+    def test_start_here_does_not_expand_content_root_in_cmd_output(self):
+        launcher = (ROOT / "START_HERE.bat").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "if defined BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT echo DevKit Content root configured.",
+            launcher,
+        )
+        self.assertNotIn(
+            "echo DevKit Content root: %BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT%",
+            launcher,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

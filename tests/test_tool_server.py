@@ -111,6 +111,31 @@ def wait_for_job(job_id: str, timeout_seconds: float = 5.0) -> dict[str, object]
 
 
 class ToolServerTests(unittest.TestCase):
+    def test_missing_asset_keeps_discovered_partner_path_in_visible_attempts(self):
+        attempted_path = str(
+            Path(r"E:\AKD\ARKDevkit\Projects\ShooterGame\Content")
+            / "PrimalEarth"
+            / "CoreBlueprints"
+            / "Projectiles"
+            / "ProjGrenadeTek.uasset"
+        )
+        with patch.object(
+            tool_server,
+            "object_path_to_uasset_path",
+            return_value=(None, [attempted_path]),
+        ):
+            with self.assertRaises(tool_server.ApiProblem) as raised:
+                read_uasset_graphs_for_request(
+                    "/Game/PrimalEarth/CoreBlueprints/Projectiles/ProjGrenadeTek"
+                )
+
+        self.assertEqual(raised.exception.status.value, 404)
+        self.assertEqual(raised.exception.payload["code"], "uasset_not_found")
+        self.assertEqual(
+            raised.exception.payload["attemptedPaths"][:3],
+            [attempted_path],
+        )
+
     def test_list_assets_discovers_v2_only_asset_and_uses_unbounded_graph_summaries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             capture_root = Path(temp_dir) / "captures"

@@ -1,8 +1,11 @@
+import json
+import os
 import sys
 import tempfile
 import unittest
 import struct
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -27,6 +30,7 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
     synthesize_boundary_pins_from_incoming_links,
     is_complete_empty_graph,
 )
+from blueprint_translator import uasset_graphs as uasset_graphs_module  # noqa: E402
 
 
 class UAssetGraphCandidateTests(unittest.TestCase):
@@ -63,6 +67,166 @@ class UAssetGraphCandidateTests(unittest.TestCase):
 
         self.assertEqual(found, asset)
         self.assertIn(str(asset), attempted)
+
+    def test_epic_manifest_discovers_custom_akd_devkit_install(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            program_data = temp_root / "ProgramData"
+            manifest_dir = program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+            manifest_dir.mkdir(parents=True)
+            install_root = temp_root / "AKD" / "ARKDevkit"
+            content_root = install_root / "Projects" / "ShooterGame" / "Content"
+            asset = content_root / "PrimalEarth" / "CoreBlueprints" / "Projectiles" / "ProjGrenadeTek.uasset"
+            asset.parent.mkdir(parents=True)
+            asset.write_bytes(b"EventGraph\x00")
+            (manifest_dir / "ARKDevKit.item").write_text(
+                json.dumps(
+                    {
+                        "InstallLocation": str(install_root),
+                        "MandatoryAppFolderName": "ARKDevkit",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            empty_config = temp_root / "missing-devkit-content-root.txt"
+            environment = {
+                "PROGRAMDATA": str(program_data),
+                "ARK_DEVKIT_CONTENT_ROOT": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT": "",
+                "ARK_DEVKIT_ROOT": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_ROOT": "",
+                "ARK_DEVKIT_PATH_MAPPINGS": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_PATH_MAPPINGS": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(uasset_graphs_module, "DEVKIT_CONTENT_ROOT_FILE", empty_config),
+                patch.object(
+                    uasset_graphs_module,
+                    "DEVKIT_PATH_MAPPINGS_FILE",
+                    temp_root / "missing-devkit-path-mappings.txt",
+                ),
+                patch.object(uasset_graphs_module, "DEFAULT_CONTENT_ROOTS", ()),
+            ):
+                found, attempted = object_path_to_uasset_path(
+                    "/Game/PrimalEarth/CoreBlueprints/Projectiles/ProjGrenadeTek"
+                )
+
+        self.assertEqual(found, asset)
+        self.assertEqual(attempted, [str(asset)])
+
+    def test_epic_manifest_discovery_ignores_corrupt_and_unrelated_items(self):
+        from blueprint_translator.devkit_paths import discover_epic_launcher_content_roots
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_dir = temp_root / "Manifests"
+            manifest_dir.mkdir()
+            install_root = temp_root / "AKD" / "ARKDevkit"
+            content_root = install_root / "Projects" / "ShooterGame" / "Content"
+            content_root.mkdir(parents=True)
+            (manifest_dir / "broken.item").write_text("{not-json", encoding="utf-8")
+            (manifest_dir / "unrelated.item").write_text(
+                json.dumps(
+                    {
+                        "InstallLocation": str(temp_root / "Fortnite"),
+                        "MandatoryAppFolderName": "Fortnite",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (manifest_dir / "ark.item").write_text(
+                json.dumps(
+                    {
+                        "InstallLocation": str(install_root),
+                        "MandatoryAppFolderName": "ARKDevkit",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            discovered = discover_epic_launcher_content_roots(manifest_dir)
+
+        self.assertEqual(discovered, [content_root])
+
+    def test_explicit_content_root_precedes_epic_manifest_discovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            explicit_root = temp_root / "Explicit" / "Projects" / "ShooterGame" / "Content"
+            explicit_root.mkdir(parents=True)
+            program_data = temp_root / "ProgramData"
+            manifest_dir = program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+            manifest_dir.mkdir(parents=True)
+            install_root = temp_root / "AKD" / "ARKDevkit"
+            discovered_root = install_root / "Projects" / "ShooterGame" / "Content"
+            discovered_root.mkdir(parents=True)
+            (manifest_dir / "ARKDevKit.item").write_text(
+                json.dumps(
+                    {
+                        "InstallLocation": str(install_root),
+                        "MandatoryAppFolderName": "ARKDevkit",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            environment = {
+                "PROGRAMDATA": str(program_data),
+                "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT": str(explicit_root),
+                "ARK_DEVKIT_CONTENT_ROOT": "",
+                "ARK_DEVKIT_ROOT": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_ROOT": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(
+                    uasset_graphs_module,
+                    "DEVKIT_CONTENT_ROOT_FILE",
+                    temp_root / "missing-devkit-content-root.txt",
+                ),
+                patch.object(uasset_graphs_module, "DEFAULT_CONTENT_ROOTS", ()),
+            ):
+                roots = uasset_graphs_module.content_roots()
+
+        self.assertEqual(roots, [explicit_root, discovered_root])
+
+    def test_deeply_corrupt_manifest_does_not_block_explicit_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            explicit_root = temp_root / "Explicit" / "Projects" / "ShooterGame" / "Content"
+            explicit_root.mkdir(parents=True)
+            program_data = temp_root / "ProgramData"
+            manifest_dir = program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "deeply-corrupt.item").write_text(
+                "[" * 20000 + "]" * 20000,
+                encoding="utf-8",
+            )
+            (manifest_dir / "oversized-integer.item").write_text(
+                '{"value": ' + "9" * 5000 + "}",
+                encoding="utf-8",
+            )
+
+            environment = {
+                "PROGRAMDATA": str(program_data),
+                "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT": str(explicit_root),
+                "ARK_DEVKIT_CONTENT_ROOT": "",
+                "ARK_DEVKIT_ROOT": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_ROOT": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(
+                    uasset_graphs_module,
+                    "DEVKIT_CONTENT_ROOT_FILE",
+                    temp_root / "missing-devkit-content-root.txt",
+                ),
+                patch.object(uasset_graphs_module, "DEFAULT_CONTENT_ROOTS", ()),
+            ):
+                roots = uasset_graphs_module.content_roots()
+
+        self.assertEqual(roots, [explicit_root])
 
     def test_normalize_accepts_mod_relative_reference(self):
         raw = "Kaminan_server/SkinBuff/SkinBuffHuman/MetalShield/BuffSkin_MetalShield.BuffSkin_MetalShield"

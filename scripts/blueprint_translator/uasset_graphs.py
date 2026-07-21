@@ -19,6 +19,7 @@ from typing import Iterable
 
 from .config import NODE_SEMANTICS
 from .core import build_blueprint_payload_from_nodes, parse_blueprint_text
+from .devkit_paths import DEFAULT_CONTENT_ROOTS, devkit_content_roots
 from .models import NodeInfo, PinInfo
 
 
@@ -31,13 +32,6 @@ UASSET_PARTIAL_TRIAGE_SCHEMA = "blueprint-translator.uasset-partial-graph-triage
 UASSET_QUALITY_GATES_SCHEMA = "blueprint-translator.uasset-quality-gates.v1"
 UASSET_CLASS_DEFAULTS_SCHEMA = "blueprint-translator.uasset-class-defaults.v1"
 DEFAULT_MAX_CANDIDATES = 1600
-
-DEFAULT_CONTENT_ROOTS = (
-    r"C:\Program Files\Epic Games\ARKDevkit\Projects\ShooterGame\Content",
-    r"D:\Epic Games\ARKDevkit\Projects\ShooterGame\Content",
-    r"E:\Epic Games\ARKDevkit\Projects\ShooterGame\Content",
-    r"G:\ARKDevkit\Projects\ShooterGame\Content",
-)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
@@ -395,18 +389,11 @@ def _dedupe_paths(roots: Iterable[Path]) -> list[Path]:
 
 
 def content_roots(extra_roots: Iterable[str | os.PathLike[str]] | None = None) -> list[Path]:
-    roots: list[Path] = []
-    for env_name in ("ARK_DEVKIT_CONTENT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT"):
-        for value in _split_path_list(os.environ.get(env_name)):
-            roots.append(Path(value).expanduser())
-    for env_name in ("ARK_DEVKIT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_ROOT"):
-        for value in _split_path_list(os.environ.get(env_name)):
-            roots.append(Path(value).expanduser() / "Projects" / "ShooterGame" / "Content")
-    roots.extend(Path(_clean_path_text(value)).expanduser() for value in _config_lines(DEVKIT_CONTENT_ROOT_FILE))
-    if extra_roots:
-        roots.extend(Path(_clean_path_text(value)).expanduser() for value in extra_roots if _clean_path_text(value))
-    roots.extend(Path(value) for value in DEFAULT_CONTENT_ROOTS)
-    return _dedupe_paths(roots)
+    return devkit_content_roots(
+        extra_roots,
+        config_file=DEVKIT_CONTENT_ROOT_FILE,
+        default_roots=DEFAULT_CONTENT_ROOTS,
+    )
 
 
 def _parse_mount_mapping(value: str) -> tuple[str, Path] | None:

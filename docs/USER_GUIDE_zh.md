@@ -21,7 +21,11 @@ http://127.0.0.1:8765/
 
 如果网页没自动打开，就自己复制上面的地址到浏览器。
 
-如果别人电脑的 ARK DevKit 不在默认位置，需要先配置 DevKit Content 目录：
+工具会先读取 Epic Games Launcher 的安装清单，自动识别包括
+`E:\AKD\ARKDevkit` 在内的自定义安装位置。正常通过 Epic Launcher 安装时，
+不需要再手工改路径。
+
+如果清单被删除、损坏，或 DevKit 是手工移动的，再配置 DevKit Content 目录：
 
 1. 把项目里的 `devkit_content_root.example.txt` 复制一份。
 2. 把复制出来的文件改名为 `devkit_content_root.txt`。
@@ -32,6 +36,9 @@ D:\Epic Games\ARKDevkit\Projects\ShooterGame\Content
 ```
 
 注意：`/Game/PrimalEarth/Dinos/Dodo/Dodo_Character_BP.Dodo_Character_BP` 这种不是 Windows 文件路径，而是 Unreal Object Path。工具会用它拼到 DevKit Content 根目录下面去找真正的 `.uasset`。
+
+环境变量或 `devkit_content_root.txt` 的显式配置优先于自动发现。为某台伙伴电脑
+专门生成的完整环境包也可以直接带入这份配置，避免依赖该电脑的 Launcher 清单。
 
 如果 mod 资产放在外置 mod Content，例如：
 

@@ -32,10 +32,10 @@
 
 - ARK DevKit；
 - ARK 的 `.uasset`、`.uexp` 或 `.ubulk` 原始资产；
-- 开发者本机的 DevKit 路径配置；
+- 默认不包含开发者本机的 DevKit 路径配置；为已知目标电脑显式制作专用包时，可以包含该目标电脑的配置；
 - 用户生成的完整 captures、日志或知识库。
 
-需要从真实资产生成新证据时，伙伴必须在自己的 Windows 电脑安装 ARK DevKit，并把 `devkit_content_root.example.txt` 复制为 `devkit_content_root.txt`，第一行填写自己的 `ShooterGame\Content` 目录。外置 Mod Content 使用 `devkit_path_mappings.example.txt`。
+需要从真实资产生成新证据时，伙伴必须在自己的 Windows 电脑安装 ARK DevKit。工具会先从 Epic Launcher 清单自动发现安装目录；自动发现失败且收到的不是目标电脑专用包时，再把 `devkit_content_root.example.txt` 复制为 `devkit_content_root.txt`，第一行填写自己的 `ShooterGame\Content` 目录。外置 Mod Content 使用 `devkit_path_mappings.example.txt`。
 
 ## 3. 启动
 
@@ -165,10 +165,12 @@ runtime\python\python.exe scripts\validate_evidence_store.py `
 runtime\python\python.exe scripts\package_full_env.py `
   --output-dir release `
   --sample-asset-dir "captures\<SampleAsset>" `
-  --harvest-report-dir "analysis\harvest_rankings"
+  --harvest-report-dir "analysis\harvest_rankings" `
+  --devkit-content-root "E:\AKD\ARKDevkit\Projects\ShooterGame\Content"
 ```
 
 打包器拒绝 dirty working tree，强制重新构建前端，并在落盘前验证样例 Evidence、每组排行报告、归档路径、必需文件、manifest 与 SHA-256。它不提供跳过构建或允许脏树的正式发布开关。
+`--devkit-content-root` 是可选项；只在为已知目标电脑制作专用包时使用。未传该参数时，包内不会泄露构建机的本地路径，运行时会优先读取目标电脑的 Epic Launcher 安装清单。
 
 ## 7. 接手维护时先读
 
