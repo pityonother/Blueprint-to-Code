@@ -15,8 +15,13 @@ import shutil
 import subprocess
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
+from .harvest_ranking import (
+    NORMALIZED_HARVEST_AMOUNT_SCALE,
+    YIELD_MODEL_VERSION,
+    YIELD_SCORE_BASIS,
+)
 from .map_reference_scan_cache import MapReferenceScanCache
 
 from .uasset_graphs import (
@@ -30,8 +35,13 @@ from .uasset_graphs import (
 
 CATALOG_SCHEMA = "ark-resource-node-catalog/v1"
 NODE_PAGE_SCHEMA = "blueprint-to-code.harvest-node-page/v1"
-RANKING_RESULT_SCHEMA = "blueprint-to-code.harvest-ranking-result/v1"
+RANKING_RESULT_SCHEMA = "blueprint-to-code.harvest-ranking-result/v2"
 NODE_PAGE_MAX_LIMIT = 16
+NODE_FILTER_MAX_LENGTH = 100
+RESOURCE_FILTER_MAX_LENGTH = 512
+MAP_EXCLUSIVITY_DEFINITION = (
+    "RECOVERED_PLAYABLE_MAP_FAMILY_SET_EQUALS_SELECTED_FAMILY"
+)
 
 CONFIRMED = "CONFIRMED"
 NOT_RECOVERED = "NOT_RECOVERED"
@@ -352,6 +362,8 @@ def _component_index(components: Iterable[dict[str, Any]]) -> dict[str, dict[str
 def attach_component_resources(
     node: dict[str, Any],
     components: Iterable[dict[str, Any]],
+    *,
+    display_names: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Join a physical node to the exact HarvestComponent resource entries."""
 
@@ -400,6 +412,8 @@ def attach_component_resources(
         entry_index = entry.get("entryIndex")
         normalized_index = int(entry_index) if isinstance(entry_index, int) else ordinal
         resource = str(entry.get("resource") or "")
+        resource_object_path = str(entry.get("resourceObjectPath") or "")
+        resource_key = resource_object_path.strip() or resource.strip()
         entry_gaps = sorted({str(item) for item in entry.get("gaps", []) if item})
         status = CONFIRMED if resource and not entry_gaps else NOT_RECOVERED
         if not resource:
@@ -408,7 +422,13 @@ def attach_component_resources(
             {
                 "entryIndex": normalized_index,
                 "resource": resource,
-                "displayName": resource_display_name(resource),
+                "resourceKey": resource_key,
+                "resourceObjectPath": resource_object_path,
+                "displayName": resource_display_name(
+                    resource,
+                    display_names,
+                    resource_object_path=resource_object_path,
+                ),
                 "nodeResourceId": build_node_resource_id(
                     str(result.get("id") or ""),
                     component_package,
@@ -428,13 +448,53 @@ def attach_component_resources(
     return result
 
 
-def resource_display_name(resource: str) -> str:
-    return (
-        str(resource or "")
-        .removeprefix("PrimalItemResource_")
-        .removesuffix("_C")
-        .replace("_", " ")
-    )
+def _humanize_resource_identifier(value: str) -> str:
+    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value.replace("_", " "))
+    words = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", words)
+    return " ".join(words.split())
+
+
+def resource_display_name(
+    resource: str,
+    display_names: Mapping[str, str] | None = None,
+    *,
+    resource_object_path: str = "",
+) -> str:
+    """Return the player-facing item name while preserving class identity elsewhere.
+
+    Names recovered from the DevKit are keyed by the complete object path first,
+    because different packages can legally contain the same generated class name.
+    The deterministic identifier formatter is only a last-resort fallback for
+    missing, modded, or not-yet-indexed item assets.
+    """
+
+    names = display_names or {}
+    for candidate in (resource_object_path, resource):
+        key = str(candidate or "").strip()
+        if not key:
+            continue
+        resolved = names.get(key) or names.get(key.casefold())
+        if resolved:
+            return str(resolved)
+
+    raw = str(resource or "").strip().strip("'\"")
+    leaf = raw.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+    stem = leaf.removesuffix("_C")
+    for prefix in (
+        "PrimalItemResource_",
+        "PrimalItemConsumable_",
+        "PrimalItemStructure_",
+        "PrimalItem_",
+    ):
+        if stem.startswith(prefix):
+            stem = stem.removeprefix(prefix)
+            break
+    parts = [part for part in stem.split("_") if part]
+    if len(parts) >= 2 and parts[0] == "Berry":
+        parts = parts[1:]
+    elif len(parts) >= 2 and parts[0] in {"Seed", "Mushroom"}:
+        parts = [*parts[1:], parts[0]]
+    return _humanize_resource_identifier("_".join(parts))
 
 
 def component_source_freshness(
@@ -488,7 +548,63 @@ def component_source_freshness(
     }
 
 
-def _matches_node_query(node: dict[str, Any], q: str, map_name: str, resource: str) -> bool:
+def normalize_node_filter(
+    value: object,
+    label: str,
+    *,
+    max_length: int = NODE_FILTER_MAX_LENGTH,
+) -> str:
+    normalized = str(value or "").strip()
+    if len(normalized) > max_length:
+        raise ValueError(
+            f"{label} must be at most {max_length} characters"
+        )
+    return normalized
+
+
+def resource_entry_key(item: Mapping[str, Any]) -> str:
+    """Return the exact item identity, with a legacy class-name fallback."""
+
+    object_path = str(item.get("resourceObjectPath") or "").strip()
+    resource_class = str(item.get("resource") or "").strip()
+    explicit_key = str(item.get("resourceKey") or "").strip()
+    return object_path or resource_class or explicit_key
+
+
+def _resource_matches_filter(item: Mapping[str, Any], resource_filter: str) -> bool:
+    folded_filter = resource_filter.casefold()
+    return folded_filter in {
+        resource_entry_key(item).casefold(),
+        str(item.get("resource") or "").strip().casefold(),
+    }
+
+
+def _node_map_usage_families(node: dict[str, Any]) -> list[str]:
+    usage = node.get("mapUsage")
+    if not isinstance(usage, dict):
+        references = node.get("mapReferences")
+        items = references.get("items") if isinstance(references, dict) else []
+        usage = _map_usage_summary(
+            item for item in items if isinstance(item, dict)
+        ) if isinstance(items, list) else _map_usage_summary([])
+    families = usage.get("families")
+    unique: dict[str, str] = {}
+    for item in families if isinstance(families, list) else []:
+        if not isinstance(item, dict):
+            continue
+        family = str(item.get("mapFamily") or "").strip()
+        if family:
+            unique.setdefault(family.casefold(), family)
+    return sorted(unique.values(), key=str.casefold)
+
+
+def _matches_node_query(
+    node: dict[str, Any],
+    q: str,
+    map_name: str,
+    resource: str,
+    only_map_family: str = "",
+) -> bool:
     if q:
         haystack = " ".join(
             [
@@ -529,15 +645,119 @@ def _matches_node_query(node: dict[str, Any], q: str, map_name: str, resource: s
         )
         if not matches_family and not matches_evidence:
             return False
+    if only_map_family:
+        usage_families = _node_map_usage_families(node)
+        if (
+            len(usage_families) != 1
+            or usage_families[0].casefold() != only_map_family.casefold()
+        ):
+            return False
     if resource:
         resource_items = node.get("resources", {}).get("items", [])
         if not any(
-            str(item.get("resource") or "").casefold() == resource.casefold()
+            _resource_matches_filter(item, resource)
             for item in resource_items
             if isinstance(item, dict)
         ):
             return False
     return True
+
+
+def _only_map_family_facets(nodes: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        families = _node_map_usage_families(node)
+        if len(families) != 1:
+            continue
+        family = families[0]
+        item = counts.setdefault(
+            family.casefold(),
+            {"mapFamily": family, "nodeCount": 0},
+        )
+        item["nodeCount"] += 1
+    return sorted(counts.values(), key=lambda item: str(item["mapFamily"]).casefold())
+
+
+def _resource_type_facets(nodes: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        resources = node.get("resources")
+        items = resources.get("items") if isinstance(resources, dict) else []
+        seen_for_node: set[str] = set()
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            resource = str(item.get("resource") or "").strip()
+            resource_key = resource_entry_key(item)
+            folded = resource_key.casefold()
+            if not resource_key or folded in seen_for_node:
+                continue
+            seen_for_node.add(folded)
+            display_name = str(item.get("displayName") or "").strip() or resource_display_name(
+                resource,
+                resource_object_path=str(item.get("resourceObjectPath") or ""),
+            )
+            facet = counts.setdefault(
+                folded,
+                {
+                    "resourceKey": resource_key,
+                    "resource": resource,
+                    "displayName": display_name,
+                    "nodeCount": 0,
+                },
+            )
+            resource_object_path = str(
+                item.get("resourceObjectPath") or ""
+            ).strip()
+            if resource_object_path:
+                facet["resourceObjectPath"] = resource_object_path
+            if display_name.casefold() < str(facet["displayName"]).casefold():
+                facet["displayName"] = display_name
+            facet["nodeCount"] += 1
+    return sorted(
+        counts.values(),
+        key=lambda item: (
+            str(item["displayName"]).casefold(),
+            str(item["resourceKey"]).casefold(),
+        ),
+    )
+
+
+def build_node_filter_metadata(
+    *,
+    q: str,
+    map_name: str,
+    only_map_family: str,
+    resource: str,
+    coverage: object,
+    only_map_families: list[dict[str, Any]],
+    resources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    page_coverage = coverage if isinstance(coverage, dict) else {}
+    map_scan = page_coverage.get("mapScan")
+    claims_complete = bool(
+        map_scan.get("claimsCompleteMapUsage")
+        if isinstance(map_scan, dict)
+        else False
+    )
+    return {
+        "appliedFilters": {
+            "q": q,
+            "map": map_name,
+            "onlyMapFamily": only_map_family,
+            "resource": resource,
+        },
+        "facets": {
+            "mapExclusivity": {
+                "definition": MAP_EXCLUSIVITY_DEFINITION,
+                "claimsCompleteMapUsage": claims_complete,
+                "isGlobalExclusivityClaim": False,
+                "excludedEvidenceKinds": ["AUXILIARY_MAP_EVIDENCE"],
+            },
+            "onlyMapFamilies": only_map_families,
+            "resources": resources,
+        },
+    }
 
 
 def _node_page_preview(node: dict[str, Any]) -> dict[str, Any]:
@@ -546,25 +766,24 @@ def _node_page_preview(node: dict[str, Any]) -> dict[str, Any]:
     maps = [dict(item) for item in map_items if isinstance(item, dict)] if isinstance(map_items, list) else []
     resources = node.get("resources")
     resource_items = resources.get("items") if isinstance(resources, dict) else []
-    recovered_resources = (
-        [
-            {
-                key: item.get(key)
-                for key in (
-                    "entryIndex",
-                    "resource",
-                    "displayName",
-                    "nodeResourceId",
-                    "evidenceStatus",
-                )
-                if key in item
-            }
-            for item in resource_items
-            if isinstance(item, dict)
-        ]
-        if isinstance(resource_items, list)
-        else []
-    )
+    recovered_resources: list[dict[str, Any]] = []
+    for item in resource_items if isinstance(resource_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        preview = {
+            key: item.get(key)
+            for key in (
+                "entryIndex",
+                "resource",
+                "resourceObjectPath",
+                "displayName",
+                "nodeResourceId",
+                "evidenceStatus",
+            )
+            if key in item
+        }
+        preview["resourceKey"] = resource_entry_key(item)
+        recovered_resources.append(preview)
     map_previews = [
         {
             key: item.get(key)
@@ -706,32 +925,65 @@ def query_resource_nodes(
     *,
     q: str = "",
     map_name: str = "",
+    only_map_family: str = "",
     resource: str = "",
     offset: int = 0,
     limit: int = 24,
 ) -> dict[str, Any]:
-    if len(q) > 100:
-        raise ValueError("q must be at most 100 characters")
+    q = normalize_node_filter(q, "q")
+    map_name = normalize_node_filter(map_name, "map")
+    only_map_family = normalize_node_filter(only_map_family, "onlyMapFamily")
+    resource = normalize_node_filter(
+        resource,
+        "resource",
+        max_length=RESOURCE_FILTER_MAX_LENGTH,
+    )
     offset = max(0, int(offset))
     limit = max(1, min(int(limit), NODE_PAGE_MAX_LIMIT))
     nodes = catalog.get("nodes")
     candidates = [node for node in nodes if isinstance(node, dict)] if isinstance(nodes, list) else []
+    matched_without_resource = [
+        node
+        for node in candidates
+        if _matches_node_query(
+            node,
+            q,
+            map_name,
+            "",
+            only_map_family,
+        )
+    ]
     matched = [
-        node for node in candidates if _matches_node_query(node, q.strip(), map_name.strip(), resource.strip())
+        node
+        for node in matched_without_resource
+        if _matches_node_query(node, "", "", resource)
     ]
     matched.sort(key=lambda node: (str(node.get("name") or "").casefold(), str(node.get("id") or "")))
     items = [_node_page_preview(node) for node in matched[offset : offset + limit]]
     next_offset = offset + len(items) if offset + len(items) < len(matched) else None
-    return {
+    page_coverage = _node_page_coverage(catalog.get("coverage"))
+    result = {
         "schema": NODE_PAGE_SCHEMA,
         "dataset": catalog.get("dataset") or {},
-        "coverage": _node_page_coverage(catalog.get("coverage")),
+        "coverage": page_coverage,
         "total": len(matched),
         "offset": offset,
         "limit": limit,
         "nextOffset": next_offset,
         "items": items,
     }
+    result.update(
+        build_node_filter_metadata(
+            q=q,
+            map_name=map_name,
+            only_map_family=only_map_family,
+            resource=resource,
+            coverage=page_coverage,
+            only_map_families=_only_map_family_facets(candidates),
+            resources=_resource_type_facets(matched_without_resource),
+        )
+    )
+    return result
 
 
 def _find_node_and_resource(
@@ -776,15 +1028,26 @@ def rank_node_resource(
         if str(row.get("resource") or "").casefold() != resource_class.casefold():
             continue
         if str(row.get("rankingStatus") or "") != "RANKED" or not isinstance(
-            row.get("engineComparisonIndex"), (int, float)
+            row.get("estimatedYieldPerNode"), (int, float)
         ):
             non_ranked += 1
             continue
-        candidates.append(dict(row))
+        candidate = dict(row)
+        estimated_yield = float(candidate["estimatedYieldPerNode"])
+        legacy_alias = candidate.get("engineComparisonIndex")
+        if isinstance(legacy_alias, (int, float)) and float(legacy_alias) != estimated_yield:
+            legacy_diagnostics = dict(candidate.get("legacyDiagnostics") or {})
+            legacy_diagnostics.setdefault("engineComparisonIndex", legacy_alias)
+            legacy_diagnostics.setdefault(
+                "scoreBasis", "DEPRECATED_ATTACK_CADENCE_COEFFICIENT"
+            )
+            candidate["legacyDiagnostics"] = legacy_diagnostics
+        candidate["engineComparisonIndex"] = estimated_yield
+        candidates.append(candidate)
 
     candidates.sort(
         key=lambda row: (
-            -float(row.get("engineComparisonIndex") or 0.0),
+            -float(row.get("estimatedYieldPerNode") or 0.0),
             str(row.get("creature") or "").casefold(),
             str(row.get("creatureObjectPath") or ""),
             int(row.get("attackIndex") or 0),
@@ -800,8 +1063,14 @@ def rank_node_resource(
         best_by_creature.append(row)
     bounded_limit = max(1, min(int(limit), 10))
     selected = best_by_creature[:bounded_limit]
-    for rank, row in enumerate(selected, start=1):
-        row["rank"] = rank
+    previous_yield: float | None = None
+    competition_rank = 0
+    for ordinal, row in enumerate(selected, start=1):
+        estimated_yield = float(row["estimatedYieldPerNode"])
+        if previous_yield is None or estimated_yield != previous_yield:
+            competition_rank = ordinal
+            previous_yield = estimated_yield
+        row["rank"] = competition_rank
 
     coverage = dict(ranking_report.get("coverage") or {})
     coverage.update(
@@ -825,9 +1094,36 @@ def rank_node_resource(
             "harvestComponentPackagePath": component_package,
         },
         "methodology": {
-            "metric": "engineComparisonIndex",
-            "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
-            "warning": "这是引擎系数比较指数，不是实测每秒产量或最终掉落倍率。",
+            "metric": "estimatedYieldPerNode",
+            "scoreBasis": YIELD_SCORE_BASIS,
+            "formulaVersion": YIELD_MODEL_VERSION,
+            "formula": (
+                "completeNodeGrantCalls * normalizedResourceWeight "
+                "* expectedQuantityPerSelection"
+            ),
+            "warning": (
+                "这是标准化静态条件下一整座新节点的预计资源单位数；"
+                "不是每秒产量，也不是受控游戏实测。"
+            ),
+            "legacyCompatibility": {
+                "engineComparisonIndex": "DEPRECATED_ALIAS_OF_ESTIMATED_YIELD_PER_NODE",
+                "harvestPressurePerSecond": "DIAGNOSTIC_ONLY_NOT_USED_FOR_ORDER",
+            },
+            "normalizedProfile": {
+                "harvestAmountScale": NORMALIZED_HARVEST_AMOUNT_SCALE,
+                "nodeStartState": "FRESH",
+                "nodeCompletion": "FULLY_HARVESTED",
+            },
+            "notIncluded": [
+                "runtime melee stat and damage scaling",
+                "server and runtime harvest multiplier overrides",
+                "Blueprint, buff, gene, and mission hooks",
+                "nonlinear quantity random powers",
+                "bIsSingleUnitHarvest and nonzero additional-effectiveness cases (rows fail closed)",
+                "actual animation wall-clock timing",
+                "nodes hit per swing",
+                "controlled observed yield",
+            ],
         },
         "scopeStatus": "SCANNED_CREATURES_ONLY",
         "claimsGlobalTop": False,

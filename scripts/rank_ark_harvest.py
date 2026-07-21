@@ -21,6 +21,9 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from blueprint_translator.harvest_ranking import (
+    NORMALIZED_HARVEST_AMOUNT_SCALE,
+    YIELD_MODEL_VERSION,
+    YIELD_SCORE_BASIS,
     evaluate_attack_resource,
     extract_creature_attacks,
     extract_harvest_component,
@@ -41,7 +44,7 @@ from blueprint_translator.uasset_graphs import (
 )
 
 
-SCHEMA = "ark-harvest-ranking/v1"
+SCHEMA = "ark-harvest-ranking/v2"
 DEFAULT_DEVKIT_ROOT = Path(r"C:\Program Files\Epic Games\ARKDevkit")
 DEFAULT_CREATURES = [
     {
@@ -63,11 +66,47 @@ DEFAULT_CREATURES = [
 ]
 
 
+def build_methodology() -> dict[str, Any]:
+    """Describe the one metric that is allowed to determine ranking order."""
+
+    return {
+        "metric": "estimatedYieldPerNode",
+        "scoreBasis": YIELD_SCORE_BASIS,
+        "formulaVersion": YIELD_MODEL_VERSION,
+        "usageScope": "UNFILTERED_ENGINE_ATTACKS",
+        "observedYieldPerSecond": None,
+        "formula": (
+            "completeNodeGrantCalls * normalizedResourceWeight "
+            "* expectedQuantityPerSelection"
+        ),
+        "normalizedProfile": {
+            "harvestAmountScale": NORMALIZED_HARVEST_AMOUNT_SCALE,
+            "nodeStartState": "FRESH",
+            "nodeCompletion": "FULLY_HARVESTED",
+        },
+        "legacyCompatibility": {
+            "engineComparisonIndex": "DEPRECATED_ALIAS_OF_ESTIMATED_YIELD_PER_NODE",
+            "harvestPressurePerSecond": "DIAGNOSTIC_ONLY_NOT_USED_FOR_ORDER",
+        },
+        "notIncluded": [
+            "runtime melee stat and damage scaling",
+            "server and runtime harvest multiplier overrides",
+            "Blueprint, buff, gene, and mission hooks",
+            "nonlinear quantity random powers",
+            "bIsSingleUnitHarvest and nonzero additional-effectiveness cases (rows fail closed)",
+            "actual animation wall-clock timing",
+            "nodes hit per swing",
+            "controlled observed yield",
+        ],
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Decode creature attacks, damage-type overrides, and harvest components into a compact "
-            "comparison report. Scores are evidence-bounded engine indices, not observed resource yield."
+            "comparison report. Rankings estimate resource units from one fresh, fully harvested node "
+            "under a normalized static profile; they are not observed yield per second."
         )
     )
     parser.add_argument("--devkit-root", type=Path, default=DEFAULT_DEVKIT_ROOT)
@@ -730,8 +769,22 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
         "resourceWeightShare",
         "overrideQuantityMin",
         "overrideQuantityMax",
+        "overrideQuantityRandomPower",
+        "quantityRandomPowerSource",
+        "quantityOverrideMatch",
+        "estimatedGrantCallsPerNode",
+        "estimatedHitsToDepleteNode",
+        "expectedQuantityPerSelection",
+        "clampResourceHarvestDamage",
+        "normalizedHarvestAmountScale",
+        "yieldModelVersion",
+        "yieldModelBasis",
+        "yieldModelStatus",
+        "yieldModelCaveats",
+        "estimatedYieldPerNode",
         "harvestPressurePerSecond",
         "engineComparisonIndex",
+        "legacyDiagnostics",
         "maxHarvestHealth",
         "harvestHealthGiveResourceInterval",
         "observedYieldPerSecond",
@@ -741,7 +794,21 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
         "warningsByScope",
         "scoreBasis",
     )
-    return {key: row.get(key) for key in keys if key in row}
+    compact = {key: row.get(key) for key in keys if key in row}
+    estimated_yield = compact.get("estimatedYieldPerNode")
+    if isinstance(estimated_yield, (int, float)):
+        legacy_alias = compact.get("engineComparisonIndex")
+        if isinstance(legacy_alias, (int, float)) and float(legacy_alias) != float(
+            estimated_yield
+        ):
+            legacy_diagnostics = dict(compact.get("legacyDiagnostics") or {})
+            legacy_diagnostics.setdefault("engineComparisonIndex", legacy_alias)
+            legacy_diagnostics.setdefault(
+                "scoreBasis", "DEPRECATED_ATTACK_CADENCE_COEFFICIENT"
+            )
+            compact["legacyDiagnostics"] = legacy_diagnostics
+        compact["engineComparisonIndex"] = estimated_yield
+    return compact
 
 
 def build_resource_candidates(
@@ -838,7 +905,7 @@ def _render_resource_view(view: dict[str, Any]) -> list[str]:
     if focus_rows:
         lines.extend(
             [
-                "| Resource | Component | Creature / Attack | Status | Damage | Interval | Dmg× | Qty× | Weight share | Index |",
+                "| Resource | Component | Creature / Attack | Status | Damage | Interval | Dmg× | Qty× | Weight share | 预计整节点产量 |",
                 "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
@@ -856,7 +923,7 @@ def _render_resource_view(view: dict[str, Any]) -> list[str]:
                     damage_multiplier=_number(row.get("damageMultiplier")),
                     quantity_multiplier=_number(row.get("harvestQuantityMultiplier")),
                     share=_number(row.get("resourceWeightShare")),
-                    score=_number(row.get("engineComparisonIndex")),
+                    score=_number(row.get("estimatedYieldPerNode")),
                 )
             )
     else:
@@ -869,7 +936,7 @@ def _render_resource_view(view: dict[str, Any]) -> list[str]:
             "",
             "同系组件只有在所有比较字段一致时才折叠；名称与对象路径均保留。",
             "",
-            "| Component aliases | Creature / Attack | Status | Weight share | Index |",
+            "| Component aliases | Creature / Attack | Status | Weight share | 预计整节点产量 |",
             "| --- | --- | --- | ---: | ---: |",
         ]
     )
@@ -881,7 +948,7 @@ def _render_resource_view(view: dict[str, Any]) -> list[str]:
             f"| {', '.join(str(item) for item in aliases)} | "
             f"{row.get('creature', '-')} / {row.get('attackName', '-')} | "
             f"{row.get('rankingStatus', '-')} | {_number(row.get('resourceWeightShare'))} | "
-            f"{_number(row.get('engineComparisonIndex'))} |"
+            f"{_number(row.get('estimatedYieldPerNode'))} |"
         )
     if not any(
         not focus_component
@@ -904,8 +971,8 @@ def render_markdown(payload: dict[str, Any], *, detail_location: str) -> str:
         f"语义缺口：{payload['coverage']['componentsSemanticGap']}；命中资源组件：{payload['coverage']['componentsMatched']}",
         f"- 生物：{payload['coverage']['creaturesLoaded']}；攻击：{payload['coverage']['attacksDecoded']}",
         "",
-        "> `engineComparisonIndex` 是用于同节点横向比较的推断索引，不是每击产量或资源/秒。",
-        "> `observedYieldPerSecond` 保持为 null，直到补齐运行时公式、服务器倍率和受控实测。",
+        "> 主排名指标 `estimatedYieldPerNode` 表示标准化静态条件下，从一座全新节点完整采完的预计资源单位数。",
+        "> 它不是每秒产量；`engineComparisonIndex` 仅是暂时兼容别名，必须与主指标相同且不参与排序。",
     ]
     resource_views = ai_view.get("resourceViews") or []
     if resource_views:
@@ -936,15 +1003,15 @@ def render_markdown(payload: dict[str, Any], *, detail_location: str) -> str:
             "## 口径",
             "",
             "```text",
-            "harvestPressurePerSecond = baseDamage / attackInterval",
-            "                           * DamageMultiplier",
-            "                           * HarvestQuantityMultiplier",
+            "completeNodeGrantCalls    = native static hit-loop grants until node health reaches zero",
             "resourceWeightShare       = target effective weight / sum(positive effective weights)",
-            "engineComparisonIndex     = harvestPressurePerSecond * resourceWeightShare",
+            "expectedQuantityPerSelection = (OverrideQuantityMin + OverrideQuantityMax) / 2",
+            "estimatedYieldPerNode     = completeNodeGrantCalls * resourceWeightShare",
+            "                            * expectedQuantityPerSelection",
             "```",
             "",
-            "这个索引只在同一 HarvestComponent、同一资源、相同运行时条件下用于排序。",
-            "资源权重是选择权重；攻击范围、实际命中节点数、近战属性、节点剩余生命、服务器倍率和动画实际周期仍需单列。",
+            "这个产量只在同一 HarvestComponent、同一资源、相同标准化运行条件下用于排序。",
+            "资源权重是选择权重；攻击范围、实际命中节点数、近战属性、服务器倍率、蓝图/增益/基因/任务动态钩子和动画实际周期仍需单列。",
             "",
             "## 扫描完整性与组件缺口",
             "",
@@ -980,7 +1047,10 @@ def render_markdown(payload: dict[str, Any], *, detail_location: str) -> str:
                 f"缺失 `{', '.join(item.get('missingFacts') or []) or '-'}`；例：{examples or '-'}"
             )
     else:
-        lines.append("- 当前最佳行没有解析缺口；运行时产量公式仍按设计保持未知。")
+        lines.append(
+            "- 当前最佳行没有解析缺口；完整节点产量已按静态本地模型估算，"
+            "运行时动态钩子仍不在模型内。"
+        )
     lines.extend(
         [
             "",
@@ -1112,24 +1182,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "contentRoot": str(content_root),
         "resources": resources,
         "resourceSelectionMode": selection_mode,
-        "methodology": {
-            "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
-            "formulaVersion": "harvest-engine-comparison-index/v1",
-            "usageScope": "UNFILTERED_ENGINE_ATTACKS",
-            "observedYieldPerSecond": None,
-            "formula": (
-                "baseDamage / attackInterval * DamageMultiplier * HarvestQuantityMultiplier "
-                "* normalizedResourceWeight"
-            ),
-            "notIncluded": [
-                "runtime melee stat scaling",
-                "server harvest multipliers",
-                "node remaining-health clamp",
-                "actual animation wall-clock timing",
-                "nodes hit per swing",
-                "controlled observed yield",
-            ],
-        },
+        "methodology": build_methodology(),
         "coverage": {
             "creaturesRequested": len(creature_specs),
             "creaturesLoaded": len(creatures),
@@ -1241,7 +1294,7 @@ def write_outputs(payload: dict[str, Any], output_dir: Path) -> dict[str, str]:
         json.dumps(
             {
                 "schema": payload["schema"],
-                "querySchema": "ark-harvest-ranking-query/v1",
+                "querySchema": "ark-harvest-ranking-query/v2",
                 "generatedAt": payload["generatedAt"],
                 "datasetRevision": payload.get("datasetRevision"),
                 "scanManifestHash": payload.get("scanManifestHash"),

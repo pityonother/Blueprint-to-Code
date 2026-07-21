@@ -23,6 +23,7 @@ from blueprint_translator.resource_nodes import (  # noqa: E402
     query_resource_nodes,
     rank_node_resource,
     referenced_component_package_paths,
+    resource_display_name,
     resolve_object_reference,
     scan_direct_map_references,
     scan_pcg_map_references,
@@ -42,6 +43,48 @@ def _jpeg(width: int = 32, height: int = 16) -> bytes:
 
 
 class ResourceNodeTests(unittest.TestCase):
+    def test_resource_display_name_prefers_exact_devkit_name_and_keeps_readable_fallbacks(self):
+        names = {
+            "primalitemconsumable_jellyvenom_c": "Bio Toxin",
+            (
+                "/game/aberration/coreblueprints/items/consumables/"
+                "primalitemresource_commonmushroom."
+                "primalitemresource_commonmushroom_c"
+            ): "Aggeravic Mushroom",
+        }
+
+        self.assertEqual(
+            resource_display_name(
+                "PrimalItemConsumable_JellyVenom_C",
+                names,
+            ),
+            "Bio Toxin",
+        )
+        self.assertEqual(
+            resource_display_name(
+                "PrimalItemResource_CommonMushroom_C",
+                names,
+                resource_object_path=(
+                    "/Game/Aberration/CoreBlueprints/Items/Consumables/"
+                    "PrimalItemResource_CommonMushroom."
+                    "PrimalItemResource_CommonMushroom_C"
+                ),
+            ),
+            "Aggeravic Mushroom",
+        )
+        self.assertEqual(
+            resource_display_name("PrimalItemConsumable_Berry_Amarberry_C"),
+            "Amarberry",
+        )
+        self.assertEqual(
+            resource_display_name("PrimalItemConsumable_Seed_Amarberry_C"),
+            "Amarberry Seed",
+        )
+        self.assertEqual(
+            resource_display_name("PrimalItemConsumable_CustomFruit_C"),
+            "Custom Fruit",
+        )
+
     def test_extracts_only_exact_length_prefixed_jpeg_inside_uasset_header(self):
         jpeg = _jpeg(width=48, height=24)
         data = b"prefix" + pack("<I", len(jpeg)) + jpeg + b"payload"
@@ -296,6 +339,7 @@ class ResourceNodeTests(unittest.TestCase):
         self.assertEqual(result["resources"]["count"], 2)
         metal = result["resources"]["items"][1]
         self.assertEqual(metal["resource"], "PrimalItemResource_Metal_C")
+        self.assertEqual(metal["resourceKey"], "PrimalItemResource_Metal_C")
         self.assertEqual(
             metal["nodeResourceId"],
             build_node_resource_id(
@@ -303,6 +347,50 @@ class ResourceNodeTests(unittest.TestCase):
                 "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/MetalHarvestComponent",
                 1,
                 "PrimalItemResource_Metal_C",
+            ),
+        )
+
+    def test_attached_resource_uses_exact_devkit_name_without_changing_class_identity(self):
+        object_path = (
+            "/Game/PrimalEarth/CoreBlueprints/Items/Consumables/"
+            "PrimalItemConsumable_JellyVenom.PrimalItemConsumable_JellyVenom_C"
+        )
+        components = [
+            {
+                "component": "JellyHarvestComponent",
+                "objectPath": (
+                    "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/"
+                    "MetalHarvestComponent.MetalHarvestComponent"
+                ),
+                "resourceEntries": [
+                    {
+                        "entryIndex": 0,
+                        "resource": "PrimalItemConsumable_JellyVenom_C",
+                        "resourceObjectPath": object_path,
+                        "gaps": [],
+                    }
+                ],
+            }
+        ]
+
+        result = attach_component_resources(
+            self._metal_node(),
+            components,
+            display_names={object_path.casefold(): "Bio Toxin"},
+        )
+
+        resource = result["resources"]["items"][0]
+        self.assertEqual(resource["resource"], "PrimalItemConsumable_JellyVenom_C")
+        self.assertEqual(resource["resourceKey"], object_path)
+        self.assertEqual(resource["resourceObjectPath"], object_path)
+        self.assertEqual(resource["displayName"], "Bio Toxin")
+        self.assertEqual(
+            resource["nodeResourceId"],
+            build_node_resource_id(
+                "node-metal",
+                "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/MetalHarvestComponent",
+                0,
+                "PrimalItemConsumable_JellyVenom_C",
             ),
         )
 
@@ -502,10 +590,19 @@ class ResourceNodeTests(unittest.TestCase):
             "schema": "ark-harvest-ranking/v1",
             "coverage": {"creaturesRequested": 4, "creaturesLoaded": 4},
             "bestRows": [
-                self._rank_row("Ankylosaurus", "MetalHarvestComponent", 220.0),
-                self._rank_row("Magmasaur", "MetalHarvestComponent", 480.0),
+                self._rank_row(
+                    "Ankylosaurus", "MetalHarvestComponent", 220.0, legacy_score=9999.0
+                ),
+                self._rank_row(
+                    "Magmasaur", "MetalHarvestComponent", 480.0, legacy_score=1.0
+                ),
                 self._rank_row("Wrong component", "MetalHarvestComponent_Rich", 9999.0),
                 self._rank_row("Wrong resource", "MetalHarvestComponent", 8888.0, resource="PrimalItemResource_Stone_C"),
+                {
+                    **self._rank_row("Legacy only", "MetalHarvestComponent", 7777.0),
+                    "estimatedYieldPerNode": None,
+                    "engineComparisonIndex": 7777.0,
+                },
             ],
         }
 
@@ -518,6 +615,21 @@ class ResourceNodeTests(unittest.TestCase):
         )
 
         self.assertEqual([row["creature"] for row in result["items"]], ["Magmasaur", "Ankylosaurus"])
+        self.assertEqual(
+            [row["estimatedYieldPerNode"] for row in result["items"]],
+            [480.0, 220.0],
+        )
+        self.assertEqual(
+            [row["engineComparisonIndex"] for row in result["items"]],
+            [480.0, 220.0],
+        )
+        self.assertEqual(result["schema"], "blueprint-to-code.harvest-ranking-result/v2")
+        self.assertEqual(result["methodology"]["metric"], "estimatedYieldPerNode")
+        self.assertEqual(
+            result["methodology"]["scoreBasis"],
+            "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE",
+        )
+        self.assertEqual(result["coverage"]["nonRankedForNodeResource"], 1)
         self.assertFalse(result["claimsGlobalTop"])
         self.assertEqual(result["coverage"]["creaturesLoaded"], 4)
         self.assertEqual(result["scopeStatus"], "SCANNED_CREATURES_ONLY")
@@ -902,7 +1014,14 @@ class ResourceNodeTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _rank_row(creature, component, score, *, resource="PrimalItemResource_Metal_C"):
+    def _rank_row(
+        creature,
+        component,
+        score,
+        *,
+        resource="PrimalItemResource_Metal_C",
+        legacy_score=None,
+    ):
         return {
             "creature": creature,
             "component": component,
@@ -912,9 +1031,10 @@ class ResourceNodeTests(unittest.TestCase):
             ),
             "resource": resource,
             "rankingStatus": "RANKED",
-            "engineComparisonIndex": score,
+            "estimatedYieldPerNode": score,
+            "engineComparisonIndex": score if legacy_score is None else legacy_score,
             "attackName": "Attack",
-            "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+            "scoreBasis": "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE",
         }
 
 

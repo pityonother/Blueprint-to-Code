@@ -8,32 +8,42 @@ import math
 from pathlib import Path
 from typing import Any
 
-from .harvest_ranking import rank_harvest_rows
+from .harvest_ranking import (
+    NORMALIZED_HARVEST_AMOUNT_SCALE,
+    YIELD_MODEL_VERSION,
+    YIELD_SCORE_BASIS,
+    rank_harvest_rows,
+)
 
 
 MAX_COMPACT_TOKENS = 12_000
 MAX_DISCOVERIES_PER_RESOURCE = 6
 MAX_COMPONENT_INDEX_ITEMS = 16
-COMPACT_SCHEMA = "ark-harvest-compact/v2"
-EXPECTED_SCORE_BASIS = "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD"
+COMPACT_SCHEMA = "ark-harvest-compact/v3"
+EXPECTED_SCORE_BASIS = YIELD_SCORE_BASIS
 EXPECTED_FORMULA = (
-    "baseDamage / attackInterval * DamageMultiplier * HarvestQuantityMultiplier "
-    "* normalizedResourceWeight"
+    "completeNodeGrantCalls * normalizedResourceWeight * "
+    "expectedQuantityPerSelection"
 )
 EXPECTED_NOT_INCLUDED = [
-    "runtime melee stat scaling",
-    "server harvest multipliers",
-    "node remaining-health clamp",
+    "runtime melee stat and damage scaling",
+    "server and runtime harvest multiplier overrides",
+    "Blueprint, buff, gene, and mission hooks",
+    "nonlinear quantity random powers",
+    "bIsSingleUnitHarvest and nonzero additional-effectiveness cases (rows fail closed)",
     "actual animation wall-clock timing",
     "nodes hit per swing",
     "controlled observed yield",
 ]
 EXPECTED_METHODOLOGY_KEYS = {
+    "metric",
     "scoreBasis",
     "formulaVersion",
     "usageScope",
     "observedYieldPerSecond",
     "formula",
+    "normalizedProfile",
+    "legacyCompatibility",
     "notIncluded",
 }
 
@@ -129,8 +139,22 @@ _COMPACT_ROW_KEYS = (
     "resourceWeightShare",
     "overrideQuantityMin",
     "overrideQuantityMax",
+    "overrideQuantityRandomPower",
+    "quantityRandomPowerSource",
+    "quantityOverrideMatch",
+    "estimatedYieldPerNode",
+    "estimatedGrantCallsPerNode",
+    "estimatedHitsToDepleteNode",
+    "expectedQuantityPerSelection",
+    "clampResourceHarvestDamage",
+    "normalizedHarvestAmountScale",
+    "yieldModelVersion",
+    "yieldModelBasis",
+    "yieldModelStatus",
+    "yieldModelCaveats",
     "harvestPressurePerSecond",
     "engineComparisonIndex",
+    "legacyDiagnostics",
     "maxHarvestHealth",
     "harvestHealthGiveResourceInterval",
     "observedYieldPerSecond",
@@ -157,6 +181,9 @@ _DISCOVERY_KEYS = (
     "harvestQuantityMultiplier",
     "resourceWeightShare",
     "maxHarvestHealth",
+    "estimatedYieldPerNode",
+    "estimatedGrantCallsPerNode",
+    "expectedQuantityPerSelection",
     "engineComparisonIndex",
     "scoreBasis",
 )
@@ -703,7 +730,9 @@ def validate_harvest_report(
     )
     if methodology.get("scoreBasis") != EXPECTED_SCORE_BASIS:
         errors.append("full methodology scoreBasis mismatch")
-    if methodology.get("formulaVersion") != "harvest-engine-comparison-index/v1":
+    if methodology.get("metric") != "estimatedYieldPerNode":
+        errors.append("full methodology metric mismatch")
+    if methodology.get("formulaVersion") != YIELD_MODEL_VERSION:
         errors.append("full methodology formulaVersion mismatch")
     if methodology.get("usageScope") not in {
         "UNFILTERED_ENGINE_ATTACKS",
@@ -716,6 +745,17 @@ def validate_harvest_report(
         errors.append("full methodology must not invent observedYieldPerSecond")
     if methodology.get("formula") != EXPECTED_FORMULA:
         errors.append("full methodology formula mismatch")
+    if methodology.get("normalizedProfile") != {
+        "harvestAmountScale": NORMALIZED_HARVEST_AMOUNT_SCALE,
+        "nodeStartState": "FRESH",
+        "nodeCompletion": "FULLY_HARVESTED",
+    }:
+        errors.append("full methodology normalizedProfile mismatch")
+    if methodology.get("legacyCompatibility") != {
+        "engineComparisonIndex": "DEPRECATED_ALIAS_OF_ESTIMATED_YIELD_PER_NODE",
+        "harvestPressurePerSecond": "DIAGNOSTIC_ONLY_NOT_USED_FOR_ORDER",
+    }:
+        errors.append("full methodology legacyCompatibility mismatch")
     if set(methodology) != EXPECTED_METHODOLOGY_KEYS:
         errors.append("full methodology fields mismatch")
     if methodology.get("notIncluded") != EXPECTED_NOT_INCLUDED:
@@ -735,15 +775,20 @@ def validate_harvest_report(
             errors.append(f"full {key} does not match coverage")
     for index, row in enumerate(full_rows):
         status = str(row.get("rankingStatus") or "")
-        score = row.get("engineComparisonIndex")
+        score = row.get("estimatedYieldPerNode")
+        compatibility_score = row.get("engineComparisonIndex")
         if row.get("observedYieldPerSecond") is not None:
             errors.append(f"full row {index} must not invent observedYieldPerSecond")
         if status == "RANKED" and (
             not isinstance(score, (int, float)) or isinstance(score, bool)
         ):
-            errors.append(f"full row {index} ranked without numeric engineComparisonIndex")
+            errors.append(f"full row {index} ranked without numeric estimatedYieldPerNode")
         if status != "RANKED" and score is not None:
-            errors.append(f"full row {index} non-ranked with engineComparisonIndex")
+            errors.append(f"full row {index} non-ranked with estimatedYieldPerNode")
+        if compatibility_score is not None and compatibility_score != score:
+            errors.append(
+                f"full row {index} deprecated engineComparisonIndex differs from estimatedYieldPerNode"
+            )
 
     selected_best_rows = _selected_best_rows_from_full_rows(full_rows)
     best_rows = [_compact_row(row) for row in selected_best_rows]

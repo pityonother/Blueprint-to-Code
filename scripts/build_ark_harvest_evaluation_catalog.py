@@ -26,7 +26,11 @@ from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
     TAMED_RIDDEN,
     extract_creature_identity,
 )
-from blueprint_translator.harvest_ranking import extract_creature_attacks  # noqa: E402
+from blueprint_translator.harvest_ranking import (  # noqa: E402
+    YIELD_MODEL_VERSION,
+    YIELD_SCORE_BASIS,
+    extract_creature_attacks,
+)
 from blueprint_translator.creature_asset_scan_cache import (  # noqa: E402
     CreatureAssetScanCache,
 )
@@ -51,8 +55,8 @@ DEFAULT_OUTPUT = (
 )
 DEFAULT_AI_OUTPUT = DEFAULT_OUTPUT.with_name("harvest_evaluation_catalog.ai.json")
 DEFAULT_SCAN_CACHE = DEFAULT_OUTPUT.with_name("creature_asset_scan_cache.json")
-AI_SCHEMA = "ark-harvest-evaluation-catalog-ai/v1"
-FORMULA_VERSION = "harvest-engine-comparison-index/v3-entry-attack-ride-aware"
+AI_SCHEMA = "ark-harvest-evaluation-catalog-ai/v2"
+FORMULA_VERSION = YIELD_MODEL_VERSION
 CREATURE_EXTRACTOR_VERSION = "ark-creature-attack-catalog/v3"
 CREATURE_CANDIDATE_PATTERNS = ("*Character*.uasset", "*Char_BP*.uasset")
 PREVIOUS_CREATURE_CANDIDATE_PATTERN = "*Character_BP*.uasset"
@@ -718,7 +722,9 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
             "rideabilityRequirement": "B_ALLOW_RIDING_TRUE",
             "candidateDiscoveryProof": "FILENAME_PATTERN_NOT_GLOBAL_CLASS_REGISTRY",
             "variantGrouping": "DINO_NAME_TAG_THEN_OBJECT_PATH",
-            "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+            "metric": "estimatedYieldPerNode",
+            "scoreBasis": YIELD_SCORE_BASIS,
+            "attackCadenceRole": "DIAGNOSTIC_ONLY_NOT_USED_FOR_COMPLETE_NODE_YIELD",
         },
         "coverage": {
             "candidateDiscovery": {

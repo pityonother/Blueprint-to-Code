@@ -3,15 +3,47 @@
 from __future__ import annotations
 
 from collections import Counter
+import math
 from typing import Any, Iterable
 
-from .harvest_ranking import evaluate_attack_resource
+from .harvest_ranking import (
+    YIELD_MODEL_VERSION,
+    YIELD_SCORE_BASIS,
+    evaluate_attack_resource,
+)
 from .resource_nodes import canonical_package_path
 
 
-EVALUATION_CATALOG_SCHEMA = "ark-harvest-evaluation-catalog/v1"
-RANKING_RESULT_SCHEMA = "blueprint-to-code.harvest-ranking-result/v2"
+EVALUATION_CATALOG_SCHEMA = "ark-harvest-evaluation-catalog/v2"
+RANKING_RESULT_SCHEMA = "blueprint-to-code.harvest-ranking-result/v3"
 TAMED_RIDDEN = "TAMED_RIDDEN"
+
+
+def _estimated_yield(row: dict[str, Any]) -> float | None:
+    """Return the only numeric value allowed to influence ranking order."""
+
+    value = row.get("estimatedYieldPerNode")
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+    ):
+        return None
+    return float(value)
+
+
+def _stable_row_identity(row: dict[str, Any]) -> tuple[str, str, int, str]:
+    """Make equal-yield best-attack and result selection deterministic."""
+
+    attack_index = row.get("attackIndex")
+    return (
+        str(row.get("creature") or "").casefold(),
+        str(row.get("creatureObjectPath") or ""),
+        int(attack_index)
+        if isinstance(attack_index, int) and not isinstance(attack_index, bool)
+        else 0,
+        str(row.get("attackName") or "").casefold(),
+    )
 
 
 def _semantic_property_value(prop: dict[str, Any]) -> Any:
@@ -64,8 +96,10 @@ def prepare_attack_for_usage_scope(
     ``skipTamed``, ``onlyOnWildDinos``, and ``preventWithRider`` are recovered
     negative facts, so they exclude an attack from the tamed-ridden scope.  The
     two ``useBlueprint*`` flags say that native/static defaults are not the whole
-    runtime answer; they do *not* prove that the attack is unavailable.  Such an
-    attack remains numerically evaluable, but carries explicit conditional gaps.
+    runtime answer; they do *not* prove that the attack is unavailable.  They are
+    forwarded as explicit conditional gaps.  The yield evaluator can then fail
+    closed when a runtime hook (notably output-damage adjustment) could change
+    the complete-node result.
     """
 
     if usage_scope != TAMED_RIDDEN:
@@ -307,9 +341,8 @@ class HarvestEvaluationEngine:
                 )
                 disposition = str(row.get("rankingStatus") or "UNRANKED")
                 dispositions[disposition] += 1
-                if disposition != "RANKED" or not isinstance(
-                    row.get("engineComparisonIndex"), (int, float)
-                ):
+                score = _estimated_yield(row)
+                if disposition != "RANKED" or score is None:
                     continue
                 if condition_reasons:
                     conditionally_ranked_attacks += 1
@@ -363,31 +396,53 @@ class HarvestEvaluationEngine:
                     }
                 )
                 current = best_by_species.get(species_key)
-                if current is None or float(row["engineComparisonIndex"]) > float(
-                    current["engineComparisonIndex"]
+                current_score = (
+                    _estimated_yield(current) if current is not None else None
+                )
+                if (
+                    current is None
+                    or current_score is None
+                    or score > current_score
+                    or (
+                        score == current_score
+                        and _stable_row_identity(row) < _stable_row_identity(current)
+                    )
                 ):
                     best_by_species[species_key] = row
 
         ranked = sorted(
             best_by_species.values(),
             key=lambda row: (
-                -float(row.get("engineComparisonIndex") or 0.0),
-                str(row.get("creature") or "").casefold(),
-                str(row.get("creatureObjectPath") or ""),
-                int(row.get("attackIndex") or 0),
+                -float(_estimated_yield(row) or 0.0),
+                *_stable_row_identity(row),
             ),
         )
+        previous_score: float | None = None
+        previous_rank = 0
+        ranked_with_positions: list[dict[str, Any]] = []
+        for ordinal, source_row in enumerate(ranked, start=1):
+            row = dict(source_row)
+            score = _estimated_yield(row)
+            if score is None:
+                continue
+            if previous_score is None or score != previous_score:
+                previous_rank = ordinal
+                previous_score = score
+            row["rank"] = previous_rank
+            ranked_with_positions.append(row)
+
         bounded_limit = max(1, min(int(limit), 10))
-        selected = [dict(row) for row in ranked[:bounded_limit]]
+        selected = ranked_with_positions[:bounded_limit]
         top_score = (
-            float(ranked[0].get("engineComparisonIndex") or 0.0) if ranked else 0.0
+            _estimated_yield(ranked_with_positions[0])
+            if ranked_with_positions
+            else 0.0
         )
-        for ordinal, row in enumerate(selected, start=1):
-            row["rank"] = ordinal
-            score = float(row.get("engineComparisonIndex") or 0.0)
+        for row in selected:
+            score = _estimated_yield(row) or 0.0
             row["relativeToNodeTopPercent"] = (
                 round(min(100.0, max(0.0, score / top_score * 100.0)), 3)
-                if top_score > 0
+                if top_score is not None and top_score > 0
                 else 0.0
             )
             row["rankingTier"] = (
@@ -414,29 +469,29 @@ class HarvestEvaluationEngine:
                 "creatureAssetsExcludedFromScope": sum(excluded_creatures.values()),
                 "attacksExcludedByCreatureScope": attacks_excluded_by_creature_scope,
                 "excludedCreatureByReason": dict(sorted(excluded_creatures.items())),
-                "rankedForNodeResource": len(ranked),
+                "rankedForNodeResource": len(ranked_with_positions),
                 "rankedSpeciesWithUnknownTameability": sum(
                     1
-                    for row in ranked
+                    for row in ranked_with_positions
                     if row.get("tameabilityStatus") != "ALLOWED"
                 ),
                 "rankedSpeciesWithUnknownRideability": sum(
                     1
-                    for row in ranked
+                    for row in ranked_with_positions
                     if row.get("rideabilityStatus") != "ALLOWED"
                 ),
                 "rankedSpeciesConfirmed": sum(
                     1
-                    for row in ranked
+                    for row in ranked_with_positions
                     if row.get("evidence", {}).get("status") == "CONFIRMED"
                 ),
                 "rankedSpeciesConditional": sum(
                     1
-                    for row in ranked
+                    for row in ranked_with_positions
                     if row.get("evidence", {}).get("status") != "CONFIRMED"
                 ),
                 "returned": len(selected),
-                "omitted": max(0, len(ranked) - len(selected)),
+                "omitted": max(0, len(ranked_with_positions) - len(selected)),
             }
         )
         complete_scope = coverage.get("claimsAllCreatures") is True
@@ -464,14 +519,26 @@ class HarvestEvaluationEngine:
             },
             "methodology": {
                 **dict(self.catalog.get("methodology") or {}),
-                "metric": "engineComparisonIndex",
-                "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
-                "relativeBasis": "ENGINE_INDEX_DIVIDED_BY_NODE_RESOURCE_TOP_SCORE",
-                "conditionalEstimatePolicy": (
-                    "DYNAMIC_BLUEPRINT_GATES_AND_DAMAGE_ADJUSTMENTS_USE_STATIC_"
-                    "RECOVERED_FACTS_AND_MUST_REMAIN_CONDITIONAL"
+                "formulaVersion": YIELD_MODEL_VERSION,
+                "metric": "estimatedYieldPerNode",
+                "scoreBasis": YIELD_SCORE_BASIS,
+                "relativeBasis": (
+                    "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE_DIVIDED_BY_"
+                    "NODE_RESOURCE_TOP_YIELD"
                 ),
-                "warning": "这是引擎系数比较指数，不是实测每秒产量或最终掉落倍率。",
+                "tiePolicy": "COMPETITION_RANK_FOR_EQUAL_ESTIMATED_YIELD_1_1_3",
+                "engineComparisonIndexPolicy": (
+                    "COMPATIBILITY_ALIAS_EQUAL_TO_ESTIMATED_YIELD_PER_NODE_"
+                    "NEVER_USED_FOR_ORDERING"
+                ),
+                "conditionalEstimatePolicy": (
+                    "BLUEPRINT_OUTPUT_DAMAGE_HOOKS_FAIL_CLOSED;OTHER_DYNAMIC_"
+                    "ATTACK_GATES_REMAIN_CONDITIONAL"
+                ),
+                "warning": (
+                    "排名按一个完整新鲜资源点的预计目标资源产量排序；这是静态标准化模型，"
+                    "不是服务器环境下的实测产量。"
+                ),
             },
             "scopeStatus": (
                 "ALL_DISCOVERED_CREATURES_EVALUATED"

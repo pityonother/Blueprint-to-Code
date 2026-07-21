@@ -26,23 +26,35 @@ class HarvestReportValidationTests(unittest.TestCase):
     def setUp(self):
         self.full_path = Path("reports/harvest_ranking_metal.full.json")
         self.full = {
-            "schema": "ark-harvest-ranking/v1",
+            "schema": "ark-harvest-ranking/v2",
             "generatedAt": "2026-07-20T00:00:00+00:00",
             "resources": ["Metal_C"],
             "resourceSelectionMode": "EXPLICIT",
             "methodology": {
-                "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
-                "formulaVersion": "harvest-engine-comparison-index/v1",
+                "metric": "estimatedYieldPerNode",
+                "scoreBasis": "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE",
+                "formulaVersion": "harvest-estimated-yield-per-node/v1-native-static-profile",
                 "usageScope": "UNFILTERED_ENGINE_ATTACKS",
                 "observedYieldPerSecond": None,
                 "formula": (
-                    "baseDamage / attackInterval * DamageMultiplier * "
-                    "HarvestQuantityMultiplier * normalizedResourceWeight"
+                    "completeNodeGrantCalls * normalizedResourceWeight * "
+                    "expectedQuantityPerSelection"
                 ),
+                "normalizedProfile": {
+                    "harvestAmountScale": 2.0,
+                    "nodeStartState": "FRESH",
+                    "nodeCompletion": "FULLY_HARVESTED",
+                },
+                "legacyCompatibility": {
+                    "engineComparisonIndex": "DEPRECATED_ALIAS_OF_ESTIMATED_YIELD_PER_NODE",
+                    "harvestPressurePerSecond": "DIAGNOSTIC_ONLY_NOT_USED_FOR_ORDER",
+                },
                 "notIncluded": [
-                    "runtime melee stat scaling",
-                    "server harvest multipliers",
-                    "node remaining-health clamp",
+                    "runtime melee stat and damage scaling",
+                    "server and runtime harvest multiplier overrides",
+                    "Blueprint, buff, gene, and mission hooks",
+                    "nonlinear quantity random powers",
+                    "bIsSingleUnitHarvest and nonzero additional-effectiveness cases (rows fail closed)",
                     "actual animation wall-clock timing",
                     "nodes hit per swing",
                     "controlled observed yield",
@@ -76,7 +88,12 @@ class HarvestReportValidationTests(unittest.TestCase):
                     "creature": "Magmasaur",
                     "attackName": "Bite",
                     "rankingStatus": "RANKED",
-                    "engineComparisonIndex": 293.5,
+                    "estimatedYieldPerNode": 33.0,
+                    "quantityRandomPowerSource": "RESOURCE_ENTRY_DEFAULT",
+                    "quantityOverrideMatch": "NONE",
+                    "clampResourceHarvestDamage": True,
+                    "yieldModelBasis": "STATIC_COMPLETE_NODE",
+                    "engineComparisonIndex": 33.0,
                     "observedYieldPerSecond": None,
                 },
                 {
@@ -86,7 +103,8 @@ class HarvestReportValidationTests(unittest.TestCase):
                     "attackName": "Tail",
                     "rankingStatus": "UNRANKED",
                     "reasonCode": "REQUIRED_ATTACK_FACT_NOT_RECOVERED",
-                    "missingFacts": ["AttackInterval"],
+                    "missingFacts": ["MaxHarvestHealth"],
+                    "estimatedYieldPerNode": None,
                     "engineComparisonIndex": None,
                     "observedYieldPerSecond": None,
                 },
@@ -97,6 +115,7 @@ class HarvestReportValidationTests(unittest.TestCase):
                     "attackName": "Tail",
                     "rankingStatus": "INCOMPATIBLE",
                     "reasonCode": "ZERO_RESOURCE_WEIGHT",
+                    "estimatedYieldPerNode": None,
                     "engineComparisonIndex": None,
                     "observedYieldPerSecond": None,
                 },
@@ -108,7 +127,8 @@ class HarvestReportValidationTests(unittest.TestCase):
                     "creature": "Magmasaur",
                     "attackName": "Bite",
                     "rankingStatus": "RANKED",
-                    "engineComparisonIndex": 293.5,
+                    "estimatedYieldPerNode": 33.0,
+                    "engineComparisonIndex": 33.0,
                     "observedYieldPerSecond": None,
                 },
                 {
@@ -118,7 +138,8 @@ class HarvestReportValidationTests(unittest.TestCase):
                     "attackName": "Tail",
                     "rankingStatus": "UNRANKED",
                     "reasonCode": "REQUIRED_ATTACK_FACT_NOT_RECOVERED",
-                    "missingFacts": ["AttackInterval"],
+                    "missingFacts": ["MaxHarvestHealth"],
+                    "estimatedYieldPerNode": None,
                     "engineComparisonIndex": None,
                     "observedYieldPerSecond": None,
                 },
@@ -129,6 +150,7 @@ class HarvestReportValidationTests(unittest.TestCase):
                     "attackName": "Tail",
                     "rankingStatus": "INCOMPATIBLE",
                     "reasonCode": "ZERO_RESOURCE_WEIGHT",
+                    "estimatedYieldPerNode": None,
                     "engineComparisonIndex": None,
                     "observedYieldPerSecond": None,
                 },
@@ -190,8 +212,8 @@ class HarvestReportValidationTests(unittest.TestCase):
         self.full["scanManifestHash"] = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
         self.full.update(build_ranking_revision_fields(self.full))
         self.ai = {
-            "schema": "ark-harvest-ranking/v1",
-            "compactSchema": "ark-harvest-compact/v2",
+            "schema": "ark-harvest-ranking/v2",
+            "compactSchema": "ark-harvest-compact/v3",
             "generatedAt": self.full["generatedAt"],
             "resources": ["Metal_C"],
             "methodology": self.full["methodology"],
@@ -243,13 +265,23 @@ class HarvestReportValidationTests(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["compression"]["characterReductionPct"], 90.0)
 
-    def test_changed_focus_coefficient_is_rejected(self):
-        self.ai["resourceViews"][0]["focusRows"][0]["engineComparisonIndex"] = 999.0
+    def test_changed_focus_yield_is_rejected(self):
+        self.ai["resourceViews"][0]["focusRows"][0]["estimatedYieldPerNode"] = 999.0
 
         result = self.validate()
 
         self.assertFalse(result["valid"])
         self.assertTrue(any("resourceViews" in error for error in result["errors"]))
+
+    def test_conflicting_deprecated_engine_alias_is_rejected(self):
+        self.full["rows"][0]["engineComparisonIndex"] = 999.0
+
+        result = self.validate()
+
+        self.assertFalse(result["valid"])
+        self.assertTrue(
+            any("differs from estimatedYieldPerNode" in error for error in result["errors"])
+        )
 
     def test_missing_focus_row_is_rejected(self):
         focus = self.ai["resourceViews"][0]["focusRows"]
@@ -358,6 +390,7 @@ class HarvestReportValidationTests(unittest.TestCase):
             "attackIndex": 2,
             "attackName": "Bite",
             "rankingStatus": "RANKED",
+            "estimatedYieldPerNode": 52.0,
             "engineComparisonIndex": 52.0,
             "observedYieldPerSecond": None,
         }
@@ -549,6 +582,7 @@ class HarvestReportValidationTests(unittest.TestCase):
                 "rankingStatus": "INCOMPATIBLE",
                 "reasonCode": "DAMAGE_TYPE_NOT_ACCEPTED",
                 "potentialAttackRate": 130.0,
+                "estimatedYieldPerNode": None,
                 "engineComparisonIndex": None,
                 "observedYieldPerSecond": None,
             }

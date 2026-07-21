@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Use an implementation independent of the production ranking formula "
-            "to verify eligibility, engineComparisonIndex, and Top-N ordering."
+            "to verify eligibility, estimatedYieldPerNode, and Top-N ordering."
         )
     )
     parser.add_argument("--node-catalog", type=Path, default=DEFAULT_NODE_CATALOG)

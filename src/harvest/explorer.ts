@@ -2,11 +2,13 @@ import { fetchHarvestJson } from './api';
 import { HarvestBuildControl } from './build-control';
 import { HarvestCreatureExplorer } from './creatures';
 import type {
+  HarvestMapFilterMode,
   HarvestNode,
   HarvestNodeDetail,
   HarvestNodePage,
   HarvestRankingResult,
   HarvestResourceEntry,
+  HarvestResourceTypeFacet,
 } from './types';
 
 
@@ -37,7 +39,10 @@ function displayMapFamily(value: string): string {
     TheIsland: 'The Island',
     TestMaps: '测试地图',
   };
-  return labels[value] || value.replaceAll('_', ' ');
+  const canonical = Object.keys(labels).find(
+    (candidate) => candidate.toLowerCase() === value.toLowerCase(),
+  );
+  return (canonical ? labels[canonical] : '') || value.replaceAll('_', ' ');
 }
 
 
@@ -85,8 +90,46 @@ function formatScore(value: number | undefined): string {
 }
 
 
+function hasEstimatedYieldMetric(ranking: HarvestRankingResult): boolean {
+  return ranking.methodology.metric === 'estimatedYieldPerNode'
+    || ranking.items.some(
+      (row) => typeof row.estimatedYieldPerNode === 'number'
+        && Number.isFinite(row.estimatedYieldPerNode),
+    );
+}
+
+
+function resourceClassDisplayName(resource: string): string {
+  return resource
+    .replace(/^PrimalItemResource_/, '')
+    .replace(/_C$/, '')
+    .replaceAll('_', ' ');
+}
+
+
+function resourceClassFromFilter(value: string): string {
+  const normalized = value.trim().replace(/^BlueprintGeneratedClass'/, '').replace(/'$/, '');
+  return normalized.split('.').at(-1) || normalized.split('/').at(-1) || normalized;
+}
+
+
+function resourceFilterDisplayName(value: string): string {
+  return resourceClassDisplayName(resourceClassFromFilter(value));
+}
+
+
+function resourceFacetKey(resource: HarvestResourceTypeFacet): string {
+  return resource.resourceKey || resource.resourceObjectPath || resource.resource;
+}
+
+
+function sameResourceIdentity(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+
 function resourceName(resource: HarvestResourceEntry): string {
-  return resource.displayName || resource.resource.replace('PrimalItemResource_', '').replace(/_C$/, '');
+  return resource.displayName || resourceClassDisplayName(resource.resource);
 }
 
 
@@ -234,6 +277,7 @@ function rowEvidence(row: HarvestRankingResult['items'][number]): string {
 export function renderHarvestRankingResult(ranking: HarvestRankingResult): string {
   const rows = ranking.items || [];
   const coverage = ranking.coverage || {};
+  const isEstimatedYield = hasEstimatedYieldMetric(ranking);
   const isV2 = ranking.schema.endsWith('/v2') || ranking.claimsCompleteWithinScope !== undefined;
   const completeWithinScope = ranking.claimsCompleteWithinScope === true;
   const scopeTitle = completeWithinScope ? '已扫描范围完整 Top 10' : '已扫描范围 Top 10';
@@ -297,17 +341,36 @@ export function renderHarvestRankingResult(ranking: HarvestRankingResult): strin
     coverage.attacksUnranked,
     coverage.attacksIncompatible,
   );
+  const heading = isEstimatedYield ? '完整节点预计产量排行' : '旧版比较指数排行（非产量）';
+  const caption = isEstimatedYield
+    ? '所选节点和资源内，一整个完整节点的预计产量'
+    : '旧版响应中的比较指数；该数值不代表完整节点产量';
+  const metricLabel = isEstimatedYield ? '预计产量/完整节点' : '旧版比较指数';
+  const relativeLabel = isEstimatedYield
+    ? '相对本节点最高预计产量'
+    : '相对旧版指数榜首';
+  const warning = isEstimatedYield
+    ? ranking.methodology.warning
+    : `旧版响应：以下数值仅为旧版比较指数，不代表完整节点产量。${ranking.methodology.warning ? ` ${ranking.methodology.warning}` : ''}`;
+  const emptyState = isEstimatedYield
+    ? '当前扫描范围内没有可按完整节点预计产量排名的记录；未知和不兼容记录没有被当成 0。'
+    : '旧版响应中没有可显示的比较指数记录；未知和不兼容记录没有被当成 0。';
+  const scopeHint = isEstimatedYield
+    ? ranking.claimsGlobalTop
+      ? '该响应声明完整节点预计产量的全局排行。'
+      : '这是本地 DevKit 与当前使用范围内的完整节点预计产量排行；它不是受控游戏实测值。'
+    : '这是旧版比较指数响应，不应解释为完整节点产量排行或游戏实测产量排行。';
 
   return `
     <div class="harvest-detail-section harvest-ranking">
       <div class="harvest-ranking-heading">
         <div>
           <p class="eyebrow">${escapeHtml(scopeTitle)}</p>
-          <h3>${escapeHtml(resourceName(ranking.resource))}：引擎比较指数排行</h3>
+          <h3>${escapeHtml(resourceName(ranking.resource))}：${escapeHtml(heading)}</h3>
         </div>
         <span class="status-pill ${scopeClass}">${escapeHtml(scopeLabel)}</span>
       </div>
-      <p class="harvest-warning">${escapeHtml(ranking.methodology.warning)}</p>
+      <p class="harvest-warning">${escapeHtml(warning)}</p>
       <div class="harvest-coverage-grid" aria-label="本次排行覆盖范围">
         ${metricCard('候选生物', candidates)}
         ${metricCard('生物资产', creatureAssets)}
@@ -317,8 +380,11 @@ export function renderHarvestRankingResult(ranking: HarvestRankingResult): strin
         ${metricCard('排除', excluded)}
       </div>
       ${rows.length
-        ? `<div class="harvest-table-wrap"><table class="harvest-ranking-table"><caption>所选节点和资源内，当前已扫描范围的引擎比较指数</caption><thead><tr><th scope="col">名次</th><th scope="col">生物</th><th scope="col">攻击与间隔</th><th scope="col">比较指数</th><th scope="col">证据</th></tr></thead><tbody>${rows.map((row) => `<tr><td><span class="rank-number">${escapeHtml(row.rank)}</span></td><td><strong>${escapeHtml(row.creature)}</strong>${row.dinoNameTag ? `<small>DinoNameTag：${escapeHtml(row.dinoNameTag)}</small>` : ''}${countValue(row.variantCount) !== null && Number(row.variantCount) > 1 ? `<small>${escapeHtml(formatCount(countValue(row.variantCount)))} 个变体归为同一物种</small>` : ''}${row.rideabilityStatus === 'ALLOWED' ? '<small>可骑乘已确认</small>' : ''}${row.tameabilityStatus === 'UNKNOWN' ? '<small>可驯服性尚未恢复</small>' : ''}</td><td class="harvest-attack-cell">${intervalCell(row)}</td><td class="score-cell">${formatScore(row.engineComparisonIndex)}${typeof row.relativeToNodeTopPercent === 'number' ? `<small>相对本节点最强 ${formatScore(row.relativeToNodeTopPercent)}%</small>` : ''}</td><td>${rowEvidence(row)}</td></tr>`).join('')}</tbody></table></div>`
-        : '<div class="empty-state">当前扫描范围内没有可排名记录；未知和不兼容记录没有被当成 0。</div>'}
+        ? `<div class="harvest-table-wrap"><table class="harvest-ranking-table"><caption>${escapeHtml(caption)}</caption><thead><tr><th scope="col">名次</th><th scope="col">生物</th><th scope="col">攻击与间隔</th><th scope="col">${escapeHtml(metricLabel)}</th><th scope="col">证据</th></tr></thead><tbody>${rows.map((row) => {
+          const score = isEstimatedYield ? row.estimatedYieldPerNode : row.engineComparisonIndex;
+          return `<tr><td><span class="rank-number">${escapeHtml(row.rank)}</span></td><td><strong>${escapeHtml(row.creature)}</strong>${row.dinoNameTag ? `<small>DinoNameTag：${escapeHtml(row.dinoNameTag)}</small>` : ''}${countValue(row.variantCount) !== null && Number(row.variantCount) > 1 ? `<small>${escapeHtml(formatCount(countValue(row.variantCount)))} 个变体归为同一物种</small>` : ''}${row.rideabilityStatus === 'ALLOWED' ? '<small>可骑乘已确认</small>' : ''}${row.tameabilityStatus === 'UNKNOWN' ? '<small>可驯服性尚未恢复</small>' : ''}</td><td class="harvest-attack-cell">${intervalCell(row)}</td><td class="score-cell">${formatScore(score)}${typeof row.relativeToNodeTopPercent === 'number' ? `<small>${escapeHtml(relativeLabel)} ${formatScore(row.relativeToNodeTopPercent)}%</small>` : ''}</td><td>${rowEvidence(row)}</td></tr>`;
+        }).join('')}</tbody></table></div>`
+        : `<div class="empty-state">${escapeHtml(emptyState)}</div>`}
       ${rows.length < 10 ? `<p class="hint">当前只有 ${escapeHtml(rows.length)} 条可排名记录，不足 10 条；不会用未知值补齐。</p>` : ''}
       <div class="harvest-ranking-details">
         <details>
@@ -340,7 +406,7 @@ export function renderHarvestRankingResult(ranking: HarvestRankingResult): strin
             <div><dt>公式版本</dt><dd><code>${escapeHtml(ranking.methodology.formulaVersion || '旧版报告未标记')}</code></dd></div>
           </dl>
           ${blockers.length ? `<ul class="harvest-blocker-list">${blockers.map((value) => `<li><code>${escapeHtml(value)}</code></li>`).join('')}</ul>` : ''}
-          <p class="hint">${ranking.claimsGlobalTop ? '该响应声明全局排行。' : '这是本地 DevKit 与当前使用范围内的比较，不声称全游戏实测产量 Top 10。'}</p>
+          <p class="hint">${escapeHtml(scopeHint)}</p>
         </details>
       </div>
     </div>
@@ -388,6 +454,196 @@ export function renderHarvestDatasetBar(page: HarvestNodePage): string {
 }
 
 
+export interface HarvestNodeFilterState {
+  query: string;
+  mapFamily: string;
+  mapMode: HarvestMapFilterMode;
+  resource: string;
+}
+
+export interface HarvestNodeSearchState extends HarvestNodeFilterState {
+  offset: number;
+  limit: number;
+}
+
+
+export function buildHarvestNodeSearchParams(
+  state: HarvestNodeSearchState,
+): URLSearchParams {
+  const params = new URLSearchParams();
+  if (state.query) {
+    params.set('q', state.query);
+  }
+  if (state.mapFamily) {
+    if (state.mapMode === 'evidenceExclusive') {
+      params.set('onlyMapFamily', state.mapFamily);
+    } else {
+      params.set('map', state.mapFamily);
+    }
+  }
+  if (state.resource) {
+    params.set('resource', state.resource);
+  }
+  params.set('offset', String(Math.max(0, state.offset)));
+  params.set('limit', String(Math.max(1, state.limit)));
+  return params;
+}
+
+
+export function renderHarvestNodeFilterForm(
+  page: HarvestNodePage | null,
+  state: HarvestNodeFilterState,
+): string {
+  const exclusiveCounts = new Map(
+    (page?.facets?.onlyMapFamilies || []).map((item) => [
+      item.mapFamily.toLowerCase(),
+      item.nodeCount,
+    ]),
+  );
+  const mapOptionsByKey = new Map<string, string>();
+  [
+    ...(page?.coverage.mapScan?.mapFamilies || []),
+    ...(page?.facets?.onlyMapFamilies || []).map((item) => item.mapFamily),
+    ...(state.mapFamily ? [state.mapFamily] : []),
+  ].forEach((family) => {
+    const key = family.toLowerCase();
+    if (!mapOptionsByKey.has(key)) {
+      mapOptionsByKey.set(key, family);
+    }
+  });
+  const mapOptions = Array.from(mapOptionsByKey.values()).sort(
+    (left, right) => left.localeCompare(right),
+  );
+  const selectedMapKey = state.mapFamily.toLowerCase();
+  const resourceOptionsByKey = new Map<string, HarvestResourceTypeFacet>();
+  (page?.facets?.resources || []).forEach((item) => {
+    const key = resourceFacetKey(item).trim();
+    if (key && !resourceOptionsByKey.has(key.toLowerCase())) {
+      resourceOptionsByKey.set(key.toLowerCase(), item);
+    }
+  });
+  const resourceOptions = Array.from(resourceOptionsByKey.values());
+  const exactSelectedResource = state.resource
+    ? resourceOptions.find((item) => sameResourceIdentity(resourceFacetKey(item), state.resource))
+    : undefined;
+  const legacyClassMatches = state.resource && !exactSelectedResource
+    ? resourceOptions.filter((item) => sameResourceIdentity(item.resource, state.resource))
+    : [];
+  let selectedResourceKey = exactSelectedResource
+    ? resourceFacetKey(exactSelectedResource)
+    : state.resource;
+  if (state.resource && !exactSelectedResource && legacyClassMatches.length === 1) {
+    selectedResourceKey = resourceFacetKey(legacyClassMatches[0]);
+  } else if (state.resource && !exactSelectedResource && legacyClassMatches.length > 1) {
+    resourceOptions.push({
+      resourceKey: state.resource,
+      resource: state.resource,
+      displayName: `${resourceFilterDisplayName(state.resource)}（全部同名蓝图）`,
+      nodeCount: page?.total ?? 0,
+    });
+  } else if (state.resource && !exactSelectedResource && legacyClassMatches.length === 0) {
+    resourceOptions.push({
+      resourceKey: state.resource,
+      resource: resourceClassFromFilter(state.resource),
+      displayName: resourceFilterDisplayName(state.resource),
+      nodeCount: 0,
+    });
+  }
+  resourceOptions.sort((left, right) => (
+    (left.displayName || left.resource).localeCompare(right.displayName || right.resource)
+    || resourceFacetKey(left).localeCompare(resourceFacetKey(right))
+  ));
+  const mapModeDisabled = !state.mapFamily;
+  const exclusiveSelected = state.mapMode === 'evidenceExclusive' && !mapModeDisabled;
+  const evidenceNote = mapModeDisabled
+    ? '请先选择地图，再选择匹配方式。'
+    : exclusiveSelected
+      ? '“当前证据仅此地图”表示已恢复的正式可玩地图家族只有所选地图；地图使用证据尚未声明完整时，不代表该节点在全游戏中绝对不会出现在其他地图。测试和工具地图不参与该筛选。'
+      : '“包含所选地图”会保留同时在其他地图出现的节点。';
+  return `
+    <form class="harvest-search panel" data-harvest-search>
+      <label for="harvest-query">搜索与筛选资源节点</label>
+      <div class="harvest-search-row">
+        <input id="harvest-query" name="q" value="${escapeHtml(state.query)}" placeholder="例如 MetalRock、UmbrellaTree" autocomplete="off">
+        <button class="button primary" type="submit">搜索</button>
+      </div>
+      <div class="harvest-filter-grid">
+        <label for="harvest-map-filter">地图家族
+          <select id="harvest-map-filter" name="mapFilter">
+            <option value="">全部地图证据</option>
+            ${mapOptions.map((family) => {
+              const exclusiveCount = exclusiveCounts.get(family.toLowerCase());
+              const countLabel = state.mapMode === 'evidenceExclusive' && exclusiveCount !== undefined
+                ? ` · ${formatCount(exclusiveCount)} 个节点`
+                : '';
+              return `<option value="${escapeHtml(family)}" ${family.toLowerCase() === selectedMapKey ? 'selected' : ''}>${escapeHtml(displayMapFamily(family))}${escapeHtml(countLabel)}</option>`;
+            }).join('')}
+          </select>
+        </label>
+        <label for="harvest-map-mode">地图匹配方式
+          <select id="harvest-map-mode" name="mapMode" aria-describedby="harvest-exclusive-map-note" ${mapModeDisabled ? 'disabled' : ''}>
+            <option value="contains" ${!exclusiveSelected ? 'selected' : ''}>包含所选地图</option>
+            <option value="evidenceExclusive" ${exclusiveSelected ? 'selected' : ''}>当前证据仅此地图</option>
+          </select>
+        </label>
+        <label for="harvest-resource-filter">包含资源类型
+          <select id="harvest-resource-filter" name="resourceFilter">
+            <option value="">全部资源类型</option>
+            ${resourceOptions.map((item) => {
+              const key = resourceFacetKey(item);
+              return `<option value="${escapeHtml(key)}" ${sameResourceIdentity(key, selectedResourceKey) ? 'selected' : ''}>${escapeHtml(item.displayName || item.resource)} · ${escapeHtml(formatCount(item.nodeCount))} 个节点 — ${escapeHtml(item.resource)}</option>`;
+            }).join('')}
+          </select>
+        </label>
+      </div>
+      <p id="harvest-exclusive-map-note" class="harvest-filter-note ${exclusiveSelected ? 'warn' : ''}">${escapeHtml(evidenceNote)}</p>
+    </form>
+  `;
+}
+
+
+export function renderHarvestNodeEmptyState(
+  page: HarvestNodePage | null,
+  state: HarvestNodeFilterState,
+): string {
+  const conditions: string[] = [];
+  if (state.query) {
+    conditions.push(`搜索“${state.query}”`);
+  }
+  if (state.mapFamily) {
+    const mapName = displayMapFamily(state.mapFamily);
+    conditions.push(
+      state.mapMode === 'evidenceExclusive'
+        ? `当前证据仅属于 ${mapName}`
+        : `地图证据包含 ${mapName}`,
+    );
+  }
+  if (state.resource) {
+    const resourceFacets = page?.facets?.resources || [];
+    const exactResourceFacet = resourceFacets.find(
+      (item) => sameResourceIdentity(resourceFacetKey(item), state.resource),
+    );
+    const legacyResourceFacets = exactResourceFacet
+      ? []
+      : resourceFacets.filter((item) => sameResourceIdentity(item.resource, state.resource));
+    const resourceFacet = exactResourceFacet
+      || (legacyResourceFacets.length === 1 ? legacyResourceFacets[0] : undefined);
+    conditions.push(
+      `包含 ${resourceFacet?.displayName || resourceFilterDisplayName(state.resource)}`,
+    );
+  }
+  if (!conditions.length) {
+    return '<div class="empty-state">当前数据库中没有可显示的资源节点。</div>';
+  }
+  return `
+    <div class="empty-state">
+      <p>当前数据库证据中，没有同时满足这些条件的资源节点：${escapeHtml(conditions.join('、'))}。</p>
+      <button class="button secondary" type="button" data-harvest-action="clear-filters">清除全部条件</button>
+    </div>
+  `;
+}
+
+
 export class HarvestExplorer {
   private mode: 'nodes' | 'creatures' | 'build' = 'nodes';
   private readonly creatureExplorer: HarvestCreatureExplorer;
@@ -397,6 +653,7 @@ export class HarvestExplorer {
   private ranking: HarvestRankingResult | null = null;
   private query = '';
   private mapFilter = '';
+  private mapMode: HarvestMapFilterMode = 'contains';
   private resourceFilter = '';
   private offset = 0;
   private loadingPage = false;
@@ -419,7 +676,9 @@ export class HarvestExplorer {
       ? requestedMode
       : 'nodes';
     this.query = params.get('q') || '';
-    this.mapFilter = params.get('mapFilter') || '';
+    const onlyMapFamily = params.get('onlyMapFamily') || '';
+    this.mapFilter = onlyMapFamily || params.get('mapFilter') || '';
+    this.mapMode = onlyMapFamily ? 'evidenceExclusive' : 'contains';
     this.resourceFilter = params.get('resourceFilter') || '';
     this.creatureExplorer = new HarvestCreatureExplorer(requestRender);
     this.buildControl = new HarvestBuildControl(requestRender);
@@ -467,10 +726,6 @@ export class HarvestExplorer {
   }
 
   private renderNodeExplorer(): string {
-    const mapOptions = Array.from(new Set([
-      ...(this.page?.coverage.mapScan?.mapFamilies || []),
-      ...(this.mapFilter ? [this.mapFilter] : []),
-    ])).sort((left, right) => left.localeCompare(right));
     return `
       <section class="harvest-hero" aria-labelledby="harvest-title">
         <div>
@@ -481,28 +736,17 @@ export class HarvestExplorer {
         <button class="button ghost" type="button" data-harvest-action="refresh">重新读取索引</button>
       </section>
       ${this.renderDatasetBar()}
-      <form class="harvest-search panel" data-harvest-search>
-        <label for="harvest-query">搜索与筛选资源节点</label>
-        <div class="harvest-search-row">
-          <input id="harvest-query" name="q" value="${escapeHtml(this.query)}" placeholder="例如 MetalRock、UmbrellaTree" autocomplete="off">
-          <button class="button primary" type="submit">搜索</button>
-        </div>
-        <div class="harvest-filter-grid">
-          <label>地图家族
-            <select id="harvest-map-filter" name="mapFilter">
-              <option value="">全部地图证据</option>
-              ${mapOptions.map((family) => `<option value="${escapeHtml(family)}" ${family === this.mapFilter ? 'selected' : ''}>${escapeHtml(displayMapFamily(family))}</option>`).join('')}
-            </select>
-          </label>
-          <label>产出资源类
-            <input id="harvest-resource-filter" name="resourceFilter" value="${escapeHtml(this.resourceFilter)}" placeholder="例如 PrimalItemResource_Metal_C" autocomplete="off">
-          </label>
-        </div>
-      </form>
+      ${renderHarvestNodeFilterForm(this.page, {
+        query: this.query,
+        mapFamily: this.mapFilter,
+        mapMode: this.mapMode,
+        resource: this.resourceFilter,
+      })}
       <div class="harvest-live" aria-live="polite">
         ${this.loadingPage ? '正在读取资源节点…' : ''}
         ${this.loadingNode ? '正在读取节点详情…' : ''}
         ${this.loadingRanking ? '正在计算所选资源的排行…' : ''}
+        ${!this.loadingPage && !this.loadingNode && !this.loadingRanking && this.page ? `共找到 ${this.page.total} 个节点。` : ''}
       </div>
       ${this.error ? this.renderError() : ''}
       <div class="harvest-explorer-grid">
@@ -544,19 +788,21 @@ export class HarvestExplorer {
     }
     document.querySelector<HTMLFormElement>('[data-harvest-search]')?.addEventListener('submit', (event) => {
       event.preventDefault();
+      this.cancelPendingSearch();
       const input = document.querySelector<HTMLInputElement>('#harvest-query');
       const mapInput = document.querySelector<HTMLSelectElement>('#harvest-map-filter');
-      const resourceInput = document.querySelector<HTMLInputElement>('#harvest-resource-filter');
+      const mapModeInput = document.querySelector<HTMLSelectElement>('#harvest-map-mode');
+      const resourceInput = document.querySelector<HTMLSelectElement>('#harvest-resource-filter');
       this.query = input?.value.trim() || '';
       this.mapFilter = mapInput?.value.trim() || '';
+      this.mapMode = this.mapFilter && mapModeInput?.value === 'evidenceExclusive'
+        ? 'evidenceExclusive'
+        : 'contains';
       this.resourceFilter = resourceInput?.value.trim() || '';
-      this.offset = 0;
-      this.selectedNode = null;
-      this.ranking = null;
+      this.resetNodeSelection();
       this.updateUrl({
         q: this.query,
-        mapFilter: this.mapFilter,
-        resourceFilter: this.resourceFilter,
+        ...this.nodeFilterUrlValues(),
         node: '',
         resource: '',
       });
@@ -567,10 +813,9 @@ export class HarvestExplorer {
       const value = (event.currentTarget as HTMLInputElement).value;
       window.clearTimeout(this.searchTimer);
       this.searchTimer = window.setTimeout(() => {
+        this.searchTimer = 0;
         this.query = value.trim();
-        this.offset = 0;
-        this.selectedNode = null;
-        this.ranking = null;
+        this.resetNodeSelection();
         this.updateUrl({ q: this.query, node: '', resource: '' });
         void this.loadNodes();
       }, 300);
@@ -578,10 +823,42 @@ export class HarvestExplorer {
 
     document.querySelector<HTMLSelectElement>('#harvest-map-filter')?.addEventListener('change', (event) => {
       this.mapFilter = (event.currentTarget as HTMLSelectElement).value.trim();
-      this.offset = 0;
-      this.selectedNode = null;
-      this.ranking = null;
-      this.updateUrl({ mapFilter: this.mapFilter, node: '', resource: '' });
+      if (!this.mapFilter) {
+        this.mapMode = 'contains';
+      }
+      this.resourceFilter = '';
+      this.resetNodeSelection();
+      this.updateUrl({
+        ...this.nodeFilterUrlValues(),
+        node: '',
+        resource: '',
+      });
+      void this.loadNodes();
+    });
+
+    document.querySelector<HTMLSelectElement>('#harvest-map-mode')?.addEventListener('change', (event) => {
+      const requestedMode = (event.currentTarget as HTMLSelectElement).value;
+      this.mapMode = this.mapFilter && requestedMode === 'evidenceExclusive'
+        ? 'evidenceExclusive'
+        : 'contains';
+      this.resourceFilter = '';
+      this.resetNodeSelection();
+      this.updateUrl({
+        ...this.nodeFilterUrlValues(),
+        node: '',
+        resource: '',
+      });
+      void this.loadNodes();
+    });
+
+    document.querySelector<HTMLSelectElement>('#harvest-resource-filter')?.addEventListener('change', (event) => {
+      this.resourceFilter = (event.currentTarget as HTMLSelectElement).value.trim();
+      this.resetNodeSelection();
+      this.updateUrl({
+        ...this.nodeFilterUrlValues(),
+        node: '',
+        resource: '',
+      });
       void this.loadNodes();
     });
 
@@ -604,6 +881,22 @@ export class HarvestExplorer {
         if (button.dataset.harvestAction === 'refresh' || button.dataset.harvestAction === 'retry') {
           this.error = '';
           this.ensureLoaded(true);
+        } else if (button.dataset.harvestAction === 'clear-filters') {
+          this.cancelPendingSearch();
+          this.query = '';
+          this.mapFilter = '';
+          this.mapMode = 'contains';
+          this.resourceFilter = '';
+          this.resetNodeSelection();
+          this.updateUrl({
+            q: '',
+            mapFilter: '',
+            onlyMapFamily: '',
+            resourceFilter: '',
+            node: '',
+            resource: '',
+          });
+          void this.loadNodes();
         }
       });
     });
@@ -634,7 +927,12 @@ export class HarvestExplorer {
       return `
         <section class="panel harvest-node-pane">
           <div class="panel-heading"><h2>资源节点</h2></div>
-          <div class="empty-state">没有找到匹配的资源节点。</div>
+          ${renderHarvestNodeEmptyState(this.page, {
+            query: this.query,
+            mapFamily: this.mapFilter,
+            mapMode: this.mapMode,
+            resource: this.resourceFilter,
+          })}
         </section>
       `;
     }
@@ -765,12 +1063,13 @@ export class HarvestExplorer {
     this.error = '';
     this.requestRender();
     try {
-      const params = new URLSearchParams({
-        q: this.query,
-        map: this.mapFilter,
+      const params = buildHarvestNodeSearchParams({
+        query: this.query,
+        mapFamily: this.mapFilter,
+        mapMode: this.mapMode,
         resource: this.resourceFilter,
-        offset: String(this.offset),
-        limit: '16',
+        offset: this.offset,
+        limit: 16,
       });
       const page = await fetchHarvestJson<HarvestNodePage>(
         `/api/harvest/nodes?${params.toString()}`,
@@ -897,6 +1196,7 @@ export class HarvestExplorer {
   private updateUrl(values: {
     q?: string;
     mapFilter?: string;
+    onlyMapFamily?: string;
     resourceFilter?: string;
     node?: string;
     resource?: string;
@@ -911,5 +1211,28 @@ export class HarvestExplorer {
       }
     });
     window.history.replaceState({}, '', url);
+  }
+
+  private nodeFilterUrlValues(): {
+    mapFilter: string;
+    onlyMapFamily: string;
+    resourceFilter: string;
+  } {
+    return {
+      mapFilter: this.mapMode === 'contains' ? this.mapFilter : '',
+      onlyMapFamily: this.mapMode === 'evidenceExclusive' ? this.mapFilter : '',
+      resourceFilter: this.resourceFilter,
+    };
+  }
+
+  private resetNodeSelection(): void {
+    this.offset = 0;
+    this.selectedNode = null;
+    this.ranking = null;
+  }
+
+  private cancelPendingSearch(): void {
+    window.clearTimeout(this.searchTimer);
+    this.searchTimer = 0;
   }
 }

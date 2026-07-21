@@ -171,18 +171,60 @@ class HarvestHttpContractTests(unittest.TestCase):
 
     def test_query_helpers_bound_limits_and_forward_exact_node_resource_identity(self):
         with patch.object(tool_server, "HARVEST_REPOSITORY", _FakeRepository()):
-            page = query_harvest_nodes_for_request("q=metal&limit=999&offset=2")
+            page = query_harvest_nodes_for_request(
+                "q=metal&onlyMapFamily=TheIsland&"
+                "resource=PrimalItemResource_Metal_C&limit=999&offset=2"
+            )
             node = query_harvest_node_for_request("node-metal")
             ranking = query_harvest_ranking_for_request(
                 "nodeId=node-metal&nodeResourceId=node-resource-metal&limit=99"
             )
 
         self.assertEqual(page["arguments"]["q"], "metal")
+        self.assertEqual(page["arguments"]["only_map_family"], "TheIsland")
+        self.assertEqual(
+            page["arguments"]["resource"],
+            "PrimalItemResource_Metal_C",
+        )
         self.assertEqual(page["arguments"]["limit"], 16)
         self.assertEqual(page["arguments"]["offset"], 2)
         self.assertEqual(node["id"], "node-metal")
         self.assertEqual(ranking["resource"]["nodeResourceId"], "node-resource-metal")
         self.assertEqual(ranking["limit"], 10)
+
+    def test_invalid_node_filter_is_returned_as_bounded_client_error(self):
+        class _RejectingRepository(_FakeRepository):
+            def list_nodes(self, **kwargs):
+                raise ValueError("private validation detail")
+
+        with patch.object(tool_server, "HARVEST_REPOSITORY", _RejectingRepository()):
+            with self.assertRaises(tool_server.ApiProblem) as raised:
+                query_harvest_nodes_for_request(
+                    f"onlyMapFamily={'x' * 101}"
+                )
+
+        self.assertEqual(raised.exception.status, 400)
+        self.assertEqual(
+            raised.exception.payload,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_NODE_FILTER",
+                "error": "Invalid resource-node filter.",
+            },
+        )
+
+    def test_invalid_dataset_keeps_service_unavailable_error_semantics(self):
+        class _InvalidDatasetRepository(_FakeRepository):
+            def list_nodes(self, **kwargs):
+                raise tool_server.HarvestDatasetInvalid("private dataset detail")
+
+        with patch.object(tool_server, "HARVEST_REPOSITORY", _InvalidDatasetRepository()):
+            with self.assertRaises(tool_server.ApiProblem) as raised:
+                query_harvest_nodes_for_request("onlyMapFamily=TheIsland")
+
+        self.assertEqual(raised.exception.status, 503)
+        self.assertEqual(raised.exception.payload["code"], "HARVEST_DATASET_INVALID")
+        self.assertNotIn("private dataset detail", raised.exception.payload["error"])
 
     def test_creature_query_helpers_bound_pagination_and_keep_exact_species_identity(self):
         with patch.object(tool_server, "HARVEST_REPOSITORY", _FakeRepository()):

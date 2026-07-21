@@ -22,6 +22,9 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from blueprint_translator.harvest_node_repository import HarvestNodeRepository  # noqa: E402
 from blueprint_translator.harvest_catalog_sqlite import SQLiteHarvestCatalog  # noqa: E402
+from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
+    EVALUATION_CATALOG_SCHEMA,
+)
 from blueprint_translator.harvest_report_validation import validate_harvest_report  # noqa: E402
 
 
@@ -321,7 +324,7 @@ def plan_commands(
 def _expected_query_payload(full_payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": full_payload.get("schema"),
-        "querySchema": "ark-harvest-ranking-query/v1",
+        "querySchema": "ark-harvest-ranking-query/v2",
         "generatedAt": full_payload.get("generatedAt"),
         "datasetRevision": full_payload.get("datasetRevision"),
         "scanManifestHash": full_payload.get("scanManifestHash"),
@@ -355,7 +358,7 @@ def validate_staged_dataset(args: argparse.Namespace) -> dict[str, Any]:
 
     evaluation_text = paths["evaluation"].read_text(encoding="utf-8")
     evaluation_payload = json.loads(evaluation_text)
-    if evaluation_payload.get("schema") != "ark-harvest-evaluation-catalog/v1":
+    if evaluation_payload.get("schema") != EVALUATION_CATALOG_SCHEMA:
         raise ValueError("Staged evaluation catalog schema is invalid.")
     evaluation_dataset = evaluation_payload.get("dataset")
     evaluation_revision = (
@@ -384,7 +387,7 @@ def validate_staged_dataset(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Staged evaluation catalog exceeds the 8 MiB performance budget.")
 
     evaluation_ai = json.loads(paths["evaluationAi"].read_text(encoding="utf-8"))
-    if evaluation_ai.get("schema") != "ark-harvest-evaluation-catalog-ai/v1":
+    if evaluation_ai.get("schema") != "ark-harvest-evaluation-catalog-ai/v2":
         raise ValueError("Staged evaluation AI summary schema is invalid.")
     if evaluation_ai.get("dataset") != evaluation_dataset:
         raise ValueError("Staged evaluation AI summary does not match the detail catalog.")
@@ -394,7 +397,7 @@ def validate_staged_dataset(args: argparse.Namespace) -> dict[str, Any]:
     )
     if (
         independent_verification.get("schema")
-        != "blueprint-to-code.harvest-independent-verification/v1"
+        != "blueprint-to-code.harvest-independent-verification/v2"
         or independent_verification.get("status") != "PASS"
     ):
         raise ValueError("Staged independent ranking verification did not pass.")

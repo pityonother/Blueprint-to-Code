@@ -40,6 +40,7 @@ from blueprint_translator.resource_node_scan_cache import ResourceNodeScanCache 
 from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
     EVALUATION_CATALOG_SCHEMA,
 )
+from rank_ark_harvest import AssetReader, build_class_index  # noqa: E402
 
 
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -75,6 +76,7 @@ DEFAULT_SAMPLE_NODES = (
     "PrimalEarth/Environment/Shared/Rocks/MetalRocks/Meshes/"
     "SM_MetalRock_01_settings.uasset",
 )
+RESOURCE_NAME_CATALOG_SCHEMA = "ark-resource-name-catalog/v1"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -205,6 +207,275 @@ def _logical_path(path: Path, content_root: Path) -> str:
         return f"/Game/{relative}"
     except ValueError:
         return path.stem
+
+
+def _discover_resource_item_candidates(
+    content_root: Path,
+    *,
+    prefer_rg: bool = True,
+) -> tuple[list[Path], str]:
+    resolved_root = content_root.resolve()
+    rg = shutil.which("rg") if prefer_rg else None
+    if rg:
+        completed = subprocess.run(
+            [rg, "--files", "-g", "PrimalItem*.uasset", str(resolved_root)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode in {0, 1}:
+            return (
+                sorted(
+                    {
+                        Path(line.strip()).resolve()
+                        for line in completed.stdout.splitlines()
+                        if line.strip()
+                    }
+                ),
+                "RIPGREP",
+            )
+
+    candidates: list[Path] = []
+    for directory, _subdirectories, filenames in os.walk(resolved_root):
+        base = Path(directory)
+        for filename in filenames:
+            if filename.startswith("PrimalItem") and filename.endswith(".uasset"):
+                candidates.append((base / filename).resolve())
+    return sorted(set(candidates)), "OS_WALK"
+
+
+def _resource_class_stem(resource: object) -> str:
+    leaf = str(resource or "").strip().strip("'\"").rsplit("/", 1)[-1]
+    return leaf.rsplit(".", 1)[-1].removesuffix("_C")
+
+
+def _resource_asset_from_object_path(
+    object_path: object,
+    content_root: Path,
+) -> Path | None:
+    text = str(object_path or "").strip().strip("'\"").replace("\\", "/")
+    game_index = text.find("/Game/")
+    if game_index < 0:
+        return None
+    package = text[game_index:].split("'", 1)[0].split(".", 1)[0]
+    relative = package.removeprefix("/Game/")
+    if not relative:
+        return None
+    resolved_root = content_root.resolve()
+    candidate = (resolved_root / Path(relative + ".uasset")).resolve()
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _effective_resource_name(
+    path: Path,
+    *,
+    content_root: Path,
+    reader: Any,
+    class_index: dict[str, Path],
+) -> dict[str, Any] | None:
+    properties, source_chain = reader.effective_defaults(path, class_index)
+    for property_name in ("DescriptiveNameBase", "ItemName"):
+        row = next(
+            (
+                item
+                for item in properties
+                if isinstance(item, dict)
+                and str(item.get("name") or "") == property_name
+                and str(item.get("value") or "").strip()
+            ),
+            None,
+        )
+        if not isinstance(row, dict):
+            continue
+        display_name = str(row.get("value") or "").strip()
+        source_path = path.resolve()
+        for candidate in reversed(source_chain):
+            defaults = reader.defaults(candidate)
+            variables = defaults.get("variables") if isinstance(defaults, dict) else {}
+            variable = variables.get(property_name) if isinstance(variables, dict) else None
+            if (
+                isinstance(variable, dict)
+                and str(variable.get("value") or "").strip() == display_name
+            ):
+                source_path = candidate.resolve()
+                break
+        return {
+            "displayName": display_name,
+            "propertyName": property_name,
+            "confidence": str(row.get("confidence") or "unknown"),
+            "sourceAsset": _logical_path(source_path, content_root),
+            "sourceChain": [
+                _logical_path(candidate, content_root) for candidate in source_chain
+            ],
+        }
+    return None
+
+
+def _build_resource_name_catalog(
+    components: list[dict[str, Any]],
+    *,
+    content_root: Path,
+    candidate_paths: list[Path] | None = None,
+    reader: Any | None = None,
+) -> dict[str, Any]:
+    """Resolve player-facing item names from exact DevKit Blueprint defaults."""
+
+    if candidate_paths is None:
+        candidates, discovery_backend = _discover_resource_item_candidates(content_root)
+    else:
+        candidates = sorted({path.resolve() for path in candidate_paths})
+        discovery_backend = "SUPPLIED"
+    asset_reader = reader or AssetReader()
+    class_index = build_class_index(candidates, content_root=content_root)
+    candidates_by_stem: dict[str, list[Path]] = {}
+    for path in candidates:
+        candidates_by_stem.setdefault(path.stem.casefold(), []).append(path)
+
+    requested: dict[tuple[str, str], dict[str, str]] = {}
+    for component in components:
+        entries = component.get("resourceEntries") if isinstance(component, dict) else []
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            resource = str(entry.get("resource") or "").strip()
+            object_path = str(entry.get("resourceObjectPath") or "").strip()
+            if not resource:
+                continue
+            key = (object_path.casefold(), resource.casefold())
+            requested.setdefault(
+                key,
+                {"resource": resource, "resourceObjectPath": object_path},
+            )
+
+    items: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for request in sorted(
+        requested.values(),
+        key=lambda item: (
+            str(item["resource"]).casefold(),
+            str(item["resourceObjectPath"]).casefold(),
+        ),
+    ):
+        resource = request["resource"]
+        object_path = request["resourceObjectPath"]
+        stem = _resource_class_stem(resource)
+        class_candidates = candidates_by_stem.get(stem.casefold(), [])
+        exact_path = _resource_asset_from_object_path(object_path, content_root)
+        if object_path:
+            if exact_path is not None and exact_path.is_file():
+                selected_paths = [exact_path]
+            else:
+                failures.append(
+                    {
+                        **request,
+                        "reasonCode": "RESOURCE_ITEM_OBJECT_PATH_NOT_FOUND",
+                        "candidateAssets": [
+                            _logical_path(path, content_root)
+                            for path in class_candidates[:10]
+                        ],
+                    }
+                )
+                continue
+        elif len(class_candidates) == 1:
+            selected_paths = class_candidates
+        else:
+            selected_paths = []
+
+        if not selected_paths:
+            failures.append(
+                {
+                    **request,
+                    "reasonCode": (
+                        "AMBIGUOUS_RESOURCE_ITEM_CLASS"
+                        if len(class_candidates) > 1
+                        else "RESOURCE_ITEM_ASSET_NOT_FOUND"
+                    ),
+                    "candidateAssets": [
+                        _logical_path(path, content_root) for path in class_candidates[:10]
+                    ],
+                }
+            )
+            continue
+        selected = selected_paths[0]
+        try:
+            resolved = _effective_resource_name(
+                selected,
+                content_root=content_root,
+                reader=asset_reader,
+                class_index=class_index,
+            )
+        except Exception as exc:
+            failures.append(
+                {
+                    **request,
+                    "reasonCode": "RESOURCE_ITEM_NAME_DECODE_FAILED",
+                    "detail": str(exc)[:300],
+                }
+            )
+            continue
+        if not resolved:
+            failures.append(
+                {
+                    **request,
+                    "reasonCode": "RESOURCE_ITEM_DISPLAY_NAME_NOT_RECOVERED",
+                    "candidateAssets": [_logical_path(selected, content_root)],
+                }
+            )
+            continue
+        items.append(
+            {
+                **request,
+                **resolved,
+                "assetObjectPath": _logical_path(selected, content_root),
+                "classNameAmbiguous": len(class_candidates) > 1,
+            }
+        )
+
+    return {
+        "schema": RESOURCE_NAME_CATALOG_SCHEMA,
+        "status": "CONFIRMED" if len(items) == len(requested) else "PARTIAL",
+        "source": "ARK_DEVKIT_EFFECTIVE_CLASS_DEFAULTS",
+        "coverage": {
+            "requested": len(requested),
+            "resolved": len(items),
+            "unresolved": len(failures),
+            "candidateAssets": len(candidates),
+            "discoveryBackend": discovery_backend,
+        },
+        "items": items,
+        "failures": failures,
+    }
+
+
+def _resource_name_lookup(catalog: dict[str, Any]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    class_names: dict[str, set[str]] = {}
+    ambiguous_classes: set[str] = set()
+    items = catalog.get("items") if isinstance(catalog, dict) else []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        resource = str(item.get("resource") or "").strip()
+        object_path = str(item.get("resourceObjectPath") or "").strip()
+        display_name = str(item.get("displayName") or "").strip()
+        if not resource or not display_name:
+            continue
+        if object_path:
+            lookup[object_path.casefold()] = display_name
+        resource_key = resource.casefold()
+        class_names.setdefault(resource_key, set()).add(display_name)
+        if item.get("classNameAmbiguous") is True:
+            ambiguous_classes.add(resource_key)
+    for resource_key, names in class_names.items():
+        if resource_key not in ambiguous_classes and len(names) == 1:
+            lookup[resource_key] = next(iter(names))
+    return lookup
 
 
 def _discover_node_candidates(
@@ -534,6 +805,11 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
         evaluation_catalog = raw_evaluation
     paths, discovery_mode, candidate_discovery = discover_node_paths(args, content_root)
     components = component_facts_from_report(ranking_report)
+    resource_name_catalog = _build_resource_name_catalog(
+        components,
+        content_root=content_root,
+    )
+    resource_display_names = _resource_name_lookup(resource_name_catalog)
     component_index = {
         canonical_package_path(component.get("objectPath")).casefold(): component
         for component in components
@@ -584,7 +860,11 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
                     args.image_cache_root.resolve(),
                     skip_images=bool(args.skip_images),
                 )
-                node = attach_component_resources(node, components)
+                node = attach_component_resources(
+                    node,
+                    components,
+                    display_names=resource_display_names,
+                )
                 component_package = canonical_package_path(
                     component.get("packagePath") if isinstance(component, dict) else ""
                 )
@@ -890,6 +1170,7 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
             **evaluation_coverage_summary,
             "claimsAllNodes": False,
         },
+        "resourceNames": resource_name_catalog,
         "nodes": sorted(
             nodes,
             key=lambda item: (str(item.get("name") or "").casefold(), str(item.get("id") or "")),

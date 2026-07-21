@@ -11,7 +11,7 @@
 - 直接从 `.uasset` / `.uexp` 读取可恢复的 EdGraph、K2 节点、Pins 和连线。
 - 兼容传统剪贴板图页输入，二进制读取失败的图页可单独补采。
 - 默认生成规范化 `evidence.sqlite` 和不超过 1,500 estimated tokens 的 `agent_index.md`；需要时按稳定 Evidence ID 查询 Node、Pin、Wire、Default 和缺口。
-- 可一键构建全 Content Foliage/Foliage Actor 资源点、精确 HarvestComponent、资源条目、`.umap + PCG + World Partition` 三层地图使用证据、缩略图、SQLite 查询索引和紧凑生物攻击目录；支持“节点资源 Top 10”与“某只恐龙擅长什么”的双向惰性查询，不生成生物 × 节点资源的笛卡尔积报告。
+- 可一键构建全 Content Foliage/Foliage Actor 资源点、精确 HarvestComponent、资源条目、`.umap + PCG + World Partition` 三层地图使用证据、缩略图、SQLite 查询索引和紧凑生物攻击目录；资源条目保留完整 Blueprint Object Path，并从 DevKit 有效继承默认值恢复 `DescriptiveNameBase`（例如 `JellyVenom → Bio Toxin`），不再把技术类名当玩家名称；支持“节点资源 Top 10”与“某只恐龙擅长什么”的双向惰性查询，不生成生物 × 节点资源的笛卡尔积报告。
 - 可显式生成 `asset_report.md`、`behavior_summary.md`、`diagnostics_report.md`、`call_graph_summary.md` 等 legacy 人类报告。
 - 提供本地 Web 控制中心和一键启动脚本，方便非程序用户使用。
 - Full local web control center, one-click Windows launcher, packaged Python runtime, and focused reports for Blueprint behavior review.
@@ -123,7 +123,7 @@ For the combined local app without the PowerShell launcher:
 npm run control
 ```
 
-资源点采集 Explorer 位于 `http://127.0.0.1:8765/?view=harvest`。它提供资源点正向 Top 10、恐龙反向强项、地图/资源过滤和可取消的数据构建页；完整口径、当前正式产物和九阶段状态见 [`docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)。
+资源点采集 Explorer 位于 `http://127.0.0.1:8765/?view=harvest`。它提供资源点正向 Top 10、恐龙反向强项、地图包含/“当前证据仅此地图”与资源类型联动过滤，以及可取消的数据构建页。排行主指标是标准化静态环境下的 `estimatedYieldPerNode`（预计目标资源单位/完整节点）；攻击间隔只作速度诊断，不再决定总产量顺序。资源下拉框以 DevKit 玩家名称为主标签、完整 Blueprint Object Path 为筛选身份、短 class 为辅助核对和旧链接兼容信息；完整口径、证据边界、当前正式产物和九阶段状态见 [`docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)。
 
 ## Token-Safe Report Reading
 
@@ -147,7 +147,7 @@ Every response states the whole-response token estimate, returned/omitted counts
 
 Default-value entities also expose `valueStatus`, `valueUsable`, bounded parse metadata, and resolved object names/fields. An `ArrayProperty` with `value=[]` is a confirmed empty array only when its parse metadata says `parsed=true`; when `parsed=false`, the same placeholder is `NOT_RECOVERED`, appears in `overview/gaps`, and is excluded from semantic knowledge imports and behavior comparisons. This prevents token compression from silently turning missing data into a false “empty” fact.
 
-Cross-asset ARK harvesting comparisons use the same rule at batch scale. `scripts/rank_ark_harvest.py` writes a complete `.full.json`, a compatibility `.query.json`, and an `ark-harvest-compact/v2` AI view for Component/resource evidence. Explicit resource runs get one bounded `resourceView` per resource; `--all-resources` gets a bounded `resourceIndex` so dozens of resource classes still stay below the context limit. Compact output retains all-row unknown summaries, component-scan gaps, returned/omitted counts, source/manifest fingerprints, and an exact sibling `detailLocation` for on-demand drill-down. `scripts/verify_ark_harvest_report.py` independently re-derives best rows, resource candidates, scan/source coverage, and the entire expected compact view from full; it requires exact equality, a smaller-than-full result, and at most 12,000 estimated tokens.
+Cross-asset ARK harvesting comparisons use the same rule at batch scale. `scripts/rank_ark_harvest.py` writes a complete `.full.json`, a compatibility `.query.json`, and an `ark-harvest-compact/v3` AI view for Component/resource evidence. Explicit resource runs get one bounded `resourceView` per resource; `--all-resources` gets a bounded `resourceIndex` so dozens of resource classes still stay below the context limit. Compact output retains all-row unknown summaries, component-scan gaps, returned/omitted counts, source/manifest fingerprints, and an exact sibling `detailLocation` for on-demand drill-down. `scripts/verify_ark_harvest_report.py` independently re-derives best rows, resource candidates, scan/source coverage, and the entire expected compact view from full; it requires exact equality, a smaller-than-full result, and at most 12,000 estimated tokens.
 
 The current Resource Explorer keeps a separate `harvest_evaluation_catalog.json` instead of expanding the Component reports into a Cartesian product. The verified 2026-07-21 local dataset discovered 2,088 `*Character* + *Char_BP*` candidates, confirmed 1,406 `PrimalDinoCharacter` assets, grouped 280 species, and decoded 3,586 attacks. It also contains 1,328 resource-node definitions, including the real `FoliageType_Actor` counterexample, and 9,100 exact node-resource entries. Node list/detail/filter reads use a generated SQLite companion that is SHA-256-bound to the canonical node JSON; a mismatch fails closed.
 

@@ -20,14 +20,19 @@ from typing import Any, Iterator
 from .resource_nodes import (
     NODE_PAGE_MAX_LIMIT,
     NODE_PAGE_SCHEMA,
+    RESOURCE_FILTER_MAX_LENGTH,
     _node_page_coverage,
     _node_page_preview,
+    build_node_filter_metadata,
+    normalize_node_filter,
+    resource_entry_key,
+    resource_display_name,
 )
 
 
-SQLITE_CATALOG_SCHEMA = "ark-harvest-sqlite/v1"
+SQLITE_CATALOG_SCHEMA = "ark-harvest-sqlite/v2"
 SOURCE_CATALOG_SCHEMA = "ark-resource-node-catalog/v1"
-SQLITE_USER_VERSION = 1
+SQLITE_USER_VERSION = 2
 
 
 class SQLiteHarvestCatalogInvalid(ValueError):
@@ -98,6 +103,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             node_id TEXT NOT NULL,
             ordinal INTEGER NOT NULL,
             node_resource_id TEXT NOT NULL,
+            resource_key TEXT NOT NULL,
+            resource_key_fold TEXT NOT NULL,
             resource TEXT NOT NULL,
             resource_fold TEXT NOT NULL,
             entry_index INTEGER,
@@ -130,6 +137,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             ON node_index(object_path);
         CREATE INDEX idx_resource_evidence_resource
             ON resource_evidence(resource_fold, node_id);
+        CREATE INDEX idx_resource_evidence_key
+            ON resource_evidence(resource_key_fold, node_id);
         CREATE INDEX idx_resource_evidence_identity
             ON resource_evidence(node_resource_id, node_id);
         CREATE INDEX idx_map_evidence_family
@@ -246,18 +255,22 @@ def build_harvest_catalog_sqlite(
                     )
                     for ordinal, resource in enumerate(_iter_dicts(resource_items)):
                         resource_name = str(resource.get("resource") or "")
+                        resource_key = resource_entry_key(resource)
                         entry_index = resource.get("entryIndex")
                         connection.execute(
                             """
                             INSERT INTO resource_evidence(
-                                node_id, ordinal, node_resource_id, resource,
-                                resource_fold, entry_index, evidence_status, payload_json
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                node_id, ordinal, node_resource_id, resource_key,
+                                resource_key_fold, resource, resource_fold, entry_index,
+                                evidence_status, payload_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 node_id,
                                 ordinal,
                                 str(resource.get("nodeResourceId") or ""),
+                                resource_key,
+                                resource_key.casefold(),
                                 resource_name,
                                 resource_name.casefold(),
                                 (
@@ -439,35 +452,60 @@ class SQLiteHarvestCatalog:
         *,
         q: str = "",
         map_name: str = "",
+        only_map_family: str = "",
         resource: str = "",
         offset: int = 0,
         limit: int = 24,
     ) -> dict[str, Any]:
-        if len(q) > 100:
-            raise ValueError("q must be at most 100 characters")
-        q = q.strip()
-        map_name = map_name.strip()
-        resource = resource.strip()
+        q = normalize_node_filter(q, "q")
+        map_name = normalize_node_filter(map_name, "map")
+        only_map_family = normalize_node_filter(
+            only_map_family,
+            "onlyMapFamily",
+        )
+        resource = normalize_node_filter(
+            resource,
+            "resource",
+            max_length=RESOURCE_FILTER_MAX_LENGTH,
+        )
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), NODE_PAGE_MAX_LIMIT))
 
-        conditions: list[str] = []
-        parameters: list[object] = []
+        base_conditions: list[str] = []
+        base_parameters: list[object] = []
         if q:
-            conditions.append("instr(n.search_text, ?) > 0")
-            parameters.append(q.casefold())
+            base_conditions.append("instr(n.search_text, ?) > 0")
+            base_parameters.append(q.casefold())
         if map_name:
-            conditions.append(
+            base_conditions.append(
                 "EXISTS (SELECT 1 FROM map_evidence m "
                 "WHERE m.node_id = n.node_id AND instr(m.search_text, ?) > 0)"
             )
-            parameters.append(map_name.casefold())
+            base_parameters.append(map_name.casefold())
+        if only_map_family:
+            base_conditions.append(
+                "EXISTS (SELECT 1 FROM map_evidence selected_map "
+                "WHERE selected_map.node_id = n.node_id "
+                "AND selected_map.map_family_fold = ? "
+                "AND json_extract(selected_map.payload_json, '$.mapKind') "
+                "= 'PLAYABLE_MAP_EVIDENCE') "
+                "AND 1 = (SELECT COUNT(DISTINCT usage_map.map_family_fold) "
+                "FROM map_evidence usage_map "
+                "WHERE usage_map.node_id = n.node_id "
+                "AND usage_map.map_family_fold <> '' "
+                "AND json_extract(usage_map.payload_json, '$.mapKind') "
+                "= 'PLAYABLE_MAP_EVIDENCE')"
+            )
+            base_parameters.append(only_map_family.casefold())
+        conditions = list(base_conditions)
+        parameters = list(base_parameters)
         if resource:
             conditions.append(
                 "EXISTS (SELECT 1 FROM resource_evidence r "
-                "WHERE r.node_id = n.node_id AND r.resource_fold = ?)"
+                "WHERE r.node_id = n.node_id "
+                "AND (r.resource_key_fold = ? OR r.resource_fold = ?))"
             )
-            parameters.append(resource.casefold())
+            parameters.extend((resource.casefold(), resource.casefold()))
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
 
         try:
@@ -485,6 +523,54 @@ class SQLiteHarvestCatalog:
                     "ORDER BY n.sort_name, n.node_id LIMIT ? OFFSET ?",
                     [*parameters, limit, offset],
                 ).fetchall()
+                only_map_rows = connection.execute(
+                    """
+                    WITH playable AS (
+                        SELECT
+                            node_id,
+                            MIN(map_family) AS map_family,
+                            map_family_fold
+                        FROM map_evidence
+                        WHERE map_family_fold <> ''
+                          AND json_extract(payload_json, '$.mapKind')
+                              = 'PLAYABLE_MAP_EVIDENCE'
+                        GROUP BY node_id, map_family_fold
+                    ), family_counts AS (
+                        SELECT node_id, COUNT(*) AS family_count
+                        FROM playable
+                        GROUP BY node_id
+                    )
+                    SELECT
+                        MIN(playable.map_family) AS map_family,
+                        COUNT(*) AS node_count
+                    FROM playable
+                    JOIN family_counts USING (node_id)
+                    WHERE family_counts.family_count = 1
+                    GROUP BY playable.map_family_fold
+                    ORDER BY playable.map_family_fold
+                    """
+                ).fetchall()
+                resource_facet_conditions = [
+                    *base_conditions,
+                    "r.resource_key_fold <> ''",
+                ]
+                resource_facet_where = (
+                    " WHERE " + " AND ".join(resource_facet_conditions)
+                )
+                resource_rows = connection.execute(
+                    "SELECT MIN(r.resource_key) AS resource_key, "
+                    "MIN(r.resource) AS resource, "
+                    "MIN(NULLIF(json_extract(r.payload_json, '$.resourceObjectPath'), '')) "
+                    "AS resource_object_path, "
+                    "MIN(NULLIF(json_extract(r.payload_json, '$.displayName'), '')) "
+                    "AS display_name, "
+                    "COUNT(DISTINCT r.node_id) AS node_count "
+                    "FROM resource_evidence r "
+                    "JOIN node_index n ON n.node_id = r.node_id"
+                    f"{resource_facet_where} "
+                    "GROUP BY r.resource_key_fold",
+                    base_parameters,
+                ).fetchall()
         except sqlite3.Error as exc:
             raise SQLiteHarvestCatalogInvalid(
                 f"SQLite harvest node query failed: {exc}"
@@ -492,16 +578,67 @@ class SQLiteHarvestCatalog:
         items = [_decode_object(row["preview_json"], "node preview") for row in rows]
         next_offset = offset + len(items) if offset + len(items) < total else None
         metadata = self._metadata()
-        return {
+        page_coverage = copy.deepcopy(metadata["pageCoverage"])
+        result = {
             "schema": NODE_PAGE_SCHEMA,
             "dataset": copy.deepcopy(metadata["dataset"]),
-            "coverage": copy.deepcopy(metadata["pageCoverage"]),
+            "coverage": page_coverage,
             "total": total,
             "offset": offset,
             "limit": limit,
             "nextOffset": next_offset,
             "items": items,
         }
+        result.update(
+            build_node_filter_metadata(
+                q=q,
+                map_name=map_name,
+                only_map_family=only_map_family,
+                resource=resource,
+                coverage=page_coverage,
+                only_map_families=[
+                    {
+                        "mapFamily": str(row["map_family"]),
+                        "nodeCount": int(row["node_count"]),
+                    }
+                    for row in only_map_rows
+                ],
+                resources=sorted(
+                    [
+                        {
+                            "resourceKey": str(row["resource_key"]),
+                            "resource": str(row["resource"]),
+                            **(
+                                {
+                                    "resourceObjectPath": str(
+                                        row["resource_object_path"]
+                                    )
+                                }
+                                if row["resource_object_path"]
+                                else {}
+                            ),
+                            "displayName": (
+                                str(row["display_name"])
+                                if row["display_name"]
+                                else resource_display_name(
+                                    str(row["resource"]),
+                                    resource_object_path=str(
+                                        row["resource_object_path"] or ""
+                                    ),
+                                )
+                            ),
+                            "nodeCount": int(row["node_count"]),
+                        }
+                        for row in resource_rows
+                    ],
+                    key=lambda item: (
+                        str(item["displayName"]).casefold(),
+                        str(item["resourceKey"]).casefold(),
+                    ),
+                ),
+            )
+        )
+        return result
 
     def get_node(self, node_id: str) -> dict[str, Any]:
         self._metadata()

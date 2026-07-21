@@ -18,10 +18,27 @@ export interface HarvestDatasetMeta {
 export interface HarvestResourceEntry {
   entryIndex: number;
   resource: string;
+  resourceKey?: string;
+  resourceObjectPath?: string;
   displayName?: string;
   nodeResourceId: string;
   evidenceStatus?: string;
   gaps?: string[];
+}
+
+export type HarvestMapFilterMode = 'contains' | 'evidenceExclusive';
+
+export interface HarvestOnlyMapFamilyFacet {
+  mapFamily: string;
+  nodeCount: number;
+}
+
+export interface HarvestResourceTypeFacet {
+  resourceKey?: string;
+  resource: string;
+  resourceObjectPath?: string;
+  displayName?: string;
+  nodeCount: number;
 }
 
 export interface HarvestMapReference {
@@ -150,6 +167,22 @@ export interface HarvestNodePage extends HarvestApiResult {
       inlineBytes?: boolean;
     };
   };
+  appliedFilters?: {
+    q?: string;
+    map?: string;
+    onlyMapFamily?: string;
+    resource?: string;
+  };
+  facets?: {
+    mapExclusivity?: {
+      definition?: string;
+      claimsCompleteMapUsage?: boolean;
+      isGlobalExclusivityClaim?: boolean;
+      excludedEvidenceKinds?: string[];
+    };
+    onlyMapFamilies?: HarvestOnlyMapFamilyFacet[];
+    resources?: HarvestResourceTypeFacet[];
+  };
   total: number;
   offset: number;
   limit: number;
@@ -184,7 +217,9 @@ export interface HarvestRankingRow {
   damageMultiplier?: number;
   harvestQuantityMultiplier?: number;
   resourceWeightShare?: number;
-  engineComparisonIndex: number;
+  estimatedYieldPerNode?: number;
+  /** @deprecated Compatibility field for harvest-ranking-result/v1 and /v2. */
+  engineComparisonIndex?: number;
   relativeToNodeTopPercent?: number;
   rankingTier?: 'CONFIRMED' | 'CONDITIONAL' | string;
   missingFacts?: string[];
@@ -342,7 +377,9 @@ export interface HarvestCreatureSpecialtyRow extends HarvestRankingRow {
   resource: HarvestResourceEntry & {
     harvestComponentPackagePath?: string;
   };
-  nodeTopEngineComparisonIndex: number;
+  nodeTopEstimatedYieldPerNode?: number;
+  /** @deprecated Compatibility field for harvest-creature-specialties/v1. */
+  nodeTopEngineComparisonIndex?: number;
   relativeToNodeTopPercent: number;
   nodeTop: {
     speciesKey?: string;
@@ -350,7 +387,9 @@ export interface HarvestCreatureSpecialtyRow extends HarvestRankingRow {
     creatureObjectPath?: string;
     attackIndex?: number;
     attackName?: string;
-    engineComparisonIndex: number;
+    estimatedYieldPerNode?: number;
+    /** @deprecated Compatibility field for harvest-creature-specialties/v1. */
+    engineComparisonIndex?: number;
     rankingTier?: string;
     evidence?: HarvestRankingRow['evidence'];
   };

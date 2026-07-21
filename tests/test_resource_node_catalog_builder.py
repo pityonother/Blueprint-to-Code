@@ -11,18 +11,177 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from build_ark_resource_node_catalog import (  # noqa: E402
     _attach_node_thumbnail,
+    _build_resource_name_catalog,
     _dataset_revision,
     _discover_node_candidates,
     _extract_node_candidate,
     _evaluation_coverage_summary,
     _indirect_map_reference_status,
     _node_type_discovery_coverage,
+    _resource_name_lookup,
     _stratified_limit,
 )
 from blueprint_translator.resource_nodes import NotFoliageTypeAsset  # noqa: E402
 
 
 class ResourceNodeCatalogBuilderTests(unittest.TestCase):
+    def test_resource_name_catalog_rejects_missing_exact_object_path(self):
+        class FakeReader:
+            def __init__(self):
+                self.effective_defaults_calls = 0
+
+            def effective_defaults(self, path, _class_index):
+                self.effective_defaults_calls += 1
+                return (
+                    [
+                        {
+                            "name": "DescriptiveNameBase",
+                            "value": "Common Mushroom",
+                            "confidence": "high",
+                        }
+                    ],
+                    [path],
+                )
+
+            def defaults(self, _path):
+                return {
+                    "variables": {
+                        "DescriptiveNameBase": {
+                            "value": "Common Mushroom",
+                            "confidence": "high",
+                        }
+                    }
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir) / "Content"
+            decoy = (
+                content_root
+                / "PrimalEarth"
+                / "Resources"
+                / "PrimalItemResource_CommonMushroom.uasset"
+            )
+            decoy.parent.mkdir(parents=True, exist_ok=True)
+            decoy.touch()
+            reader = FakeReader()
+            catalog = _build_resource_name_catalog(
+                [
+                    {
+                        "resourceEntries": [
+                            {
+                                "resource": "PrimalItemResource_CommonMushroom_C",
+                                "resourceObjectPath": (
+                                    "/Game/Aberration/Items/"
+                                    "PrimalItemResource_CommonMushroom."
+                                    "PrimalItemResource_CommonMushroom_C"
+                                ),
+                            }
+                        ]
+                    }
+                ],
+                content_root=content_root,
+                candidate_paths=[decoy],
+                reader=reader,
+            )
+
+        self.assertEqual(catalog["coverage"]["resolved"], 0)
+        self.assertEqual(catalog["coverage"]["unresolved"], 1)
+        self.assertEqual(
+            catalog["failures"][0]["reasonCode"],
+            "RESOURCE_ITEM_OBJECT_PATH_NOT_FOUND",
+        )
+        self.assertEqual(reader.effective_defaults_calls, 0)
+
+    def test_resource_name_catalog_uses_exact_object_path_and_effective_devkit_default(self):
+        class FakeReader:
+            def effective_defaults(self, path, _class_index):
+                name = (
+                    "Aggeravic Mushroom"
+                    if "Aberration" in path.parts
+                    else "Common Mushroom"
+                )
+                return (
+                    [
+                        {
+                            "name": "DescriptiveNameBase",
+                            "value": name,
+                            "confidence": "high",
+                        }
+                    ],
+                    [path],
+                )
+
+            def defaults(self, path):
+                name = (
+                    "Aggeravic Mushroom"
+                    if "Aberration" in path.parts
+                    else "Common Mushroom"
+                )
+                return {
+                    "variables": {
+                        "DescriptiveNameBase": {
+                            "value": name,
+                            "confidence": "high",
+                        }
+                    }
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir) / "Content"
+            aberration = (
+                content_root
+                / "Aberration"
+                / "Items"
+                / "PrimalItemResource_CommonMushroom.uasset"
+            )
+            primal = (
+                content_root
+                / "PrimalEarth"
+                / "Resources"
+                / "PrimalItemResource_CommonMushroom.uasset"
+            )
+            for path in (aberration, primal):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            components = [
+                {
+                    "resourceEntries": [
+                        {
+                            "resource": "PrimalItemResource_CommonMushroom_C",
+                            "resourceObjectPath": (
+                                "/Game/Aberration/Items/"
+                                "PrimalItemResource_CommonMushroom."
+                                "PrimalItemResource_CommonMushroom_C"
+                            ),
+                        }
+                    ]
+                }
+            ]
+
+            catalog = _build_resource_name_catalog(
+                components,
+                content_root=content_root,
+                candidate_paths=[aberration, primal],
+                reader=FakeReader(),
+            )
+
+        self.assertEqual(catalog["coverage"]["requested"], 1)
+        self.assertEqual(catalog["coverage"]["resolved"], 1)
+        self.assertEqual(catalog["items"][0]["displayName"], "Aggeravic Mushroom")
+        self.assertEqual(catalog["items"][0]["propertyName"], "DescriptiveNameBase")
+        lookup = _resource_name_lookup(catalog)
+        self.assertEqual(
+            lookup[
+                (
+                    "/game/aberration/items/"
+                    "primalitemresource_commonmushroom."
+                    "primalitemresource_commonmushroom_c"
+                )
+            ],
+            "Aggeravic Mushroom",
+        )
+        self.assertNotIn("primalitemresource_commonmushroom_c", lookup)
+
     def test_indirect_map_status_does_not_claim_skipped_scanners_were_indexed(self):
         self.assertEqual(
             _indirect_map_reference_status(

@@ -25,7 +25,7 @@ import build_ark_harvest_explorer as build_explorer  # noqa: E402
 class BuildArkHarvestExplorerTests(unittest.TestCase):
     def test_query_contract_is_exactly_derived_from_full_report(self):
         full = {
-            "schema": "ark-harvest-ranking/v1",
+            "schema": "ark-harvest-ranking/v2",
             "generatedAt": "now",
             "datasetRevision": "revision",
             "scanManifestHash": "manifest",
@@ -39,7 +39,7 @@ class BuildArkHarvestExplorerTests(unittest.TestCase):
 
         self.assertEqual(query["bestRows"], full["bestRows"])
         self.assertNotIn("rows", query)
-        self.assertEqual(query["querySchema"], "ark-harvest-ranking-query/v1")
+        self.assertEqual(query["querySchema"], "ark-harvest-ranking-query/v2")
 
     def test_plan_builds_evaluation_catalog_before_final_node_catalog(self):
         with tempfile.TemporaryDirectory() as temp_dir:

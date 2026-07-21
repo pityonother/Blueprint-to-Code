@@ -52,6 +52,15 @@ function displayCreature(creature: HarvestCreatureSummary): string {
 }
 
 
+function hasEstimatedYieldMetric(result: HarvestCreatureSpecialties): boolean {
+  return result.methodology.metric === 'estimatedYieldPerNode'
+    || result.items.some(
+      (row) => typeof row.estimatedYieldPerNode === 'number'
+        && Number.isFinite(row.estimatedYieldPerNode),
+    );
+}
+
+
 function statusSummary(
   values: string[] | undefined,
   empty: string,
@@ -119,6 +128,7 @@ export function renderHarvestCreatureSpecialties(
   result: HarvestCreatureSpecialties,
 ): string {
   const rows = result.items || [];
+  const isEstimatedYield = hasEstimatedYieldMetric(result);
   const page = result.page || {
     offset: result.offset || 0,
     limit: result.limit || 24,
@@ -126,8 +136,10 @@ export function renderHarvestCreatureSpecialties(
     returned: rows.length,
     omitted: Math.max(0, (result.total ?? rows.length) - rows.length),
   };
-  const warning = result.methodology.warning
-    || '这是从蓝图系数复算的引擎比较指数，不等于游戏内一次攻击的实测掉落量。';
+  const warning = isEstimatedYield
+    ? result.methodology.warning
+      || '这是根据当前已恢复游戏数据估算的一整个完整节点产量，不是受控游戏实测值。'
+    : `旧版响应：以下数值仅为旧版比较指数，不代表完整节点产量。${result.methodology.warning ? ` ${result.methodology.warning}` : ''}`;
   const blockers = Array.from(new Set([
     ...(result.claimBlockers || []),
     ...(result.evidence?.blockers || []),
@@ -138,6 +150,14 @@ export function renderHarvestCreatureSpecialties(
   const nextOffset = page.offset + page.returned < page.total
     ? page.offset + page.returned
     : null;
+  const rankingExplanation = isEstimatedYield
+    ? '按该恐龙的每完整节点预计产量从高到低排列；相对百分比仅用于说明它与同一节点资源榜首的差距。'
+    : '旧版响应按“该恐龙比较指数 ÷ 同一节点资源的旧版榜首指数”排序；该百分比不代表完整节点产量。';
+  const selectedMetricLabel = isEstimatedYield ? '本龙预计产量' : '本龙旧版比较指数';
+  const topMetricLabel = isEstimatedYield ? '节点最高预计产量' : '节点旧版榜首指数';
+  const scopeExplanation = isEstimatedYield
+    ? '绝对值表示同一公式下一整个完整节点的预计资源单位数；相对百分比以每个节点资源的当前最高预计产量为 100%。这仍是游戏数据估算，不是受控实测。'
+    : '这是旧版比较指数响应；绝对值和相对百分比都不应解释为完整节点产量或游戏实测产量。';
 
   return `
     <section class="panel harvest-creature-detail-pane" aria-label="恐龙擅长资源排行">
@@ -145,7 +165,7 @@ export function renderHarvestCreatureSpecialties(
         <div>
           <p class="eyebrow">CREATURE SPECIALTIES</p>
           <h2>${escapeHtml(displayCreature(result.species))} 擅长什么</h2>
-          <p>按“该恐龙指数 ÷ 同一节点资源榜首指数”排序，100% 表示它就是当前证据范围的榜首。</p>
+          <p>${escapeHtml(rankingExplanation)}</p>
         </div>
         <span class="status-pill ${evidenceComplete ? 'good' : 'warn'}">${evidenceComplete ? '范围证据完整' : '范围仍有缺口'}</span>
       </div>
@@ -158,7 +178,14 @@ export function renderHarvestCreatureSpecialties(
       </div>
       ${rows.length ? `
         <div class="harvest-specialty-list" role="list">
-          ${rows.map((row) => `
+          ${rows.map((row) => {
+            const selectedMetric = isEstimatedYield
+              ? row.estimatedYieldPerNode
+              : row.engineComparisonIndex;
+            const topMetric = isEstimatedYield
+              ? row.nodeTopEstimatedYieldPerNode ?? row.nodeTop.estimatedYieldPerNode
+              : row.nodeTopEngineComparisonIndex ?? row.nodeTop.engineComparisonIndex;
+            return `
             <article class="harvest-specialty-row" role="listitem">
               <div class="harvest-specialty-rank"><span>${escapeHtml(row.rank)}</span><small>名</small></div>
               <div class="harvest-specialty-identity">
@@ -167,9 +194,9 @@ export function renderHarvestCreatureSpecialties(
                 <code>${escapeHtml(row.resource.resource)}</code>
               </div>
               <div class="harvest-specialty-score">
-                <strong>${escapeHtml(formatScore(row.relativeToNodeTopPercent))}%</strong>
-                <small>本龙指数 ${escapeHtml(formatScore(row.engineComparisonIndex))}</small>
-                <small>节点榜首 ${escapeHtml(formatScore(row.nodeTopEngineComparisonIndex))}</small>
+                <strong>${isEstimatedYield ? `${escapeHtml(selectedMetricLabel)} ${escapeHtml(formatScore(selectedMetric))}` : `${escapeHtml(formatScore(row.relativeToNodeTopPercent))}%`}</strong>
+                <small>${isEstimatedYield ? `相对节点榜首 ${escapeHtml(formatScore(row.relativeToNodeTopPercent))}%` : `${escapeHtml(selectedMetricLabel)} ${escapeHtml(formatScore(selectedMetric))}`}</small>
+                <small>${escapeHtml(topMetricLabel)} ${escapeHtml(formatScore(topMetric))}</small>
               </div>
               <div class="harvest-specialty-attack">
                 <strong>${escapeHtml(row.attackName || '攻击名称未恢复')}</strong>
@@ -177,7 +204,8 @@ export function renderHarvestCreatureSpecialties(
                 <span class="status-pill ${row.rankingTier === 'CONFIRMED' ? 'good' : 'warn'}">${escapeHtml(row.rankingTier || row.evidence?.status || '条件证据')}</span>
               </div>
             </article>
-          `).join('')}
+          `;
+          }).join('')}
         </div>
       ` : '<div class="empty-state">当前证据范围内，这只恐龙没有可数值排名的节点资源组合；未知值没有按 0 处理。</div>'}
       <div class="harvest-pagination">
@@ -187,7 +215,7 @@ export function renderHarvestCreatureSpecialties(
       </div>
       <details class="harvest-scope-details">
         <summary>证据范围与限制</summary>
-        <p>绝对值用于同一公式内比较；相对百分比以每个节点资源的当前榜首为 100%。本页不声称全游戏实测产量排行。</p>
+        <p>${escapeHtml(scopeExplanation)}</p>
         ${blockers.length ? `<ul class="harvest-blocker-list">${blockers.map((value) => `<li><code>${escapeHtml(value)}</code></li>`).join('')}</ul>` : '<p class="hint">当前响应没有额外范围阻断项。</p>'}
       </details>
     </section>

@@ -331,6 +331,273 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(properties["TreasureSupplyCrateClass"]["object"], "/Game/Fixture/SupplyCrate.SupplyCrate_C")
         self.assertIn("MinStoredXPForTreasure", report)
 
+    def test_cdo_soft_object_array_recovers_inline_fname_paths(self):
+        damage_type_paths = [
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/DmgType_Melee_Dino_Herbivore.DmgType_Melee_Dino_Herbivore_C",
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/DmgType_Melee_SickleHarvest.DmgType_Melee_SickleHarvest_C",
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/DmgType_Melee_BigfootHarvest.DmgType_Melee_BigfootHarvest_C",
+        ]
+        names = [
+            "None",
+            "DamageTypeEntryValuesOverrides",
+            "ArrayProperty",
+            "SoftObjectProperty",
+            *damage_type_paths,
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        array_value = struct.pack("<i", len(damage_type_paths)) + b"".join(
+            fname(path) + struct.pack("<i", 0) for path in damage_type_paths
+        )
+        cdo_data = b"".join(
+            [
+                fname("DamageTypeEntryValuesOverrides"),
+                fname("ArrayProperty"),
+                struct.pack("<ii", len(array_value), 0),
+                fname("SoftObjectProperty"),
+                array_value,
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        prop = {item["name"]: item for item in payload["properties"]}[
+            "DamageTypeEntryValuesOverrides"
+        ]
+
+        self.assertTrue(prop["array_parse"]["parsed"], prop)
+        self.assertEqual(prop["array_parse"]["count"], 3)
+        self.assertEqual(prop["objects"], damage_type_paths)
+        self.assertEqual(prop["object_paths"], damage_type_paths)
+        self.assertEqual(
+            [element["object_path"] for element in prop["array_parse"]["elements"]],
+            damage_type_paths,
+        )
+
+    def test_cdo_inline_soft_object_array_fails_closed_on_malformed_elements(self):
+        valid_path = "/Game/Fixture/Damage.Damage_C"
+        names = [
+            "None",
+            "DamageTypeEntryValuesOverrides",
+            "ArrayProperty",
+            "SoftObjectProperty",
+            valid_path,
+            "NotAnObjectPath",
+        ]
+
+        def fname(name: str, number: int = 0) -> bytes:
+            return struct.pack("<ii", names.index(name), number)
+
+        def parse(array_value: bytes):
+            cdo_data = b"".join(
+                [
+                    fname("DamageTypeEntryValuesOverrides"),
+                    fname("ArrayProperty"),
+                    struct.pack("<ii", len(array_value), 0),
+                    fname("SoftObjectProperty"),
+                    array_value,
+                    fname("None"),
+                ]
+            )
+            package = {
+                "uasset_data": cdo_data,
+                "uexp_data": b"",
+                "names": names,
+                "imports": [],
+                "exports": [
+                    {
+                        "object_name": "Default__Fixture_C",
+                        "serial_location": {
+                            "file": "uasset",
+                            "offset": 0,
+                            "size": len(cdo_data),
+                            "available": True,
+                        },
+                    }
+                ],
+                "soft_object_paths": [],
+            }
+            payload = read_uasset_class_defaults(package, "Fixture")
+            return {item["name"]: item for item in payload["properties"]}[
+                "DamageTypeEntryValuesOverrides"
+            ]
+
+        malformed_values = {
+            "ansi fstring missing null terminator": (
+                struct.pack("<i", 1)
+                + fname(valid_path)
+                + struct.pack("<i", 1)
+                + b"X"
+            ),
+            "utf16 fstring missing null terminator": (
+                struct.pack("<i", 1)
+                + fname(valid_path)
+                + struct.pack("<i", -1)
+                + b"X\x00"
+            ),
+            "invalid utf16 fstring encoding": (
+                struct.pack("<i", 1)
+                + fname(valid_path)
+                + struct.pack("<i", -2)
+                + b"\x00\xd8\x00\x00"
+            ),
+            "trailing byte": (
+                struct.pack("<i", 1)
+                + fname(valid_path)
+                + struct.pack("<i", 0)
+                + b"\xff"
+            ),
+            "numbered fname": (
+                struct.pack("<i", 1)
+                + fname(valid_path, number=1)
+                + struct.pack("<i", 0)
+            ),
+            "non-object path": (
+                struct.pack("<i", 1)
+                + fname("NotAnObjectPath")
+                + struct.pack("<i", 0)
+            ),
+        }
+
+        for label, array_value in malformed_values.items():
+            with self.subTest(label=label):
+                prop = parse(array_value)
+                self.assertFalse(prop["array_parse"]["parsed"], prop)
+                self.assertEqual(prop["objects"], [])
+                self.assertEqual(prop["object_paths"], [])
+
+    def test_cdo_soft_object_array_preserves_confirmed_zero_count(self):
+        names = [
+            "None",
+            "DamageTypeEntryValuesOverrides",
+            "ArrayProperty",
+            "SoftObjectProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        array_value = struct.pack("<i", 0)
+        cdo_data = b"".join(
+            [
+                fname("DamageTypeEntryValuesOverrides"),
+                fname("ArrayProperty"),
+                struct.pack("<ii", len(array_value), 0),
+                fname("SoftObjectProperty"),
+                array_value,
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        prop = {item["name"]: item for item in payload["properties"]}[
+            "DamageTypeEntryValuesOverrides"
+        ]
+
+        self.assertTrue(prop["array_parse"]["parsed"], prop)
+        self.assertEqual(prop["array_parse"]["count"], 0)
+        self.assertEqual(prop["objects"], [])
+        self.assertEqual(prop["object_paths"], [])
+
+    def test_cdo_soft_object_array_preserves_path_table_indices(self):
+        soft_object_paths = [
+            {"object_path": "/Game/Fixture/First.First_C"},
+            {"object_path": "/Game/Fixture/Second.Second_C"},
+        ]
+        names = [
+            "None",
+            "DamageTypeEntryValuesOverrides",
+            "ArrayProperty",
+            "SoftObjectProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        indices = [1, 0]
+        array_value = struct.pack("<i", len(indices)) + b"".join(
+            struct.pack("<i", index) for index in indices
+        )
+        cdo_data = b"".join(
+            [
+                fname("DamageTypeEntryValuesOverrides"),
+                fname("ArrayProperty"),
+                struct.pack("<ii", len(array_value), 0),
+                fname("SoftObjectProperty"),
+                array_value,
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": soft_object_paths,
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        prop = {item["name"]: item for item in payload["properties"]}[
+            "DamageTypeEntryValuesOverrides"
+        ]
+        expected = [
+            soft_object_paths[index]["object_path"] for index in indices
+        ]
+
+        self.assertTrue(prop["array_parse"]["parsed"], prop)
+        self.assertEqual(prop["array_parse"]["count"], 2)
+        self.assertEqual(prop["objects"], expected)
+        self.assertEqual(prop["object_paths"], expected)
+
     def test_cdo_array_and_unparsed_struct_keep_parser_metadata(self):
         names = [
             "/Game/Fixture",

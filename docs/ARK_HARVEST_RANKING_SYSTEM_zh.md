@@ -17,7 +17,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `scripts/blueprint_translator/harvest_ranking.py` | 纯数据投影、兼容性判断、比较指数计算和排序 |
+| `scripts/blueprint_translator/harvest_ranking.py` | 纯数据投影、完整资源 Object Path 保留、兼容性判断、完整节点产量模拟和排序 |
 | `scripts/rank_ark_harvest.py` | 扫描 DevKit、解析生物和组件、追踪伤害类型继承与资源覆盖、生成报告 |
 | `scripts/blueprint_translator/harvest_report_validation.py` | 定义完整报告与压缩报告之间的验证合同 |
 | `scripts/verify_ark_harvest_report.py` | 从命令行执行压缩合同验证 |
@@ -51,11 +51,12 @@ PrimalDinoCharacter descendant.AttackInfos
   -> DamageType 的父类链
   -> 该 DamageType 针对目标资源的替换 DamageType
   -> HarvestComponent.HarvestDamageTypeEntries 的最近匹配项
-  -> HarvestComponent.HarvestResourceEntries 的资源权重及 DamageType 覆盖
-  -> 兼容性状态与比较指数
+  -> HarvestComponent.HarvestResourceEntries 的权重、数量范围及 DamageType 覆盖
+  -> 节点生命、发放间隔、最终一击 clamp 与静态原生发放循环
+  -> 兼容性状态与 estimatedYieldPerNode
 ```
 
-解析器保留 `AttackInfos`、`HarvestResourceEntries` 和 `HarvestDamageTypeEntries` 的数组元素边界。也就是说，一个元素中的 `EntryWeight` 不会被误当作另一个元素的值。对象数组按位置对齐后，才会形成“资源 -> 替换伤害类型”或“伤害类型 -> 权重覆盖”的映射。
+解析器保留 `AttackInfos`、`HarvestResourceEntries` 和 `HarvestDamageTypeEntries` 的数组元素边界。也就是说，一个元素中的 `EntryWeight` 不会被误当作另一个元素的值。对象数组按位置对齐后，才会形成“资源 -> 替换伤害类型”或“伤害类型 -> 权重覆盖”的映射。`SoftObjectProperty` 数组同时支持 4-byte 路径表索引和 ARK 当前使用的内联 `FName + FString` 路径；内联布局只有在每项合法且正好消耗声明边界时才确认，否则继续标记未恢复。这个边界修复让三个 Bio Toxin 毒性植物节点恢复了可验证的归一化权重和 Top 10，而没有把未知覆盖误当成空数组。
 
 伤害类型匹配不是只看名称相等。系统从有效伤害类型开始沿父类链向上查找，选择 HarvestComponent 中最近的可接受条目；资源权重、最小数量和最大数量覆盖也按同一条链选择最近匹配项。
 
@@ -101,18 +102,21 @@ PrimalDinoCharacter descendant.AttackInfos
 - `DamageMultiplier = 2`；
 - `HarvestQuantityMultiplier = 1`。
 
-组件还记录了 `MaxHarvestHealth = 620` 和 `HarvestHealthGiveResourceInterval = 40`。这些值会保留在报告中，但当前没有被擅自拼入最终掉落公式。
+组件还记录了 `MaxHarvestHealth = 620` 和 `HarvestHealthGiveResourceInterval = 40`。新模型会在标准化 `harvestAmountScale = 2` 下把发放阈值换算为 `20`，并逐击模拟直到新鲜节点被完整采完。
 
-#### 第四步：可复算的比较指数
+#### 第四步：可复算的完整节点预计产量
 
 ```text
-baseDamage / attackInterval = 120 / 0.5 = 240
-harvestPressurePerSecond    = 240 * 2 * 1 = 480
-resourceWeightShare         = 0.63 / (0.40 + 0.63)
-                            = 0.6116504801
-engineComparisonIndex       = 480 * 0.6116504801
-                            = 293.5922304478
+effectiveDamagePerHit       = 120 * 2 = 240
+grantThreshold              = 40 / 2 = 20
+completeNodeGrantCalls      = 12 + 12 + 12 = 36
+resourceWeightShare         = 0.63 / (0.40 + 0.63) = 0.6116504801
+expectedQuantityPerSelection= (1 + 2) / 2 = 1.5
+estimatedYieldPerNode       = 36 * 0.6116504801 * 1.5
+                            = 33.029126...
 ```
+
+`AttackInterval = 0.5` 仍保留作速度诊断，但不参与完整节点总产量排序。`engineComparisonIndex` 只保留一个发布周期作为兼容别名，并被强制等于 `estimatedYieldPerNode`；旧的攻速系数放在 `legacyDiagnostics`，绝不参与排名。
 
 这里的 `0.629999995...` 和 `0.400000005...` 是资产中浮点数的实际序列化表示；Markdown 为便于阅读显示为 `0.63` 和 `0.4`，完整精度保留在 `.full.json`。
 
@@ -131,7 +135,17 @@ INCOMPATIBLE / ZERO_RESOURCE_WEIGHT
 
 系统不会把它当作“缺数据”，也不会把 `3 × 7` 误写成金属产量倍率。它可以在另一个具有正 Metal 权重的组件上进入排行，所以结论必须绑定到“生物 + 攻击 + 资源 + HarvestComponent”，不能压成一个全局生物星级。
 
-### 3.3 二进制解析的保真护栏
+### 3.3 灭绝城市路灯为什么应由星尾兽排在 Dreadnoughtus 前面
+
+`CityPropHarvestComponent_Light_Large_Off` 的节点生命是 `150`、发放间隔是 `40`。在同一标准化静态口径下：
+
+- Dreadnoughtus：单击有效伤害很高，但 `HarvestQuantityMultiplier = 1`，完整节点约形成 `26` 次发放调用；
+- Doedicurus：`DamageMultiplier = 3`、`HarvestQuantityMultiplier = 7`，分两击完整采完时约形成 `56` 次发放调用；
+- Electronics 的归一化权重和单次期望数量对两者相同，因此 Doedicurus 的 `estimatedYieldPerNode` 更高。
+
+这正是旧模型出错的核心：旧模型把 `baseDamage / AttackInterval` 当主分数，高伤害或极短间隔会被无限放大；真实的有限节点会耗尽，而且发放调用按每击整数阈值和数量倍率截断。新排名模拟完整节点，不再让 `0.01` 秒的配置值自动制造百倍总产量。
+
+### 3.4 二进制解析的保真护栏
 
 报告压缩之前先修解析边界，而不是压缩错误值：
 
@@ -150,9 +164,9 @@ DamageType 索引必须覆盖该目录的全部 `.uasset`，不能只匹配 `Dmg
 
 | 状态 | 含义 | 是否有数值排行 |
 | --- | --- | --- |
-| `RANKED` | 必需系数已恢复，目标资源存在，有效 DamageType 被接受，资源权重大于零 | 有 `engineComparisonIndex` |
-| `INCOMPATIBLE` | 已有足够证据确认这次组合不适用，不是信息缺失 | 没有，指数为 `null` |
-| `UNRANKED` | 某项必需事实未恢复，无法可靠判断 | 没有，指数为 `null` |
+| `RANKED` | 完整节点模型的必需事实已恢复，目标资源存在，有效 DamageType 被接受，资源权重大于零 | 有 `estimatedYieldPerNode` |
+| `INCOMPATIBLE` | 已有足够证据确认这次组合不适用，不是信息缺失 | 没有，产量为 `null` |
+| `UNRANKED` | 某项必需事实或当前未实现的原生分支无法可靠恢复 | 没有，产量为 `null` |
 
 常见 `INCOMPATIBLE` 原因：
 
@@ -162,63 +176,76 @@ DamageType 索引必须覆盖该目录的全部 `.uasset`，不能只匹配 `Dmg
 
 常见 `UNRANKED` 原因：
 
-- `REQUIRED_ATTACK_FACT_NOT_RECOVERED`：攻击名、伤害类型、基础伤害或攻击间隔缺失；
+- `REQUIRED_ATTACK_FACT_NOT_RECOVERED`：攻击名、伤害类型或基础伤害缺失；
 - `REQUIRED_COMPONENT_FACT_NOT_RECOVERED`：资源数组、伤害类型数组或组件必需字段未可靠恢复；
 - `REQUIRED_DAMAGE_TYPE_FACT_NOT_RECOVERED`：DamageType 资产、父链或资源专用替换未可靠恢复；
 - `TARGET_RESOURCE_FACT_NOT_RECOVERED`：某个资源条目的身份或必需权重未可靠恢复；
 - `RESOURCE_WEIGHT_NOT_RECOVERED`：目标资源权重未知；
-- `REQUIRED_COEFFICIENT_NOT_RECOVERED`：伤害倍率、数量倍率或合法攻击间隔缺失。
+- `REQUIRED_COEFFICIENT_NOT_RECOVERED`：伤害倍率、数量倍率、节点生命或发放间隔缺失；
+- `RESOURCE_QUANTITY_MODEL_NOT_RECOVERED`：目标资源的最小/最大数量或随机分布参数缺失；
+- `BLUEPRINT_OUTPUT_DAMAGE_NOT_RECOVERED`：攻击会动态调整输出伤害，静态数据不能安全代替运行结果；
+- `SINGLE_UNIT_HARVEST_MODEL_NOT_RECOVERED`、`NONZERO_HARVEST_EFFECTIVENESS_MODEL_NOT_IMPLEMENTED`：命中当前尚未完整复原的原生分支，失败关闭而不是猜值。
 
 一个关键约束是：未知永远不转换为数字 `0`。`0` 只有在资产明确给出零值时才参与兼容性判断。
-攻击、组件、目标资源和 DamageType 的缺口分别保存在 `missingFactsByScope`；不进入当前指数的 Min/Max 数量覆盖缺口只作为 `warnings`，不会伪装成公式必需项。只要任一竞争资源权重未知，归一化分母就不完整，该行必须保持 `UNRANKED`。
+攻击、组件、目标资源和 DamageType 的缺口分别保存在 `missingFactsByScope`。Min/Max 数量现在直接决定预计资源单位，缺失时必须 `UNRANKED`；只要任一竞争资源权重未知，归一化分母也不完整，该行同样失败关闭。
 
 ## 5. 公式口径与禁止外推范围
 
-当前公式是：
+当前主指标是标准化静态环境下，从一个满生命节点采到耗尽时目标资源的期望单位数：
 
 ```text
-harvestPressurePerSecond = baseDamage / attackInterval
-                           * DamageMultiplier
-                           * HarvestQuantityMultiplier
+effectiveDamagePerHit = baseDamage * DamageMultiplier
+grantThreshold        = HarvestHealthGiveResourceInterval / 2
 
-resourceWeightShare      = target effective weight
-                           / sum(all positive effective weights)
+逐击循环直到 remainingHealth = 0：
+  creditedHealthLoss = min(effectiveDamagePerHit,
+                           remainingHealth 或 3.5 * remainingHealth)
+  damageAccumulator += creditedHealthLoss
+  rawGrantUnits       = floor(damageAccumulator / grantThreshold)
+  grantCallsThisHit   = trunc(HarvestQuantityMultiplier * rawGrantUnits)
+  若发生发放调用，则清空本击 accumulator（包括余数）
 
-engineComparisonIndex    = harvestPressurePerSecond
-                           * resourceWeightShare
+resourceWeightShare = target effective weight
+                      / sum(all positive effective weights)
+
+estimatedYieldPerNode = sum(grantCalls)
+                        * resourceWeightShare
+                        * expectedQuantityPerSelection
 ```
 
-`engineComparisonIndex` 是无量纲的引擎系数比较值，只适合在以下条件一致时横向排序：
+`expectedQuantityPerSelection` 在当前 DevKit 语料全部 `OverrideQuantityRandomPower = 1` 的线性分布下等于 `(Min + Max) / 2`。非线性 power、`bIsSingleUnitHarvest=true` 或非零 additional effectiveness 暂时失败关闭。
+
+`estimatedYieldPerNode` 的单位是“目标资源单位/完整节点”，只适合在以下条件一致时横向排序：
 
 - 同一目标资源；
 - 同一 HarvestComponent；
 - 同一 DevKit 资产版本；
 - 相同服务器和运行时条件。
 
-它不是“每击资源数”，也不是“资源/秒”。虽然内部字段名是 `harvestPressurePerSecond`，`AttackInterval` 仍只是蓝图配置值，尚未用真实动画墙钟时间校准。
+它不是“每击资源数”，也不是“资源/秒”。`AttackInterval` 和 `harvestPressurePerSecond` 仅保留为诊断，因为它们没有真实动画墙钟校准，也不改变同一完整节点最终能发放多少资源。
 
-以下因素当前明确不进入指数：
+以下因素当前明确不进入标准化产量模型：
 
 - 生物运行时近战属性和成长点；
 - 服务器采集倍率及其他配置；
-- 节点剩余生命和单次扣血上限；
+- 动态 Blueprint、Buff、基因、任务和服务器 hook；
 - 实际动画周期、移动、转向和攻击取消；
 - 一次攻击实际命中的节点数；
 - 受控环境中的实测掉落；
-- `OverrideQuantityMin/Max`、`MaxHarvestHealth`、`HarvestHealthGiveResourceInterval` 与最终发放流程的完整运行时关系。
+- 非线性数量随机分布、单单位采集和非零 additional-effectiveness 分支（当前行会失败关闭）。
 
-所以报告中的 `observedYieldPerSecond` 按设计保持 `null`。只有补齐运行时公式或可复现的受控实测后，才能新增真实产量指标；不能把当前指数改名成产量。
+所以报告中的 `observedYieldPerSecond` 按设计保持 `null`。当前字段明确叫“预计完整节点产量”，不是游戏实测；受控实测用于校准标准化 profile 和发现尚未恢复的运行时 hook。
 
 ### 5.1 Explorer 的确认层与条件静态估算
 
-Explorer 查询只针对当前选中的“节点定义 + HarvestComponent + 资源条目”复算，不把不同 Component 的指数直接合并成全局倍率：
+Explorer 查询只针对当前选中的“节点定义 + HarvestComponent + 资源条目”复算，不把不同 Component 的预计单位数直接合并成全局倍率：
 
 - `bSkipTamed`、`bOnlyOnWildDinos` 和 `bPreventWithRider` 是硬排除；命中后不进入可用排行；
-- `bUseBlueprintCanRiderAttack` 或 `bUseBlueprintAdjustOutputDamage` 依赖未恢复的蓝图运行时返回值，不会被假定为通过；
-- 如果后一类行的全部静态攻击和 Component 必需事实已经恢复，可以显示数值估算，但必须保持 `usageEligibilityStatus=CONDITIONAL`、`usageEstimateBasis=STATIC_ATTACK_FACTS_WITH_BLUEPRINT_RUNTIME_RESULT_NOT_RECOVERED`、`rankingTier=CONDITIONAL` 和 `evidence.status=PARTIAL`；
+- `bUseBlueprintCanRiderAttack` 依赖未恢复的蓝图资格返回值，可保留条件性静态估算并标记 `CONDITIONAL`；
+- `bUseBlueprintAdjustOutputDamage` 会直接改变产量输入，当前必须 `UNRANKED`，不能用未调整的基础伤害代替；
 - 只有没有条件原因、且生物和排行证据均确认的行，才进入 `CONFIRMED` 层。
 
-正向查询的 `relativeToNodeTopPercent` 是该行指数除以同一节点资源的第一名指数。反向“某只恐龙擅长什么”也使用“该恐龙在某节点资源上的指数 ÷ 该节点资源第一名指数”排序，再展开引用该精确 Component/resource/entry 组合的节点。这个百分比表示相对当前可评估候选的强弱，不是游戏中的掉落概率、采集率或实测资源/秒。
+正向查询的 `relativeToNodeTopPercent` 是该行预计完整节点产量除以同一节点资源的第一名产量。反向“某只恐龙擅长什么”同样以 `estimatedYieldPerNode` 作为唯一主排序和并列名次依据，再展开引用该精确 Component/resource/entry 组合的节点；`relativeToNodeTopPercent` 只作辅助说明，不影响顺序。这个百分比表示相对当前可评估候选的完整节点总产量，不是掉落概率、采集速度或实测资源/秒。
 
 ## 6. 报告压缩合同
 
@@ -239,20 +266,20 @@ Explorer 查询只针对当前选中的“节点定义 + HarvestComponent + 资�
 
 `componentIndex` 最多返回 16 项，但同时给出 `total/returned/omitted/truncated`。这不是静默删项；compact 顶层 `detailLocation` 会给出本次报告确切的同名 `.full.json` 文件名，需要剩余组件或 Top-K 之外的行时按它下钻，不再使用可能命中多份文件的通配符。同理，每个 `resourceView` 的 `rankedDiscoveryCoverage` 会告诉 AI Top-K 之外还省略了多少条。
 
-Resource Explorer 使用另一组正式运行产物：`harvest_ranking_all_resources.full.json/.ai.json` 提供全资源 Component 事实及有界 AI 入口，`harvest_evaluation_catalog.json` 提供扩展生物攻击事实，`resource_node_catalog.json` 保存 canonical 节点、资源、图片和三层地图证据，`harvest_catalog.sqlite` 是 API 的主查询读模型。`.query.json` 继续作为兼容产物存在，但 Explorer 的节点列表、详情、过滤和恐龙强项投影不需要把它或 canonical JSON 整份载入内存。SQLite 也不应交给 AI 阅读；AI 仍应从 `.ai.json` 开始，缺什么再走有界 API 或精确下钻。
+Resource Explorer 使用另一组正式运行产物：`harvest_ranking_all_resources.full.json/.ai.json` 提供全资源 Component 事实及有界 AI 入口，`harvest_evaluation_catalog.json` 提供扩展生物攻击事实，`resource_node_catalog.json` 保存 canonical 节点、资源、玩家名称证据、图片和三层地图证据，`harvest_catalog.sqlite` 是 API 的主查询读模型。玩家名称来自完整 `ResourceItem.object_path` 指向物品 Blueprint 的有效 `DescriptiveNameBase`/`ItemName`，不是短类名拆词；顶层 `resourceNames` 保留源资产、继承链与置信度，非空完整路径失效时失败关闭而不串到同名包。列表 facet 和筛选用 `resourceKey`（完整路径优先）区分同一短 class 的不同包，短 class 仅保留旧链接兼容语义。`.query.json` 继续作为兼容产物存在，但 Explorer 的节点列表、详情、过滤和恐龙强项投影不需要把它或 canonical JSON 整份载入内存。SQLite 也不应交给 AI 阅读；AI 仍应从 `.ai.json` 开始，缺什么再走有界 API 或精确下钻。
 
 ### 6.2 验证器当前会检查什么
 
 `verify_ark_harvest_report.py` 会将 `.ai.json` 与同次生成的 `.full.json` 对比，并检查：
 
-- full schema、`ark-harvest-compact/v2`、资源范围、生成时间、方法口径和 coverage 完全一致；
+- full schema、`ark-harvest-compact/v3`、资源范围、生成时间、方法口径和 coverage 完全一致；
 - 完整行数以及 `RANKED/INCOMPATIBLE/UNRANKED` 计数与 coverage 一致；
 - 从 full 唯一重算整份 compact 视图并逐字段相等比较，而不是只检查 compact 自己选择携带的字段；
 - 每个请求资源必须有独立 `resourceView`，包括焦点行、确定性 Top-K、候选状态和省略计数；
 - `bestRows` 与 `resourceCandidates` 必须从 full 的全部组合行独立重算，组件 gap 聚合、扫描 manifest 的 SHA-256 和覆盖计数也从 full 重新计算；manifest 的文件路径与对象路径必须非空且各自唯一，所有组件和组合行也必须归属于该 manifest；
 - `unknownSummaryScope` 必须是 `allRows`，`unknownSummary` 的状态、原因、缺失字段和示例必须与完整报告的全部组合行一致；
 - `failureSummary`、有界 `componentIndex`、来源文件数量及基于 `path|sha256` 生成的集合摘要一致；来源路径不得重复且每项必须有合法 SHA-256，生物、DamageType、组件、扫描清单及其 `sourceChain` 引用的每个文件都必须在来源集合中找到；
-- full 和 compact 都不能捏造 `observedYieldPerSecond`，非 `RANKED` 行也不能携带数值指数；
+- full 和 compact 都不能捏造 `observedYieldPerSecond`，非 `RANKED` 行也不能携带数值 `estimatedYieldPerNode`；兼容别名若存在必须与主产量字段相等；
 - `tokenEstimate` 必须与实际 compact 文件长度一致，compact 必须小于 full，且硬上限为 12,000 估算 token；
 - compact 不允许缺少必需字段，也不允许在顶层或 `tokenEstimate` 等嵌套结构中加入未定义的结论字段；布尔值也不能冒充整数 token 计数。
 
@@ -272,7 +299,7 @@ Resource Explorer 使用另一组正式运行产物：`harvest_ranking_all_resou
 
 这证明的是“合同覆盖字段在大幅压缩后仍与完整报告一致”，不是证明所有被省略字段都无损，也不是证明完整报告已经还原全部游戏运行时行为。
 
-同一批脚本还对 Stone 和 Wood 做了跨资源实跑：Stone 为 `1010767 → 23191` 字符（减少 `97.71%`，估算 `5798` token），Wood 为 `1376173 → 25404` 字符（减少 `98.15%`，估算 `6351` token），两者均通过合同验证。Wood 压缩报告仍明确保留全部 `36` 条 `MeleeDamageType` 缺失，同时把另外 `4` 条有完整父链证据的组合正确标为 `DAMAGE_TYPE_NOT_ACCEPTED`，不会再把“已确认不兼容”混成“资产缺失”。Stone 的 Min/Max 数量覆盖缺口保留为 warning，不再错误阻断当前不使用 Min/Max 的指数。
+同一批旧脚本还曾对 Stone 和 Wood 做过跨资源压缩实跑。这些数字只证明旧合同的压缩完整性，不能作为新产量模型的排行基线；新模型把 Min/Max 数量、节点生命与发放间隔纳入必需事实，旧产物必须重建后才能比较。
 
 三资源批量报告为 `2337269 → 47268` 字符（减少 `97.98%`，估算 `11817` token），Metal、Stone、Wood 分别保留 `36/56/72` 条 canonical 候选及各自的独立视图。第一次生成曾达到 `14593` token，并被 12,000 上限正确拒绝；改成有界组件索引和每资源 Top-K 后才通过。
 
@@ -304,7 +331,7 @@ runtime\python\python.exe scripts\rank_ark_harvest.py `
 runtime\python\python.exe scripts\build_ark_harvest_explorer.py
 ```
 
-编排器实际执行八个子命令：基础全资源 Component 报告、preliminary 节点与精确 Component manifest、带 manifest 的最终 Component 报告、扩展生物 evaluation、最终节点/地图/图片目录、SQLite、128 目标独立排行复算、full/AI 合同验证。所有输出先写入 staging；revision、SQLite 源 SHA-256、Repository smoke 和排行验证全部通过后才原子替换正式文件，失败时保留旧版。完整阶段表和构建安全边界见 [`ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`](ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)。
+编排器实际执行八个子命令：基础全资源 Component 报告、preliminary 节点与精确 Component manifest、带 manifest 的最终 Component 报告、扩展生物 evaluation、DevKit 玩家名称与最终节点/地图/图片目录、SQLite、128 目标独立排行复算、full/AI 合同验证。所有输出先写入 staging；revision、名称覆盖、SQLite 源 SHA-256、Repository smoke 和排行验证全部通过后才原子替换正式文件，失败时保留旧版。完整阶段表和构建安全边界见 [`ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`](ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)。
 
 ### 7.2 验证压缩报告
 
@@ -328,7 +355,7 @@ runtime\python\python.exe scripts\rank_ark_harvest.py `
   --output-dir analysis\harvest_rankings
 ```
 
-多资源报告仍然按“资源 + 组件对象路径 + 生物对象路径”分别选最佳攻击，每个资源独立保留候选、焦点和 Top-K；不应跨组件直接比较指数。
+多资源报告仍然按“资源 + 组件对象路径 + 生物对象路径”分别选最佳攻击，每个资源独立保留候选、焦点和 Top-K；不应把不同节点定义的预计单位数压成无条件的全局星级。
 
 ### 7.4 限定组件进行诊断
 
@@ -388,7 +415,7 @@ runtime\python\python.exe scripts\rank_ark_harvest.py `
 - `coverage.creaturesRequested` 是否等于预期；
 - `coverage.creaturesLoaded` 是否相同；
 - full 的 `failures.creatures` 或 compact 的 `failureSummary.creatures` 是否为空；
-- `AttackInfos` 中是否至少有一个攻击恢复出 DamageType、基础伤害和攻击间隔；
+- `AttackInfos` 中是否至少有一个攻击恢复出 DamageType 和基础伤害；攻击间隔用于速度诊断，不决定完整节点总产量；
 - 新 DamageType 的资产、父类链和资源覆盖是否均能找到。
 
 ## 9. 扩展资源（兼容 Component 报告）
@@ -400,7 +427,7 @@ runtime\python\python.exe scripts\rank_ark_harvest.py `
 3. 用 `--resource <简名或完整类名>` 生成单资源报告；
 4. 检查 `coverage.componentsMatched`、组件失败项和状态分布；
 5. 运行压缩合同验证；
-6. 只在同资源、同组件内解释指数差异。
+6. 只在同资源、同节点定义口径内解释预计完整节点产量差异。
 
 如果资源不在 catalog 中，不能立即解释为“游戏里不可采集”。它只说明当前扫描和解析范围没有恢复出该资源。正式 Explorer 会扫描全 Content `*HarvestComponent*.uasset` 并加入节点精确引用的 Component，但特殊 Actor、Buff、Inventory、原生代码或尚未识别的节点定义类仍可能形成缺口，需要先扩展发现证据，再加入排名。
 
@@ -425,13 +452,13 @@ analysis/harvest_rankings/<product>_<build>/...
 
 源文件集合指纹证明“这份报告使用了哪些具体文件”，但不会自动识别产品名称和游戏 Build；版本标签仍需由运行者明确保存。
 
-## 11. 当前金属样例的正确结论
+## 11. 新口径下的金属示例结论
 
 在当前本地 DevKit 的 `MetalHarvestComponent` 上：
 
-- Magmasaur `Bite`：`RANKED`，比较指数约 `293.5922`；
-- Ankylosaurus 尾击：`RANKED`，比较指数约 `91.2911`；
+- Magmasaur `Bite`：在上文给定静态输入下 `RANKED`，预计完整节点 Metal 约 `33.0291` 单位；
+- Ankylosaurus 尾击：只有恢复出同一节点所需的全部数量和发放事实后才参与新榜，不能沿用旧攻速指数；
 - Therizinosaurus `ClawAttack`：`INCOMPATIBLE / DAMAGE_TYPE_NOT_ACCEPTED`，父链已恢复，但该组件没有接受它；
 - Doedicurus 尾击：`INCOMPATIBLE / ZERO_RESOURCE_WEIGHT`。
 
-这个结论不能外推为“Magmasaur 在所有金属节点、所有版本和所有服务器上实际每秒产量最高”。它准确表达的是：在指定资产快照和 `MetalHarvestComponent` 上，Magmasaur 在当前已可排行的候选中指数最高；Therizinosaurus 的该攻击在这个组件上已有足够证据确认不兼容。其他攻击或组件若仍有缺口，必须继续保持未知；所有未恢复的组件与运行时因素都在 compact 报告中以计数、原因、样例、省略数和确切 `detailLocation` 保留。
+这个结论不能外推为“Magmasaur 在所有金属节点、所有版本和所有服务器上实际每秒产量最高”。它只表达指定资产快照、指定节点定义、满生命到耗尽、标准化倍率下的目标资源期望总量。其他攻击或组件若仍有缺口，必须继续保持未知；所有未恢复的组件与运行时因素都在 compact 报告中以计数、原因、样例、省略数和确切 `detailLocation` 保留。

@@ -593,6 +593,37 @@ def _read_fstring(data: bytes, offset: int) -> tuple[str, int]:
     return raw.decode("utf-16le", errors="replace"), offset
 
 
+def _read_inline_soft_object_fstring(
+    data: bytes,
+    offset: int,
+    value_end: int,
+) -> tuple[str, int]:
+    """Read a strictly bounded FString embedded in an inline SoftObjectPath."""
+
+    if offset < 0 or value_end > len(data) or offset + 4 > value_end:
+        raise ValueError("Inline SoftObjectPath FString is outside its value boundary.")
+    length = _read_i32(data, offset)
+    offset += 4
+    if length == 0:
+        return "", offset
+    if length > 0:
+        if length > 1_000_000 or offset + length > value_end:
+            raise ValueError("Invalid inline SoftObjectPath FString length.")
+        raw = data[offset : offset + length]
+        if not raw.endswith(b"\x00"):
+            raise ValueError("Inline SoftObjectPath FString is not null terminated.")
+        return raw[:-1].decode("ascii", errors="strict"), offset + length
+
+    char_count = -length
+    byte_count = char_count * 2
+    if char_count > 1_000_000 or offset + byte_count > value_end:
+        raise ValueError("Invalid inline SoftObjectPath UTF-16 FString length.")
+    raw = data[offset : offset + byte_count]
+    if not raw.endswith(b"\x00\x00"):
+        raise ValueError("Inline SoftObjectPath UTF-16 FString is not null terminated.")
+    return raw[:-2].decode("utf-16le", errors="strict"), offset + byte_count
+
+
 def _read_fname(names: list[str], data: bytes, offset: int) -> tuple[str, int, int]:
     index = _read_i32(data, offset)
     number = _read_i32(data, offset + 4)
@@ -2258,7 +2289,59 @@ def _parse_cdo_array_value(
         "NameProperty": 8,
     }
     width = fixed_widths.get(inner_type)
-    if width is not None:
+    inline_soft_object_paths = (
+        inner_type == "SoftObjectProperty"
+        and width is not None
+        and cursor + count * width != value_end
+    )
+    if inline_soft_object_paths:
+        for index in range(count):
+            element_start = cursor
+            if cursor + 12 > value_end:
+                return None
+            asset_path_info = _fname_at(export_data, cursor, names)
+            if not asset_path_info:
+                return None
+            asset_path, _asset_path_index, asset_path_number = asset_path_info
+            asset_leaf = asset_path.rsplit("/", 1)[-1]
+            if (
+                asset_path_number != 0
+                or not asset_path.startswith("/")
+                or "." not in asset_leaf
+                or asset_leaf.startswith(".")
+                or asset_leaf.endswith(".")
+            ):
+                return None
+            cursor += 8
+            try:
+                sub_path, cursor_after = _read_inline_soft_object_fstring(
+                    export_data,
+                    cursor,
+                    value_end,
+                )
+            except (IndexError, ValueError, struct.error):
+                return None
+            if cursor_after > value_end:
+                return None
+            cursor = cursor_after
+            object_path = (
+                f"{asset_path}:{sub_path}" if sub_path else asset_path
+            )
+            values.append(object_path)
+            objects.append(object_path)
+            object_paths.append(object_path)
+            elements.append(
+                {
+                    "index": index,
+                    "value": object_path,
+                    "object": object_path,
+                    "object_path": object_path,
+                    "raw_offsets": raw_offsets(element_start, cursor),
+                }
+            )
+        if cursor != value_end:
+            return None
+    elif width is not None:
         if cursor + count * width != value_end:
             return None
         for index in range(count):
@@ -2516,6 +2599,18 @@ def parse_cdo_property_value(
             )
             if decoded_array is not None:
                 item.update(decoded_array)
+            elif str(block.get("inner_type") or "") == "SoftObjectProperty":
+                item["value"] = []
+                item["array_offset"] = value_offset
+                item["element_kind"] = "SoftObjectProperty"
+                item["array_parse"] = {
+                    "parsed": False,
+                    "element_kind": "SoftObjectProperty",
+                    "raw_size": max(0, value_end - value_offset),
+                    "array_offset": value_offset,
+                }
+                item["objects"] = []
+                item["object_paths"] = []
             else:
                 value_chunk = export_data[value_offset:end]
                 refs, array_offset = extract_object_ref_array(value_chunk, imports, exports)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 import threading
 from collections import Counter, OrderedDict
@@ -20,7 +21,12 @@ from .harvest_evaluation_catalog import (
     find_node_and_resource,
     prepare_attack_for_usage_scope,
 )
-from .harvest_ranking import evaluate_attack_resource, normalize_unreal_object_identity
+from .harvest_ranking import (
+    YIELD_SCORE_BASIS,
+    estimate_complete_node_yield,
+    evaluate_attack_resource,
+    normalize_unreal_object_identity,
+)
 from .resource_nodes import query_resource_nodes, rank_node_resource
 from .resource_nodes import canonical_package_path
 
@@ -29,7 +35,7 @@ _REVISION_PATTERN = re.compile(r"[0-9a-f]{64}")
 _LAZY_CACHE_CAPACITY = 256
 _TOP_BASELINE_CACHE_CAPACITY = 1024
 _CREATURE_PAIR_CACHE_CAPACITY = 2048
-CREATURE_SPECIALTIES_SCHEMA = "blueprint-to-code.harvest-creature-specialties/v1"
+CREATURE_SPECIALTIES_SCHEMA = "blueprint-to-code.harvest-creature-specialties/v2"
 CREATURE_PAGE_SCHEMA = "blueprint-to-code.harvest-creature-page/v1"
 
 _SPECIALTY_ROW_FIELDS = (
@@ -55,6 +61,14 @@ _SPECIALTY_ROW_FIELDS = (
     "harvestQuantityMultiplier",
     "resourceWeightShare",
     "harvestPressurePerSecond",
+    "estimatedYieldPerNode",
+    "estimatedGrantCallsPerNode",
+    "estimatedHitsToDepleteNode",
+    "expectedQuantityPerSelection",
+    "quantityRandomPower",
+    "normalizedHarvestAmountScale",
+    "yieldModelVersion",
+    "yieldModelBasis",
     "engineComparisonIndex",
     "rankingStatus",
     "reasonCode",
@@ -198,13 +212,17 @@ def _eligible_attack_candidates(
                 prepared.get("damageType")
             )
             base_damage = prepared.get("baseDamage")
-            attack_interval = prepared.get("attackInterval")
+            ranking_gaps = [
+                str(gap)
+                for gap in prepared.get("gaps") or []
+                if str(gap) != "AttackInterval"
+            ]
             if (
-                prepared.get("gaps")
+                ranking_gaps
                 or not source_damage_type
                 or not isinstance(base_damage, (int, float))
-                or not isinstance(attack_interval, (int, float))
-                or float(attack_interval) <= 0
+                or float(base_damage) <= 0
+                or prepared.get("useBlueprintAdjustOutputDamage") is True
             ):
                 continue
             candidates.append(
@@ -234,8 +252,14 @@ def _component_coefficients_by_source(
     damage_type_parents: dict[str, str],
     resource_damage_overrides: dict[tuple[str, str], str],
     damage_type_gaps: dict[str, list[str]],
-) -> dict[str, tuple[float, float, float]]:
-    """Return damage, quantity, and weight-share coefficients for rankable sources."""
+) -> dict[str, dict[str, float | bool]]:
+    """Return complete-node model inputs for each safely rankable damage source.
+
+    This is a compact precomputation for the reverse-specialty query.  It does
+    not calculate a second score formula: callers must pass these inputs to
+    :func:`estimate_complete_node_yield`, the same native-static hit simulator
+    used by the authoritative forward evaluator.
+    """
 
     component_ranking_gaps = component.get("rankingGaps")
     if not isinstance(component_ranking_gaps, list):
@@ -251,6 +275,17 @@ def _component_coefficients_by_source(
             "HARVEST_DAMAGE_ENTRIES_NOT_RECOVERED",
         }
         for gap in component_ranking_gaps
+    ):
+        return {}
+
+    max_harvest_health = component.get("maxHarvestHealth")
+    give_resource_interval = component.get("harvestHealthGiveResourceInterval")
+    if (
+        not isinstance(max_harvest_health, (int, float))
+        or not isinstance(give_resource_interval, (int, float))
+        or float(max_harvest_health) <= 0
+        or float(give_resource_interval) <= 0
+        or component.get("isSingleUnitHarvest") is True
     ):
         return {}
 
@@ -283,6 +318,18 @@ def _component_coefficients_by_source(
     if not isinstance(target_entry, dict):
         return {}
 
+    quantity_random_power = target_entry.get("overrideQuantityRandomPower")
+    if quantity_random_power is None:
+        quantity_random_power = 1.0
+    if (
+        not isinstance(quantity_random_power, (int, float))
+        or not math.isfinite(float(quantity_random_power))
+        or not math.isclose(
+            float(quantity_random_power), 1.0, rel_tol=0.0, abs_tol=1e-6
+        )
+    ):
+        return {}
+
     normalized_parents = _normalized_damage_parents(damage_type_parents)
     normalized_damage_gaps = {
         normalize_unreal_object_identity(key): list(value)
@@ -306,7 +353,7 @@ def _component_coefficients_by_source(
         if "DAMAGE_TYPE_PARENT_NOT_RECOVERED" in (entry.get("gaps") or []):
             unresolved_damage_entry = True
 
-    result: dict[str, tuple[float, float, float]] = {}
+    result: dict[str, dict[str, float | bool]] = {}
     for source_damage_type in source_damage_types:
         effective_damage_type = normalized_resource_overrides.get(
             (source_damage_type, target_resource),
@@ -381,17 +428,46 @@ def _component_coefficients_by_source(
         )
         damage_multiplier = damage_entry.get("damageMultiplier")
         quantity_multiplier = damage_entry.get("harvestQuantityMultiplier")
+        additional_effectiveness = damage_entry.get(
+            "damageHarvestAdditionalEffectiveness"
+        )
+        if additional_effectiveness is None:
+            additional_effectiveness = 0.0
+        minimum_quantity = _nearest_override_value(
+            target_entry.get("minQuantityOverrides"),
+            chain,
+            target_entry.get("overrideQuantityMin"),
+        )
+        maximum_quantity = _nearest_override_value(
+            target_entry.get("maxQuantityOverrides"),
+            chain,
+            target_entry.get("overrideQuantityMax"),
+        )
         if (
             total_positive_weight <= 0
             or not isinstance(damage_multiplier, (int, float))
             or not isinstance(quantity_multiplier, (int, float))
+            or not isinstance(additional_effectiveness, (int, float))
+            or not math.isclose(
+                float(additional_effectiveness), 0.0, rel_tol=0.0, abs_tol=1e-9
+            )
+            or not isinstance(minimum_quantity, (int, float))
+            or not isinstance(maximum_quantity, (int, float))
         ):
             continue
-        result[source_damage_type] = (
-            float(damage_multiplier),
-            float(quantity_multiplier),
-            target_weight / total_positive_weight,
-        )
+        result[source_damage_type] = {
+            "damage_multiplier": float(damage_multiplier),
+            "harvest_quantity_multiplier": float(quantity_multiplier),
+            "max_harvest_health": float(max_harvest_health),
+            "harvest_health_give_resource_interval": float(give_resource_interval),
+            "resource_weight_share": target_weight / total_positive_weight,
+            "minimum_quantity": float(minimum_quantity),
+            "maximum_quantity": float(maximum_quantity),
+            "quantity_random_power": float(quantity_random_power),
+            "clamp_resource_harvest_damage": bool(
+                component.get("clampResourceHarvestDamage")
+            ),
+        }
     return result
 
 
@@ -423,17 +499,20 @@ def _best_discovered_scope_row(
     )
     best_by_species: dict[str, tuple[float, int, dict[str, Any]]] = {}
     for candidate in candidates:
-        coefficient = coefficients.get(str(candidate.get("sourceDamageType") or ""))
-        if coefficient is None:
+        yield_inputs = coefficients.get(
+            str(candidate.get("sourceDamageType") or "")
+        )
+        if yield_inputs is None:
             continue
         prepared = candidate["preparedAttack"]
-        score = (
-            float(prepared["baseDamage"])
-            / float(prepared["attackInterval"])
-            * coefficient[0]
-            * coefficient[1]
-            * coefficient[2]
-        )
+        try:
+            estimate = estimate_complete_node_yield(
+                base_damage=float(prepared["baseDamage"]),
+                **yield_inputs,
+            )
+        except (TypeError, ValueError):
+            continue
+        score = float(estimate["estimatedYieldPerNode"])
         species_key = str(candidate.get("speciesKey") or "")
         order = int(candidate.get("order") or 0)
         current = best_by_species.get(species_key)
@@ -443,7 +522,7 @@ def _best_discovered_scope_row(
             best_by_species[species_key] = (score, order, candidate)
     if not best_by_species:
         return None
-    _score, _order, winner = min(
+    ranked_species = sorted(
         best_by_species.values(),
         key=lambda value: (
             -value[0],
@@ -452,23 +531,32 @@ def _best_discovered_scope_row(
             int(value[2]["preparedAttack"].get("attackIndex") or 0),
         ),
     )
+    winner: dict[str, Any] | None = None
+    row: dict[str, Any] | None = None
+    for _score, _order, candidate in ranked_species:
+        creature = candidate["creature"]
+        prepared = candidate["preparedAttack"]
+        evaluated = evaluate_attack_resource(
+            creature=str(creature.get("name") or "Unknown creature"),
+            creature_object_path=str(creature.get("objectPath") or ""),
+            attack=prepared,
+            component=component,
+            resource=resource,
+            resource_entry_index=resource_entry_index,
+            damage_type_parents=engine.damage_type_parents,
+            resource_damage_overrides=engine.resource_damage_overrides,
+            damage_type_gaps=engine.damage_type_gaps,
+        )
+        if evaluated.get("rankingStatus") == "RANKED" and isinstance(
+            evaluated.get("estimatedYieldPerNode"), (int, float)
+        ):
+            winner = candidate
+            row = evaluated
+            break
+    if winner is None or row is None:
+        return None
     creature = winner["creature"]
     prepared = winner["preparedAttack"]
-    row = evaluate_attack_resource(
-        creature=str(creature.get("name") or "Unknown creature"),
-        creature_object_path=str(creature.get("objectPath") or ""),
-        attack=prepared,
-        component=component,
-        resource=resource,
-        resource_entry_index=resource_entry_index,
-        damage_type_parents=engine.damage_type_parents,
-        resource_damage_overrides=engine.resource_damage_overrides,
-        damage_type_gaps=engine.damage_type_gaps,
-    )
-    if row.get("rankingStatus") != "RANKED" or not isinstance(
-        row.get("engineComparisonIndex"), (int, float)
-    ):
-        return None
     require_confirmed_rideability = (
         engine.catalog.get("methodology", {}).get("rideabilityRequirement")
         == "B_ALLOW_RIDING_TRUE"
@@ -617,7 +705,10 @@ class HarvestNodeRepository:
         with self._lock:
             if self._ranking is None or signature != self._ranking_signature:
                 payload = self._read_object(self.ranking_path, "Harvest ranking report")
-                if payload.get("schema") != "ark-harvest-ranking/v1" or not isinstance(
+                if payload.get("schema") not in {
+                    "ark-harvest-ranking/v1",
+                    "ark-harvest-ranking/v2",
+                } or not isinstance(
                     payload.get("bestRows"), list
                 ):
                     raise HarvestDatasetInvalid("Harvest ranking report schema is invalid.")
@@ -803,8 +894,6 @@ class HarvestNodeRepository:
         }
         bounded_limit = max(1, min(int(limit), 10))
         items = [dict(row) for row in result.get("items", [])[:bounded_limit]]
-        for rank, row in enumerate(items, start=1):
-            row["rank"] = rank
         result["items"] = items
         coverage = dict(result.get("coverage") or {})
         ranked_total = int(coverage.get("rankedForNodeResource") or len(items))
@@ -987,6 +1076,7 @@ class HarvestNodeRepository:
         *,
         q: str = "",
         map_name: str = "",
+        only_map_family: str = "",
         resource: str = "",
         offset: int = 0,
         limit: int = 24,
@@ -996,6 +1086,7 @@ class HarvestNodeRepository:
                 return self._load_sqlite_catalog().list_nodes(
                     q=q,
                     map_name=map_name,
+                    only_map_family=only_map_family,
                     resource=resource,
                     offset=offset,
                     limit=limit,
@@ -1006,6 +1097,7 @@ class HarvestNodeRepository:
             self._load_catalog(),
             q=q,
             map_name=map_name,
+            only_map_family=only_map_family,
             resource=resource,
             offset=offset,
             limit=limit,
@@ -1325,8 +1417,8 @@ class HarvestNodeRepository:
             top_row = top_by_key.get(key)
             if selected_row is None or top_row is None:
                 continue
-            selected_score = selected_row.get("engineComparisonIndex")
-            top_score = top_row.get("engineComparisonIndex")
+            selected_score = selected_row.get("estimatedYieldPerNode")
+            top_score = top_row.get("estimatedYieldPerNode")
             if not isinstance(selected_score, (int, float)) or not isinstance(
                 top_score, (int, float)
             ) or float(top_score) <= 0:
@@ -1353,6 +1445,9 @@ class HarvestNodeRepository:
                         **resource,
                         "harvestComponentPackagePath": component_package,
                     },
+                    "nodeTopEstimatedYieldPerNode": float(top_score),
+                    # Compatibility alias for one release.  It deliberately
+                    # carries the same units/value as the new yield metric.
                     "nodeTopEngineComparisonIndex": float(top_score),
                     "relativeToNodeTopPercent": relative_percent,
                     "nodeTop": {
@@ -1361,6 +1456,7 @@ class HarvestNodeRepository:
                         "creatureObjectPath": top_row.get("creatureObjectPath"),
                         "attackIndex": top_row.get("attackIndex"),
                         "attackName": top_row.get("attackName"),
+                        "estimatedYieldPerNode": float(top_score),
                         "engineComparisonIndex": float(top_score),
                         "rankingTier": top_row.get("rankingTier"),
                         "evidence": copy.deepcopy(top_row.get("evidence") or {}),
@@ -1370,21 +1466,27 @@ class HarvestNodeRepository:
 
         ranked_rows.sort(
             key=lambda row: (
+                -float(row.get("estimatedYieldPerNode") or 0.0),
                 -float(row.get("relativeToNodeTopPercent") or 0.0),
-                -float(row.get("engineComparisonIndex") or 0.0),
                 str(row.get("resource", {}).get("resource") or "").casefold(),
                 str(row.get("node", {}).get("name") or "").casefold(),
                 str(row.get("node", {}).get("id") or ""),
             )
         )
+        previous_score: float | None = None
+        previous_rank = 0
+        for ordinal, row in enumerate(ranked_rows, start=1):
+            score = float(row.get("estimatedYieldPerNode") or 0.0)
+            if previous_score is None or score != previous_score:
+                previous_rank = ordinal
+                previous_score = score
+            row["rank"] = previous_rank
         bounded_offset = max(0, int(offset))
         bounded_limit = max(1, min(int(limit), 100))
         page_items = [
             copy.deepcopy(row)
             for row in ranked_rows[bounded_offset : bounded_offset + bounded_limit]
         ]
-        for ordinal, row in enumerate(page_items, start=bounded_offset + 1):
-            row["rank"] = ordinal
 
         evaluation_coverage = dict(evaluation_catalog.get("coverage") or {})
         claims_all_creatures = evaluation_coverage.get("claimsAllCreatures") is True
@@ -1413,10 +1515,19 @@ class HarvestNodeRepository:
             },
             "methodology": {
                 **dict(evaluation_catalog.get("methodology") or {}),
-                "metric": "engineComparisonIndex",
-                "sortMetric": "relativeToNodeTopPercent",
-                "relativeBasis": "SELECTED_SPECIES_SCORE_DIVIDED_BY_NODE_RESOURCE_TOP_SCORE",
-                "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+                "metric": "estimatedYieldPerNode",
+                "sortMetric": "estimatedYieldPerNode",
+                "relativeBasis": (
+                    "SELECTED_SPECIES_ESTIMATED_YIELD_PER_NODE_DIVIDED_BY_"
+                    "NODE_RESOURCE_TOP_ESTIMATED_YIELD_PER_NODE"
+                ),
+                "tiePolicy": (
+                    "COMPETITION_RANK_FOR_EQUAL_ESTIMATED_YIELD_1_1_3"
+                ),
+                "scoreBasis": YIELD_SCORE_BASIS,
+                "engineComparisonIndexCompatibility": (
+                    "ALIAS_OF_ESTIMATED_YIELD_PER_NODE_NOT_USED_FOR_SELECTION"
+                ),
             },
             "scopeStatus": (
                 "ALL_DISCOVERED_CREATURES_EVALUATED"

@@ -1536,12 +1536,22 @@ def query_harvest_nodes_for_request(query: str) -> dict[str, object]:
         return HARVEST_REPOSITORY.list_nodes(
             q=values.get("q", [""])[0],
             map_name=values.get("map", [""])[0],
+            only_map_family=values.get("onlyMapFamily", [""])[0],
             resource=values.get("resource", [""])[0],
             offset=offset,
             limit=limit,
         )
     except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
         raise _harvest_dataset_problem(exc) from exc
+    except ValueError as exc:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_NODE_FILTER",
+                "error": "Invalid resource-node filter.",
+            },
+        ) from exc
 
 
 def query_harvest_node_for_request(node_id: str) -> dict[str, object]:

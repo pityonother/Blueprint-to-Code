@@ -16,8 +16,11 @@ import math
 from typing import Any, Callable
 
 
-VERIFICATION_SCHEMA = "blueprint-to-code.harvest-independent-verification/v1"
-FORMULA_VERSION = "independent-harvest-engine-comparison-index/v2-conditional-scope"
+VERIFICATION_SCHEMA = "blueprint-to-code.harvest-independent-verification/v2"
+FORMULA_VERSION = "independent-harvest-estimated-yield-per-node/v1-native-static-profile"
+SCORE_BASIS = "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE"
+NORMALIZED_HARVEST_AMOUNT_SCALE = 2.0
+UNCLAMPED_FINAL_HIT_HEALTH_MULTIPLIER = 3.5
 USAGE_SCOPE = "TAMED_RIDDEN"
 
 ReferenceQuery = Callable[[str, str, int], dict[str, Any]]
@@ -80,6 +83,20 @@ def _nearest(overrides: object, chain: list[str], fallback: Any) -> tuple[Any, s
     return fallback, None
 
 
+def _stable_row_identity(row: dict[str, Any]) -> tuple[str, str, int, str]:
+    """Independently reproduce the public tie policy for equal yields."""
+
+    attack_index = row.get("attackIndex")
+    return (
+        str(row.get("creature") or "").casefold(),
+        str(row.get("creatureObjectPath") or ""),
+        int(attack_index)
+        if isinstance(attack_index, int) and not isinstance(attack_index, bool)
+        else 0,
+        str(row.get("attackName") or "").casefold(),
+    )
+
+
 def _resource_override_map(rows: object) -> dict[tuple[str, str], str]:
     result: dict[tuple[str, str], str] = {}
     for row in rows if isinstance(rows, list) else []:
@@ -125,13 +142,84 @@ def _scope_attack(attack: dict[str, Any]) -> tuple[dict[str, Any] | None, str | 
     return prepared, None
 
 
-def _disposition(status: str, reason: str, score: float | None = None, **facts: Any) -> dict[str, Any]:
+def _disposition(
+    status: str,
+    reason: str,
+    estimated_yield: float | None = None,
+    **facts: Any,
+) -> dict[str, Any]:
     return {
         "rankingStatus": status,
         "reasonCode": reason,
-        "engineComparisonIndex": score,
+        "estimatedYieldPerNode": estimated_yield,
+        # Transitional compatibility alias.  The verifier never ranks by this
+        # name and separately rejects a reference alias that disagrees with the
+        # new complete-node metric.
+        "engineComparisonIndex": estimated_yield,
+        "scoreBasis": SCORE_BASIS,
         **facts,
     }
+
+
+def _simulate_complete_node_grants(
+    *,
+    base_damage: float,
+    damage_multiplier: float,
+    harvest_quantity_multiplier: float,
+    max_harvest_health: float,
+    harvest_health_give_resource_interval: float,
+    clamp_resource_harvest_damage: bool,
+) -> tuple[int, int]:
+    """Independently reproduce the recovered native finite-node grant loop."""
+
+    values = (
+        base_damage,
+        damage_multiplier,
+        harvest_quantity_multiplier,
+        max_harvest_health,
+        harvest_health_give_resource_interval,
+    )
+    if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in values):
+        raise ValueError("Complete-node grant inputs must be finite numbers.")
+    if base_damage <= 0 or damage_multiplier <= 0:
+        raise ValueError("Complete-node yield requires positive harvest damage.")
+    if harvest_quantity_multiplier < 0:
+        raise ValueError("HarvestQuantityMultiplier cannot be negative.")
+    if max_harvest_health <= 0 or harvest_health_give_resource_interval <= 0:
+        raise ValueError("Complete-node yield requires positive node health and interval.")
+
+    remaining_health = float(max_harvest_health)
+    damage_per_hit = float(base_damage) * float(damage_multiplier)
+    threshold = (
+        float(harvest_health_give_resource_interval)
+        / NORMALIZED_HARVEST_AMOUNT_SCALE
+    )
+    damage_accumulator = 0.0
+    grant_calls = 0
+    hit_count = 0
+    max_iterations = max(1, int(math.ceil(remaining_health / damage_per_hit)) + 2)
+    while remaining_health > 1e-9:
+        hit_count += 1
+        if hit_count > max_iterations:
+            raise ValueError("Complete-node hit simulation did not converge.")
+        final_hit_cap = (
+            remaining_health
+            if clamp_resource_harvest_damage
+            else UNCLAMPED_FINAL_HIT_HEALTH_MULTIPLIER * remaining_health
+        )
+        credited_health_loss = min(damage_per_hit, final_hit_cap)
+        damage_accumulator += credited_health_loss
+        raw_grant_units = math.floor(damage_accumulator / threshold + 1e-9)
+        calls_this_hit = math.trunc(
+            float(harvest_quantity_multiplier) * raw_grant_units
+        )
+        if calls_this_hit > 0:
+            grant_calls += calls_this_hit
+            # Native path clears the accumulator after a successful grant,
+            # including any remainder below the threshold.
+            damage_accumulator = 0.0
+        remaining_health = max(0.0, remaining_health - credited_health_loss)
+    return grant_calls, hit_count
 
 
 def _independent_evaluate(
@@ -148,13 +236,21 @@ def _independent_evaluate(
     target_resource = _identity(resource)
     base_damage = attack.get("baseDamage")
     attack_interval = attack.get("attackInterval")
+    attack_gaps = [
+        str(gap)
+        for gap in attack.get("gaps") or []
+        if str(gap) != "AttackInterval"
+    ]
     if (
-        list(attack.get("gaps") or [])
+        attack_gaps
         or not source_damage_type
         or not isinstance(base_damage, (int, float))
-        or not isinstance(attack_interval, (int, float))
     ):
         return _disposition("UNRANKED", "REQUIRED_ATTACK_FACT_NOT_RECOVERED")
+    if float(base_damage) <= 0:
+        return _disposition("INCOMPATIBLE", "NON_POSITIVE_HARVEST_DAMAGE")
+    if attack.get("useBlueprintAdjustOutputDamage") is True:
+        return _disposition("UNRANKED", "BLUEPRINT_OUTPUT_DAMAGE_NOT_RECOVERED")
 
     component_ranking_gaps = component.get("rankingGaps")
     if not isinstance(component_ranking_gaps, list):
@@ -308,31 +404,153 @@ def _independent_evaluate(
 
     damage_multiplier = damage_entry.get("damageMultiplier")
     quantity_multiplier = damage_entry.get("harvestQuantityMultiplier")
-    if (
-        not isinstance(damage_multiplier, (int, float))
-        or not isinstance(quantity_multiplier, (int, float))
-        or float(attack_interval) <= 0
+    max_harvest_health = component.get("maxHarvestHealth")
+    give_resource_interval = component.get("harvestHealthGiveResourceInterval")
+    if not all(
+        isinstance(value, (int, float))
+        for value in (
+            damage_multiplier,
+            quantity_multiplier,
+            max_harvest_health,
+            give_resource_interval,
+        )
     ):
         return _disposition("UNRANKED", "REQUIRED_COEFFICIENT_NOT_RECOVERED")
+    if component.get("isSingleUnitHarvest") is True:
+        return _disposition("UNRANKED", "SINGLE_UNIT_HARVEST_MODEL_NOT_RECOVERED")
+
+    target_entry_gaps = set(
+        target_entry.get("rankingGaps") or target_entry.get("gaps") or []
+    )
+    target_override_types = target_entry.get("damageTypeEntryValues")
+
+    def relevant_quantity_override_gap(gap_code: str) -> bool:
+        return gap_code in target_entry_gaps and (
+            not isinstance(target_override_types, list)
+            or any(_identity(candidate) in chain for candidate in target_override_types)
+        )
+
+    if any(
+        relevant_quantity_override_gap(gap_code)
+        for gap_code in (
+            "DAMAGE_TYPE_MIN_QUANTITY_OVERRIDE_NOT_RECOVERED",
+            "DAMAGE_TYPE_MAX_QUANTITY_OVERRIDE_NOT_RECOVERED",
+        )
+    ):
+        return _disposition("UNRANKED", "RESOURCE_QUANTITY_MODEL_NOT_RECOVERED")
+
+    minimum_quantity, minimum_match = _nearest(
+        target_entry.get("minQuantityOverrides"),
+        chain,
+        target_entry.get("overrideQuantityMin"),
+    )
+    maximum_quantity, maximum_match = _nearest(
+        target_entry.get("maxQuantityOverrides"),
+        chain,
+        target_entry.get("overrideQuantityMax"),
+    )
+    quantity_random_power = target_entry.get("overrideQuantityRandomPower")
+    random_power_source = "RECOVERED_COMPONENT_VALUE"
+    if quantity_random_power is None:
+        quantity_random_power = 1.0
+        random_power_source = "NATIVE_LINEAR_DEFAULT_FOR_LEGACY_REPORT"
+    if not all(
+        isinstance(value, (int, float))
+        for value in (minimum_quantity, maximum_quantity, quantity_random_power)
+    ):
+        return _disposition("UNRANKED", "RESOURCE_QUANTITY_MODEL_NOT_RECOVERED")
+    if not math.isclose(
+        float(quantity_random_power), 1.0, rel_tol=0.0, abs_tol=1e-6
+    ):
+        return _disposition(
+            "UNRANKED", "COMPLETE_NODE_YIELD_MODEL_NOT_APPLICABLE"
+        )
+
+    additional_effectiveness = damage_entry.get(
+        "damageHarvestAdditionalEffectiveness"
+    )
+    if additional_effectiveness is None:
+        additional_effectiveness = 0.0
+    if not isinstance(additional_effectiveness, (int, float)):
+        return _disposition("UNRANKED", "HARVEST_EFFECTIVENESS_MODEL_NOT_RECOVERED")
+    if not math.isclose(
+        float(additional_effectiveness), 0.0, rel_tol=0.0, abs_tol=1e-9
+    ):
+        return _disposition(
+            "UNRANKED", "NONZERO_HARVEST_EFFECTIVENESS_MODEL_NOT_IMPLEMENTED"
+        )
+
+    weight_share = resource_weight / total_positive_weight
+    try:
+        grant_calls, hit_count = _simulate_complete_node_grants(
+            base_damage=float(base_damage),
+            damage_multiplier=float(damage_multiplier),
+            harvest_quantity_multiplier=float(quantity_multiplier),
+            max_harvest_health=float(max_harvest_health),
+            harvest_health_give_resource_interval=float(give_resource_interval),
+            clamp_resource_harvest_damage=bool(
+                component.get("clampResourceHarvestDamage")
+            ),
+        )
+        minimum_quantity = float(minimum_quantity)
+        maximum_quantity = float(maximum_quantity)
+        if (
+            not math.isfinite(minimum_quantity)
+            or not math.isfinite(maximum_quantity)
+            or minimum_quantity < 0
+            or maximum_quantity < minimum_quantity
+        ):
+            raise ValueError("Resource quantity bounds are invalid.")
+    except ValueError:
+        return _disposition(
+            "UNRANKED", "COMPLETE_NODE_YIELD_MODEL_NOT_APPLICABLE"
+        )
+
+    expected_quantity = (minimum_quantity + maximum_quantity) / 2.0
+    estimated_yield = float(grant_calls) * weight_share * expected_quantity
+    interval_for_diagnostics = (
+        float(attack_interval)
+        if isinstance(attack_interval, (int, float)) and float(attack_interval) > 0
+        else None
+    )
     pressure = (
         float(base_damage)
-        / float(attack_interval)
+        / interval_for_diagnostics
         * float(damage_multiplier)
         * float(quantity_multiplier)
+        if interval_for_diagnostics is not None
+        else None
     )
     return _disposition(
         "RANKED",
-        "ENGINE_COEFFICIENTS_RECOVERED",
-        pressure * (resource_weight / total_positive_weight),
+        "COMPLETE_NODE_YIELD_ESTIMATED",
+        estimated_yield,
         sourceDamageType=source_damage_type,
         effectiveDamageType=effective_damage_type,
         baseDamage=float(base_damage),
-        attackInterval=float(attack_interval),
+        attackInterval=interval_for_diagnostics,
         damageMultiplier=float(damage_multiplier),
         harvestQuantityMultiplier=float(quantity_multiplier),
+        damageHarvestAdditionalEffectiveness=float(additional_effectiveness),
         resourceWeight=resource_weight,
         totalPositiveResourceWeight=total_positive_weight,
-        resourceWeightShare=resource_weight / total_positive_weight,
+        resourceWeightShare=weight_share,
+        overrideQuantityMin=minimum_quantity,
+        overrideQuantityMax=maximum_quantity,
+        overrideQuantityRandomPower=float(quantity_random_power),
+        quantityRandomPowerSource=random_power_source,
+        quantityOverrideMatch=minimum_match or maximum_match,
+        maxHarvestHealth=float(max_harvest_health),
+        harvestHealthGiveResourceInterval=float(give_resource_interval),
+        estimatedGrantCallsPerNode=grant_calls,
+        estimatedHitsToDepleteNode=hit_count,
+        expectedQuantityPerSelection=expected_quantity,
+        clampResourceHarvestDamage=bool(
+            component.get("clampResourceHarvestDamage")
+        ),
+        normalizedHarvestAmountScale=NORMALIZED_HARVEST_AMOUNT_SCALE,
+        yieldModelVersion=FORMULA_VERSION,
+        yieldModelBasis="NATIVE_STATIC_COMPLETE_NODE_HIT_SIMULATION",
         harvestPressurePerSecond=pressure,
     )
 
@@ -499,7 +717,7 @@ def independently_rank_target(
             )
             status = str(disposition.get("rankingStatus") or "UNRANKED")
             dispositions[status] += 1
-            score = disposition.get("engineComparisonIndex")
+            score = disposition.get("estimatedYieldPerNode")
             if status != "RANKED" or not isinstance(score, (int, float)):
                 continue
             if condition_reasons:
@@ -550,24 +768,42 @@ def independently_rank_target(
                 "rankingTier": "CONFIRMED" if evidence_confirmed else "CONDITIONAL",
             }
             current = best_by_species.get(species_key)
-            if current is None or float(score) > float(current["engineComparisonIndex"]):
+            current_score = (
+                float(current["estimatedYieldPerNode"])
+                if current is not None
+                else None
+            )
+            if (
+                current is None
+                or current_score is None
+                or float(score) > current_score
+                or (
+                    float(score) == current_score
+                    and _stable_row_identity(row) < _stable_row_identity(current)
+                )
+            ):
                 best_by_species[species_key] = row
 
     ranked = sorted(
         best_by_species.values(),
         key=lambda row: (
-            -float(row.get("engineComparisonIndex") or 0.0),
-            str(row.get("creature") or "").casefold(),
-            str(row.get("creatureObjectPath") or ""),
-            int(row.get("attackIndex") or 0),
+            -float(row.get("estimatedYieldPerNode") or 0.0),
+            *_stable_row_identity(row),
         ),
     )
     bounded_limit = max(1, min(int(limit), 10))
     selected = [dict(row) for row in ranked[:bounded_limit]]
-    top_score = float(ranked[0].get("engineComparisonIndex") or 0.0) if ranked else 0.0
-    for rank, row in enumerate(selected, start=1):
-        row["rank"] = rank
-        score = float(row.get("engineComparisonIndex") or 0.0)
+    top_score = (
+        float(ranked[0].get("estimatedYieldPerNode") or 0.0) if ranked else 0.0
+    )
+    previous_score: float | None = None
+    competition_rank = 0
+    for ordinal, row in enumerate(selected, start=1):
+        score = float(row.get("estimatedYieldPerNode") or 0.0)
+        if previous_score is None or score != previous_score:
+            competition_rank = ordinal
+            previous_score = score
+        row["rank"] = competition_rank
         row["relativeToNodeTopPercent"] = (
             round(min(100.0, max(0.0, score / top_score * 100.0)), 3)
             if top_score > 0
@@ -759,6 +995,7 @@ def verify_catalogs(
                 "rankingStatus",
                 "reasonCode",
                 "rankingTier",
+                "rank",
                 "usageEligibilityStatus",
                 "usageConditionReasonCodes",
                 "evidence",
@@ -771,8 +1008,8 @@ def verify_catalogs(
                         expected=expected_row.get(field),
                         actual=actual_row.get(field),
                     )
-            expected_score = expected_row.get("engineComparisonIndex")
-            actual_score = actual_row.get("engineComparisonIndex")
+            expected_score = expected_row.get("estimatedYieldPerNode")
+            actual_score = actual_row.get("estimatedYieldPerNode")
             scores_match = (
                 isinstance(expected_score, (int, float))
                 and isinstance(actual_score, (int, float))
@@ -787,10 +1024,53 @@ def verify_catalogs(
                 _append_mismatch(
                     mismatches,
                     target=key,
-                    field=f"items[{index}].engineComparisonIndex",
+                    field=f"items[{index}].estimatedYieldPerNode",
                     expected=expected_score,
                     actual=actual_score,
                 )
+            expected_relative = expected_row.get("relativeToNodeTopPercent")
+            actual_relative = actual_row.get("relativeToNodeTopPercent")
+            relative_matches = (
+                isinstance(expected_relative, (int, float))
+                and isinstance(actual_relative, (int, float))
+                and math.isclose(
+                    float(expected_relative),
+                    float(actual_relative),
+                    rel_tol=float_tolerance,
+                    abs_tol=float_tolerance,
+                )
+            )
+            if not relative_matches:
+                _append_mismatch(
+                    mismatches,
+                    target=key,
+                    field=f"items[{index}].relativeToNodeTopPercent",
+                    expected=expected_relative,
+                    actual=actual_relative,
+                )
+            # The legacy key is optional.  If a reference still emits it, it
+            # must be an alias of the new metric, never a second score capable
+            # of contradicting the returned ordering.
+            if "engineComparisonIndex" in actual_row:
+                alias_score = actual_row.get("engineComparisonIndex")
+                alias_matches = (
+                    isinstance(actual_score, (int, float))
+                    and isinstance(alias_score, (int, float))
+                    and math.isclose(
+                        float(actual_score),
+                        float(alias_score),
+                        rel_tol=float_tolerance,
+                        abs_tol=float_tolerance,
+                    )
+                )
+                if not alias_matches:
+                    _append_mismatch(
+                        mismatches,
+                        target=key,
+                        field=f"items[{index}].engineComparisonIndexAlias",
+                        expected=actual_score,
+                        actual=alias_score,
+                    )
         expected_coverage = expected.get("coverage", {})
         actual_coverage = actual.get("coverage", {})
         for field in (
@@ -832,10 +1112,21 @@ def verify_catalogs(
                 "EVALUATE_ATTACK_RESOURCE"
             ),
             "referenceMode": "BLACK_BOX_QUERY_CALLBACK",
+            "metric": "estimatedYieldPerNode",
+            "scoreBasis": SCORE_BASIS,
             "score": (
-                "baseDamage / attackInterval * damageMultiplier * "
-                "harvestQuantityMultiplier * normalizedResourceWeight"
+                "finite native-style per-hit node simulation; grantCalls * "
+                "normalizedResourceWeight * (quantityMin + quantityMax) / 2"
             ),
+            "attackIntervalRole": "DIAGNOSTIC_ONLY_NOT_USED_FOR_NODE_YIELD_ORDER",
+            "normalizedHarvestAmountScale": NORMALIZED_HARVEST_AMOUNT_SCALE,
+            "unclampedFinalHitCap": "3.5 * remainingHarvestHealth",
+            "unsupportedModelsFailClosed": [
+                "bIsSingleUnitHarvest=true",
+                "DamageHarvestAdditionalEffectiveness!=0",
+                "OverrideQuantityRandomPower!=1",
+                "bUseBlueprintAdjustOutputDamage=true",
+            ],
             "usageScope": USAGE_SCOPE,
             "floatTolerance": float_tolerance,
         },

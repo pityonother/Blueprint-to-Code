@@ -1273,13 +1273,14 @@ code {
 
 .harvest-filter-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
 .harvest-filter-grid label {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .harvest-filter-grid input,
@@ -1291,6 +1292,28 @@ code {
   padding: 9px 11px;
   color: #f0f6f3;
   background: #0f1415;
+}
+
+.harvest-filter-grid select:disabled {
+  color: #74807b;
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.harvest-filter-note {
+  margin: 0;
+  border-left: 3px solid rgba(143, 216, 194, 0.45);
+  padding: 7px 10px;
+  color: #aeb8b3;
+  background: rgba(143, 216, 194, 0.05);
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+
+.harvest-filter-note.warn {
+  border-left-color: #e6bd70;
+  color: #e8d5ad;
+  background: rgba(230, 189, 112, 0.07);
 }
 
 .harvest-search-row input:focus-visible,

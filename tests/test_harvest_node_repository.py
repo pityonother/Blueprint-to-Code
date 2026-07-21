@@ -1,3 +1,4 @@
+import copy
 import json
 import sys
 import tempfile
@@ -17,7 +18,9 @@ from blueprint_translator.harvest_node_repository import (  # noqa: E402
     _eligible_attack_candidates,
 )
 from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
+    EVALUATION_CATALOG_SCHEMA,
     HarvestEvaluationEngine,
+    RANKING_RESULT_SCHEMA,
 )
 from blueprint_translator.harvest_catalog_sqlite import (  # noqa: E402
     build_harvest_catalog_sqlite,
@@ -63,12 +66,19 @@ def _component(name: str = "MetalHarvestComponent") -> dict[str, object]:
     return {
         "component": name,
         "objectPath": f"/Game/Components/{name}.{name}",
+        "maxHarvestHealth": 75.0,
+        "harvestHealthGiveResourceInterval": 20.0,
+        "clampResourceHarvestDamage": False,
+        "isSingleUnitHarvest": False,
         "resourceEntries": [
             {
                 "entryIndex": 0,
                 "resource": "PrimalItemResource_Metal_C",
                 "entryWeight": 1.0,
                 "weightOverrides": {"DmgType_MineStone_C": 1.0},
+                "overrideQuantityMin": 1.0,
+                "overrideQuantityMax": 1.0,
+                "overrideQuantityRandomPower": 1.0,
                 "minQuantityOverrides": {},
                 "maxQuantityOverrides": {},
                 "gaps": [],
@@ -95,7 +105,7 @@ def _evaluation_catalog(
     creatures: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     return {
-        "schema": "ark-harvest-evaluation-catalog/v1",
+        "schema": EVALUATION_CATALOG_SCHEMA,
         "dataset": {
             "revision": revision,
             "componentDatasetRevision": component_revision,
@@ -334,6 +344,7 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
                                 ),
                                 "resource": "PrimalItemResource_Metal_C",
                                 "rankingStatus": "RANKED",
+                                "estimatedYieldPerNode": 91.2,
                                 "engineComparisonIndex": 91.2,
                                 "attackIndex": 0,
                             }
@@ -405,16 +416,49 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
 
             result = repository.rankings("node-a", "resource-a", limit=10)
 
-        self.assertEqual(result["schema"], "blueprint-to-code.harvest-ranking-result/v2")
+        self.assertEqual(result["schema"], RANKING_RESULT_SCHEMA)
         self.assertEqual(result["node"]["id"], "node-a")
         self.assertEqual(result["items"][0]["speciesKey"], "anky")
         self.assertEqual(result["dataset"]["evaluationRevision"], EVALUATION_REVISION)
+
+    def test_lazy_result_preserves_competition_ranks_for_equal_yields(self):
+        cached = {
+            "items": [
+                {
+                    "speciesKey": "alpha",
+                    "estimatedYieldPerNode": 20.0,
+                    "rank": 1,
+                },
+                {
+                    "speciesKey": "beta",
+                    "estimatedYieldPerNode": 20.0,
+                    "rank": 1,
+                },
+                {
+                    "speciesKey": "gamma",
+                    "estimatedYieldPerNode": 10.0,
+                    "rank": 3,
+                },
+            ],
+            "coverage": {"rankedForNodeResource": 3},
+        }
+
+        result = HarvestNodeRepository._bind_lazy_result(
+            cached,
+            node_catalog={"dataset": {}},
+            node={"id": "node-a", "name": "Node A", "objectPath": "/Node/A"},
+            resource={"nodeResourceId": "resource-a"},
+            component_package="/Component/A",
+            limit=3,
+        )
+
+        self.assertEqual([row["rank"] for row in result["items"]], [1, 1, 3])
 
     def test_evaluation_catalog_schema_and_revisions_fail_closed(self):
         invalid_payloads = {
             "wrong schema": {
                 **_evaluation_catalog(),
-                "schema": "ark-harvest-evaluation-catalog/v2",
+                "schema": "ark-harvest-evaluation-catalog/v1",
             },
             "short revision": _evaluation_catalog(revision="abc"),
             "uppercase revision": _evaluation_catalog(revision="E" * 64),
@@ -515,6 +559,11 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
                 "resource": "PrimalItemResource_Metal_C",
                 "entryWeight": 1.0,
                 "weightOverrides": {},
+                "overrideQuantityMin": 1.0,
+                "overrideQuantityMax": 1.0,
+                "overrideQuantityRandomPower": 1.0,
+                "minQuantityOverrides": {},
+                "maxQuantityOverrides": {},
                 "gaps": [],
             },
             {
@@ -522,6 +571,11 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
                 "resource": "PrimalItemResource_Metal_C",
                 "entryWeight": 0.5,
                 "weightOverrides": {},
+                "overrideQuantityMin": 1.0,
+                "overrideQuantityMax": 1.0,
+                "overrideQuantityRandomPower": 1.0,
+                "minQuantityOverrides": {},
+                "maxQuantityOverrides": {},
                 "gaps": [],
             },
         ]
@@ -616,7 +670,7 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
             {
                 "damageTypeParent": "DmgType_Doed_C",
                 "damageMultiplier": 2.0,
-                "harvestQuantityMultiplier": 1.0,
+                "harvestQuantityMultiplier": 2.0,
                 "gaps": [],
             },
         ]
@@ -625,7 +679,7 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
             {
                 "damageTypeParent": "DmgType_Anky_C",
                 "damageMultiplier": 2.0,
-                "harvestQuantityMultiplier": 1.0,
+                "harvestQuantityMultiplier": 2.0,
                 "gaps": [],
             },
             {
@@ -638,6 +692,11 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
         stone_component["resourceEntries"][0]["resource"] = (
             "PrimalItemResource_Stone_C"
         )
+        # Deliberately invert relative strength and absolute yield: Anky is the
+        # Stone winner at 100%, but its Metal yield is still higher.  The
+        # specialties rank must follow yield, not the relative percentage.
+        stone_component["resourceEntries"][0]["overrideQuantityMin"] = 0.25
+        stone_component["resourceEntries"][0]["overrideQuantityMax"] = 0.25
         creatures = [
             {
                 "name": "Ankylosaurus",
@@ -746,7 +805,7 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
 
         self.assertEqual(
             first_page["schema"],
-            "blueprint-to-code.harvest-creature-specialties/v1",
+            "blueprint-to-code.harvest-creature-specialties/v2",
         )
         self.assertEqual(first_page["species"]["speciesKey"], "anky")
         self.assertEqual(first_page["species"]["variantCount"], 2)
@@ -756,23 +815,43 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
         self.assertEqual(first_page["coverage"]["nodeResourcePairsRanked"], 3)
         self.assertEqual(
             [row["node"]["id"] for row in first_page["items"]],
-            ["node-stone", "node-stone-clone"],
+            ["node-metal", "node-stone"],
         )
-        self.assertEqual(first_page["items"][0]["rank"], 1)
-        self.assertEqual(first_page["items"][0]["engineComparisonIndex"], 100.0)
-        self.assertEqual(first_page["items"][0]["relativeToNodeTopPercent"], 100.0)
+        self.assertEqual(
+            [row["rank"] for row in first_page["items"]],
+            [1, 2],
+        )
+        self.assertEqual(first_page["items"][0]["estimatedYieldPerNode"], 10.0)
+        self.assertEqual(
+            first_page["items"][0]["engineComparisonIndex"],
+            first_page["items"][0]["estimatedYieldPerNode"],
+        )
+        self.assertEqual(first_page["items"][0]["relativeToNodeTopPercent"], 50.0)
         self.assertNotIn("damageTypeChain", first_page["items"][0])
         self.assertIn("damageMultiplier", first_page["items"][0])
         self.assertEqual(
             first_page["items"][0]["creatureObjectPath"],
             "/Game/Dinos/AnkyAberrant",
         )
-        self.assertEqual(second_page["items"][0]["node"]["id"], "node-metal")
-        self.assertEqual(second_page["items"][0]["rank"], 3)
-        self.assertEqual(second_page["items"][0]["engineComparisonIndex"], 50.0)
-        self.assertEqual(second_page["items"][0]["nodeTopEngineComparisonIndex"], 100.0)
-        self.assertEqual(second_page["items"][0]["relativeToNodeTopPercent"], 50.0)
-        self.assertEqual(second_page["items"][0]["nodeTop"]["speciesKey"], "doed")
+        self.assertEqual(first_page["items"][0]["nodeTopEstimatedYieldPerNode"], 20.0)
+        self.assertEqual(first_page["items"][0]["nodeTopEngineComparisonIndex"], 20.0)
+        self.assertEqual(first_page["items"][0]["nodeTop"]["speciesKey"], "doed")
+        self.assertEqual(
+            first_page["items"][0]["nodeTop"]["estimatedYieldPerNode"],
+            first_page["items"][0]["nodeTop"]["engineComparisonIndex"],
+        )
+        self.assertEqual(second_page["items"][0]["node"]["id"], "node-stone-clone")
+        self.assertEqual(second_page["items"][0]["rank"], 2)
+        self.assertEqual(second_page["items"][0]["estimatedYieldPerNode"], 5.0)
+        self.assertEqual(second_page["items"][0]["nodeTopEstimatedYieldPerNode"], 5.0)
+        self.assertEqual(second_page["items"][0]["relativeToNodeTopPercent"], 100.0)
+        self.assertEqual(second_page["items"][0]["nodeTop"]["speciesKey"], "anky")
+        self.assertEqual(
+            first_page["methodology"]["metric"], "estimatedYieldPerNode"
+        )
+        self.assertEqual(
+            first_page["methodology"]["sortMetric"], "estimatedYieldPerNode"
+        )
         self.assertGreater(first_evaluation_count, 0)
         self.assertEqual(second_evaluation_count, first_evaluation_count)
 
@@ -808,6 +887,11 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
                 "entryWeight": 0.25,
                 "weightOverrides": {"DmgType_Override_C": 0.75},
                 "damageTypeEntryValues": ["DmgType_Override_C"],
+                "overrideQuantityMin": 1.0,
+                "overrideQuantityMax": 1.0,
+                "overrideQuantityRandomPower": 1.0,
+                "minQuantityOverrides": {},
+                "maxQuantityOverrides": {},
                 "gaps": [],
             },
             {
@@ -816,6 +900,11 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
                 "entryWeight": 0.75,
                 "weightOverrides": {"DmgType_Override_C": 0.25},
                 "damageTypeEntryValues": ["DmgType_Override_C"],
+                "overrideQuantityMin": 1.0,
+                "overrideQuantityMax": 1.0,
+                "overrideQuantityRandomPower": 1.0,
+                "minQuantityOverrides": {},
+                "maxQuantityOverrides": {},
                 "gaps": [],
             },
         ]
@@ -848,7 +937,6 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
                         "baseDamage": 10.0,
                         "attackInterval": 1.0,
                         "riderAttackInterval": 1.0,
-                        "useBlueprintAdjustOutputDamage": True,
                         "gaps": [],
                     }
                 ],
@@ -915,16 +1003,239 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
         self.assertIsNotNone(fast)
         self.assertEqual(fast["speciesKey"], authoritative["speciesKey"])
         self.assertEqual(
-            fast["engineComparisonIndex"],
-            authoritative["engineComparisonIndex"],
+            fast["estimatedYieldPerNode"],
+            authoritative["estimatedYieldPerNode"],
         )
-        self.assertEqual(fast["rankingTier"], "CONDITIONAL")
+        self.assertEqual(
+            fast["engineComparisonIndex"], fast["estimatedYieldPerNode"]
+        )
+        self.assertEqual(fast["rankingTier"], "CONFIRMED")
         self.assertEqual(fast["rankingTier"], authoritative["rankingTier"])
-        self.assertIn(
-            "BLUEPRINT_ADJUST_OUTPUT_DAMAGE_NOT_RECOVERED",
-            fast["evidence"]["gaps"],
-        )
         self.assertEqual(fast["evidence"], authoritative["evidence"])
+
+    def test_fast_node_top_does_not_reward_an_extreme_attack_interval(self):
+        component = _component("CadenceNeutralComponent")
+        creatures = [
+            {
+                "name": "Z Fast Cadence",
+                "speciesKey": "fast",
+                "objectPath": "/Game/Dinos/Fast",
+                "tameability": {"status": "ALLOWED", "reasonCodes": []},
+                "rideability": {"status": "ALLOWED", "reasonCodes": []},
+                "attacks": [
+                    {
+                        "attackIndex": 0,
+                        "attackName": "Fast",
+                        "damageType": "DmgType_MineStone_C",
+                        "baseDamage": 30.0,
+                        "attackInterval": 0.01,
+                        "riderAttackInterval": 0.01,
+                        "gaps": [],
+                    }
+                ],
+            },
+            {
+                "name": "A Normal Cadence",
+                "speciesKey": "normal",
+                "objectPath": "/Game/Dinos/Normal",
+                "tameability": {"status": "ALLOWED", "reasonCodes": []},
+                "rideability": {"status": "ALLOWED", "reasonCodes": []},
+                "attacks": [
+                    {
+                        "attackIndex": 0,
+                        "attackName": "Normal",
+                        "damageType": "DmgType_MineStone_C",
+                        "baseDamage": 30.0,
+                        "attackInterval": 1.0,
+                        "riderAttackInterval": 1.0,
+                        "gaps": [],
+                    }
+                ],
+            },
+        ]
+        evaluation = _evaluation_catalog(
+            components=[component], creatures=creatures
+        )
+        engine = HarvestEvaluationEngine(evaluation)
+        candidates, _variant_counts = _eligible_attack_candidates(evaluation)
+
+        winner = _best_discovered_scope_row(
+            engine,
+            component_package="/Game/Components/CadenceNeutralComponent",
+            resource="PrimalItemResource_Metal_C",
+            resource_entry_index=0,
+            candidates=candidates,
+        )
+
+        self.assertIsNotNone(winner)
+        self.assertEqual(winner["speciesKey"], "normal")
+        self.assertEqual(winner["estimatedYieldPerNode"], 11.0)
+        self.assertEqual(
+            winner["engineComparisonIndex"], winner["estimatedYieldPerNode"]
+        )
+
+    def test_extinction_streetlight_top_prefers_doedicurus_over_dreadnoughtus(self):
+        component = _component("CityPropHarvestComponent_Light_Large_Off")
+        component.update(
+            {
+                "maxHarvestHealth": 150.0,
+                "harvestHealthGiveResourceInterval": 40.0,
+                "clampResourceHarvestDamage": False,
+                "resourceEntries": [
+                    {
+                        "entryIndex": 0,
+                        "resource": "PrimalItemResource_Electronics_C",
+                        "entryWeight": 0.2,
+                        "overrideQuantityMin": 0.0,
+                        "overrideQuantityMax": 1.0,
+                        "overrideQuantityRandomPower": 1.0,
+                        "minQuantityOverrides": {},
+                        "maxQuantityOverrides": {},
+                        "weightOverrides": {},
+                        "gaps": [],
+                    },
+                    {
+                        "entryIndex": 1,
+                        "resource": "PrimalItemResource_ScrapMetal_C",
+                        "entryWeight": 1.485,
+                        "overrideQuantityMin": 1.0,
+                        "overrideQuantityMax": 1.0,
+                        "overrideQuantityRandomPower": 1.0,
+                        "minQuantityOverrides": {},
+                        "maxQuantityOverrides": {},
+                        "weightOverrides": {},
+                        "gaps": [],
+                    },
+                ],
+                "damageEntries": [
+                    {
+                        "damageTypeParent": "DmgType_Dread_C",
+                        "damageMultiplier": 1.0,
+                        "harvestQuantityMultiplier": 1.0,
+                        "damageHarvestAdditionalEffectiveness": 0.0,
+                        "gaps": [],
+                    },
+                    {
+                        "damageTypeParent": "DmgType_Doed_C",
+                        "damageMultiplier": 3.0,
+                        "harvestQuantityMultiplier": 7.0,
+                        "damageHarvestAdditionalEffectiveness": 0.0,
+                        "gaps": [],
+                    },
+                ],
+            }
+        )
+        creatures = [
+            {
+                "name": "Dreadnoughtus",
+                "speciesKey": "dread",
+                "objectPath": "/Game/Dinos/Dread",
+                "tameability": {"status": "ALLOWED", "reasonCodes": []},
+                "rideability": {"status": "ALLOWED", "reasonCodes": []},
+                "attacks": [
+                    {
+                        "attackIndex": 0,
+                        "attackName": "Bite",
+                        "damageType": "DmgType_Dread_C",
+                        "baseDamage": 1080.0,
+                        "attackInterval": 0.5,
+                        "riderAttackInterval": 0.5,
+                        "gaps": [],
+                    }
+                ],
+            },
+            {
+                "name": "Doedicurus",
+                "speciesKey": "doed",
+                "objectPath": "/Game/Dinos/Doed",
+                "tameability": {"status": "ALLOWED", "reasonCodes": []},
+                "rideability": {"status": "ALLOWED", "reasonCodes": []},
+                "attacks": [
+                    {
+                        "attackIndex": 0,
+                        "attackName": "Tail",
+                        "damageType": "DmgType_Doed_C",
+                        "baseDamage": 32.0,
+                        "attackInterval": 0.67,
+                        "riderAttackInterval": 0.67,
+                        "gaps": [],
+                    }
+                ],
+            },
+        ]
+        evaluation = _evaluation_catalog(
+            components=[component], creatures=creatures
+        )
+        engine = HarvestEvaluationEngine(evaluation)
+        candidates, _variant_counts = _eligible_attack_candidates(evaluation)
+        rows = {
+            candidate["speciesKey"]: evaluate_attack_resource(
+                creature=candidate["creature"]["name"],
+                creature_object_path=candidate["creature"]["objectPath"],
+                attack=candidate["preparedAttack"],
+                component=component,
+                resource="PrimalItemResource_Electronics_C",
+                resource_entry_index=0,
+                damage_type_parents={},
+                resource_damage_overrides={},
+                damage_type_gaps={},
+            )
+            for candidate in candidates
+        }
+
+        winner = _best_discovered_scope_row(
+            engine,
+            component_package=(
+                "/Game/Components/CityPropHarvestComponent_Light_Large_Off"
+            ),
+            resource="PrimalItemResource_Electronics_C",
+            resource_entry_index=0,
+            candidates=candidates,
+        )
+
+        self.assertIsNotNone(winner)
+        self.assertEqual(winner["speciesKey"], "doed")
+        self.assertGreater(
+            rows["doed"]["estimatedYieldPerNode"],
+            rows["dread"]["estimatedYieldPerNode"],
+        )
+        self.assertAlmostEqual(
+            winner["estimatedYieldPerNode"], 56 * (0.2 / 1.685) * 0.5
+        )
+
+    def test_fast_node_top_fails_closed_for_unsupported_native_branches(self):
+        base_component = _component("UnsupportedComponent")
+        evaluation = _evaluation_catalog(components=[base_component])
+        candidates, _variant_counts = _eligible_attack_candidates(evaluation)
+
+        cases = {}
+        single_unit = copy.deepcopy(base_component)
+        single_unit["isSingleUnitHarvest"] = True
+        cases["single unit"] = single_unit
+        nonzero_effectiveness = copy.deepcopy(base_component)
+        nonzero_effectiveness["damageEntries"][0][
+            "damageHarvestAdditionalEffectiveness"
+        ] = 0.5
+        cases["nonzero effectiveness"] = nonzero_effectiveness
+        nonlinear_random = copy.deepcopy(base_component)
+        nonlinear_random["resourceEntries"][0][
+            "overrideQuantityRandomPower"
+        ] = 2.0
+        cases["nonlinear random power"] = nonlinear_random
+
+        for label, component in cases.items():
+            with self.subTest(label=label):
+                case_evaluation = _evaluation_catalog(components=[component])
+                engine = HarvestEvaluationEngine(case_evaluation)
+                self.assertIsNone(
+                    _best_discovered_scope_row(
+                        engine,
+                        component_package="/Game/Components/UnsupportedComponent",
+                        resource="PrimalItemResource_Metal_C",
+                        resource_entry_index=0,
+                        candidates=candidates,
+                    )
+                )
 
 
 if __name__ == "__main__":

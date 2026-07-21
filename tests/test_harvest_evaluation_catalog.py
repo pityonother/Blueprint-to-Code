@@ -2,15 +2,22 @@ import sys
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
+    EVALUATION_CATALOG_SCHEMA,
+    RANKING_RESULT_SCHEMA,
     HarvestEvaluationEngine,
     extract_creature_identity,
     prepare_attack_for_usage_scope,
+)
+from blueprint_translator.harvest_ranking import (  # noqa: E402
+    YIELD_MODEL_VERSION,
+    YIELD_SCORE_BASIS,
 )
 
 
@@ -117,7 +124,7 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
             ],
         }
         evaluation_catalog = {
-            "schema": "ark-harvest-evaluation-catalog/v1",
+            "schema": EVALUATION_CATALOG_SCHEMA,
             "dataset": {
                 "revision": "b" * 64,
                 "componentDatasetRevision": "a" * 64,
@@ -147,6 +154,9 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
                             "resource": "PrimalItemResource_Metal_C",
                             "entryWeight": 1.0,
                             "weightOverrides": {"DmgType_MineStone_C": 1.0},
+                            "overrideQuantityMin": 1.0,
+                            "overrideQuantityMax": 2.0,
+                            "overrideQuantityRandomPower": 1.0,
                             "minQuantityOverrides": {},
                             "maxQuantityOverrides": {},
                             "gaps": [],
@@ -240,12 +250,12 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
                             "attackIndex": 0,
                             "attackName": "Tail",
                             "damageType": "DmgType_MineStone_C",
-                            "baseDamage": 30.0,
+                            "baseDamage": 25.0,
                             "attackInterval": 1.0,
                             "riderAttackInterval": 1.0,
                             "skipTamed": False,
                             "preventWithRider": False,
-                            "useBlueprintAdjustOutputDamage": True,
+                            "useBlueprintCanRiderAttack": True,
                             "gaps": [],
                         },
                         {
@@ -314,7 +324,7 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
         )
 
         self.assertEqual([row["speciesKey"] for row in result["items"]], ["anky", "doed"])
-        self.assertEqual(result["items"][0]["creatureObjectPath"], "/Game/Dinos/AnkyVariant")
+        self.assertEqual(result["items"][0]["creatureObjectPath"], "/Game/Dinos/Anky")
         self.assertEqual(result["items"][0]["variantCount"], 2)
         self.assertEqual(result["items"][0]["attackInterval"], 2.0)
         self.assertEqual(result["items"][0]["tameabilityStatus"], "ALLOWED")
@@ -327,15 +337,14 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
             result["items"][0]["evidence"]["gaps"],
         )
         self.assertIn(
-            "BLUEPRINT_ADJUST_OUTPUT_DAMAGE_NOT_RECOVERED",
+            "BLUEPRINT_RIDER_ELIGIBILITY_NOT_RECOVERED",
             result["items"][1]["evidence"]["gaps"],
         )
         self.assertEqual(result["coverage"]["attacksConditionallyEvaluated"], 3)
         self.assertEqual(
             result["coverage"]["conditionalEvaluationByReason"],
             {
-                "BLUEPRINT_ADJUST_OUTPUT_DAMAGE_NOT_RECOVERED": 1,
-                "BLUEPRINT_RIDER_ELIGIBILITY_NOT_RECOVERED": 2,
+                "BLUEPRINT_RIDER_ELIGIBILITY_NOT_RECOVERED": 3,
             },
         )
         self.assertEqual(result["coverage"]["attacksExcludedByScope"], 2)
@@ -353,6 +362,10 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
         )
         self.assertEqual(result["scopeStatus"], "ALL_DISCOVERED_CREATURES_EVALUATED")
         self.assertFalse(result["claimsGlobalTop"])
+        self.assertEqual(result["schema"], RANKING_RESULT_SCHEMA)
+        self.assertEqual(result["methodology"]["formulaVersion"], YIELD_MODEL_VERSION)
+        self.assertEqual(result["methodology"]["metric"], "estimatedYieldPerNode")
+        self.assertEqual(result["methodology"]["scoreBasis"], YIELD_SCORE_BASIS)
 
     def test_lazy_engine_selects_duplicate_resource_by_exact_entry_index(self):
         node_catalog = {
@@ -384,7 +397,7 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
             ],
         }
         evaluation_catalog = {
-            "schema": "ark-harvest-evaluation-catalog/v1",
+            "schema": EVALUATION_CATALOG_SCHEMA,
             "dataset": {
                 "revision": "b" * 64,
                 "componentDatasetRevision": "a" * 64,
@@ -398,12 +411,19 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
                         "/Game/Components/DuplicateHarvestComponent."
                         "DuplicateHarvestComponent"
                     ),
+                    "maxHarvestHealth": 100.0,
+                    "harvestHealthGiveResourceInterval": 20.0,
                     "resourceEntries": [
                         {
                             "entryIndex": 0,
                             "resource": "PrimalItemResource_Berry_C",
                             "entryWeight": 1.0,
                             "weightOverrides": {},
+                            "overrideQuantityMin": 1.0,
+                            "overrideQuantityMax": 2.0,
+                            "overrideQuantityRandomPower": 1.0,
+                            "minQuantityOverrides": {},
+                            "maxQuantityOverrides": {},
                             "gaps": [],
                         },
                         {
@@ -411,6 +431,11 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
                             "resource": "PrimalItemResource_Berry_C",
                             "entryWeight": 0.5,
                             "weightOverrides": {},
+                            "overrideQuantityMin": 1.0,
+                            "overrideQuantityMax": 2.0,
+                            "overrideQuantityRandomPower": 1.0,
+                            "minQuantityOverrides": {},
+                            "maxQuantityOverrides": {},
                             "gaps": [],
                         },
                     ],
@@ -471,6 +496,132 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
             first["items"][0]["engineComparisonIndex"],
             second["items"][0]["engineComparisonIndex"] * 2,
         )
+
+    def test_ranking_best_relative_score_and_ties_use_only_complete_node_yield(self):
+        node_catalog = {
+            "dataset": {},
+            "nodes": [
+                {
+                    "id": "node",
+                    "name": "Node",
+                    "objectPath": "/Game/Nodes/Node.Node",
+                    "harvestComponent": {"packagePath": "/Game/Components/Test"},
+                    "resources": {
+                        "items": [
+                            {
+                                "entryIndex": 0,
+                                "resource": "PrimalItemResource_Test_C",
+                                "nodeResourceId": "resource",
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        evaluation_catalog = {
+            "schema": EVALUATION_CATALOG_SCHEMA,
+            "methodology": {"usageScope": "TAMED_RIDDEN"},
+            "coverage": {"claimsAllCreatures": True},
+            "components": [
+                {
+                    "objectPath": "/Game/Components/Test.Test",
+                    "resourceEntries": [],
+                    "damageEntries": [],
+                }
+            ],
+            "damageTypeParents": {},
+            "resourceDamageOverrides": [],
+            "damageTypeGaps": {},
+            "creatures": [
+                {
+                    "name": "Alpha",
+                    "speciesKey": "alpha",
+                    "objectPath": "/Game/Dinos/Alpha",
+                    "tameability": {"status": "ALLOWED", "reasonCodes": []},
+                    "attacks": [
+                        {
+                            "attackIndex": 0,
+                            "attackName": "Alpha hit",
+                            "mockYield": 100.0,
+                            "legacyScore": 1.0,
+                        }
+                    ],
+                },
+                {
+                    "name": "Beta",
+                    "speciesKey": "beta",
+                    "objectPath": "/Game/Dinos/Beta",
+                    "tameability": {"status": "ALLOWED", "reasonCodes": []},
+                    "attacks": [
+                        {
+                            "attackIndex": 0,
+                            "attackName": "Beta hit",
+                            "mockYield": 100.0,
+                            "legacyScore": 999999.0,
+                        }
+                    ],
+                },
+                {
+                    "name": "Gamma",
+                    "speciesKey": "gamma",
+                    "objectPath": "/Game/Dinos/Gamma",
+                    "tameability": {"status": "ALLOWED", "reasonCodes": []},
+                    "attacks": [
+                        {
+                            "attackIndex": 0,
+                            "attackName": "Old-index winner",
+                            "mockYield": 50.0,
+                            "legacyScore": 1000000.0,
+                        },
+                        {
+                            "attackIndex": 1,
+                            "attackName": "Yield winner",
+                            "mockYield": 75.0,
+                            "legacyScore": 0.0,
+                        },
+                    ],
+                },
+            ],
+        }
+
+        def fake_evaluate_attack_resource(**kwargs):
+            attack = kwargs["attack"]
+            return {
+                "rankingStatus": "RANKED",
+                "creature": kwargs["creature"],
+                "creatureObjectPath": kwargs["creature_object_path"],
+                "attackIndex": attack["attackIndex"],
+                "attackName": attack["attackName"],
+                "estimatedYieldPerNode": attack["mockYield"],
+                # Deliberately contradictory legacy values prove that no
+                # ordering, best-attack, rank, or relative calculation reads it.
+                "engineComparisonIndex": attack["legacyScore"],
+            }
+
+        with patch(
+            "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+            side_effect=fake_evaluate_attack_resource,
+        ):
+            result = HarvestEvaluationEngine(evaluation_catalog).rank_node_resource(
+                node_catalog,
+                node_id="node",
+                node_resource_id="resource",
+            )
+
+        self.assertEqual(
+            [row["speciesKey"] for row in result["items"]],
+            ["alpha", "beta", "gamma"],
+        )
+        self.assertEqual(
+            [row["estimatedYieldPerNode"] for row in result["items"]],
+            [100.0, 100.0, 75.0],
+        )
+        self.assertEqual([row["rank"] for row in result["items"]], [1, 1, 3])
+        self.assertEqual(
+            [row["relativeToNodeTopPercent"] for row in result["items"]],
+            [100.0, 100.0, 75.0],
+        )
+        self.assertEqual(result["items"][2]["attackIndex"], 1)
 
 
 if __name__ == "__main__":
