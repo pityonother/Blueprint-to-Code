@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/native_evidence_set_v2.schema.json",
+  "title": "Blueprint to Code Native Evidence Set v2",
+  "type": "object",
+  "required": [
+    "schema",
+    "evidenceSetId",
+    "generatedAtUtc",
+    "provenance",
+    "trust",
+    "targets",
+    "gaps"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code-native-evidence-set/v2"
+    },
+    "evidenceSetId": {
+      "type": "string",
+      "pattern": "^native-set://[0-9a-f]{64}/[0-9a-f]{64}$"
+    },
+    "generatedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "binary",
+        "pdb",
+        "ghidra",
+        "java",
+        "generator"
+      ],
+      "properties": {
+        "binary": {
+          "type": "object",
+          "required": [
+            "module",
+            "sha256",
+            "size",
+            "machine",
+            "peTimestamp",
+            "imageBase",
+            "codeView"
+          ],
+          "properties": {
+            "module": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "machine": {
+              "type": "string",
+              "minLength": 1
+            },
+            "machineCode": {
+              "type": "string"
+            },
+            "peTimestamp": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "imageBase": {
+              "type": "string",
+              "pattern": "^0x[0-9A-F]+$"
+            },
+            "codeView": {
+              "type": "object",
+              "required": [
+                "format",
+                "guid",
+                "age",
+                "pdbFileName"
+              ],
+              "properties": {
+                "format": {
+                  "const": "RSDS"
+                },
+                "guid": {
+                  "$ref": "#/$defs/guid"
+                },
+                "age": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "pdbFileName": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "pdb": {
+          "type": "object",
+          "required": [
+            "fileName",
+            "sha256",
+            "guid",
+            "age",
+            "loaded",
+            "matchesBinary"
+          ],
+          "properties": {
+            "fileName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "signature": {
+              "type": "string"
+            },
+            "guid": {
+              "$ref": "#/$defs/guid"
+            },
+            "age": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "loaded": {
+              "type": "boolean"
+            },
+            "matchesBinary": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "ghidra": {
+          "type": "object",
+          "required": [
+            "version",
+            "releaseAssetSha256",
+            "languageId",
+            "compilerSpecId",
+            "analysisOptionsSha256"
+          ],
+          "properties": {
+            "version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "releaseAssetSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "languageId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "compilerSpecId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "analysisOptionsSha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "additionalProperties": false
+        },
+        "java": {
+          "type": "object",
+          "required": [
+            "vendor",
+            "version"
+          ],
+          "properties": {
+            "vendor": {
+              "type": "string",
+              "minLength": 1
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "generator": {
+          "type": "object",
+          "required": [
+            "repositoryCommit",
+            "repositoryDirty",
+            "recipeId",
+            "recipeSha256",
+            "scriptSha256"
+          ],
+          "properties": {
+            "repositoryCommit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "repositoryDirty": {
+              "type": "boolean"
+            },
+            "recipeId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "recipeSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "scriptSha256": {
+              "type": "object",
+              "required": [
+                "runner",
+                "exporter",
+                "pdbConfigurator"
+              ],
+              "additionalProperties": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "trust": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "VERIFIED",
+            "EXPERIMENTAL",
+            "DIRTY_GENERATOR",
+            "PROVENANCE_INCOMPLETE"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "selection": {
+      "type": "object"
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "guid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  },
+  "additionalProperties": false
+}

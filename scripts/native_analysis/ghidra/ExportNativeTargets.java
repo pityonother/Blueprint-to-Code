@@ -77,6 +77,12 @@ public class ExportNativeTargets extends GhidraScript {
 		root.addProperty("languageId", currentProgram.getLanguageID().toString());
 		root.addProperty("compilerSpecId", currentProgram.getCompilerSpec().getCompilerSpecID().toString());
 		root.addProperty("pdbLoaded", pdbLoaded);
+		Options programOptions = currentProgram.getOptions(Program.PROGRAM_INFO);
+		root.addProperty("pdbFile", programOptions.getString(PdbParserConstants.PDB_FILE, ""));
+		root.addProperty("pdbGuid", programOptions.getString(PdbParserConstants.PDB_GUID, ""));
+		root.addProperty("pdbAge", programOptions.getString(PdbParserConstants.PDB_AGE, ""));
+		root.addProperty("pdbSignature", programOptions.getString(PdbParserConstants.PDB_SIGNATURE, ""));
+		root.addProperty("pdbVersion", programOptions.getString(PdbParserConstants.PDB_VERSION, ""));
 		root.addProperty("decompileTimeoutSeconds", DECOMPILE_TIMEOUT_SECONDS);
 
 		JsonArray requestedPatterns = new JsonArray();

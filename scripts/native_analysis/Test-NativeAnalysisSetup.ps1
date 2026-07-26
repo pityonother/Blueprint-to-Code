@@ -21,19 +21,20 @@ Write-Host "[PASS] Ghidra launcher: $($context.GhidraRun)"
 Write-Host "[PASS] Headless analyzer: $($context.AnalyzeHeadless)"
 Write-Host "[PASS] Java executable: $($context.JavaExe)"
 
-$savedErrorActionPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-$javaOutput = & $context.JavaExe -version 2>&1
-$javaExitCode = $LASTEXITCODE
-$ErrorActionPreference = $savedErrorActionPreference
-if ($javaExitCode -ne 0) {
-    throw "Java version check failed with exit code $javaExitCode."
+$ghidraVersion = Get-NativeGhidraVersion -ApplicationPropertiesPath $context.GhidraApplicationProperties
+if ($ghidraVersion -ne [string]$config.ghidra.version) {
+    throw "NATIVE_TOOL_MISSING: Expected Ghidra $($config.ghidra.version), detected $ghidraVersion."
 }
-$javaVersion = ($javaOutput | Select-Object -First 1) -join ""
-if ($javaVersion -notmatch 'version "21\.') {
-    throw "Ghidra 12.1.2 requires JDK 21; detected: $javaVersion"
+Write-Host "[PASS] Ghidra version: $ghidraVersion"
+
+$javaRuntime = Get-NativeJavaRuntimeInfo -JavaExe $context.JavaExe
+if ($javaRuntime.Version -ne [string]$config.java.runtimeVersion) {
+    throw "NATIVE_JAVA_VERSION_MISMATCH: Expected Java runtime $($config.java.runtimeVersion), detected $($javaRuntime.Version)."
 }
-Write-Host "[PASS] Java version: $javaVersion"
+if ($javaRuntime.Vendor -ne [string]$config.java.vendor) {
+    throw "NATIVE_JAVA_VERSION_MISMATCH: Expected Java vendor $($config.java.vendor), detected $($javaRuntime.Vendor)."
+}
+Write-Host "[PASS] Java runtime: $($javaRuntime.Vendor) $($javaRuntime.Version)"
 
 foreach ($devKitFile in @($dllPath, $pdbPath)) {
     if (-not (Test-Path -LiteralPath $devKitFile -PathType Leaf)) {
@@ -42,17 +43,20 @@ foreach ($devKitFile in @($dllPath, $pdbPath)) {
     Write-Host "[PASS] DevKit file: $devKitFile"
 }
 
+$identity = Get-NativeBuildIdentityObject -DllPath $dllPath -PdbPath $pdbPath -Config $config -ProjectRoot $projectRoot
+Write-Host "[PASS] PE CodeView: $($identity.binary.codeView.guid) age $($identity.binary.codeView.age)"
+Write-Host "[PASS] PDB identity matched: $($identity.pdb.guid) age $($identity.pdb.age)"
+Write-Host "[PASS] Dynamic project: $($identity.project.name)"
+
 if (-not $SkipDevKitHash) {
-    $dllHash = Get-LowerSha256 -Path $dllPath
-    $pdbHash = Get-LowerSha256 -Path $pdbPath
-    if ($dllHash -ne [string]$config.shooterGame.binarySha256) {
-        throw "DLL SHA-256 mismatch: $dllHash"
+    if ($identity.binary.sha256 -ne [string]$config.shooterGame.binarySha256) {
+        throw "NATIVE_BINARY_HASH_UNREGISTERED: DLL SHA-256 mismatch: $($identity.binary.sha256)"
     }
-    if ($pdbHash -ne [string]$config.shooterGame.pdbSha256) {
-        throw "PDB SHA-256 mismatch: $pdbHash"
+    if ($identity.pdb.sha256 -ne [string]$config.shooterGame.pdbSha256) {
+        throw "NATIVE_PDB_HASH_MISMATCH: PDB SHA-256 mismatch: $($identity.pdb.sha256)"
     }
-    Write-Host "[PASS] DLL SHA-256: $dllHash"
-    Write-Host "[PASS] PDB SHA-256: $pdbHash"
+    Write-Host "[PASS] DLL SHA-256: $($identity.binary.sha256)"
+    Write-Host "[PASS] PDB SHA-256: $($identity.pdb.sha256)"
 }
 
 Write-Host "Native analysis setup is ready."

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/native_project_manifest_v1.schema.json",
+  "title": "Blueprint to Code Native Project Manifest v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "project",
+    "binary",
+    "pdb"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code-native-project/v1"
+    },
+    "project": {
+      "type": "object",
+      "required": [
+        "name",
+        "hashPrefix",
+        "workspaceSlug"
+      ]
+    },
+    "binary": {
+      "type": "object",
+      "required": [
+        "module",
+        "sha256",
+        "size",
+        "codeView"
+      ]
+    },
+    "pdb": {
+      "type": "object",
+      "required": [
+        "fileName",
+        "sha256",
+        "guid",
+        "age",
+        "matchesBinary"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

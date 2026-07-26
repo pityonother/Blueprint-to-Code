@@ -9,7 +9,9 @@
   },
   "java": {
     "distribution": "Eclipse Temurin",
+    "vendor": "Eclipse Adoptium",
     "version": "21.0.11+10",
+    "runtimeVersion": "21.0.11+10-LTS",
     "folderName": "jdk-21.0.11+10",
     "releaseAsset": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
     "releaseUrl": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
@@ -24,12 +26,15 @@
   },
   "workspace": {
     "folderName": "ghidra-workspaces\\BlueprintToCode",
-    "projectName": "ShooterGameNative_B0E67E1E",
+    "projectNamePrefix": "ShooterGameNative",
+    "projectHashLength": 12,
+    "legacyProjectName": "ShooterGameNative_B0E67E1E",
     "headlessMaxMemory": "8G",
     "analysisTimeoutSeconds": 1800
   },
   "evidence": {
-    "schema": "blueprint-to-code-native-targets/v1",
+    "schema": "blueprint-to-code-native-evidence-set/v2",
+    "legacySchema": "blueprint-to-code-native-targets/v1",
     "uriFormat": "native://<binary-sha256>/<module>/<rva>"
   }
 }

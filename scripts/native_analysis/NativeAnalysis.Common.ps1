@@ -44,9 +44,10 @@ function Resolve-NativeAnalysisContext {
 
     $ghidraRun = Join-Path $GhidraPath "ghidraRun.bat"
     $analyzeHeadless = Join-Path $GhidraPath "support\analyzeHeadless.bat"
+    $ghidraApplicationProperties = Join-Path $GhidraPath "Ghidra\application.properties"
     $javaExe = Join-Path $JavaHome "bin\java.exe"
 
-    foreach ($requiredFile in @($ghidraRun, $analyzeHeadless, $javaExe)) {
+    foreach ($requiredFile in @($ghidraRun, $analyzeHeadless, $ghidraApplicationProperties, $javaExe)) {
         if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
             throw "Required native-analysis tool is missing: $requiredFile"
         }
@@ -59,6 +60,7 @@ function Resolve-NativeAnalysisContext {
         JavaHome = [System.IO.Path]::GetFullPath($JavaHome)
         GhidraRun = $ghidraRun
         AnalyzeHeadless = $analyzeHeadless
+        GhidraApplicationProperties = $ghidraApplicationProperties
         JavaExe = $javaExe
     }
 }
@@ -93,6 +95,198 @@ function Get-LowerSha256 {
         throw "File does not exist: $Path"
     }
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Resolve-NativeIdentityPython {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    $bundledPython = Join-Path $ProjectRoot "runtime\python\python.exe"
+    if (Test-Path -LiteralPath $bundledPython -PathType Leaf) {
+        return [System.IO.Path]::GetFullPath($bundledPython)
+    }
+    $systemPython = Get-Command python -ErrorAction SilentlyContinue
+    if ($systemPython) {
+        return [System.IO.Path]::GetFullPath($systemPython.Source)
+    }
+    throw "NATIVE_TOOL_MISSING: Python is required for native identity validation."
+}
+
+function Invoke-NativeIdentityTool {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot,
+        [Parameter(Mandatory)]
+        [string[]]$Arguments
+    )
+
+    $pythonExe = Resolve-NativeIdentityPython -ProjectRoot $ProjectRoot
+    $identityCli = Join-Path $ProjectRoot "scripts\native_analysis\native_identity.py"
+    if (-not (Test-Path -LiteralPath $identityCli -PathType Leaf)) {
+        throw "NATIVE_TOOL_MISSING: Native identity CLI is missing: $identityCli"
+    }
+
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = (& $pythonExe $identityCli @Arguments 2>&1) -join [Environment]::NewLine
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw $output.Trim()
+    }
+    return $output
+}
+
+function Get-NativeBuildIdentityObject {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DllPath,
+        [Parameter(Mandatory)]
+        [string]$PdbPath,
+        [Parameter(Mandatory)]
+        [pscustomobject]$Config,
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    $arguments = @(
+        "build",
+        "--dll", [System.IO.Path]::GetFullPath($DllPath),
+        "--pdb", [System.IO.Path]::GetFullPath($PdbPath),
+        "--project-prefix", [string]$Config.workspace.projectNamePrefix,
+        "--project-hash-length", [string]$Config.workspace.projectHashLength
+    )
+    $json = Invoke-NativeIdentityTool -ProjectRoot $ProjectRoot -Arguments $arguments
+    return $json | ConvertFrom-Json
+}
+
+function Get-NativeProjectLayout {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$Identity,
+        [Parameter(Mandatory)]
+        [pscustomobject]$Config,
+        [Parameter(Mandatory)]
+        [string]$ToolsRoot,
+        [string]$WorkspaceRoot
+    )
+
+    $workspaceBase = $WorkspaceRoot
+    if (-not $workspaceBase) {
+        $workspaceBase = Join-Path $ToolsRoot $Config.workspace.folderName
+    }
+    $workspaceBase = [System.IO.Path]::GetFullPath($workspaceBase)
+    $resolvedWorkspace = Join-Path $workspaceBase ([string]$Identity.project.workspaceSlug)
+    $projectName = [string]$Identity.project.name
+    [pscustomobject]@{
+        WorkspaceBase = $workspaceBase
+        WorkspaceRoot = $resolvedWorkspace
+        ProjectName = $projectName
+        ProjectFile = Join-Path $resolvedWorkspace ($projectName + ".gpr")
+        ProjectManifest = Join-Path $resolvedWorkspace ($projectName + ".manifest.json")
+    }
+}
+
+function Test-NativeProjectManifest {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ManifestPath,
+        [Parameter(Mandatory)]
+        [string]$DllPath,
+        [Parameter(Mandatory)]
+        [string]$PdbPath,
+        [Parameter(Mandatory)]
+        [pscustomobject]$Config,
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        throw "NATIVE_PROJECT_PROGRAM_HASH_MISMATCH: Project manifest is missing: $ManifestPath"
+    }
+    $arguments = @(
+        "validate-project",
+        "--manifest", [System.IO.Path]::GetFullPath($ManifestPath),
+        "--dll", [System.IO.Path]::GetFullPath($DllPath),
+        "--pdb", [System.IO.Path]::GetFullPath($PdbPath),
+        "--project-prefix", [string]$Config.workspace.projectNamePrefix,
+        "--project-hash-length", [string]$Config.workspace.projectHashLength
+    )
+    Invoke-NativeIdentityTool -ProjectRoot $ProjectRoot -Arguments $arguments | Out-Null
+}
+
+function Write-NativeProjectManifest {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ManifestPath,
+        [Parameter(Mandatory)]
+        [string]$DllPath,
+        [Parameter(Mandatory)]
+        [string]$PdbPath,
+        [Parameter(Mandatory)]
+        [pscustomobject]$Config,
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    $arguments = @(
+        "--pretty",
+        "--output", [System.IO.Path]::GetFullPath($ManifestPath),
+        "project-manifest",
+        "--dll", [System.IO.Path]::GetFullPath($DllPath),
+        "--pdb", [System.IO.Path]::GetFullPath($PdbPath),
+        "--project-prefix", [string]$Config.workspace.projectNamePrefix,
+        "--project-hash-length", [string]$Config.workspace.projectHashLength
+    )
+    Invoke-NativeIdentityTool -ProjectRoot $ProjectRoot -Arguments $arguments | Out-Null
+}
+
+function Get-NativeGhidraVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ApplicationPropertiesPath
+    )
+
+    $match = Select-String -LiteralPath $ApplicationPropertiesPath -Pattern '^application\.version=(.+)$' | Select-Object -First 1
+    if (-not $match) {
+        throw "NATIVE_TOOL_MISSING: Could not read the installed Ghidra version."
+    }
+    return $match.Matches[0].Groups[1].Value.Trim()
+}
+
+function Get-NativeJavaRuntimeInfo {
+    param(
+        [Parameter(Mandatory)]
+        [string]$JavaExe
+    )
+
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $javaOutput = & $JavaExe -XshowSettings:properties -version 2>&1
+        $javaExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if ($javaExitCode -ne 0) {
+        throw "NATIVE_JAVA_VERSION_MISMATCH: Java version check failed with exit code $javaExitCode."
+    }
+    $runtimeLine = $javaOutput | Select-String -Pattern '^\s*java\.runtime\.version\s*=\s*(.+)$' | Select-Object -First 1
+    $vendorLine = $javaOutput | Select-String -Pattern '^\s*java\.vendor\s*=\s*(.+)$' | Select-Object -First 1
+    if (-not $runtimeLine -or -not $vendorLine) {
+        throw "NATIVE_JAVA_VERSION_MISMATCH: Java runtime properties were not available."
+    }
+    [pscustomobject]@{
+        Version = $runtimeLine.Matches[0].Groups[1].Value.Trim()
+        Vendor = $vendorLine.Matches[0].Groups[1].Value.Trim()
+    }
 }
 
 function Resolve-BlueprintToCodeDevKitRoot {
