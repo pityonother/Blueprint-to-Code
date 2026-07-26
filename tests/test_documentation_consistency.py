@@ -97,7 +97,7 @@ class DocumentationConsistencyTests(unittest.TestCase):
         self.assertIn("不授予开源许可证", policy)
         self.assertIn("版权由项目作者保留", policy)
 
-    def test_readme_links_current_gpt_pro_progress_review(self):
+    def test_readme_links_current_discovery_progress_review(self):
         review_path = (
             ROOT
             / "docs"
@@ -107,7 +107,7 @@ class DocumentationConsistencyTests(unittest.TestCase):
         self.assertTrue(review_path.is_file())
         self.assertIn(
             (
-                "[GPT Pro 进度审查说明]"
+                "[ARK Knowledge Discovery：GPT Pro 视察说明]"
                 "(docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)"
             ),
             self.readme,
@@ -120,12 +120,13 @@ class DocumentationConsistencyTests(unittest.TestCase):
 
         review = review_path.read_text(encoding="utf-8")
         for marker in (
-            "624/624",
-            "formal_validation",
-            "741a359",
-            "RUNTIME_CONFIRMED",
-            "Run-NativeRecipe.ps1",
-            "只审查当前实施进度并给出下一阶段方向",
+            "# ARK Knowledge Discovery 当前完成情况（供 GPT Pro 视察）",
+            "## Codex 已完成的工程工作",
+            "## 已发现的知识",
+            "它不是交接文档，也不是要求 GPT Pro 接管实现",
+            "`knowledge_base/discovery_bundle.zip`",
+            "仓库完整测试：637 项通过，0 失败",
+            "请给出审查结论与下一阶段方向即可；不需要接管或重写",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, review)

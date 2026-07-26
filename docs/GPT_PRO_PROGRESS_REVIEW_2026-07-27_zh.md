@@ -163,7 +163,7 @@ ZIP 中共有 215 个文件，SQLite 成员使用 ZIP64。manifest 记录的源�
 - `SHA256SUMS.txt` 覆盖除其自身外的 214 个文件。
 - 报告、README、manifest 和样本清单没有 Unicode replacement character。
 - 发现工具专项测试：11/11 通过。
-- 仓库完整测试：635 项通过，0 失败。
+- 仓库完整测试：637 项通过，0 失败。
 - Ruff、Python compile、Git diff whitespace 检查通过。
 
 ## 目前仍不能声称已经解决的内容

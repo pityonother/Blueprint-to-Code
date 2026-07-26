@@ -10,6 +10,11 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
+from _python_interpreter import (
+    compatible_python_interpreters,
+    preferred_python,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -150,12 +155,7 @@ class NativeEvidenceStoreTests(unittest.TestCase):
             "link_blueprint_native_evidence.py",
             "build_hybrid_context_pack.py",
         )
-        interpreters = [Path(sys.executable)]
-        bundled = ROOT / "runtime" / "python" / "python.exe"
-        if bundled.is_file() and bundled.resolve() != interpreters[0].resolve():
-            interpreters.append(bundled)
-
-        for interpreter in interpreters:
+        for interpreter in compatible_python_interpreters(ROOT):
             for command in commands:
                 with self.subTest(interpreter=str(interpreter), command=command):
                     completed = subprocess.run(
@@ -230,8 +230,7 @@ class NativeEvidenceStoreTests(unittest.TestCase):
         self.assertTrue(default_args.formal)
 
     def test_bundled_cli_end_to_end_import_query_and_context(self):
-        bundled = ROOT / "runtime" / "python" / "python.exe"
-        interpreter = bundled if bundled.is_file() else Path(sys.executable)
+        interpreter = preferred_python(ROOT)
         evidence_dir = self.root / "cli-evidence"
         context_dir = self.root / "cli-context"
 

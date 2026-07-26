@@ -6,11 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _python_interpreter import preferred_python
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-RUNTIME_PYTHON = ROOT / "runtime" / "python" / "python.exe"
-PYTHON = RUNTIME_PYTHON if RUNTIME_PYTHON.is_file() else Path(sys.executable)
+PYTHON = preferred_python(ROOT)
 
 sys.path.insert(0, str(SCRIPTS))
 

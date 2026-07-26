@@ -674,10 +674,23 @@ class HarvestBuildJobManager:
             return
 
         process_group_id = process.pid
-        os.killpg(
-            process_group_id,
-            getattr(signal, "SIGKILL", 9) if force else signal.SIGINT,
-        )
+        try:
+            os.killpg(
+                process_group_id,
+                getattr(signal, "SIGKILL", 9) if force else signal.SIGINT,
+            )
+        except ProcessLookupError:
+            # Popen-like test doubles (and the narrow real-world race where
+            # setsid completed differently than expected) can report a live
+            # root process without there being a matching process group.
+            # Leaving that root untouched keeps the worker blocked in wait()
+            # forever, so fall back to signalling the root itself.
+            if process.poll() is not None:
+                return
+            if force:
+                process.kill()
+            else:
+                process.send_signal(signal.SIGTERM)
 
     @staticmethod
     def _force_stop_unmanaged_process_tree(process: subprocess.Popen[str]) -> None:
