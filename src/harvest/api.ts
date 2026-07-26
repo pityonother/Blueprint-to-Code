@@ -1,4 +1,5 @@
 import type { HarvestApiResult } from './types';
+import { ApiFailure, api } from '../shared/api';
 
 
 export class HarvestApiError extends Error {
@@ -25,16 +26,16 @@ export async function requestHarvestJson<T extends HarvestApiResult>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers || {}),
-    },
-  });
-  const payload = (await response.json()) as T;
-  if (!response.ok || !payload.ok) {
-    throw new HarvestApiError(payload.error || `请求失败：${response.status}`, response.status, payload.code);
+  try {
+    return await api<T>(path, init);
+  } catch (error) {
+    if (error instanceof ApiFailure) {
+      throw new HarvestApiError(
+        error.message,
+        error.status,
+        error.code,
+      );
+    }
+    throw error;
   }
-  return payload;
 }

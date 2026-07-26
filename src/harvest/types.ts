@@ -445,7 +445,6 @@ export interface HarvestBuildJob {
   status: HarvestBuildStatus;
   pid: number | null;
   returnCode: number | null;
-  command?: string[];
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

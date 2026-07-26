@@ -1,5 +1,6 @@
 import './styles.css';
 import { HarvestExplorer } from './harvest/explorer';
+import { ApiFailure, api, type ApiResult } from './shared/api';
 
 type ReportKey =
   | 'agent_index'
@@ -132,19 +133,11 @@ interface AppState extends ApiResult {
   devkitOutputLogCommand: string;
 }
 
-interface ApiResult {
-  ok: boolean;
-  error?: string;
-  code?: string;
-  [key: string]: unknown;
-}
-
 interface JobInfo {
   id: string;
   kind: string;
   title: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
-  command: string;
   stdout: string;
   stderr: string;
   returnCode: number | null;
@@ -188,19 +181,6 @@ let workspaceView: WorkspaceView = new URLSearchParams(window.location.search).g
   ? 'harvest'
   : 'blueprint';
 const harvestExplorer = new HarvestExplorer(() => render());
-
-class ApiFailure extends Error {
-  payload: ApiResult;
-  status: number;
-  code?: string;
-
-  constructor(payload: ApiResult, status: number) {
-    super(payload.error || `请求失败：${status}`);
-    this.payload = payload;
-    this.status = status;
-    this.code = typeof payload.code === 'string' ? payload.code : undefined;
-  }
-}
 
 const reportLabels: Record<ReportKey, string> = {
   agent_index: 'AI 证据索引',
@@ -289,18 +269,6 @@ function readableError(error: unknown): string {
     return error.message;
   }
   return error instanceof Error ? error.message : String(error);
-}
-
-async function api<T extends ApiResult>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
-  const payload = (await response.json()) as T;
-  if (!response.ok || !payload.ok) {
-    throw new ApiFailure(payload, response.status);
-  }
-  return payload;
 }
 
 function delay(ms: number): Promise<void> {

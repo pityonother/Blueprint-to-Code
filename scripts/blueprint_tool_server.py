@@ -15,9 +15,7 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
-import uuid
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -73,6 +71,18 @@ from blueprint_translator.uasset_graphs import (
     write_graph_candidate_files,
     write_uasset_graph_read_files,
 )
+from blueprint_server.jobs import (
+    JOB_TIMEOUT_SECONDS,
+    cancel_job,
+    create_background_job,
+    get_job,
+)
+from blueprint_server.request import (
+    ApiProblem,
+    discard_bounded_body,
+    read_json_object,
+)
+from blueprint_server.security import SecurityPolicy, redact_sensitive_text
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -112,9 +122,6 @@ HARVEST_REPOSITORY = HarvestNodeRepository(
     ),
 )
 HARVEST_BUILD_MANAGER = HarvestBuildJobManager(project_root=PROJECT_ROOT)
-
-_LOCAL_HTTP_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
-
 
 def resolve_harvest_image_path(image_identity: str, image_root: Path = HARVEST_IMAGE_ROOT) -> Path:
     """Resolve one immutable image by lowercase SHA-256 identity only."""
@@ -169,202 +176,6 @@ KNOWLEDGE_TARGETS = {
 }
 
 DEFAULT_COMPARE_ROOT = CAPTURE_ROOT / "_compare_reports"
-JOB_TIMEOUT_SECONDS = 1800
-JOB_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
-JOBS: dict[str, dict[str, object]] = {}
-JOBS_LOCK = threading.Lock()
-
-
-class ApiProblem(Exception):
-    def __init__(self, status: HTTPStatus, payload: dict[str, object]):
-        super().__init__(str(payload.get("error") or status.phrase))
-        self.status = status
-        self.payload = payload
-
-
-def now_iso() -> str:
-    return _dt.datetime.now().isoformat(timespec="seconds")
-
-
-def public_job(job: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in job.items()
-        if key not in {"process", "thread", "cancelRequested", "onComplete"}
-    }
-
-
-def get_job(job_id: str) -> dict[str, object]:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            raise ApiProblem(
-                HTTPStatus.NOT_FOUND,
-                {"ok": False, "code": "job_not_found", "error": f"任务不存在：{job_id}"},
-            )
-        return public_job(dict(job))
-
-
-def append_job_stream(job_id: str, key: str, text: str) -> None:
-    if not text:
-        return
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return
-        job[key] = str(job.get(key) or "") + text
-
-
-def read_job_stream(job_id: str, stream: object, key: str) -> None:
-    try:
-        for line in iter(stream.readline, ""):  # type: ignore[attr-defined]
-            append_job_stream(job_id, key, line)
-    finally:
-        try:
-            stream.close()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
-
-def prune_finished_jobs(limit: int = 60) -> None:
-    with JOBS_LOCK:
-        finished = [
-            (str(job.get("finishedAt") or ""), job_id)
-            for job_id, job in JOBS.items()
-            if str(job.get("status")) in JOB_TERMINAL_STATUSES
-        ]
-        finished.sort()
-        for _finished_at, job_id in finished[: max(0, len(finished) - limit)]:
-            JOBS.pop(job_id, None)
-
-
-def run_background_job(
-    job_id: str,
-    command: list[str],
-    on_complete: object,
-) -> None:
-    started = time.time()
-    process: subprocess.Popen[str] | None = None
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return
-        if bool(job.get("cancelRequested")):
-            job["status"] = "cancelled"
-            job["finishedAt"] = now_iso()
-            return
-        job["status"] = "running"
-        job["startedAt"] = now_iso()
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(PROJECT_ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id]["process"] = process
-        readers: list[threading.Thread] = []
-        if process.stdout:
-            readers.append(threading.Thread(target=read_job_stream, args=(job_id, process.stdout, "stdout"), daemon=True))
-        if process.stderr:
-            readers.append(threading.Thread(target=read_job_stream, args=(job_id, process.stderr, "stderr"), daemon=True))
-        for reader in readers:
-            reader.start()
-        try:
-            return_code = process.wait(timeout=JOB_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            return_code = process.wait()
-            with JOBS_LOCK:
-                if job_id in JOBS:
-                    JOBS[job_id]["status"] = "timed_out"
-                    JOBS[job_id]["error"] = f"任务超过 {JOB_TIMEOUT_SECONDS // 60} 分钟后超时。"
-        for reader in readers:
-            reader.join(timeout=2)
-        duration = round(time.time() - started, 2)
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if not job:
-                return
-            cancel_requested = bool(job.get("cancelRequested"))
-            if str(job.get("status")) != "timed_out":
-                job["status"] = "cancelled" if cancel_requested else "succeeded" if return_code == 0 else "failed"
-            job["returnCode"] = return_code
-            job["durationSeconds"] = duration
-            job["finishedAt"] = now_iso()
-        result: dict[str, object] = {}
-        if callable(on_complete):
-            result = on_complete(return_code)  # type: ignore[misc]
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id]["result"] = result
-    except Exception as exc:
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id]["status"] = "failed"
-                JOBS[job_id]["error"] = str(exc)
-                JOBS[job_id]["durationSeconds"] = round(time.time() - started, 2)
-                JOBS[job_id]["finishedAt"] = now_iso()
-    finally:
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id].pop("process", None)
-
-
-def create_background_job(
-    kind: str,
-    title: str,
-    command: list[str],
-    on_complete: object,
-) -> dict[str, object]:
-    prune_finished_jobs()
-    job_id = uuid.uuid4().hex[:12]
-    job: dict[str, object] = {
-        "id": job_id,
-        "kind": kind,
-        "title": title,
-        "status": "queued",
-        "command": " ".join(command),
-        "stdout": "",
-        "stderr": "",
-        "returnCode": None,
-        "durationSeconds": 0,
-        "createdAt": now_iso(),
-        "startedAt": "",
-        "finishedAt": "",
-        "error": "",
-        "result": {},
-        "cancelRequested": False,
-    }
-    thread = threading.Thread(target=run_background_job, args=(job_id, command, on_complete), daemon=True)
-    job["thread"] = thread
-    with JOBS_LOCK:
-        JOBS[job_id] = job
-    thread.start()
-    return public_job(job)
-
-
-def cancel_job(job_id: str) -> dict[str, object]:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            raise ApiProblem(
-                HTTPStatus.NOT_FOUND,
-                {"ok": False, "code": "job_not_found", "error": f"任务不存在：{job_id}"},
-            )
-        job["cancelRequested"] = True
-        process = job.get("process")
-        if str(job.get("status")) == "queued":
-            job["status"] = "cancelled"
-            job["finishedAt"] = now_iso()
-    if isinstance(process, subprocess.Popen):
-        process.terminate()
-    return get_job(job_id)
 
 
 def is_within(path: Path, parent: Path) -> bool:
@@ -1737,78 +1548,6 @@ def start_harvest_build_for_request(body: dict[str, object]) -> dict[str, object
         raise _harvest_build_problem(exc) from exc
 
 
-def validate_harvest_build_http_boundary(
-    headers: object,
-    *,
-    server_port: int,
-) -> None:
-    """Reject cross-origin or non-JSON requests before reading a build body."""
-
-    get_header = getattr(headers, "get", None)
-    if not callable(get_header):
-        raise ApiProblem(
-            HTTPStatus.FORBIDDEN,
-            {
-                "ok": False,
-                "code": "HARVEST_BUILD_HOST_FORBIDDEN",
-                "error": "The harvest build request host is not allowed.",
-            },
-        )
-    content_type = str(get_header("Content-Type") or "").strip().casefold()
-    if content_type != "application/json":
-        raise ApiProblem(
-            HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
-            {
-                "ok": False,
-                "code": "HARVEST_BUILD_JSON_REQUIRED",
-                "error": "Harvest build requests require application/json.",
-            },
-        )
-
-    def authority(value: str, *, origin: bool) -> tuple[str, int] | None:
-        try:
-            parsed = urlparse(value if origin else f"http://{value}")
-            port = parsed.port or 80
-        except ValueError:
-            return None
-        if (
-            (origin and parsed.scheme.casefold() != "http")
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-            or parsed.path not in {"", "/"}
-        ):
-            return None
-        hostname = str(parsed.hostname or "").casefold()
-        if hostname not in _LOCAL_HTTP_HOSTS:
-            return None
-        return hostname, int(port)
-
-    host = authority(str(get_header("Host") or "").strip(), origin=False)
-    if host is None or host[1] != int(server_port):
-        raise ApiProblem(
-            HTTPStatus.FORBIDDEN,
-            {
-                "ok": False,
-                "code": "HARVEST_BUILD_HOST_FORBIDDEN",
-                "error": "The harvest build request host is not allowed.",
-            },
-        )
-    raw_origin = str(get_header("Origin") or "").strip()
-    if raw_origin:
-        request_origin = authority(raw_origin, origin=True)
-        if request_origin != host:
-            raise ApiProblem(
-                HTTPStatus.FORBIDDEN,
-                {
-                    "ok": False,
-                    "code": "HARVEST_BUILD_ORIGIN_FORBIDDEN",
-                    "error": "Cross-origin harvest build requests are not allowed.",
-                },
-            )
-
-
 def cancel_harvest_build_for_request(job_id: str) -> dict[str, object]:
     if not job_id:
         raise _harvest_build_problem(
@@ -1858,11 +1597,45 @@ def static_content_type(mime_type: str | None) -> str:
     return normalized
 
 
+_UNREAD_BODY_PROBLEM_CODES = frozenset(
+    {
+        "HOST_FORBIDDEN",
+        "REQUEST_HEADERS_INVALID",
+        "JSON_CONTENT_TYPE_REQUIRED",
+        "SESSION_TOKEN_REQUIRED",
+        "SESSION_TOKEN_INVALID",
+        "ORIGIN_FORBIDDEN",
+        "ORIGIN_REQUIRED",
+        "REMOTE_AUTH_REQUIRED",
+        "TRANSFER_ENCODING_UNSUPPORTED",
+        "CONTENT_LENGTH_REQUIRED",
+        "CONTENT_LENGTH_INVALID",
+        "REQUEST_BODY_REQUIRED",
+        "REQUEST_BODY_TOO_LARGE",
+    }
+)
+
+
 class ControlCenterHandler(BaseHTTPRequestHandler):
     server_version = "BlueprintToolControlCenter/1.0"
 
+    def security_policy(self) -> SecurityPolicy:
+        policy = getattr(self.server, "security_policy", None)
+        if not isinstance(policy, SecurityPolicy):
+            raise RuntimeError("Control-center security policy is not configured.")
+        return policy
+
     def log_message(self, format: str, *args: object) -> None:
-        sys.stderr.write("[BlueprintTool] " + (format % args) + "\n")
+        message = format % args
+        policy = getattr(self.server, "security_policy", None)
+        if isinstance(policy, SecurityPolicy):
+            message = policy.redact(message, PROJECT_ROOT)
+        else:
+            message = redact_sensitive_text(
+                message,
+                path_roots=(PROJECT_ROOT,),
+            )
+        sys.stderr.write("[BlueprintTool] " + message + "\n")
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1882,6 +1655,8 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -1912,18 +1687,51 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def read_json_body(self) -> dict[str, object]:
-        length = int(self.headers.get("Content-Length") or "0")
-        if length <= 0:
-            return {}
-        raw = self.rfile.read(length).decode("utf-8-sig")
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise ValueError("Request body must be a JSON object.")
-        return data
+        return read_json_object(
+            self.rfile,
+            self.headers,
+            max_body_bytes=self.security_policy().max_body_bytes,
+        )
+
+    def discard_rejected_request_body(self) -> None:
+        """Briefly drain a rejected bounded body before closing on Windows."""
+
+        try:
+            self.wfile.flush()
+        except OSError:
+            return
+        previous_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(0.25)
+            discard_bounded_body(
+                self.rfile,
+                self.headers,
+                max_body_bytes=self.security_policy().max_body_bytes,
+            )
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                self.connection.settimeout(previous_timeout)
+            except OSError:
+                pass
 
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
+            if parsed.path == "/api/session":
+                policy = self.security_policy()
+                policy.validate_session_request(
+                    self.headers,
+                    server_port=int(self.server.server_address[1]),
+                )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "sessionToken": policy.session_token,
+                    }
+                )
+                return
             if parsed.path == "/api/state":
                 self.send_json({"ok": True, **api_state()})
                 return
@@ -2051,24 +1859,11 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             and self.path.endswith("/cancel")
         )
         try:
-            if is_harvest_build_request or is_harvest_cancel_request:
-                validate_harvest_build_http_boundary(
-                    self.headers,
-                    server_port=int(self.server.server_address[1]),
-                )
-                try:
-                    body = self.read_json_body()
-                except (UnicodeError, ValueError) as exc:
-                    raise ApiProblem(
-                        HTTPStatus.BAD_REQUEST,
-                        {
-                            "ok": False,
-                            "code": "HARVEST_BUILD_REQUEST_INVALID",
-                            "error": "Invalid harvest build JSON body.",
-                        },
-                    ) from exc
-            else:
-                body = self.read_json_body()
+            self.security_policy().validate_post_request(
+                self.headers,
+                server_port=int(self.server.server_address[1]),
+            )
+            body = self.read_json_body()
             if self.path == "/api/harvest/build":
                 self.send_json(
                     {"ok": True, "job": start_harvest_build_for_request(body)},
@@ -2203,14 +1998,45 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 )
                 self.send_json({"ok": True, **result, "items": missing_functions_from_report(asset_dir)})
                 return
-            self.send_error_json("Unknown API endpoint.", HTTPStatus.NOT_FOUND)
+            self.send_json(
+                {
+                    "ok": False,
+                    "code": "API_ENDPOINT_NOT_FOUND",
+                    "error": "Unknown API endpoint.",
+                },
+                HTTPStatus.NOT_FOUND,
+            )
         except subprocess.TimeoutExpired:
-            self.send_error_json("Analyzer timed out after 30 minutes.", HTTPStatus.REQUEST_TIMEOUT)
+            self.send_json(
+                {
+                    "ok": False,
+                    "code": "ANALYZER_TIMEOUT",
+                    "error": "Analyzer timed out after 30 minutes.",
+                },
+                HTTPStatus.REQUEST_TIMEOUT,
+            )
         except ApiProblem as exc:
+            body_is_unread = (
+                str(exc.payload.get("code") or "")
+                in _UNREAD_BODY_PROBLEM_CODES
+            )
+            if body_is_unread:
+                self.close_connection = True
             self.send_json(exc.payload, exc.status)
+            if body_is_unread:
+                self.discard_rejected_request_body()
+        except (TypeError, ValueError):
+            self.send_json(
+                {
+                    "ok": False,
+                    "code": "REQUEST_INVALID",
+                    "error": "Request arguments are invalid.",
+                },
+                HTTPStatus.BAD_REQUEST,
+            )
         except Exception as exc:
+            self.log_message("POST request failed: %s", exc)
             if is_harvest_build_request or is_harvest_cancel_request:
-                self.log_message("harvest build request failed: %s", exc)
                 self.send_json(
                     {
                         "ok": False,
@@ -2220,7 +2046,14 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
             else:
-                self.send_error_json(str(exc))
+                self.send_json(
+                    {
+                        "ok": False,
+                        "code": "REQUEST_FAILED",
+                        "error": "Request failed.",
+                    },
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
     def handle_report(self, query: str) -> None:
         values = parse_qs(query)
@@ -2295,19 +2128,58 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def create_control_center_server(
+    host: str,
+    port: int,
+    *,
+    allow_remote: bool = False,
+    auth_token: str | None = None,
+) -> ThreadingHTTPServer:
+    policy = SecurityPolicy(
+        bind_host=host,
+        allow_remote=allow_remote,
+        auth_token=auth_token,
+    )
+    server = ThreadingHTTPServer((host, port), ControlCenterHandler)
+    server.security_policy = policy  # type: ignore[attr-defined]
+    return server
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the local Blueprint translator web control center.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow an explicit non-loopback bind. Requires --auth-token.",
+    )
+    parser.add_argument(
+        "--auth-token",
+        help="Bearer token required for every remote session and POST request.",
+    )
     parser.add_argument("--open", action="store_true", help="Open the control center in the default browser.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    server = ThreadingHTTPServer((args.host, args.port), ControlCenterHandler)
+    try:
+        server = create_control_center_server(
+            args.host,
+            args.port,
+            allow_remote=args.allow_remote,
+            auth_token=args.auth_token,
+        )
+    except ValueError as exc:
+        print(f"Cannot start Blueprint Tool Control Center: {exc}", file=sys.stderr)
+        return 2
     url = f"http://{args.host}:{args.port}/"
     print(f"Blueprint Tool Control Center: {url}")
+    if server.security_policy.remote:  # type: ignore[attr-defined]
+        print(
+            "WARNING: remote access is enabled; bearer authentication is required."
+        )
     print("Press Ctrl+C to stop.")
     if args.open:
         webbrowser.open(url)

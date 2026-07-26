@@ -207,7 +207,8 @@ class HarvestBuildJobManagerTests(unittest.TestCase):
         )
         self.assertLessEqual(len(completed["logTail"]), 80)
         self.assertTrue(completed["logTruncated"])
-        command = completed["command"]
+        self.assertNotIn("command", completed)
+        command = popen.call_args.args[0]
         self.assertIsInstance(command, list)
         self.assertIn("--skip-images", command)
         popen.assert_called_once()
@@ -591,7 +592,8 @@ class HarvestBuildJobManagerTests(unittest.TestCase):
             accepted = manager.start({"creature_file": suspicious})
             completed = manager.wait(accepted["id"], timeout=2)
 
-        command = completed["command"]
+        self.assertNotIn("command", completed)
+        command = popen.call_args.args[0]
         creature_value = command[command.index("--creature-file") + 1]
         self.assertEqual(creature_value, str((ROOT / suspicious).resolve()))
         self.assertNotIn(";", command[:-1])

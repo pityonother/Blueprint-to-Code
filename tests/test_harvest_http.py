@@ -4,7 +4,6 @@ import tempfile
 import threading
 import unittest
 from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,24 +88,40 @@ class HarvestHttpContractTests(unittest.TestCase):
         *,
         content_type: str = "application/json",
         host: str = "127.0.0.1:{port}",
-        origin: str | None = None,
+        origin: str | None = "http://127.0.0.1:{port}",
+        non_browser: bool = False,
         start_error: Exception | None = None,
     ) -> tuple[int, dict[str, object], dict[str, str], _FakeBuildManager]:
         manager = _FakeBuildManager(start_error=start_error)
-        server = ThreadingHTTPServer(
-            ("127.0.0.1", 0),
-            tool_server.ControlCenterHandler,
-        )
+        server = tool_server.create_control_center_server("127.0.0.1", 0)
         port = int(server.server_address[1])
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
+            session_connection = HTTPConnection("127.0.0.1", port, timeout=3)
+            try:
+                session_connection.request(
+                    "GET",
+                    "/api/session",
+                    headers={"Host": f"127.0.0.1:{port}"},
+                )
+                session_response = session_connection.getresponse()
+                session_payload = json.loads(
+                    session_response.read().decode("utf-8")
+                )
+                self.assertEqual(session_response.status, 200)
+                session_token = str(session_payload["sessionToken"])
+            finally:
+                session_connection.close()
             headers = {
                 "Content-Type": content_type,
                 "Host": host.format(port=port),
+                "X-Blueprint-Session": session_token,
             }
             if origin is not None:
                 headers["Origin"] = origin.format(port=port)
+            if non_browser:
+                headers["X-Blueprint-Client"] = "non-browser"
             with patch.object(tool_server, "HARVEST_BUILD_MANAGER", manager):
                 connection = HTTPConnection("127.0.0.1", port, timeout=3)
                 try:
@@ -279,7 +294,7 @@ class HarvestHttpContractTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 415)
-        self.assertEqual(payload["code"], "HARVEST_BUILD_JSON_REQUIRED")
+        self.assertEqual(payload["code"], "JSON_CONTENT_TYPE_REQUIRED")
         self.assertIsNone(manager.started)
 
     def test_public_build_post_rejects_cross_origin_browser_request(self):
@@ -289,11 +304,15 @@ class HarvestHttpContractTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 403)
-        self.assertEqual(payload["code"], "HARVEST_BUILD_ORIGIN_FORBIDDEN")
+        self.assertEqual(payload["code"], "ORIGIN_FORBIDDEN")
         self.assertIsNone(manager.started)
 
     def test_public_build_post_allows_local_tool_without_origin(self):
-        status, payload, _headers, manager = self.request_build({"options": {}})
+        status, payload, _headers, manager = self.request_build(
+            {"options": {}},
+            origin=None,
+            non_browser=True,
+        )
 
         self.assertEqual(status, 202)
         self.assertTrue(payload["ok"])
@@ -306,7 +325,7 @@ class HarvestHttpContractTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 403)
-        self.assertEqual(payload["code"], "HARVEST_BUILD_HOST_FORBIDDEN")
+        self.assertEqual(payload["code"], "HOST_FORBIDDEN")
         self.assertIsNone(manager.started)
 
     def test_public_build_post_rejects_path_overrides_without_leaking_paths(self):

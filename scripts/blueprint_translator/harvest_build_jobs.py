@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from blueprint_server.security import redact_sensitive_text
+
 
 QUEUED = "QUEUED"
 RUNNING = "RUNNING"
@@ -181,6 +183,7 @@ class HarvestBuildJobManager:
         self.max_log_chars = int(max_log_chars)
         self.max_progress_lines = int(max_progress_lines)
         self.terminate_timeout_seconds = float(terminate_timeout_seconds)
+        self._redaction_roots = (self.project_root, Path.home().resolve())
         self._condition = threading.Condition(threading.RLock())
         self._job: _Job | None = None
 
@@ -476,7 +479,11 @@ class HarvestBuildJobManager:
 
     def _append_line(self, job: _Job, stream_name: str, raw_line: str) -> None:
         line = raw_line.rstrip("\r\n")
-        entry = f"[{stream_name}] {line}\n"
+        safe_line = redact_sensitive_text(
+            line,
+            path_roots=self._redaction_roots,
+        )
+        entry = f"[{stream_name}] {safe_line}\n"
         with self._condition:
             if self._job is not job:
                 return
@@ -502,14 +509,17 @@ class HarvestBuildJobManager:
             if match:
                 current = int(match.group(1))
                 total = int(match.group(2))
-                label = match.group(3).strip()
+                label = redact_sensitive_text(
+                    match.group(3).strip(),
+                    path_roots=self._redaction_roots,
+                )
                 job.progress = {
                     "current": current,
                     "total": total,
                     "label": label,
-                    "line": line,
+                    "line": safe_line,
                 }
-                job.progress_lines.append(line)
+                job.progress_lines.append(safe_line)
                 if len(job.progress_lines) > self.max_progress_lines:
                     del job.progress_lines[
                         : len(job.progress_lines) - self.max_progress_lines
@@ -785,7 +795,6 @@ class HarvestBuildJobManager:
             "status": job.status,
             "pid": job.pid,
             "returnCode": job.return_code,
-            "command": list(job.command),
             "createdAt": job.created_at,
             "startedAt": job.started_at,
             "finishedAt": job.finished_at,
@@ -794,7 +803,10 @@ class HarvestBuildJobManager:
             "cancelTooLate": job.cancel_too_late,
             "promotionCritical": job.promotion_critical,
             "promotionCommitted": job.promotion_committed,
-            "error": job.error,
+            "error": redact_sensitive_text(
+                job.error,
+                path_roots=self._redaction_roots,
+            ),
             "progress": dict(job.progress),
             "progressLines": list(job.progress_lines),
             "logTail": job.log_tail,
