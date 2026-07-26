@@ -926,8 +926,10 @@ def render_native_index(
     recipe_id, recipe_sha = _recipe_identity(provenance)
     functions = _native_functions(payload)
     gaps = _objects(payload.get("gaps"), "gaps")
+    total_gap_count = len(gaps)
 
     def render(function_rows: Iterable[dict[str, Any]], gap_rows: Iterable[dict[str, Any]]) -> str:
+        selected_gap_rows = list(gap_rows)
         function_lines = [
             (
                 f"- `{row.get('qualifiedName', row.get('name', ''))}` "
@@ -942,8 +944,21 @@ def render_native_index(
                 f"[{_status(row, 'NOT_RECOVERED')}]: "
                 f"{_gap_detail(row)[:180]}"
             )
-            for row in gap_rows
+            for row in selected_gap_rows
         ]
+        omitted_gap_count = total_gap_count - len(selected_gap_rows)
+        if gap_lines and omitted_gap_count:
+            gap_lines.append(
+                f"- {omitted_gap_count} additional gaps were omitted by the "
+                "index token budget."
+            )
+        elif total_gap_count and not gap_lines:
+            gap_lines = [
+                f"- {total_gap_count} gaps were recorded; details were omitted "
+                "by the index token budget."
+            ]
+        elif not gap_lines:
+            gap_lines = ["- No gaps were recorded."]
         return "\n".join(
             [
                 "# Native Evidence Index",
@@ -961,7 +976,7 @@ def render_native_index(
                 "",
                 "## Evidence gaps",
                 "",
-                *(gap_lines or ["- No gaps were recorded."]),
+                *gap_lines,
                 "",
                 "## Next bounded queries",
                 "",

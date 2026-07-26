@@ -26,6 +26,7 @@ from blueprint_translator.native_identity import (  # noqa: E402
 )
 from blueprint_translator.native_evidence_store import (  # noqa: E402
     NATIVE_TABLES,
+    render_native_index,
     write_native_evidence_artifacts,
 )
 from import_native_evidence import build_parser as build_import_parser  # noqa: E402
@@ -84,6 +85,36 @@ class NativeEvidenceStoreTests(unittest.TestCase):
         with open_native_evidence_repository(self.evidence_dir) as repository:
             self.assertEqual(repository.evidence_set_id, result["evidence_set_id"])
             self.assertEqual(len(repository.list_functions()), 4)
+
+    def test_index_reports_gaps_when_budget_omits_every_gap_detail(self):
+        payload = json.loads(self.source.read_text(encoding="utf-8"))
+        payload["gaps"] = [
+            {
+                "gapId": f"native-gap://fixture/budget-{index:03d}",
+                "status": "NOT_RECOVERED",
+                "reasonCode": "DECOMPILE_BUDGET_EXCEEDED",
+                "detail": "bounded decompile detail " + ("x" * 180),
+            }
+            for index in range(40)
+        ]
+        payload_without_gaps = {**payload, "gaps": []}
+        shell = render_native_index(
+            payload_without_gaps,
+            source_sha256="f" * 64,
+            max_tokens=10_000,
+        )
+
+        index = render_native_index(
+            payload,
+            source_sha256="f" * 64,
+            max_tokens=estimate_tokens(shell) + 30,
+        )
+
+        self.assertIn(
+            "40 gaps were recorded; details were omitted by the index token budget.",
+            index,
+        )
+        self.assertNotIn("No gaps were recorded.", index)
 
     def test_source_or_sqlite_tamper_fails_closed(self):
         write_native_evidence_artifacts(self.source, self.evidence_dir)
