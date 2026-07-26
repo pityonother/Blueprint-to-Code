@@ -73,6 +73,8 @@ runtime\python\python.exe scripts\native_analysis\native_identity.py `
   --pdb "<matching.pdb>" `
   --raw-export "<native-targets-v1.json>" `
   --toolchain scripts\native_analysis\toolchain.json `
+  --ghidra-home "<tools-root>\ghidra_12.1.2_PUBLIC" `
+  --java-home "<tools-root>\jdk-21.0.11+10" `
   --experimental
 
 runtime\python\python.exe scripts\import_native_evidence.py `
@@ -156,8 +158,10 @@ runtime\python\python.exe scripts\build_native_context_pack.py `
   --output-dir "analysis\native_context"
 ```
 
-输出把确认函数、caller/callee、字段、常量、分支和 gap 分开，并记录所用
-source fingerprint。它是一个可丢弃的有界视图，不替代权威 JSON。
+输出把函数、caller/callee、字段、常量、分支和 gap 分开，并记录所用
+source fingerprint 与 `sourceTrust`。非 `VERIFIED` / 非 formal 来源中的函数
+会标记为 `PROVENANCE_UNVERIFIED`，同时保留原始 `evidenceStatus`，不会被
+描述成 confirmed fact。它是一个可丢弃的有界视图，不替代权威 JSON。
 
 ## 6. 验证和公开 fixture
 

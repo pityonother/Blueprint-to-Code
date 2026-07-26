@@ -114,6 +114,10 @@ runtime\python\python.exe scripts\build_hybrid_context_pack.py `
 - stale provenance warnings。
 
 默认预算为 2,200 estimated tokens，上限 8,000。完整反编译正文不进入 pack。
+Pack 顶层始终携带 `nativeTrust.status` 和 `formalValidation`。只有
+`VERIFIED` 且经过 formal validation 的 Native Store 才能进入 Native
+confirmed facts 和 resolved cross-source edges；实验或不完整来源会降级为
+`PROVENANCE_UNVERIFIED` assumption/gap，并保留原始 `evidenceStatus` 供审计。
 当当前 Blueprint revision/source fingerprint 与边依赖不一致时，边会变为
 `STALE`；调用方必须重新运行 linker，不能沿用旧 target。
 

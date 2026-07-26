@@ -84,6 +84,10 @@ Validator 会检查：
   asset ID、revision ID、source fingerprint 一致性（validator 不会重新定位并
   哈希本机原始 `.uasset`）；
 - runtime observation ID、文件 SHA-256 和 claim observation refs；
+- runtime observation 的完整结构与重新计算状态；`NOT_RUN` 不得引用
+  observation，其他状态必须至少引用一个 observation；
+- `RUNTIME_CALIBRATED` / `RUNTIME_CONFIRMED` 不接受 synthetic fixture，
+  且声明状态必须与每个引用 observation 的重算结果一致；
 - 本机 full evidence 是否需要重建。
 
 本机 full evidence 缺失但 committed sanitized manifest 已验证时，输出 `LOCAL_EVIDENCE_REQUIRED` warning，而不是坏链接。旧 v1 evidence 缺少 recipe 或 PDB GUID/Age 时必须标为 `PROVENANCE_INCOMPLETE`；普通审阅可以看到 warning，`--formal` 必须失败。
@@ -98,6 +102,9 @@ STALE_GENERATOR
 PROVENANCE_UNVERIFIED
 EVIDENCE_REF_NOT_FOUND
 REPORT_CLAIM_MARKER_MISSING
+RUNTIME_OBSERVATION_INVALID
+RUNTIME_STATUS_MISMATCH
+RUNTIME_SYNTHETIC_NOT_ALLOWED
 ```
 
 不要为了通过 validator 把未知来源改成 `CONFIRMED`。正确做法是重新运行绑定当前 DLL/PDB/recipe 的原生流水线，或把无法闭合的 claim 标为 `UNRESOLVED`。

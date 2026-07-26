@@ -17,8 +17,9 @@ Ghidra project name 可能把旧工程、当前 DLL 和新命名的导出文件�
    固定为 `<tools-root>/ghidra-workspaces/BlueprintToCode/<binary_sha12>/`。
 3. workspace 内保存不含本机路径的 project manifest。manifest 至少绑定完整 DLL
    SHA-256、PE CodeView GUID/Age、PDB SHA-256 与 PDB GUID/Age。
-4. 正式证据还必须绑定 Ghidra/JDK 版本、language/compiler spec、分析配置哈希、
-   recipe 与生成器脚本哈希、Git commit 和 dirty 状态。
+4. 正式证据还必须绑定 Ghidra/JDK 版本与已登记关键安装文件的实际指纹、
+   language/compiler spec、分析配置哈希、recipe 与生成器脚本哈希、Git commit
+   和 dirty 状态。
 5. `-AllowHashMismatch` 只允许对未登记的新构建进行显式实验，不允许复用另一
    DLL 哈希的工程。检测到旧固定工程时只给迁移说明，不自动删除或移动。
 6. runner 在 Ghidra 运行后重新读取导出结果并与当前输入逐项比较。任何

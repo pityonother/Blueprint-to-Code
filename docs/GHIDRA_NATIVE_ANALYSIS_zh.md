@@ -143,7 +143,8 @@ Native Evidence v2 记录：
 
 - DLL SHA-256、PE identity、映像基址、语言和 compiler spec；
 - PDB SHA-256、GUID/Age、loaded 和 binary match；
-- Ghidra/JDK/analysis options；
+- Ghidra/JDK 版本、官方发布包 SHA-256、已登记关键安装文件的实际
+  `installationFingerprint`，以及 analysis options；
 - recipe 与 runner/exporter/configurator hashes；
 - Git commit/dirty 与生成时间；
 - 每个 target 的候选、接受/拒绝原因、RVA、签名、调用、字段、常量、分支、
@@ -169,11 +170,14 @@ bp://.../g/.../n/... --CALLS_NATIVE--> native://.../0x...
 ```text
 NATIVE_TOOL_MISSING
 NATIVE_JAVA_VERSION_MISMATCH
+NATIVE_TOOLCHAIN_HASH_MISMATCH
 NATIVE_BINARY_HASH_UNREGISTERED
+NATIVE_HASH_BYPASS_REQUIRES_EXPERIMENTAL
 NATIVE_PDB_HASH_MISMATCH
 NATIVE_PDB_IDENTITY_MISMATCH
 NATIVE_PDB_NOT_LOADED
 NATIVE_PROJECT_PROGRAM_HASH_MISMATCH
+NATIVE_ANALYSIS_TIMEOUT
 NATIVE_RECIPE_SCHEMA_INVALID
 NATIVE_RECIPE_SELECTOR_FORBIDDEN
 NATIVE_RECIPE_TARGET_COUNT_MISMATCH
