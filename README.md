@@ -91,6 +91,7 @@ claim://<report-id>/<claim-id>
 - [Runtime Calibration](docs/RUNTIME_CALIBRATION_zh.md)
 - [Harvest Runtime 实测协议](docs/HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)
 - [ARK 资源点 Explorer](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)
+- [GPT Pro 进度审查说明](docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)
 - [授权与分发策略](docs/LICENSE_POLICY.md)
 
 ## Control Center

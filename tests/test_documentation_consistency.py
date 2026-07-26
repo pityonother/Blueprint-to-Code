@@ -97,6 +97,39 @@ class DocumentationConsistencyTests(unittest.TestCase):
         self.assertIn("不授予开源许可证", policy)
         self.assertIn("版权由项目作者保留", policy)
 
+    def test_readme_links_current_gpt_pro_progress_review(self):
+        review_path = (
+            ROOT
+            / "docs"
+            / "GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md"
+        )
+
+        self.assertTrue(review_path.is_file())
+        self.assertIn(
+            (
+                "[GPT Pro 进度审查说明]"
+                "(docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)"
+            ),
+            self.readme,
+        )
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(
+            "!docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md",
+            gitignore,
+        )
+
+        review = review_path.read_text(encoding="utf-8")
+        for marker in (
+            "623/623",
+            "formal_validation",
+            "741a359",
+            "RUNTIME_CONFIRMED",
+            "Run-NativeRecipe.ps1",
+            "只审查当前实施进度并给出下一阶段方向",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, review)
+
 
 if __name__ == "__main__":
     unittest.main()

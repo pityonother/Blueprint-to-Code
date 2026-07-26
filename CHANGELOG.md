@@ -18,6 +18,8 @@ match it.
   real-data collection protocol.
 - Versioned HTTP analysis contracts and GitHub Actions release/native-fixture
   gates.
+- A GPT Pro progress-review brief covering completed implementation, verified
+  results, remaining evidence limits, and questions for next-step direction.
 
 ### Changed
 
@@ -28,6 +30,11 @@ match it.
   response, routing, API, escaping, and error responsibilities to modules.
 - The former license-decision placeholder is resolved as an author-retained
   rights policy; no open-source license is granted by default.
+
+### Fixed
+
+- Compact Native Evidence indexes now distinguish zero gaps from gap details
+  omitted by the token budget.
 
 ### Security
 
