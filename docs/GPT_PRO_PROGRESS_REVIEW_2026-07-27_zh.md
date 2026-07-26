@@ -131,7 +131,7 @@
 ### 最新通用门禁
 
 ```text
-Python unittest:        623/623 passed
+Python unittest:        624/624 passed
 Frontend build:         TypeScript + Vite passed
 Node contracts:         core/API/harvest passed
 npm audit high:         0 vulnerabilities
@@ -139,8 +139,8 @@ Blueprint evidence:     227/227 passed, 0 failed
 git diff --check:       passed
 ```
 
-最终 Python 数量应以本分支提交前最后一次实际运行输出为准；如果本文数字与
-GitHub Actions 不一致，请把远端最新 run 作为额外结果列出，不要覆盖本地记录。
+该数字来自本分支提交前最后一次本地全量运行；GitHub Actions 是独立的 Linux
+环境结果，应另行列出，不能用任一方替代另一方。
 
 ### Claim 门禁
 

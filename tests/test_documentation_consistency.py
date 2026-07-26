@@ -120,7 +120,7 @@ class DocumentationConsistencyTests(unittest.TestCase):
 
         review = review_path.read_text(encoding="utf-8")
         for marker in (
-            "623/623",
+            "624/624",
             "formal_validation",
             "741a359",
             "RUNTIME_CONFIRMED",

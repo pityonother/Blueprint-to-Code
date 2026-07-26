@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -54,6 +55,19 @@ class CiContractTests(unittest.TestCase):
             workflow,
             re.compile(r"(?i)(token|password|secret)\s*:\s*['\"][^$]"),
         )
+
+    def test_linux_wasm_peer_is_explicit_in_the_lock_contract(self):
+        package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+        lock = json.loads(
+            (ROOT / "package-lock.json").read_text(encoding="utf-8")
+        )
+
+        expected = package["devDependencies"]["@emnapi/runtime"]
+        runtime = lock["packages"]["node_modules/@emnapi/runtime"]
+
+        self.assertEqual(expected, "1.11.3")
+        self.assertEqual(runtime["version"], expected)
+        self.assertTrue(runtime["dev"])
 
 
 if __name__ == "__main__":

@@ -35,6 +35,8 @@ match it.
 
 - Compact Native Evidence indexes now distinguish zero gaps from gap details
   omitted by the token budget.
+- The npm lock contract now includes the WASM runtime peer required by
+  Linux/Node 24 clean installs.
 
 ### Security
 
