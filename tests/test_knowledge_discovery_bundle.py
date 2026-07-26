@@ -1115,6 +1115,15 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                         "BlueprintType": "BPTYPE_Normal",
                     },
                 },
+                {
+                    "object_path": "/Actual/TargetAsset.SecondaryObject",
+                    "package_name": "/Actual/TargetAsset",
+                    "package_path": "/Actual",
+                    "asset_name": "SecondaryObject",
+                    "asset_class_path": "/Script/Engine.Material",
+                    "package_flags": 0,
+                    "tags": {},
+                },
             ]
             registry_assets_path = registry / "registry_assets.jsonl"
             registry_assets_path.write_text(
@@ -1140,7 +1149,7 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                     {
                         "schema": "ark.kb.registry-snapshot.v1",
                         "status": "COMPLETE",
-                        "asset_count": 2,
+                        "asset_count": 3,
                         "dependency_count": 1,
                         "inventory_signature": "f" * 64,
                         "source": {"engine_version": "5.5.4"},
@@ -1212,7 +1221,23 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                 self.assertEqual(parent, ("/Script/Engine.Actor", "native_parent"))
                 self.assertEqual(
                     connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0],
-                    2,
+                    3,
+                )
+                self.assertEqual(
+                    {
+                        row[0]
+                        for row in connection.execute(
+                            """
+                            SELECT object_path
+                            FROM assets
+                            WHERE package_path='/Actual/TargetAsset'
+                            """
+                        )
+                    },
+                    {
+                        "/Actual/TargetAsset.TargetAsset",
+                        "/Actual/TargetAsset.SecondaryObject",
+                    },
                 )
             finally:
                 connection.close()

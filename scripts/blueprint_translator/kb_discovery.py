@@ -3615,7 +3615,9 @@ def _apply_registry_assets(
         base = dict(source_base or _unknown_asset(object_path, package))
         original_package = str(base.get("package_path") or "")
         if source_base is not None:
-            assets.pop(str(source_base["object_path"]), None)
+            source_object_path = str(source_base["object_path"])
+            if assets.get(source_object_path) is source_base:
+                assets.pop(source_object_path)
         base["object_path"] = object_path
         base["package_path"] = package
         base["asset_name"] = str(registry["asset_name"])
