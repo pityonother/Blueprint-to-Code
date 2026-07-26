@@ -83,9 +83,11 @@ from blueprint_server.request import (
     read_json_object,
 )
 from blueprint_server.security import SecurityPolicy, redact_sensitive_text
+from package_full_env import read_project_version
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_VERSION = read_project_version(PROJECT_ROOT)
 CAPTURE_ROOT = PROJECT_ROOT / "captures"
 DIST_ROOT = PROJECT_ROOT / "dist"
 KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge_base"
@@ -1565,6 +1567,7 @@ def cancel_harvest_build_for_request(job_id: str) -> dict[str, object]:
 
 def api_state() -> dict[str, object]:
     return {
+        "version": PROJECT_VERSION,
         "projectRoot": str(PROJECT_ROOT),
         "captureRoot": str(CAPTURE_ROOT),
         "assets": list_assets(),

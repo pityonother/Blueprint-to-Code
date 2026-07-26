@@ -526,6 +526,14 @@ code {
   text-align: center;
 }
 
+.app-footer {
+  color: #75817c;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  padding: 2px 24px 18px;
+  text-align: center;
+}
+
 .split-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

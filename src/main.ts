@@ -123,6 +123,7 @@ interface KnowledgeBaseSummary {
 
 interface AppState extends ApiResult {
   ok: boolean;
+  version: string;
   projectRoot: string;
   captureRoot: string;
   assets: AssetSummary[];
@@ -213,6 +214,7 @@ const defaultReport: ReportKey = 'agent_index';
 const DEFAULT_ARTIFACT_MODE = 'indexed' as const;
 
 let state: AppState | null = null;
+let appVersion = '';
 let selectedPath = window.localStorage.getItem('blueprint-tool.selected') || '';
 let selectedReport: ReportKey = defaultReport;
 let reportContent = '';
@@ -1199,6 +1201,15 @@ function renderAdvancedSection(asset?: AssetSummary): string {
   `;
 }
 
+function renderVersionFooter(): string {
+  const label = appVersion ? `v${appVersion}` : '版本加载中';
+  return `
+    <footer class="app-footer" aria-label="应用版本">
+      Blueprint to Code ${escapeHtml(label)}
+    </footer>
+  `;
+}
+
 function renderMain(): void {
   if (workspaceView === 'harvest') {
     root.innerHTML = `
@@ -1207,6 +1218,7 @@ function renderMain(): void {
         <main class="workspace harvest-workspace">
           ${harvestExplorer.render()}
         </main>
+        ${renderVersionFooter()}
       </div>
     `;
     bindEvents();
@@ -1234,6 +1246,7 @@ function renderMain(): void {
         ${renderAdvancedSection(asset)}
         <p class="footnote">日志最近一条：${escapeHtml(logs[0] || '无')}</p>
       </main>
+      ${renderVersionFooter()}
     </div>
   `;
 
@@ -1375,6 +1388,7 @@ async function refreshState(keepReport = true): Promise<void> {
   const previousSelectedPath = selectedPath;
   const payload = await api<AppState>('/api/state');
   state = payload;
+  appVersion = payload.version;
   if (!selectedPath || !state.assets.some((asset) => asset.path === selectedPath)) {
     selectedPath = state.assets.find((asset) => asset.graphs > 0 && asset.hasOutput)?.path || state.assets[0]?.path || '';
   }
@@ -1948,6 +1962,12 @@ async function cancelCurrentJob(): Promise<void> {
   }
 }
 
+async function refreshVersion(): Promise<void> {
+  const payload = await api<ApiResult & { version: string }>('/api/state');
+  appVersion = payload.version;
+  render();
+}
+
 async function buildKnowledgeBase(): Promise<void> {
   busy = true;
   appendLog('开始生成 ARK DevKit 全局背景知识库。');
@@ -2269,6 +2289,11 @@ async function handleAction(action: string): Promise<void> {
 render();
 if (workspaceView === 'blueprint') {
   refreshState().catch((error) => {
+    logs = [error instanceof Error ? error.message : String(error)];
+    render();
+  });
+} else {
+  refreshVersion().catch((error) => {
     logs = [error instanceof Error ? error.message : String(error)];
     render();
   });

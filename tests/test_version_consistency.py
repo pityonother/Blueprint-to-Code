@@ -5,6 +5,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,36 @@ class VersionConsistencyTests(unittest.TestCase):
 
         self.assertEqual(manifest["version"], version)
         self.assertTrue(re.fullmatch(r"\d+\.\d+\.\d+", str(manifest["version"])))
+
+    def test_control_center_state_reads_the_root_version(self):
+        import blueprint_tool_server
+
+        with (
+            patch.object(blueprint_tool_server, "list_assets", return_value=[]),
+            patch.object(
+                blueprint_tool_server,
+                "knowledge_base_summary",
+                return_value={},
+            ),
+            patch.object(
+                blueprint_tool_server,
+                "read_devkit_request",
+                return_value="",
+            ),
+        ):
+            state = blueprint_tool_server.api_state()
+
+        self.assertEqual(state["version"], read_project_version(ROOT))
+
+    def test_both_frontend_workspaces_render_the_state_version_footer(self):
+        source = (ROOT / "src" / "main.ts").read_text(encoding="utf-8")
+
+        self.assertIn("version: string;", source)
+        self.assertIn("appVersion = payload.version;", source)
+        self.assertGreaterEqual(
+            source.count("${renderVersionFooter()}"),
+            2,
+        )
 
 
 if __name__ == "__main__":
