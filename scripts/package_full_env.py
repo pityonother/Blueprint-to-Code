@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 ARCHIVE_ROOT = "BlueprintToCode"
+SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _BLOCKED_PREFIXES = (
     ".claude/",
     ".git/",
@@ -76,6 +77,16 @@ def resolve_npm_executable() -> str:
     if executable is None:
         raise FileNotFoundError("npm/npm.cmd was not found on PATH")
     return executable
+
+
+def read_project_version(root: Path) -> str:
+    """Read and validate the repository's single release-version source."""
+
+    version_path = root.resolve() / "VERSION"
+    version = version_path.read_text(encoding="utf-8-sig").strip()
+    if not SEMVER_PATTERN.fullmatch(version):
+        raise ValueError(f"VERSION must contain one SemVer value: {version!r}")
+    return version
 
 
 def sanitize_repository_url(url: str) -> str:
@@ -145,9 +156,12 @@ def build_package_manifest(
     sample_revision: str = "",
     harvest_reports: list[str] | None = None,
     devkit_content_root_configured: bool = False,
+    version: str | None = None,
 ) -> dict[str, object]:
+    resolved_version = version or read_project_version(Path(__file__).resolve().parents[1])
     return {
         "schema": "blueprint-to-code.full-env-package.v2",
+        "version": resolved_version,
         "packageType": "full-environment-internal-beta",
         "repository": repository_url,
         "branch": branch,
@@ -369,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
             _run(root, "git", "remote", "get-url", "origin")
         )
         generated_at = datetime.now(timezone.utc)
+        version = read_project_version(root)
         entries: dict[str, Path | bytes] = {}
 
         sample_root = _resolve_input(root, args.sample_asset_dir)
@@ -435,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
             sample_revision=str(sample_validation["revisionId"]),
             harvest_reports=verified_reports,
             devkit_content_root_configured=devkit_root_configured,
+            version=version,
         )
         manifest_bytes = (
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -457,7 +473,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         stamp = generated_at.astimezone().strftime("%Y%m%d-%H%M%S")
-        output_path = output_dir / f"BlueprintToCode_full_env_{stamp}_{short_commit}.zip"
+        output_path = (
+            output_dir
+            / f"BlueprintToCode_v{version}_full_env_{stamp}_{short_commit}.zip"
+        )
         temporary_output = output_path.with_suffix(".tmp.zip")
         if temporary_output.exists():
             temporary_output.unlink()

@@ -110,4 +110,3 @@ Missing: @emnapi/wasi-threads@1.2.3 from lock file
 3. Blueprint ↔ Native bridge、Claim Manifest、runtime observation。
 4. 全 POST 安全边界、job 限长/脱敏/进程树取消。
 5. Public fixture、CI、单一版本来源和文档一致性。
-
