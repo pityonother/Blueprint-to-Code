@@ -70,6 +70,7 @@ DEPENDENCY_TYPES = (
     ("hard_management", "include_hard_management_references"),
 )
 ALL_DEPENDENCY_OPTION_NAMES = tuple(item[1] for item in DEPENDENCY_TYPES)
+UNRESOLVED_DEPENDENCY_TYPE = "unresolved_identifier"
 
 DEFAULT_BATCH_SIZE = 500
 MAX_BATCH_SIZE = 10000
@@ -479,6 +480,13 @@ def _published_manifest_if_current(
         "COMPLETE_WITH_WARNINGS",
     ):
         return None
+    producer = manifest.get("producer")
+    if (
+        not isinstance(producer, dict)
+        or producer.get("script") != os.path.basename(__file__)
+        or producer.get("source_sha256") != _sha256_file(os.path.abspath(__file__))
+    ):
+        return None
     if manifest.get("inventory_signature") != inventory_signature:
         return None
     if bool(manifest.get("dependencies_enabled")) != bool(dependency_enabled):
@@ -705,14 +713,27 @@ def _dependency_rows_for_package(registry, package_name, option_map, errors):
             )
         )
         for target_package_name in targets:
+            exported_type = (
+                dependency_type
+                if target_package_name.startswith("/")
+                else UNRESOLVED_DEPENDENCY_TYPE
+            )
             rows.append(
                 {
                     "schema": DEPENDENCY_ROW_SCHEMA,
                     "source_package_name": package_name,
                     "target_package_name": target_package_name,
-                    "dependency_type": dependency_type,
+                    "dependency_type": exported_type,
+                    "reported_dependency_type": dependency_type,
                     "source_kind": "asset_registry",
-                    "confidence": "HIGH",
+                    "confidence": (
+                        "HIGH" if exported_type == dependency_type else "LOW"
+                    ),
+                    "reason_code": (
+                        ""
+                        if exported_type == dependency_type
+                        else "TARGET_NOT_PACKAGE_PATH"
+                    ),
                 }
             )
     return rows
@@ -842,7 +863,10 @@ def _new_checkpoint(
         "dependency_rows": 0,
         "dependency_output_bytes": 0,
         "dependency_counts": {
-            dependency_type: 0 for dependency_type, _option_name in DEPENDENCY_TYPES
+            **{
+                dependency_type: 0 for dependency_type, _option_name in DEPENDENCY_TYPES
+            },
+            UNRESOLVED_DEPENDENCY_TYPE: 0,
         },
         "skipped_assets_without_identity": int(skipped_without_identity),
         "duplicate_asset_identities": int(duplicate_asset_count),
@@ -948,6 +972,18 @@ def _manifest_from_checkpoint(
                 len(checkpoint.get("errors") or [])
             )
         )
+    unresolved_count = int(
+        (checkpoint.get("dependency_counts") or {}).get(
+            UNRESOLVED_DEPENDENCY_TYPE,
+            0,
+        )
+        or 0
+    )
+    if unresolved_count:
+        warnings.append(
+            "{} dependency targets were identifiers rather than package paths; "
+            "they are exported as explicit unresolved records".format(unresolved_count)
+        )
     generated_at = _utc_now()
     files = {
         "assets": {
@@ -1002,7 +1038,8 @@ def _manifest_from_checkpoint(
         "dependencies_enabled": dependency_enabled,
         "tag_allowlist": list(TAG_ALLOWLIST),
         "dependency_types": [
-            dependency_type for dependency_type, _option_name in DEPENDENCY_TYPES
+            *(dependency_type for dependency_type, _option_name in DEPENDENCY_TYPES),
+            UNRESOLVED_DEPENDENCY_TYPE,
         ],
         "checkpoint": {
             "schema": CHECKPOINT_SCHEMA,

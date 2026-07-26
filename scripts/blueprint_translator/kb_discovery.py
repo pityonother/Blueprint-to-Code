@@ -2632,6 +2632,7 @@ def _iter_registry_dependencies(
         "searchable",
         "hard_manage",
         "soft_manage",
+        "unresolved",
     }
     for row_number, row in enumerate(
         _iter_jsonl(dependencies_path),
@@ -2655,13 +2656,28 @@ def _iter_registry_dependencies(
             "searchable_name": "searchable",
             "hard_management": "hard_manage",
             "soft_management": "soft_manage",
+            "unresolved_identifier": "unresolved",
         }.get(strength, strength)
-        if not (
-            source_package.startswith("/")
-            and target_package.startswith("/")
-            and strength in allowed_strengths
-        ):
+        if not source_package.startswith("/") or strength not in allowed_strengths:
             raise ValueError(f"REGISTRY_DEPENDENCY_ROW_INVALID:{row_number}")
+        if not target_package:
+            raise ValueError(f"REGISTRY_DEPENDENCY_ROW_INVALID:{row_number}")
+        if strength == "unresolved" or not target_package.startswith("/"):
+            yield {
+                "source_package": source_package,
+                "target_package": target_package,
+                "reference_strength": "unresolved",
+                "edge_kind": "unresolved_registry_identifier",
+                "confidence": "LOW",
+                "source_kind": "unreal_asset_registry",
+                "reason_code": str(row.get("reason_code") or "TARGET_NOT_PACKAGE_PATH"),
+                "reported_dependency_type": str(
+                    row.get("reported_dependency_type")
+                    or row.get("dependency_type")
+                    or UNKNOWN
+                ),
+            }
+            continue
         yield {
             "source_package": source_package,
             "target_package": target_package,
@@ -3981,6 +3997,41 @@ def _insert_registry_reference_rows(
     for dependency in dependencies:
         source = str(dependency["source_package"])
         target = str(dependency["target_package"])
+        if dependency.get("edge_kind") != "package_dependency":
+            reason_code = str(
+                dependency.get("reason_code") or "TARGET_NOT_PACKAGE_PATH"
+            )
+            failure_id = stable_id(
+                "scan-failure://",
+                source,
+                "asset_registry_dependency",
+                target,
+                reason_code,
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO scan_failures(
+                    failure_id, object_path, stage, error_code, status,
+                    detail_redacted
+                ) VALUES (?, ?, 'asset_registry_dependency', ?,
+                          'NOT_RECOVERED', ?)
+                """,
+                (
+                    failure_id,
+                    source,
+                    reason_code,
+                    canonical_json(
+                        {
+                            "targetIdentifier": target,
+                            "reportedDependencyType": dependency.get(
+                                "reported_dependency_type",
+                                UNKNOWN,
+                            ),
+                        }
+                    ),
+                ),
+            )
+            continue
         reference_id = stable_id(
             "registry-reference://",
             source,

@@ -1137,7 +1137,16 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                     "dependency_type": "soft_package",
                     "source_kind": "asset_registry",
                     "confidence": "HIGH",
-                }
+                },
+                {
+                    "source_package_name": "/Actual/TargetAsset",
+                    "target_package_name": "Function_42",
+                    "dependency_type": "unresolved_identifier",
+                    "reported_dependency_type": "hard_package",
+                    "reason_code": "TARGET_NOT_PACKAGE_PATH",
+                    "source_kind": "asset_registry",
+                    "confidence": "LOW",
+                },
             ]
             registry_dependencies_path = registry / "registry_dependencies.jsonl"
             registry_dependencies_path.write_text(
@@ -1150,7 +1159,7 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                         "schema": "ark.kb.registry-snapshot.v1",
                         "status": "COMPLETE",
                         "asset_count": 3,
-                        "dependency_count": 1,
+                        "dependency_count": 2,
                         "inventory_signature": "f" * 64,
                         "source": {"engine_version": "5.5.4"},
                         "output_integrity": {
@@ -1239,6 +1248,24 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                         "/Actual/TargetAsset.SecondaryObject",
                     },
                 )
+                unresolved = connection.execute(
+                    """
+                    SELECT object_path, stage, error_code, status,
+                           detail_redacted
+                    FROM scan_failures
+                    WHERE stage='asset_registry_dependency'
+                    """
+                ).fetchone()
+                self.assertEqual(
+                    unresolved[:4],
+                    (
+                        "/Actual/TargetAsset",
+                        "asset_registry_dependency",
+                        "TARGET_NOT_PACKAGE_PATH",
+                        "NOT_RECOVERED",
+                    ),
+                )
+                self.assertIn("Function_42", unresolved[4])
             finally:
                 connection.close()
 
