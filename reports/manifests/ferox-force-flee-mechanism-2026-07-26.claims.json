@@ -1,0 +1,101 @@
+{
+  "schema": "blueprint-to-code-report-claims/v1",
+  "reportId": "ferox-force-flee-mechanism-2026-07-26",
+  "reportPath": "reports/FEROX_FORCE_FLEE_MECHANISM_2026-07-26.md",
+  "generatedAtUtc": "2026-07-26T18:13:23Z",
+  "generator": {
+    "repositoryCommit": "WORKTREE_UNCOMMITTED",
+    "dirty": true
+  },
+  "dependencies": {
+    "blueprintAssets": [
+      {
+        "manifestPath": "reports/evidence_manifests/ferox-character-2026-07-26.blueprint.json",
+        "assetId": "f66149335e0fefb4dad91f76",
+        "revisionId": "678888f577bb49fd826ff2df",
+        "sourceFingerprint": "a3e39281f605e620247019521e289171869cfecc6b6232d43a2097ac3416e6b7"
+      }
+    ],
+    "nativeEvidenceSets": [
+      {
+        "manifestPath": "reports/evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json",
+        "evidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "pdbSha256": "5285ae571d09fde9183a491f6bdef6e10a143857dd8b7fa5f9e6755b9c01bc16",
+        "recipeId": "UNRECOVERED_LEGACY_RECIPE",
+        "recipeSha256": "",
+        "generatorScriptSha256": {}
+      }
+    ],
+    "runtimeObservationSets": []
+  },
+  "claims": [
+    {
+      "claimId": "claim://ferox-force-flee/native-refresh-while-blueprint-gate-is-true",
+      "summary": "The Ferox Blueprint can keep the force-flee gate true after positive damage, and the native AI controller refreshes LastForcedFleeTime while that Blueprint gate continues to request fleeing.",
+      "status": "HYBRID_STATIC",
+      "confidence": "MEDIUM",
+      "evidenceRefs": [
+        "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/13",
+        "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/34",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x11E5420",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x3B82D0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x15F5B10"
+      ],
+      "assumptions": [
+        "Runtime timing and inherited ForcedFleeDuration defaults have not been calibrated by this historical report."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE",
+        "blueprintSourceFingerprint": "a3e39281f605e620247019521e289171869cfecc6b6232d43a2097ac3416e6b7"
+      },
+      "invalidationConditions": [
+        "Ferox Blueprint source fingerprint changed",
+        "ShooterGame binary hash changed",
+        "a formal recipe rebuild contradicts the legacy target",
+        "runtime calibration disproves the refresh behavior"
+      ],
+      "reportMarkers": [
+        "会刷新 `LastForcedFleeTime`"
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    },
+    {
+      "claimId": "claim://ferox-force-flee/ally-witness-chain",
+      "summary": "The available Blueprint and native evidence does not establish that an undamaged Ferox enters force-flee solely because it witnessed a nearby Ferox being damaged.",
+      "status": "UNRESOLVED",
+      "confidence": "LOW",
+      "evidenceRefs": [
+        "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/13",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x11E5420"
+      ],
+      "assumptions": [],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE",
+        "blueprintSourceFingerprint": "a3e39281f605e620247019521e289171869cfecc6b6232d43a2097ac3416e6b7"
+      },
+      "invalidationConditions": [
+        "A Blueprint or native damage-notification neighbor chain is recovered",
+        "a controlled runtime observation demonstrates the undamaged-ally trigger",
+        "Ferox Blueprint source fingerprint changed",
+        "ShooterGame binary hash changed"
+      ],
+      "reportMarkers": [
+        "当前证据不足以断言。"
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "blueprint-to-code-sanitized-blueprint-evidence/v1",
+  "assetId": "87d9b483f8405fd34d11cb18",
+  "assetName": "SupplyCrate_BuriedTreasurePirate_Primitive",
+  "revisionId": "a77382808376fb8d88fcbc22",
+  "sourceFingerprint": "ca2b6eebf025b25bd713f1d3e520b06d15a1068d5e2cc6cc9c1de23f175b8dc6",
+  "trust": {
+    "status": "VERIFIED"
+  },
+  "evidenceRefs": [
+    "bp://87d9b483f8405fd34d11cb18@a77382808376fb8d88fcbc22/default/MinQualityMultiplier",
+    "bp://87d9b483f8405fd34d11cb18@a77382808376fb8d88fcbc22/default/MaxQualityMultiplier"
+  ],
+  "evidenceSummaries": [
+    {
+      "ref": "bp://87d9b483f8405fd34d11cb18@a77382808376fb8d88fcbc22/default/MinQualityMultiplier",
+      "name": "MinQualityMultiplier",
+      "value": 2.0,
+      "valueStatus": "CONFIRMED",
+      "source": "uasset_cdo_property_tag"
+    },
+    {
+      "ref": "bp://87d9b483f8405fd34d11cb18@a77382808376fb8d88fcbc22/default/MaxQualityMultiplier",
+      "name": "MaxQualityMultiplier",
+      "value": 4.0,
+      "valueStatus": "CONFIRMED",
+      "source": "uasset_cdo_property_tag"
+    }
+  ]
+}

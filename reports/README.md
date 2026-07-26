@@ -25,3 +25,16 @@
 - `CONFIRMED`、`HEURISTIC`、`SOURCE_NOT_AVAILABLE` 和运行时待验证项不能互相替代。
 - `captures/`、`native_evidence/`、Ghidra 工程和报告生成中间文件是本机产物，
   不随这些 Markdown 报告提交。
+- `manifests/*.claims.json` 记录关键结论、Evidence ID、假设和失效条件；
+  `evidence_manifests/` 只保存可公开的 fingerprints 与 target 摘要。
+- 历史原生证据缺少 recipe/generator 指纹时标记
+  `PROVENANCE_INCOMPLETE`，不会伪装为正式 `VERIFIED`。
+
+验证 committed 报告：
+
+```powershell
+runtime\python\python.exe scripts\validate_report_claims.py --all --pretty
+```
+
+正式发布使用 `--formal`。它会拒绝 incomplete/stale provenance；本机完整
+evidence 缺失则显示 `LOCAL_EVIDENCE_REQUIRED`，不能用坏链接代替。

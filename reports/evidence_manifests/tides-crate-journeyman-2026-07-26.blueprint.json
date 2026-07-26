@@ -1,0 +1,30 @@
+{
+  "schema": "blueprint-to-code-sanitized-blueprint-evidence/v1",
+  "assetId": "2a2196927277c8f6c35984f2",
+  "assetName": "SupplyCrate_BuriedTreasurePirate_Journeyman",
+  "revisionId": "c8c250f2ae5e7f4a69e98fef",
+  "sourceFingerprint": "b03ce6cbf3901531009f3ee26b781f88a32b91a8009940227514868908676a1c",
+  "trust": {
+    "status": "VERIFIED"
+  },
+  "evidenceRefs": [
+    "bp://2a2196927277c8f6c35984f2@c8c250f2ae5e7f4a69e98fef/default/MinQualityMultiplier",
+    "bp://2a2196927277c8f6c35984f2@c8c250f2ae5e7f4a69e98fef/default/MaxQualityMultiplier"
+  ],
+  "evidenceSummaries": [
+    {
+      "ref": "bp://2a2196927277c8f6c35984f2@c8c250f2ae5e7f4a69e98fef/default/MinQualityMultiplier",
+      "name": "MinQualityMultiplier",
+      "value": 2.0,
+      "valueStatus": "CONFIRMED",
+      "source": "uasset_cdo_property_tag"
+    },
+    {
+      "ref": "bp://2a2196927277c8f6c35984f2@c8c250f2ae5e7f4a69e98fef/default/MaxQualityMultiplier",
+      "name": "MaxQualityMultiplier",
+      "value": 4.0,
+      "valueStatus": "CONFIRMED",
+      "source": "uasset_cdo_property_tag"
+    }
+  ]
+}

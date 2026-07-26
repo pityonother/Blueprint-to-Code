@@ -22,6 +22,20 @@ NATIVE_ID = f"native://{SHA_A}/fixture.dll/0x1000"
 EVIDENCE_SET_ID = f"native-set://{SHA_A}/{SHA_C}"
 BP_ID = "bp://111111111111111111111111@222222222222222222222222/g/1/n/10"
 RUNTIME_ID = "runtime://fixture/quality-v1"
+HISTORICAL_REPORT_MANIFESTS = (
+    "reports/manifests/tides-of-fortune-complete-native-2026-07-26.claims.json",
+    "reports/manifests/ark-player-visible-reward-model-2026-07-26.claims.json",
+    "reports/manifests/ferox-force-flee-mechanism-2026-07-26.claims.json",
+)
+HISTORICAL_REPORTS = (
+    "reports/TIDES_OF_FORTUNE_COMPLETE_NATIVE_2026-07-26.md",
+    "reports/ARK_PLAYER_VISIBLE_REWARD_MODEL_DEEP_DIVE_2026-07-26.md",
+    "reports/FEROX_FORCE_FLEE_MECHANISM_2026-07-26.md",
+)
+HISTORICAL_NATIVE_MANIFEST = (
+    "reports/evidence_manifests/"
+    "shooter-game-native-legacy-2026-07-26.native.json"
+)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -314,6 +328,136 @@ class ReportClaimValidationTests(unittest.TestCase):
                 "STALE_RUNTIME_OBSERVATION",
                 {issue["code"] for issue in stale["issues"]},
             )
+
+
+class HistoricalReportClaimMigrationTests(unittest.TestCase):
+    def test_committed_formal_fixture_remains_a_verified_release_gate(self):
+        fixture_root = ROOT / "tests" / "fixtures" / "report_claims"
+        fixture_manifest = (
+            fixture_root
+            / "reports"
+            / "manifests"
+            / "fixture.claims.json"
+        )
+
+        result = validate_claim_manifests(
+            fixture_root,
+            [fixture_manifest],
+            formal=True,
+        )
+
+        self.assertTrue(result["ok"], result["issues"])
+        self.assertEqual(result["summary"]["claims"], 1)
+        self.assertEqual(result["summary"]["errors"], 0)
+
+    def test_historical_migration_passes_default_with_explicit_provenance_warnings(self):
+        manifests = [ROOT / path for path in HISTORICAL_REPORT_MANIFESTS]
+
+        result = validate_claim_manifests(ROOT, manifests)
+
+        self.assertTrue(result["ok"], result["issues"])
+        self.assertEqual(result["summary"]["manifests"], 3)
+        self.assertEqual(result["summary"]["claims"], 10)
+        warning_codes = {
+            issue["code"]
+            for issue in result["issues"]
+            if issue["severity"] == "WARNING"
+        }
+        self.assertIn("PROVENANCE_UNVERIFIED", warning_codes)
+        self.assertIn("LOCAL_EVIDENCE_REQUIRED", warning_codes)
+
+    def test_historical_migration_fails_closed_in_formal_mode(self):
+        manifests = [ROOT / path for path in HISTORICAL_REPORT_MANIFESTS]
+
+        result = validate_claim_manifests(ROOT, manifests, formal=True)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["summary"]["claims"], 10)
+        self.assertIn(
+            "PROVENANCE_UNVERIFIED",
+            {
+                issue["code"]
+                for issue in result["issues"]
+                if issue["severity"] == "ERROR"
+            },
+        )
+
+    def test_migrated_reports_link_only_committed_claim_and_sanitized_evidence(self):
+        for report_path in HISTORICAL_REPORTS:
+            report = ROOT / report_path
+            text = report.read_text(encoding="utf-8")
+            with self.subTest(report=report_path):
+                self.assertNotIn("../native_evidence/", text)
+                self.assertNotIn("native_evidence/shooter-game-native-", text)
+                self.assertIn("./manifests/", text)
+                self.assertIn("./evidence_manifests/", text)
+
+    def test_historical_sanitized_manifest_contains_only_bounded_public_metadata(self):
+        manifest_path = ROOT / HISTORICAL_NATIVE_MANIFEST
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        serialized = json.dumps(payload, ensure_ascii=False)
+
+        self.assertEqual(
+            payload["schema"],
+            "blueprint-to-code-sanitized-native-evidence/v1",
+        )
+        self.assertEqual(payload["trust"]["status"], "PROVENANCE_INCOMPLETE")
+        self.assertEqual(len(payload["targets"]), 23)
+        self.assertEqual(
+            len({target["evidenceId"] for target in payload["targets"]}),
+            23,
+        )
+        self.assertNotIn("decompiledC", serialized)
+        self.assertNotIn("executablePath", serialized)
+        self.assertNotIn("C:\\", serialized)
+
+    def test_cross_source_historical_claims_bind_verified_blueprint_evidence(self):
+        tides_path = ROOT / HISTORICAL_REPORT_MANIFESTS[0]
+        reward_path = ROOT / HISTORICAL_REPORT_MANIFESTS[1]
+        ferox_path = ROOT / HISTORICAL_REPORT_MANIFESTS[2]
+        tides = json.loads(tides_path.read_text(encoding="utf-8"))
+        reward = json.loads(reward_path.read_text(encoding="utf-8"))
+        ferox = json.loads(ferox_path.read_text(encoding="utf-8"))
+
+        claims = {
+            claim["claimId"]: claim
+            for manifest in (tides, reward, ferox)
+            for claim in manifest["claims"]
+        }
+        cross_source_ids = {
+            "claim://tides-of-fortune/item-set-count-distribution",
+            "claim://tides-of-fortune/effective-crate-quality-range",
+            "claim://ferox-force-flee/native-refresh-while-blueprint-gate-is-true",
+            "claim://ferox-force-flee/ally-witness-chain",
+        }
+        for claim_id in cross_source_ids:
+            refs = claims[claim_id]["evidenceRefs"]
+            with self.subTest(claim_id=claim_id):
+                self.assertTrue(any(ref.startswith("bp://") for ref in refs))
+                self.assertTrue(any(ref.startswith("native://") for ref in refs))
+
+        for claim in reward["claims"]:
+            self.assertTrue(
+                all(ref.startswith("native://") for ref in claim["evidenceRefs"]),
+                claim["claimId"],
+            )
+
+        blueprint_dependencies = (
+            tides["dependencies"]["blueprintAssets"]
+            + ferox["dependencies"]["blueprintAssets"]
+        )
+        self.assertEqual(len(blueprint_dependencies), 8)
+        for dependency in blueprint_dependencies:
+            manifest_path = ROOT / dependency["manifestPath"]
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            serialized = json.dumps(payload, ensure_ascii=False)
+            with self.subTest(manifest=dependency["manifestPath"]):
+                self.assertEqual(
+                    payload["schema"],
+                    "blueprint-to-code-sanitized-blueprint-evidence/v1",
+                )
+                self.assertEqual(payload["trust"]["status"], "VERIFIED")
+                self.assertNotIn("C:\\", serialized)
 
 
 if __name__ == "__main__":

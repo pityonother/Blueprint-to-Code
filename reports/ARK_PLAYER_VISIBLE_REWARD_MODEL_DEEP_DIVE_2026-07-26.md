@@ -4,6 +4,11 @@
 > 分析对象：当前本机 ARK DevKit 资产与 `ShooterGameEditor-ShooterGame.dll`
 > 原生 DLL SHA-256：`b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a`
 
+- [报告 Claim Manifest](./manifests/ark-player-visible-reward-model-2026-07-26.claims.json)
+- [脱敏原生证据 Manifest](./evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json)
+
+> 历史本地 v1 反编译导出仍保持忽略状态；当时的 recipe 与生成器指纹未留存，因此正式发布前必须按当前 recipe 重建。下文历史结论保持不变。
+
 ## 一、先把最容易混淆的四种“品质”拆开
 
 玩家开箱时看到的东西，实际至少经过四层：
@@ -708,13 +713,10 @@ Cost_i
 | `UPrimalItem::InitializeItem` | `0x1448C40` | 重建蓝图实例的耗材数组 |
 | `UPrimalItem::calcResourceQuantityRequired` | `0x1469500` | 单项材料的精确数量公式 |
 
-对应本地证据：
+对应的可提交证据入口：
 
-- `native_evidence/shooter-game-native-quality-expanded-b0e67e1e7625.json`
-- `native_evidence/shooter-game-native-player-item-model-b0e67e1e7625.json`
-- `native_evidence/shooter-game-native-initialize-item-b0e67e1e7625.json`
-- `native_evidence/shooter-game-native-resource-quantity-formula-b0e67e1e7625.json`
-- `native_evidence/shooter-game-native-quality-cost-multiplier-accessors-b0e67e1e7625.json`
+- [报告 Claim Manifest](./manifests/ark-player-visible-reward-model-2026-07-26.claims.json)
+- [脱敏原生证据 Manifest](./evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json)
 - `captures/COREMEDIA_PrimalGameData_BP/uasset_class_defaults.json`
 - `captures/PrimalItem_TreasureMap_Wild_Bottle_Base/uasset_class_defaults.json`
 - `captures/SupplyCrate_BuriedTreasure_ShoulderDragon/uasset_class_defaults.json`

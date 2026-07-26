@@ -3,6 +3,11 @@
 调查日期：2026-07-26
 目标资产：`Shapeshifter_Small_Character_BP`（小型/可驯服形态猿狐）
 
+- [报告 Claim Manifest](./manifests/ferox-force-flee-mechanism-2026-07-26.claims.json)
+- [脱敏原生证据 Manifest](./evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json)
+
+> 历史本地 v1 反编译导出仍保持忽略状态；当时的 recipe 与生成器指纹未留存，因此正式发布前必须按当前 recipe 重建。下文历史结论保持不变。
+
 ## 一、结论
 
 如果你准备驯服的那只野生猿狐实际吃到了正伤害——包括坐骑直接攻击、范围伤害或擦到判定——它会通过蓝图主动进入 `AllowAIForceFlee = true` 的强制逃跑状态。伤害来源是已驯服恐龙时，同样会触发这一逻辑。
@@ -131,10 +136,8 @@
 
 ### 原生证据
 
-- 定向反编译：
-  `native_evidence/shooter-game-native-ferox-force-flee-b0e67e1e7625.json`
-- 名称检索：
-  `native_evidence/shooter-game-native-name-search-ferox-flee-b0e67e1e7625.json`
+- [报告 Claim Manifest](./manifests/ferox-force-flee-mechanism-2026-07-26.claims.json)
+- [脱敏原生证据 Manifest](./evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json)
 - ShooterGame DLL SHA-256：
   `b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a`
 - PDB 已加载；3 个目标函数均完成反编译。

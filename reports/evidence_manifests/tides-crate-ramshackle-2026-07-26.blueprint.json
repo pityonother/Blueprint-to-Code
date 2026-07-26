@@ -1,0 +1,30 @@
+{
+  "schema": "blueprint-to-code-sanitized-blueprint-evidence/v1",
+  "assetId": "63eb94ca0c84005ff41d5426",
+  "assetName": "SupplyCrate_BuriedTreasurePirate_Ramshackle",
+  "revisionId": "52cddd57343fb11fbd35a49e",
+  "sourceFingerprint": "ec03e94a254f57aa2d61e4e3f62887a6477e4aa8550d3e80d8d6e19effaac5d9",
+  "trust": {
+    "status": "VERIFIED"
+  },
+  "evidenceRefs": [
+    "bp://63eb94ca0c84005ff41d5426@52cddd57343fb11fbd35a49e/default/MinQualityMultiplier",
+    "bp://63eb94ca0c84005ff41d5426@52cddd57343fb11fbd35a49e/default/MaxQualityMultiplier"
+  ],
+  "evidenceSummaries": [
+    {
+      "ref": "bp://63eb94ca0c84005ff41d5426@52cddd57343fb11fbd35a49e/default/MinQualityMultiplier",
+      "name": "MinQualityMultiplier",
+      "value": 2.0,
+      "valueStatus": "CONFIRMED",
+      "source": "uasset_cdo_property_tag"
+    },
+    {
+      "ref": "bp://63eb94ca0c84005ff41d5426@52cddd57343fb11fbd35a49e/default/MaxQualityMultiplier",
+      "name": "MaxQualityMultiplier",
+      "value": 4.0,
+      "valueStatus": "CONFIRMED",
+      "source": "uasset_cdo_property_tag"
+    }
+  ]
+}

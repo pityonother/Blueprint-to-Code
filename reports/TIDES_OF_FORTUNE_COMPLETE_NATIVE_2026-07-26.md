@@ -9,8 +9,10 @@
 - [附录 A：六档漂流瓶全部 292 个中文物品与 Blueprint 类名](./tides_of_fortune_exact_loot_2026-07-25.md)
 - [附录 B：五阶段全部 125 套潜在任务配置](./tides_of_fortune_2026-07-25.md)
 - [附录 C：羁绊羽毛与血之灵药逐图对照](./tof_feather_vs_sanguine/conclusion_zh.md)
-- [原生证据 1：宝箱生成、品质索引与评分封顶](../native_evidence/shooter-game-native-targets-b0e67e1e7625.json)
-- [原生证据 2：宝箱构造器、加权随机、物品创建与属性封顶](../native_evidence/shooter-game-native-quality-expanded-b0e67e1e7625.json)
+- [报告 Claim Manifest](./manifests/tides-of-fortune-complete-native-2026-07-26.claims.json)
+- [脱敏原生证据 Manifest](./evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json)
+
+> 历史本地 v1 反编译导出仍保持忽略状态；当时的 recipe 与生成器指纹未留存，因此正式发布前必须按当前 recipe 重建。下文历史结论保持不变。
 
 ## 一、先给结论
 

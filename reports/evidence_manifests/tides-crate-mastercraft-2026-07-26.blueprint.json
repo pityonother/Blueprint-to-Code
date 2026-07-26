@@ -1,0 +1,30 @@
+{
+  "schema": "blueprint-to-code-sanitized-blueprint-evidence/v1",
+  "assetId": "14c3112355111a772189a3db",
+  "assetName": "SupplyCrate_BuriedTreasurePirate_Mastercraft",
+  "revisionId": "a2079a39d4cca4e6e55029a4",
+  "sourceFingerprint": "a23f0677e122d57be58f5b20f5bcaae2fb4a1bc6cb16d7910f49845023c2ee35",
+  "trust": {
+    "status": "VERIFIED"
+  },
+  "evidenceRefs": [
+    "bp://14c3112355111a772189a3db@a2079a39d4cca4e6e55029a4/default/MinQualityMultiplier",
+    "bp://14c3112355111a772189a3db@a2079a39d4cca4e6e55029a4/default/MaxQualityMultiplier"
+  ],
+  "evidenceSummaries": [
+    {
+      "ref": "bp://14c3112355111a772189a3db@a2079a39d4cca4e6e55029a4/default/MinQualityMultiplier",
+      "name": "MinQualityMultiplier",
+      "value": 2.0,
+      "valueStatus": "CONFIRMED",
+      "source": "uasset_cdo_property_tag"
+    },
+    {
+      "ref": "bp://14c3112355111a772189a3db@a2079a39d4cca4e6e55029a4/default/MaxQualityMultiplier",
+      "name": "MaxQualityMultiplier",
+      "value": 4.0,
+      "valueStatus": "CONFIRMED",
+      "source": "uasset_cdo_property_tag"
+    }
+  ]
+}

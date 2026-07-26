@@ -1,0 +1,154 @@
+{
+  "schema": "blueprint-to-code-report-claims/v1",
+  "reportId": "ark-player-visible-reward-model-2026-07-26",
+  "reportPath": "reports/ARK_PLAYER_VISIBLE_REWARD_MODEL_DEEP_DIVE_2026-07-26.md",
+  "generatedAtUtc": "2026-07-26T18:13:23Z",
+  "generator": {
+    "repositoryCommit": "WORKTREE_UNCOMMITTED",
+    "dirty": true
+  },
+  "dependencies": {
+    "blueprintAssets": [],
+    "nativeEvidenceSets": [
+      {
+        "manifestPath": "reports/evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json",
+        "evidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "pdbSha256": "5285ae571d09fde9183a491f6bdef6e10a143857dd8b7fa5f9e6755b9c01bc16",
+        "recipeId": "UNRECOVERED_LEGACY_RECIPE",
+        "recipeSha256": "",
+        "generatorScriptSha256": {}
+      }
+    ],
+    "runtimeObservationSets": []
+  },
+  "claims": [
+    {
+      "claimId": "claim://ark-reward-model/independent-stat-randomization",
+      "summary": "Each enabled FItemStatInfo entry derives its own randomized stat-point result from the quality input rather than sharing one final roll across all visible stats.",
+      "status": "STATIC_REVERSED",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1441730"
+      ],
+      "assumptions": [
+        "The item enables the corresponding FItemStatInfo entry."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE"
+      },
+      "invalidationConditions": [
+        "ShooterGame binary hash changed",
+        "stat randomization implementation changed",
+        "a formal recipe rebuild contradicts the legacy target"
+      ],
+      "reportMarkers": [
+        "`FItemStatInfo::GetRandomValue` 的当前原生形式可写为："
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    },
+    {
+      "claimId": "claim://ark-reward-model/stat-points-to-visible-value",
+      "summary": "FItemStatInfo::GetItemStatModifier converts the randomized stat-point result into the item-specific visible modifier used for armor, durability, damage, or another configured stat.",
+      "status": "STATIC_REVERSED",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x143D7B0"
+      ],
+      "assumptions": [
+        "The item's stat metadata maps the modifier to the visible field discussed in the report."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE"
+      },
+      "invalidationConditions": [
+        "ShooterGame binary hash changed",
+        "visible-stat modifier implementation changed",
+        "a formal recipe rebuild contradicts the legacy target"
+      ],
+      "reportMarkers": [
+        "`FItemStatInfo::GetItemStatModifier`："
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    },
+    {
+      "claimId": "claim://ark-reward-model/strict-quality-threshold-comparison",
+      "summary": "GetItemQualityIndex scans quality definitions from higher tiers downward and uses a strict greater-than comparison, so a rating exactly on a threshold remains in the preceding tier.",
+      "status": "STATIC_REVERSED",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x12EA8F0"
+      ],
+      "assumptions": [
+        "Numeric quality thresholds are supplied by the active GameData and are outside this algorithm-only claim."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE"
+      },
+      "invalidationConditions": [
+        "ShooterGame binary hash changed",
+        "quality-index comparison implementation changed",
+        "a formal recipe rebuild contradicts the legacy target"
+      ],
+      "reportMarkers": [
+        "使用严格的“大于阈值”"
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    },
+    {
+      "claimId": "claim://ark-reward-model/blueprint-crafting-cost-formula",
+      "summary": "Blueprint reconstruction computes each resource quantity from base cost, inventory multiplier, rating-dependent scale, and rating power, rounds the result, and clamps the minimum to one.",
+      "status": "STATIC_REVERSED",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x142E5A0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14332F0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x16A490",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x16A4B0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x16A4D0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1447DB0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1448C40",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1469500"
+      ],
+      "assumptions": [
+        "Base costs and active item, inventory, and GameData multipliers are external inputs; this claim does not assign them unverified numeric values."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE"
+      },
+      "invalidationConditions": [
+        "ShooterGame binary hash changed",
+        "crafting-cost reconstruction implementation changed",
+        "a formal recipe rebuild contradicts the legacy target"
+      ],
+      "reportMarkers": [
+        "Cost = max(1, round(raw))"
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    }
+  ]
+}

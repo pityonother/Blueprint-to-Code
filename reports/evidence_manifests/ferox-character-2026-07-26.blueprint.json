@@ -1,0 +1,35 @@
+{
+  "schema": "blueprint-to-code-sanitized-blueprint-evidence/v1",
+  "assetId": "f66149335e0fefb4dad91f76",
+  "assetName": "Shapeshifter_Small_Character_BP",
+  "revisionId": "678888f577bb49fd826ff2df",
+  "sourceFingerprint": "a3e39281f605e620247019521e289171869cfecc6b6232d43a2097ac3416e6b7",
+  "trust": {
+    "status": "VERIFIED"
+  },
+  "evidenceRefs": [
+    "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/13",
+    "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/34",
+    "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/43"
+  ],
+  "evidenceSummaries": [
+    {
+      "ref": "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/13",
+      "name": "BPAdjustDamage",
+      "status": "CONFIRMED",
+      "confidence": "medium"
+    },
+    {
+      "ref": "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/34",
+      "name": "BPShouldForceFlee",
+      "status": "CONFIRMED",
+      "confidence": "medium"
+    },
+    {
+      "ref": "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/g/43",
+      "name": "EventGraph",
+      "status": "CONFIRMED",
+      "confidence": "medium"
+    }
+  ]
+}
