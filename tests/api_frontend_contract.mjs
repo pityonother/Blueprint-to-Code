@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'vite';
 
+import './frontend_core_contract.mjs';
+
 
 const requests = [];
 const originalFetch = globalThis.fetch;

@@ -1,6 +1,13 @@
 import './styles.css';
+import {
+  workspaceUrl,
+  workspaceViewFromSearch,
+  type WorkspaceView,
+} from './app/router';
 import { HarvestExplorer } from './harvest/explorer';
 import { ApiFailure, api, type ApiResult } from './shared/api';
+import { readableError } from './shared/errors';
+import { escapeHtml } from './shared/html';
 
 type ReportKey =
   | 'agent_index'
@@ -177,10 +184,7 @@ if (!app) {
   throw new Error('Missing #app root.');
 }
 const root = app;
-type WorkspaceView = 'blueprint' | 'harvest';
-let workspaceView: WorkspaceView = new URLSearchParams(window.location.search).get('view') === 'harvest'
-  ? 'harvest'
-  : 'blueprint';
+let workspaceView = workspaceViewFromSearch(window.location.search);
 const harvestExplorer = new HarvestExplorer(() => render());
 
 const reportLabels: Record<ReportKey, string> = {
@@ -241,15 +245,6 @@ let selectedMissingFunctions = new Set<string>();
 let graphQueueSummary: GraphQueueSummary | null = null;
 let graphQueueSummaryAssetPath = '';
 
-function escapeHtml(value: unknown): string {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
 function appendLog(message: string): void {
   const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   logs = [`[${timestamp}] ${message}`, ...logs].slice(0, 90);
@@ -260,17 +255,6 @@ function setMainNotice(message: string, tone: 'info' | 'good' | 'warn' | 'danger
   mainNotice = message;
   mainNoticeTone = tone;
   appendLog(message);
-}
-
-function readableError(error: unknown): string {
-  if (error instanceof ApiFailure) {
-    const attempted = error.payload.attemptedPaths;
-    if (Array.isArray(attempted) && attempted.length) {
-      return `${error.message} 尝试路径：${attempted.slice(0, 3).join('；')}`;
-    }
-    return error.message;
-  }
-  return error instanceof Error ? error.message : String(error);
 }
 
 function delay(ms: number): Promise<void> {
@@ -1301,15 +1285,7 @@ function bindEvents(): void {
       }
       syncInputs();
       workspaceView = nextView;
-      const url = new URL(window.location.href);
-      if (workspaceView === 'harvest') {
-        url.searchParams.set('view', 'harvest');
-      } else {
-        url.searchParams.delete('view');
-        url.searchParams.delete('q');
-        url.searchParams.delete('node');
-        url.searchParams.delete('resource');
-      }
+      const url = workspaceUrl(window.location.href, workspaceView);
       window.history.replaceState({}, '', url);
       render();
       if (workspaceView === 'blueprint' && !state) {

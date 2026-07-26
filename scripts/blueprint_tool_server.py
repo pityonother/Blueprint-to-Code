@@ -82,6 +82,13 @@ from blueprint_server.request import (
     discard_bounded_body,
     read_json_object,
 )
+from blueprint_server.responses import (
+    encode_json_response,
+    error_payload,
+    prepare_json_response,
+    static_content_type,
+)
+from blueprint_server.routes_state import StateRoute, state_route_payload
 from blueprint_server.security import SecurityPolicy, redact_sensitive_text
 from package_full_env import read_project_version
 
@@ -1565,39 +1572,23 @@ def cancel_harvest_build_for_request(job_id: str) -> dict[str, object]:
         raise _harvest_build_problem(exc) from exc
 
 
+STATE_ROUTE = StateRoute(
+    version=PROJECT_VERSION,
+    project_root=PROJECT_ROOT,
+    capture_root=CAPTURE_ROOT,
+    devkit_request_path=DEVKIT_REQUEST_PATH,
+    list_assets=lambda: list_assets(),
+    knowledge_base_summary=lambda: knowledge_base_summary(),
+    read_devkit_request=lambda: read_devkit_request(),
+    devkit_python_command=lambda: devkit_python_command(),
+    devkit_output_log_command=lambda: devkit_output_log_command(),
+)
+
+
 def api_state() -> dict[str, object]:
-    return {
-        "version": PROJECT_VERSION,
-        "projectRoot": str(PROJECT_ROOT),
-        "captureRoot": str(CAPTURE_ROOT),
-        "assets": list_assets(),
-        "knowledgeBase": knowledge_base_summary(),
-        "devkitRequestPath": str(DEVKIT_REQUEST_PATH),
-        "devkitAssetPath": read_devkit_request(),
-        "devkitPythonCommand": devkit_python_command(),
-        "devkitOutputLogCommand": devkit_output_log_command(),
-    }
+    """Compatibility entry for callers that imported the legacy server module."""
 
-
-def encode_json_response(payload: object) -> bytes:
-    """Encode API JSON without presentation whitespace to keep transport token-small."""
-
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def static_content_type(mime_type: str | None) -> str:
-    normalized = mime_type or "application/octet-stream"
-    if normalized.startswith("text/") or normalized in {
-        "application/javascript",
-        "application/json",
-        "image/svg+xml",
-    }:
-        return f"{normalized}; charset=utf-8"
-    return normalized
+    return STATE_ROUTE.state()
 
 
 _UNREAD_BODY_PROBLEM_CODES = frozenset(
@@ -1653,18 +1644,19 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         super().end_headers()
 
     def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
-        encoded = encode_json_response(payload)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        if self.close_connection:
-            self.send_header("Connection", "close")
+        response = prepare_json_response(
+            payload,
+            status,
+            close_connection=bool(self.close_connection),
+        )
+        self.send_response(response.status)
+        for header, value in response.headers:
+            self.send_header(header, value)
         self.end_headers()
-        self.wfile.write(encoded)
+        self.wfile.write(response.body)
 
     def send_error_json(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
-        self.send_json({"ok": False, "error": message}, status)
+        self.send_json(error_payload(message), status)
 
     def send_harvest_image(self, filename: str) -> None:
         identity = filename.removesuffix(".jpg") if filename.endswith(".jpg") else ""
@@ -1735,8 +1727,9 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                     }
                 )
                 return
-            if parsed.path == "/api/state":
-                self.send_json({"ok": True, **api_state()})
+            state_payload = state_route_payload(parsed.path, api_state)
+            if state_payload is not None:
+                self.send_json(state_payload)
                 return
             if parsed.path == "/api/harvest/nodes":
                 self.send_json({"ok": True, **query_harvest_nodes_for_request(parsed.query)})
