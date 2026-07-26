@@ -1,0 +1,189 @@
+{
+  "schema": "blueprint-to-code-native-analysis-recipe/v1",
+  "recipeId": "test-native-fixture/v1",
+  "description": "Public synthetic fixture proving exact overload selection, call traversal, fields, constants, branches, and vtable queries.",
+  "binaryModule": "blueprint_native_fixture.dll",
+  "requirements": {
+    "pdbRequired": true,
+    "formalProvenanceRequired": true
+  },
+  "targets": [
+    {
+      "id": "compute-quality-int",
+      "selector": {
+        "qualifiedName": "BlueprintToCodeFixture::ComputeQuality",
+        "signature": "int BlueprintToCodeFixture::ComputeQuality(int,int)"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "compute-quality-double",
+      "selector": {
+        "qualifiedName": "BlueprintToCodeFixture::ComputeQuality",
+        "signature": "double BlueprintToCodeFixture::ComputeQuality(double,double)"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 1,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": false,
+        "vtable": false
+      }
+    },
+    {
+      "id": "quality-entry",
+      "selector": {
+        "qualifiedName": "BlueprintToCodeFixture::QualityEntry"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 1,
+        "calleesDepth": 3,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": false,
+        "vtable": false
+      }
+    },
+    {
+      "id": "quality-middle",
+      "selector": {
+        "qualifiedName": "BlueprintToCodeFixture::QualityMiddle"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 1,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": false,
+        "vtable": false
+      }
+    },
+    {
+      "id": "quality-leaf",
+      "selector": {
+        "simpleName": "QualityLeaf",
+        "allowSimpleName": true
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": false,
+        "vtable": false
+      }
+    },
+    {
+      "id": "inspect-branch-and-constant",
+      "selector": {
+        "qualifiedName": "BlueprintToCodeFixture::InspectBranchAndConstant"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 0,
+        "calleesDepth": 0,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "touch-quality-fields",
+      "selector": {
+        "qualifiedName": "BlueprintToCodeFixture::QualityModel::TouchFields"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 0,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": true,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "quality-model-adjust",
+      "selector": {
+        "qualifiedName": "BlueprintToCodeFixture::QualityModel::Adjust"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 1,
+        "calleesDepth": 0,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": true
+      }
+    }
+  ],
+  "fieldQueries": [
+    {
+      "id": "quality-input-base-rating",
+      "structureName": "BlueprintToCodeFixture::QualityInputs",
+      "fieldName": "base_rating",
+      "functionTargetIds": [
+        "touch-quality-fields"
+      ],
+      "expectedMatches": 1
+    },
+    {
+      "id": "quality-input-multiplier",
+      "structureName": "BlueprintToCodeFixture::QualityInputs",
+      "fieldName": "multiplier",
+      "functionTargetIds": [
+        "touch-quality-fields"
+      ],
+      "expectedMatches": 1
+    },
+    {
+      "id": "quality-input-maximum",
+      "structureName": "BlueprintToCodeFixture::QualityInputs",
+      "fieldName": "maximum",
+      "functionTargetIds": [
+        "touch-quality-fields"
+      ],
+      "expectedMatches": 1
+    }
+  ],
+  "vtableQueries": [
+    {
+      "id": "quality-model-adjust-slot",
+      "className": "BlueprintToCodeFixture::QualityModel",
+      "slotOffset": "0x8",
+      "expectedMatches": 1
+    }
+  ],
+  "budgets": {
+    "maxFunctions": 32,
+    "maxCallEdges": 256,
+    "maxFieldAccesses": 128,
+    "maxConstants": 512,
+    "maxVtableMatches": 16,
+    "maxDecompiledCharactersPerFunction": 40000,
+    "maxTotalDecompiledCharacters": 300000
+  }
+}

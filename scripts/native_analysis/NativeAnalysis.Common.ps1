@@ -319,3 +319,90 @@ function Resolve-BlueprintToCodeDevKitRoot {
 
     return [string]$Config.shooterGame.defaultDevKitRoot
 }
+
+function Resolve-NativeRecipeInputPaths {
+    param(
+        [string]$DllPath,
+        [string]$PdbPath,
+        [string]$DevKitRoot,
+        [Parameter(Mandatory)]
+        [pscustomobject]$Config,
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    if ([bool]$DllPath -xor [bool]$PdbPath) {
+        throw "NATIVE_TOOL_MISSING: -DllPath and -PdbPath must be provided together."
+    }
+    if ($DllPath -and $PdbPath) {
+        return [pscustomobject]@{
+            DllPath = [System.IO.Path]::GetFullPath($DllPath)
+            PdbPath = [System.IO.Path]::GetFullPath($PdbPath)
+            Source = "explicit"
+        }
+    }
+
+    $resolvedDevKitRoot = Resolve-BlueprintToCodeDevKitRoot `
+        -DevKitRoot $DevKitRoot `
+        -Config $Config `
+        -ProjectRoot $ProjectRoot
+    return [pscustomobject]@{
+        DllPath = [System.IO.Path]::GetFullPath(
+            (Join-Path $resolvedDevKitRoot $Config.shooterGame.binaryRelativePath)
+        )
+        PdbPath = [System.IO.Path]::GetFullPath(
+            (Join-Path $resolvedDevKitRoot $Config.shooterGame.pdbRelativePath)
+        )
+        Source = "devkit"
+    }
+}
+
+function Remove-NativeRunDirectory {
+    param(
+        [Parameter(Mandatory)]
+        [string]$RunRoot,
+        [Parameter(Mandatory)]
+        [string]$TempBase
+    )
+
+    $resolvedTempBase = [System.IO.Path]::GetFullPath($TempBase).
+        TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        )
+    $resolvedRunRoot = [System.IO.Path]::GetFullPath($RunRoot).
+        TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        )
+    $requiredPrefix = $resolvedTempBase + [System.IO.Path]::DirectorySeparatorChar
+    if ($resolvedRunRoot -eq $resolvedTempBase -or -not $resolvedRunRoot.StartsWith(
+            $requiredPrefix,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "NATIVE_TEMP_PATH_INVALID: Refusing to remove a run path outside the native task temp root."
+    }
+    $runParent = [System.IO.Path]::GetDirectoryName($resolvedRunRoot)
+    $runName = [System.IO.Path]::GetFileName($resolvedRunRoot)
+    if (-not $runParent.Equals(
+            $resolvedTempBase,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or $runName -notmatch '^[0-9a-f]{12}-[0-9a-f]{12}-[0-9]{8}-[0-9]{6}$') {
+        throw "NATIVE_TEMP_PATH_INVALID: Refusing to remove a path that is not an exact native run directory."
+    }
+    if (Test-Path -LiteralPath $resolvedRunRoot -PathType Container) {
+        $item = Get-Item -LiteralPath $resolvedRunRoot -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "NATIVE_TEMP_PATH_INVALID: Refusing to recursively remove a reparse-point run directory."
+        }
+        $reparseChild = Get-ChildItem -LiteralPath $resolvedRunRoot -Directory -Force |
+            Where-Object {
+                ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            } |
+            Select-Object -First 1
+        if ($reparseChild) {
+            throw "NATIVE_TEMP_PATH_INVALID: Refusing to recurse through a reparse-point child directory."
+        }
+        Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force -ErrorAction Stop
+    }
+}

@@ -1,0 +1,379 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/native_analysis_recipe_v1.schema.json",
+  "title": "Blueprint to Code Native Analysis Recipe v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "recipeId",
+    "description",
+    "binaryModule",
+    "requirements",
+    "targets",
+    "fieldQueries",
+    "vtableQueries",
+    "budgets"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code-native-analysis-recipe/v1"
+    },
+    "recipeId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*/v[1-9][0-9]*$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "binaryModule": {
+      "type": "string",
+      "pattern": "^[^/\\\\]+$"
+    },
+    "requirements": {
+      "type": "object",
+      "required": [
+        "pdbRequired",
+        "formalProvenanceRequired"
+      ],
+      "properties": {
+        "pdbRequired": {
+          "type": "boolean"
+        },
+        "formalProvenanceRequired": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/target"
+      }
+    },
+    "fieldQueries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/fieldQuery"
+      }
+    },
+    "vtableQueries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/vtableQuery"
+      }
+    },
+    "budgets": {
+      "$ref": "#/$defs/budgets"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "selector": {
+      "type": "object",
+      "properties": {
+        "qualifiedName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rva": {
+          "type": "string",
+          "pattern": "^0x[0-9A-Fa-f]+$"
+        },
+        "simpleName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "allowSimpleName": {
+          "type": "boolean"
+        },
+        "regex": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "qualifiedName"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "rva"
+                ]
+              },
+              {
+                "required": [
+                  "simpleName"
+                ]
+              },
+              {
+                "required": [
+                  "regex"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "rva"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "qualifiedName"
+                ]
+              },
+              {
+                "required": [
+                  "simpleName"
+                ]
+              },
+              {
+                "required": [
+                  "regex"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "simpleName",
+            "allowSimpleName"
+          ],
+          "properties": {
+            "allowSimpleName": {
+              "const": true
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "qualifiedName"
+                ]
+              },
+              {
+                "required": [
+                  "rva"
+                ]
+              },
+              {
+                "required": [
+                  "regex"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "regex"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "qualifiedName"
+                ]
+              },
+              {
+                "required": [
+                  "rva"
+                ]
+              },
+              {
+                "required": [
+                  "simpleName"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "exports": {
+      "type": "object",
+      "properties": {
+        "decompile": {
+          "type": "boolean"
+        },
+        "callersDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "calleesDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "constants": {
+          "type": "boolean"
+        },
+        "fieldAccesses": {
+          "type": "boolean"
+        },
+        "branches": {
+          "type": "boolean"
+        },
+        "vtable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "id",
+        "selector",
+        "expectedMatches",
+        "exports"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "selector": {
+          "$ref": "#/$defs/selector"
+        },
+        "expectedMatches": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "exports": {
+          "$ref": "#/$defs/exports"
+        }
+      },
+      "additionalProperties": false
+    },
+    "fieldQuery": {
+      "type": "object",
+      "required": [
+        "id",
+        "structureName",
+        "fieldName",
+        "expectedMatches"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "structureName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fieldName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "functionTargetIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "expectedMatches": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "vtableQuery": {
+      "type": "object",
+      "required": [
+        "id",
+        "className",
+        "slotOffset",
+        "expectedMatches"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "className": {
+          "type": "string",
+          "minLength": 1
+        },
+        "slotOffset": {
+          "type": "string",
+          "pattern": "^0x[0-9A-Fa-f]+$"
+        },
+        "expectedMatches": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "budgets": {
+      "type": "object",
+      "required": [
+        "maxFunctions",
+        "maxCallEdges",
+        "maxFieldAccesses",
+        "maxConstants",
+        "maxVtableMatches",
+        "maxDecompiledCharactersPerFunction",
+        "maxTotalDecompiledCharacters"
+      ],
+      "properties": {
+        "maxFunctions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000
+        },
+        "maxCallEdges": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "maxFieldAccesses": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "maxConstants": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "maxVtableMatches": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "maxDecompiledCharactersPerFunction": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500000
+        },
+        "maxTotalDecompiledCharacters": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000000
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

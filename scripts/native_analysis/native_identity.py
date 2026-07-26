@@ -24,6 +24,11 @@ from blueprint_translator.native_identity import (  # noqa: E402
     validate_native_evidence_manifest,
     validate_native_project_manifest,
 )
+from blueprint_translator.native_recipe import (  # noqa: E402
+    create_native_recipe_evidence_manifest,
+    load_native_recipe,
+    requires_registered_binary_hashes,
+)
 
 
 def _read_json(path: Path) -> Any:
@@ -132,6 +137,22 @@ def _command_validate_evidence(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _command_recipe_info(args: argparse.Namespace) -> dict[str, Any]:
+    document = load_native_recipe(
+        args.recipe,
+        formal=not args.experimental,
+    )
+    if args.registered_module:
+        document["hashPolicy"] = {
+            "registeredModule": Path(args.registered_module).name,
+            "requiresRegisteredHashes": requires_registered_binary_hashes(
+                document["recipe"],
+                registered_module=args.registered_module,
+            ),
+        }
+    return document
+
+
 def _command_wrap_legacy(args: argparse.Namespace) -> dict[str, Any]:
     identity = _identity_from_args(args)
     raw_export = _read_json(args.raw_export)
@@ -190,6 +211,61 @@ def _command_wrap_legacy(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def _command_wrap_recipe(args: argparse.Namespace) -> dict[str, Any]:
+    identity = _identity_from_args(args)
+    raw_export = _read_json(args.raw_export)
+    toolchain = _read_json(args.toolchain)
+    recipe_document = load_native_recipe(
+        args.recipe,
+        formal=not args.experimental,
+    )
+    recipe = recipe_document["recipe"]
+    analysis_options_sha = hashlib.sha256(
+        json.dumps(
+            {
+                "analysisTimeoutSeconds": raw_export.get(
+                    "analysisTimeoutSeconds"
+                ),
+                "decompileTimeoutSeconds": raw_export.get(
+                    "decompileTimeoutSeconds"
+                ),
+                "budgets": recipe.get("budgets"),
+                "pdbUniversal": True,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    generator = {
+        **_git_provenance(args.repository_root),
+        "recipeId": recipe["recipeId"],
+        "recipeSha256": recipe_document["sha256"],
+        "scriptSha256": {
+            "runner": _file_sha256(args.runner),
+            "exporter": _file_sha256(args.exporter),
+            "pdbConfigurator": _file_sha256(args.pdb_configurator),
+        },
+    }
+    ghidra_config = toolchain.get("ghidra") or {}
+    java_config = toolchain.get("java") or {}
+    return create_native_recipe_evidence_manifest(
+        raw_export,
+        recipe_document=recipe_document,
+        identity=identity,
+        ghidra={
+            "version": args.ghidra_version or ghidra_config.get("version"),
+            "releaseAssetSha256": ghidra_config.get("sha256"),
+            "analysisOptionsSha256": analysis_options_sha,
+        },
+        java={
+            "vendor": args.java_vendor or java_config.get("distribution"),
+            "version": args.java_version or java_config.get("version"),
+        },
+        generator=generator,
+        formal=not args.experimental,
+    )
+
+
 def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dll", type=Path, required=True)
     parser.add_argument("--pdb", type=Path, required=True)
@@ -227,6 +303,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate_evidence.add_argument("--experimental", action="store_true")
     validate_evidence.set_defaults(handler=_command_validate_evidence)
 
+    recipe_info = subparsers.add_parser("recipe-info")
+    recipe_info.add_argument("--recipe", type=Path, required=True)
+    recipe_info.add_argument("--registered-module")
+    recipe_info.add_argument("--experimental", action="store_true")
+    recipe_info.set_defaults(handler=_command_recipe_info)
+
     wrap = subparsers.add_parser("wrap-legacy")
     _add_identity_arguments(wrap)
     wrap.add_argument("--raw-export", type=Path, required=True)
@@ -260,6 +342,37 @@ def build_parser() -> argparse.ArgumentParser:
     wrap.add_argument("--java-version")
     wrap.add_argument("--experimental", action="store_true")
     wrap.set_defaults(handler=_command_wrap_legacy)
+
+    wrap_recipe = subparsers.add_parser("wrap-recipe")
+    _add_identity_arguments(wrap_recipe)
+    wrap_recipe.add_argument("--recipe", type=Path, required=True)
+    wrap_recipe.add_argument("--raw-export", type=Path, required=True)
+    wrap_recipe.add_argument("--toolchain", type=Path, required=True)
+    wrap_recipe.add_argument(
+        "--repository-root",
+        type=Path,
+        default=REPOSITORY_ROOT,
+    )
+    wrap_recipe.add_argument(
+        "--runner",
+        type=Path,
+        default=Path(__file__).with_name("Run-NativeRecipe.ps1"),
+    )
+    wrap_recipe.add_argument(
+        "--exporter",
+        type=Path,
+        default=Path(__file__).with_name("ghidra") / "ExportNativeRecipe.java",
+    )
+    wrap_recipe.add_argument(
+        "--pdb-configurator",
+        type=Path,
+        default=Path(__file__).with_name("ghidra") / "ConfigurePdbAnalyzer.java",
+    )
+    wrap_recipe.add_argument("--ghidra-version")
+    wrap_recipe.add_argument("--java-vendor")
+    wrap_recipe.add_argument("--java-version")
+    wrap_recipe.add_argument("--experimental", action="store_true")
+    wrap_recipe.set_defaults(handler=_command_wrap_recipe)
     return parser
 
 
