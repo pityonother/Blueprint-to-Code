@@ -22,7 +22,6 @@ Runtime calibration 是静态证据之上的独立观察层。它不会改写 Bl
 ```text
 schemas/runtime_observation_set_v1.schema.json
 ```
-
 每个 observation set 必须记录：
 
 - `observationSetId`；
@@ -71,4 +70,3 @@ schemas/runtime_observation_set_v1.schema.json
 .\runtime\python\python.exe -m unittest discover `
   -s tests -p "test_runtime_calibration.py"
 ```
-

@@ -13,6 +13,20 @@ scripts/validate_report_claims.py
 
 完整 `native_evidence/` 仍然是本机 ignored 产物。仓库只提交 sanitized manifest，其中可以包含 binary/PDB/recipe/generator 指纹、目标 Evidence ID 和 gap，但不得包含 DLL/PDB、完整反编译文本或本机绝对路径。
 
+三类依赖各自绑定实际文件：
+
+- `blueprintAssets`：指向 committed sanitized Blueprint manifest，并同时记录
+  asset ID、revision ID 与 source fingerprint；
+- `nativeEvidenceSets`：指向 committed sanitized Native manifest，并记录
+  evidence set、DLL/PDB、recipe 与 generator fingerprints；
+- `runtimeObservationSets`：指向 observation JSON，并记录 `runtime://` ID 和
+  observation 文件 SHA-256。
+
+Validator 会比较 Blueprint sanitized manifest 中的 asset/revision/source
+fingerprint，并重新计算 Runtime observation 文件的 SHA-256；同时确认 claim
+中的 `bp://`、`native://`、`runtime://` 都由对应依赖公开。不能只在 claim
+里手写一个看起来合法的 ID。
+
 ## Claim 最小字段
 
 ```json
@@ -66,6 +80,10 @@ Validator 会检查：
 - binary/PDB/evidence-set/recipe/generator 指纹；
 - report marker；
 - provenance trust 与 dirty generator；
+- Blueprint claim dependency 与 committed sanitized manifest 中的
+  asset ID、revision ID、source fingerprint 一致性（validator 不会重新定位并
+  哈希本机原始 `.uasset`）；
+- runtime observation ID、文件 SHA-256 和 claim observation refs；
 - 本机 full evidence 是否需要重建。
 
 本机 full evidence 缺失但 committed sanitized manifest 已验证时，输出 `LOCAL_EVIDENCE_REQUIRED` warning，而不是坏链接。旧 v1 evidence 缺少 recipe 或 PDB GUID/Age 时必须标为 `PROVENANCE_INCOMPLETE`；普通审阅可以看到 warning，`--formal` 必须失败。
@@ -83,4 +101,3 @@ REPORT_CLAIM_MARKER_MISSING
 ```
 
 不要为了通过 validator 把未知来源改成 `CONFIRMED`。正确做法是重新运行绑定当前 DLL/PDB/recipe 的原生流水线，或把无法闭合的 claim 标为 `UNRESOLVED`。
-

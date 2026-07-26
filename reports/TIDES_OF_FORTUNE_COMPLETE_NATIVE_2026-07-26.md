@@ -8,7 +8,7 @@
 
 - [附录 A：六档漂流瓶全部 292 个中文物品与 Blueprint 类名](./tides_of_fortune_exact_loot_2026-07-25.md)
 - [附录 B：五阶段全部 125 套潜在任务配置](./tides_of_fortune_2026-07-25.md)
-- [附录 C：羁绊羽毛与血之灵药逐图对照](./tof_feather_vs_sanguine/conclusion_zh.md)
+- 附录 C：羁绊羽毛与血之灵药逐图对照（本地生成材料未纳入仓库；可审计结论已迁入正文与 Claim Manifest）
 - [报告 Claim Manifest](./manifests/tides-of-fortune-complete-native-2026-07-26.claims.json)
 - [脱敏原生证据 Manifest](./evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json)
 

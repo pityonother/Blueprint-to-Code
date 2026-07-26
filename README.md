@@ -1,32 +1,97 @@
-# Blueprint to Code---Made by codex，I just provide direction
+# Blueprint to Code
 
-## 项目简介 / Project Overview
+Blueprint to Code is an evidence-first local analyzer for ARK DevKit and Unreal
+Blueprint assets. It recovers inspectable Blueprint evidence, links an optional
+version-bound native evidence layer, and builds bounded, source-traceable
+contexts and reports.
 
-**中文：** Blueprint to Code 是一个面向 ARK DevKit / Unreal Blueprint 的本地分析工具。它可以从复制的蓝图图页、DevKit 导出的 Class Defaults / Components，以及 `.uasset` / `.uexp` 资产文件中恢复蓝图结构，生成行为报告、伪代码、诊断信息、调用关系和玩家/模组作者可读的分析结论。目标是尽量减少手动 Ctrl+A/C 图页复制，让复杂蓝图资产可以被更快地审查、比较和理解。
+它不是完整 Blueprint decompiler，不会恢复开发者的原始 C++ 源码，也不保证生成
+可编译 C++。伪代码和 Ghidra 伪 C 都是分析产物；每项结论只在记录的资产、
+DLL/PDB、recipe、生成器和运行时观察边界内成立。仓库与发布包不包含 ARK
+DevKit、游戏资产、ShooterGame DLL/PDB、Ghidra workspace 或完整 proprietary
+反编译输出。项目版本以根目录 [`VERSION`](VERSION) 为唯一来源。
 
-**English:** Blueprint to Code is a local analysis toolkit for ARK DevKit / Unreal Blueprint assets. It can read copied Blueprint graph text, DevKit-exported Class Defaults / Components, and recoverable graph data from `.uasset` / `.uexp` files, then generate behavior reports, pseudocode, diagnostics, call graphs, and readable summaries for players and mod authors. Its goal is to reduce manual graph copying and make large Blueprint assets easier to inspect, compare, and understand.
+## 5 分钟快速开始
 
-核心能力 / Key features:
+源码开发需要 Node.js `^20.19.0` 或 `>=22.12.0`。真实资产读取还需要在本机
+合法安装 ARK DevKit；只浏览 committed fixtures 不需要 ARK 文件。
 
-- 直接从 `.uasset` / `.uexp` 读取可恢复的 EdGraph、K2 节点、Pins 和连线。
-- 兼容传统剪贴板图页输入，二进制读取失败的图页可单独补采。
-- 默认生成规范化 `evidence.sqlite` 和不超过 1,500 estimated tokens 的 `agent_index.md`；需要时按稳定 Evidence ID 查询 Node、Pin、Wire、Default 和缺口。
-- 可一键构建全 Content Foliage/Foliage Actor 资源点、精确 HarvestComponent、资源条目、`.umap + PCG + World Partition` 三层地图使用证据、缩略图、SQLite 查询索引和紧凑生物攻击目录；资源条目保留完整 Blueprint Object Path，并从 DevKit 有效继承默认值恢复 `DescriptiveNameBase`（例如 `JellyVenom → Bio Toxin`），不再把技术类名当玩家名称；支持“节点资源 Top 10”与“某只恐龙擅长什么”的双向惰性查询，不生成生物 × 节点资源的笛卡尔积报告。
-- 可显式生成 `asset_report.md`、`behavior_summary.md`、`diagnostics_report.md`、`call_graph_summary.md` 等 legacy 人类报告。
-- 提供本地 Web 控制中心和一键启动脚本，方便非程序用户使用。
-- Full local web control center, one-click Windows launcher, packaged Python runtime, and focused reports for Blueprint behavior review.
+```powershell
+npm ci
+npm run build
+.\scripts\launch_blueprint_tool.ps1 -NoBuild
+```
 
-文档入口 / Documentation:
+浏览器打开 `http://127.0.0.1:8765/` 后：
 
-- [开发伙伴交接：可信度、查询、测试与发布](docs/DEVELOPER_HANDOFF_zh.md)
-- [Blueprint Evidence Store v2 规格](docs/BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
-- [Buff_StriderHackingParent 实证案例](docs/BUFF_STRIDER_HACKING_PARENT_EVIDENCE_V2_CASE_zh.md)
-- [ARK 资源点采集查询：九阶段完成版](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)
+1. 从 ARK DevKit 复制一个 `/Game/...Asset.Asset` Object Path；
+2. 粘贴到第 1 步，点击“从 .uasset 读取图内容”；
+3. 先读不超过 1,500 estimated tokens 的 `agent_index.md`；
+4. 用有预算的 query/context 命令补取当前问题需要的证据。
+
+完整环境包用户可直接运行 `START_HERE.bat`；诊断入口是 `DIAGNOSE.bat`。
+
+## 证据架构
+
+```mermaid
+flowchart LR
+    A[".uasset / .uexp<br/>Defaults / Components<br/>clipboard graphs"] --> B["Blueprint Evidence Store<br/>bp:// IDs"]
+    C["Optional DLL + matching PDB<br/>hash-bound Ghidra recipe"] --> D["Native Evidence Store<br/>native:// IDs"]
+    B --> E["Hybrid edge graph<br/>confirmed / ambiguous / unresolved"]
+    D --> E
+    E --> F["Bounded context pack"]
+    F --> G["Report + Claim Manifest<br/>claim:// IDs"]
+    H["Runtime observations<br/>runtime:// IDs"] --> G
+    I["Asset / binary / recipe / generator changes"] --> J["Automatic stale or fail-closed result"]
+    J --> E
+    J --> G
+```
+
+一个 Blueprint → Native → Claim 链路的形状如下。解析器只有在 owner、
+qualified name 与候选数都满足规则时才把边标为 `CONFIRMED`：
+
+```text
+bp://<asset-id>@<revision-id>/g/<graph-id>/n/<node-id>
+  --CALLS_NATIVE-->
+native://<binary-sha256>/ShooterGameEditor-ShooterGame.dll/<rva>
+  --SUPPORTS-->
+claim://<report-id>/<claim-id>
+```
+
+若函数有多个候选，边保持 `AMBIGUOUS`；若完整本地 evidence 未提交，公开报告
+指向 sanitized manifest 并标记 `LOCAL_EVIDENCE_REQUIRED`，不会伪造
+`CONFIRMED`。
+
+## 核心能力
+
+- 从 `.uasset` / `.uexp` 恢复可确认的 EdGraph、K2 Node、Pin、Wire、Default
+  与明确 gap；失败图页仍可用剪贴板单独补采。
+- 以 revision 固定的 `evidence.sqlite`、稳定 `bp://` ID 和 500–8,000
+  estimated-token 查询预算提供 Blueprint evidence。
+- 通过声明式 recipe、DLL/PDB 身份匹配和动态 Ghidra project 提供可选的
+  `native://` evidence；SQLite 只作为 JSON SHA-256 绑定的查询索引。
+- 保存 Blueprint ↔ Native 的 confirmed、ambiguous 与 unresolved 显式边，
+  默认 context 不塞入整份反编译文本。
+- 用 Claim Manifest 绑定报告结论、来源 fingerprints、假设、失效条件与
+  runtime 状态。
+- 提供 Harvest 完整节点静态估计、双向 Top 10 查询和独立 runtime observation
+  校准；静态估计不冒充真实游戏测量。
+- 提供 loopback 默认、本地 session、同源 POST、请求体上限、脱敏 job 快照与
+  进程树取消的 Web 控制中心。
+
+## 文档索引
+
 - [中文使用手册](docs/USER_GUIDE_zh.md)
-
-ARK DevKit / Unreal Blueprint clipboard-text analyzer for turning copied Blueprint
-graph pages, exported Class Defaults, and component context into reports that are
-useful for mod behavior review.
+- [开发伙伴交接：查询、测试与发布](docs/DEVELOPER_HANDOFF_zh.md)
+- [Blueprint Evidence Store v2](docs/BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
+- [Native Evidence Store v1](docs/NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md)
+- [Ghidra 原生分析](docs/GHIDRA_NATIVE_ANALYSIS_zh.md)
+- [Hybrid Evidence Linking](docs/HYBRID_EVIDENCE_LINKING_zh.md)
+- [Report Claim Manifest](docs/REPORT_CLAIM_MANIFEST_zh.md)
+- [Runtime Calibration](docs/RUNTIME_CALIBRATION_zh.md)
+- [Harvest Runtime 实测协议](docs/HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)
+- [ARK 资源点 Explorer](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)
+- [许可证待项目所有者决定](docs/LICENSE_DECISION_REQUIRED.md)
 
 ## Control Center
 
@@ -157,7 +222,7 @@ The current Resource Explorer keeps a separate `harvest_evaluation_catalog.json`
 
 Map usage is evidence-layered: direct `.umap` package references, PCG_Biomes dependencies, and World Partition `__ExternalActors__` references are recorded separately. `assetOrigin.packageNamespace` is never treated as map usage. These layers fixed the old Genesis/Genesis2-only appearance, but they still do not prove spawn coordinates or a complete runtime dependency closure, so `claimsCompleteMapUsage=false` remains required.
 
-The GUI evaluates only the selected HarvestComponent/resource-entry pair, collapses variants by species, and returns at most ten rows plus a node-relative percentage. The reverse view ranks one creature's specialties by its score divided by each node-resource leader. `bSkipTamed`, `bOnlyOnWildDinos`, and `bPreventWithRider` are hard exclusions; dynamic `bUseBlueprintCanRiderAttack` and `bUseBlueprintAdjustOutputDamage` rows may receive a static numeric estimate only when the required facts exist, and remain visibly `CONDITIONAL/PARTIAL` rather than being promoted to confirmed. Results remain `claimsAllNodes=false`, `claimsAllNodeDefinitionClasses=false`, `claimsAllCreatures=false`, `claimsAllDiscoveredCandidates=false`, `claimsCompleteMapUsage=false`, and `claimsGlobalTop=false`; the metric is an inferred engine-coefficient comparison index, not measured yield. See `docs/ARK_HARVEST_RANKING_SYSTEM_zh.md` and `docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`.
+The GUI evaluates only the selected HarvestComponent/resource-entry pair, collapses variants by species, and returns at most ten rows plus a node-relative percentage. The reverse view ranks one creature's specialties by its score divided by each node-resource leader. `bSkipTamed`, `bOnlyOnWildDinos`, and `bPreventWithRider` are hard exclusions; dynamic `bUseBlueprintCanRiderAttack` and `bUseBlueprintAdjustOutputDamage` rows may receive a static numeric estimate only when the required facts exist, and remain visibly `CONDITIONAL/PARTIAL` rather than being promoted to confirmed. Results remain `claimsAllNodes=false`, `claimsAllNodeDefinitionClasses=false`, `claimsAllCreatures=false`, `claimsAllDiscoveredCandidates=false`, `claimsCompleteMapUsage=false`, and `claimsGlobalTop=false`; `estimatedYieldPerNode` is a static estimate for one complete standardized node, not a measured runtime yield. See `docs/ARK_HARVEST_RANKING_SYSTEM_zh.md` and `docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`.
 
 When one answer needs several related refs, build a question-specific context pack capped at 1,400 estimated tokens:
 

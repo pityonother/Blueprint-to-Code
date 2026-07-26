@@ -57,4 +57,3 @@ all provenance hashes == current inputs
 - 仅比较文件名、大小或 PE 时间戳：碰撞和误配风险高。
 - 只验证 PDB SHA-256：不能证明 PE CodeView 指向该符号流。
 - 自动迁移或删除旧 workspace：可能破坏用户尚未导出的分析工作。
-

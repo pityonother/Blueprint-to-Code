@@ -73,7 +73,9 @@ G:\ARKDevkit\Projects\ShooterGame\Mods\Kaminan_server\Content
 
 4. **第 3 步**：看“读取结果”。三个数字：
 
-   - **已完整读取**：节点、连线、属性都还原成功，可以信任。
+   - **已完整读取**：达到当前自动恢复门槛（存在节点、Node-Pin 覆盖率至少
+     75%，且至少恢复一条连线）。它不代表每个节点、连线和属性都已还原；
+     下结论前仍需检查 Gap、覆盖率和启发式链接标记。
    - **部分读取**：能看，但有些连线或字段是工具猜出来的（启发式），相关说明
      仅供参考。
    - **需要手动补充**：这些图页 `.uasset` 解析失败，需要回 DevKit 复制粘贴。
@@ -226,7 +228,33 @@ Ctrl+C
 
 只有排查问题时才用。普通使用不用点。
 
-## 8. 常见问题
+## 8. 可选的原生证据与报告验证
+
+普通 Blueprint 读取不需要 Ghidra。只有问题进入 ARK 原生 C++，例如 loot
+quality、item rating 或 Blueprint 节点背后的 native call 时，才需要由开发
+伙伴在拥有匹配 DLL/PDB 的电脑运行 Native recipe。
+
+你拿到的公开报告会链接两种小文件：
+
+- `reports/manifests/*.claims.json`：列出每条结论、Evidence ID、假设和失效条件；
+- `reports/evidence_manifests/*.native.json`：只保存版本和 target 摘要，不含
+  ARK DLL/PDB 或完整反编译。
+
+检查所有报告：
+
+```powershell
+runtime\python\python.exe scripts\validate_report_claims.py --all --pretty
+```
+
+`LOCAL_EVIDENCE_REQUIRED` 表示公开仓库没有提交完整本机 evidence，需要在对应
+DevKit build 上重跑 recipe；它不是“函数不存在”。历史报告可能显示
+`PROVENANCE_INCOMPLETE`，此时默认检查保留报告并警告，formal 发布会拒绝。
+
+不要把 Ghidra 伪 C 当作原始源码。需要玩家可见的确定结论时，还要按
+[`HARVEST_RUNTIME_TEST_PROTOCOL_zh.md`](HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)
+一类协议采集真实 runtime observation。
+
+## 9. 常见问题
 
 ### 找不到 `.uasset`
 
@@ -289,6 +317,6 @@ http://127.0.0.1:8765/
 http://127.0.0.1:8766/
 ```
 
-## 9. 给别人一句话说明
+## 10. 给别人一句话说明
 
 解压，双击 `START_HERE.bat`，粘贴 Blueprint Object Path，点 **从 .uasset 读取图内容**，先看 **AI 证据索引**，需要补采时再点 **只补采失败图页**；长篇行为说明按需重新生成。

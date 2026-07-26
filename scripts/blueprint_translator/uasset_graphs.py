@@ -1,9 +1,11 @@
-"""Mine likely Blueprint graph names from Unreal .uasset files.
+"""Recover conservative Blueprint graph evidence from Unreal asset packages.
 
-This is deliberately conservative: it does not parse Blueprint bytecode or
-serialized graph objects. It only extracts safe ASCII/UTF-16 strings and ranks
-names that look like Blueprint graph pages. ARK DevKit Python validation remains
-the authority for whether a candidate is a real graph.
+The module has both a string-based candidate miner and bounded parsers for the
+package summary, Name/Import/Export maps, selected serialized object properties,
+EdGraph/K2 nodes, pins, and links. It does not parse Blueprint bytecode, claim
+every Unreal property layout, or treat heuristic links as confirmed facts.
+ARK DevKit validation remains authoritative when a serialized layout is missing
+or ambiguous.
 """
 
 from __future__ import annotations
