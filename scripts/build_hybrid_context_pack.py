@@ -129,6 +129,14 @@ def build_hybrid_context_pack(
         if current_blueprint_source_fingerprint is not None
         else str(dependencies.get("blueprintSourceFingerprint") or "")
     )
+    native_trust = {
+        "status": native.trust_status,
+        "formalValidation": native.formal_validation,
+    }
+    native_is_formal = (
+        native.trust_status == "VERIFIED"
+        and native.formal_validation
+    )
     edges = mark_stale_edges(
         hybrid.list_edges(),
         current_blueprint_revision_id=current_revision,
@@ -146,7 +154,21 @@ def build_hybrid_context_pack(
     resolved: list[dict[str, Any]] = []
     assumptions: list[dict[str, Any]] = []
     blueprint_gaps: list[dict[str, Any]] = []
-    warnings: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = (
+        []
+        if native_is_formal
+        else [
+            {
+                "code": "PROVENANCE_UNVERIFIED",
+                "status": native.trust_status,
+                "formalValidation": native.formal_validation,
+                "detail": (
+                    "Native evidence is not formal VERIFIED provenance; "
+                    "native facts and resolved cross-source edges were withheld."
+                ),
+            }
+        ]
+    )
     seen_native: set[str] = set()
     for edge in selected:
         resolution = edge.get("resolution")
@@ -163,7 +185,7 @@ def build_hybrid_context_pack(
         }
         if blueprint_fact["status"] == "CONFIRMED":
             blueprint_facts.append(blueprint_fact)
-        if edge.get("status") == "CONFIRMED":
+        if edge.get("status") == "CONFIRMED" and native_is_formal:
             resolved.append(edge)
             target_id = str(edge.get("targetId") or "")
             if target_id and target_id not in seen_native:
@@ -171,6 +193,19 @@ def build_hybrid_context_pack(
                 function = _native_function(native, target_id)
                 if function is not None:
                     native_facts.append(function)
+        elif edge.get("status") == "CONFIRMED":
+            assumptions.append(
+                {
+                    "edgeId": edge.get("edgeId", ""),
+                    "sourceId": edge.get("sourceId", ""),
+                    "targetId": edge.get("targetId", ""),
+                    "status": "PROVENANCE_UNVERIFIED",
+                    "evidenceStatus": "CONFIRMED",
+                    "candidateCount": resolution.get("candidateCount", 0),
+                    "candidates": resolution.get("candidates", []),
+                    "gaps": ["NATIVE_PROVENANCE_UNVERIFIED"],
+                }
+            )
         elif edge.get("status") == "STALE":
             warnings.append(
                 {
@@ -206,9 +241,25 @@ def build_hybrid_context_pack(
     runtime_gaps = [
         gap for gap in all_native_gaps if _is_runtime_only_gap(gap)
     ]
-    native_gaps = [
+    native_gaps = (
+        []
+        if native_is_formal
+        else [
+            {
+                "kind": "native-provenance-gap",
+                "status": "PROVENANCE_UNVERIFIED",
+                "reasonCode": "NATIVE_PROVENANCE_UNVERIFIED",
+                "detail": (
+                    "Native evidence trust is "
+                    f"{native.trust_status} with formalValidation="
+                    f"{native.formal_validation}."
+                ),
+            }
+        ]
+    )
+    native_gaps.extend(
         gap for gap in all_native_gaps if not _is_runtime_only_gap(gap)
-    ]
+    )
     for edge in selected:
         if edge.get("status") == "SOURCE_NOT_AVAILABLE":
             native_gaps.append(
@@ -231,6 +282,7 @@ def build_hybrid_context_pack(
         "blueprintSourceFingerprint": current_blueprint_source,
         "nativeEvidenceSetId": native.evidence_set_id,
         "nativeSourceFingerprint": native.source_sha256,
+        "nativeTrust": native_trust,
         "hybridSourceFingerprint": hybrid.source_sha256,
         "blueprintConfirmedFacts": blueprint_facts,
         "nativeConfirmedFacts": native_facts,
@@ -269,7 +321,8 @@ def build_hybrid_context_pack(
                 key
                 for key in removable
                 if isinstance(pack.get(key), list)
-                and len(pack[key]) > (
+                and len(pack[key])
+                > (
                     1
                     if key
                     in {
@@ -277,6 +330,15 @@ def build_hybrid_context_pack(
                         "nativeConfirmedFacts",
                         "resolvedCrossSourceEdges",
                     }
+                    or (
+                        not native_is_formal
+                        and key
+                        in {
+                            "assumptions",
+                            "nativeGaps",
+                            "staleProvenanceWarnings",
+                        }
+                    )
                     else 0
                 )
             ),
@@ -329,6 +391,7 @@ def render_hybrid_context_pack(pack: dict[str, Any]) -> str:
         (
             f"`{row.get('sourceId', '')}` [{row.get('status', '')}] has "
             f"{row.get('candidateCount', 0)} candidate(s); "
+            f"evidenceStatus={row.get('evidenceStatus', '')}; "
             f"gaps={row.get('gaps', [])}"
         )
         for row in rows("assumptions")
@@ -356,8 +419,9 @@ def render_hybrid_context_pack(pack: dict[str, Any]) -> str:
     ]
     warnings = [
         (
-            f"`{row.get('edgeId', '')}` [{row.get('status', '')}]: "
-            f"{row.get('gaps', [])}"
+            f"`{row.get('code') or row.get('edgeId', '')}` "
+            f"[{row.get('status', '')}]: "
+            f"{row.get('detail') or row.get('gaps', [])}"
         )
         for row in rows("staleProvenanceWarnings")
     ]
@@ -368,6 +432,12 @@ def render_hybrid_context_pack(pack: dict[str, Any]) -> str:
             f"- Question: {pack.get('question', '')}",
             f"- Blueprint revision: `{pack.get('blueprintRevisionId', '')}`",
             f"- Native evidence set: `{pack.get('nativeEvidenceSetId', '')}`",
+            (
+                "- Native trust: "
+                f"`{(pack.get('nativeTrust') or {}).get('status', '')}` "
+                f"(formalValidation="
+                f"`{(pack.get('nativeTrust') or {}).get('formalValidation', False)}`)"
+            ),
             f"- Budget: {pack.get('estimatedTokens', 0)} / {pack.get('effectiveBudget', 0)} estimated tokens",
             "",
             *section("Blueprint confirmed facts", blueprint),

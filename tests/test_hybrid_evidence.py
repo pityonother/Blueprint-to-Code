@@ -213,6 +213,10 @@ class HybridEvidenceTests(unittest.TestCase):
         self.assertTrue(pack["blueprintGaps"])
         self.assertTrue(pack["nativeGaps"])
         self.assertTrue(pack["runtimeOnlyGaps"])
+        self.assertEqual(
+            pack["nativeTrust"],
+            {"status": "VERIFIED", "formalValidation": True},
+        )
         self.assertTrue(
             all(
                 str(gap.get("reasonCode", "")).startswith("RUNTIME_")
@@ -237,6 +241,60 @@ class HybridEvidenceTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.hybrid_dir, Path("analysis") / "evidence_graph")
+
+    def test_experimental_native_source_is_not_promoted_to_hybrid_facts(self):
+        source = self.root / "experimental-source.json"
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        payload["trust"]["status"] = "EXPERIMENTAL"
+        source.write_text(json.dumps(payload), encoding="utf-8")
+        native_dir = self.root / "experimental-native"
+        write_native_evidence_artifacts(source, native_dir, formal=False)
+
+        with open_native_evidence_repository(native_dir) as native:
+            hybrid_payload = build_hybrid_evidence_payload(
+                blueprint_calls=[self.calls[0]],
+                native_functions=native.list_functions(),
+                blueprint_revision_id="2" * 24,
+                blueprint_source_fingerprint="e" * 64,
+                native_evidence_set_id=native.evidence_set_id,
+                native_source_fingerprint=native.source_sha256,
+            )
+            hybrid_dir = self.root / "experimental-linked"
+            write_hybrid_evidence_artifacts(hybrid_payload, hybrid_dir)
+            with open_hybrid_evidence_repository(hybrid_dir) as hybrid:
+                pack = build_hybrid_context_pack(
+                    hybrid,
+                    native,
+                    question="How does ComputeQuality reach native quality logic?",
+                    budget=2200,
+                    current_blueprint_revision_id="2" * 24,
+                    current_blueprint_source_fingerprint="e" * 64,
+                )
+
+        self.assertEqual(
+            pack["nativeTrust"],
+            {"status": "EXPERIMENTAL", "formalValidation": False},
+        )
+        self.assertEqual(pack["nativeConfirmedFacts"], [])
+        self.assertEqual(pack["resolvedCrossSourceEdges"], [])
+        self.assertTrue(
+            any(
+                row.get("status") == "PROVENANCE_UNVERIFIED"
+                and row.get("evidenceStatus") == "CONFIRMED"
+                for row in pack["assumptions"]
+            )
+        )
+        self.assertIn(
+            "NATIVE_PROVENANCE_UNVERIFIED",
+            {gap.get("reasonCode") for gap in pack["nativeGaps"]},
+        )
+        self.assertIn(
+            "PROVENANCE_UNVERIFIED",
+            {warning.get("code") for warning in pack["staleProvenanceWarnings"]},
+        )
+        rendered = render_hybrid_context_pack(pack)
+        self.assertIn("EXPERIMENTAL", rendered)
+        self.assertIn("PROVENANCE_UNVERIFIED", rendered)
 
 
 if __name__ == "__main__":

@@ -209,6 +209,10 @@ class HttpApiContractTests(unittest.TestCase):
                         question=request["question"],
                         budget=request["budgetTokens"],
                     )
+        self.assertEqual(
+            response["nativeTrust"],
+            {"status": "VERIFIED", "formalValidation": True},
+        )
         assert_matches_schema(self, _load_schema("hybrid_response"), response)
 
     def test_claim_validation_request_and_real_responses_match_contract(self):

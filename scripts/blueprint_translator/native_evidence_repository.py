@@ -59,6 +59,8 @@ class NativeEvidenceRepository:
         connection: sqlite3.Connection,
         evidence_set_id: str,
         source_sha256: str,
+        trust_status: str,
+        formal_validation: bool,
     ) -> None:
         self.root = root
         self.source_path = source_path
@@ -69,6 +71,8 @@ class NativeEvidenceRepository:
         self._closed = False
         self.evidence_set_id = evidence_set_id
         self.source_sha256 = source_sha256
+        self.trust_status = trust_status
+        self.formal_validation = formal_validation
         self._query = NativeEvidenceQueryService(
             connection,
             evidence_set_id=evidence_set_id,
@@ -211,6 +215,8 @@ class NativeEvidenceRepository:
             connection=connection,
             evidence_set_id=evidence_set_id,
             source_sha256=actual_source_hash,
+            trust_status=trust_status,
+            formal_validation=formal_validation,
         )
 
     def query(self, request: dict[str, object]) -> dict[str, object]:

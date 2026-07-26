@@ -104,6 +104,26 @@ def build_native_context_pack(
     effective_budget = min(int(budget), MAX_CONTEXT_BUDGET)
     bounded_question = " ".join(str(question or "").split())[:1000]
     terms = _terms(bounded_question)
+    source_trust = {
+        "status": repository.trust_status,
+        "formalValidation": repository.formal_validation,
+    }
+    source_is_formal = (
+        repository.trust_status == "VERIFIED"
+        and repository.formal_validation
+    )
+    provenance_warnings = (
+        []
+        if source_is_formal
+        else [
+            {
+                "code": "PROVENANCE_UNVERIFIED",
+                "status": repository.trust_status,
+                "formalValidation": repository.formal_validation,
+                "detail": "Statuses downgraded.",
+            }
+        ]
+    )
 
     search_hits: list[dict[str, Any]] = []
     for term in terms:
@@ -121,7 +141,14 @@ def build_native_context_pack(
             )
         except ValueError:
             continue
-    functions = _unique(search_hits, "evidenceId")[:5]
+    functions = []
+    for function in _unique(search_hits, "evidenceId")[:5]:
+        row = dict(function)
+        evidence_status = str(row.get("status") or "SOURCE_NOT_AVAILABLE")
+        row["evidenceStatus"] = evidence_status
+        if not source_is_formal:
+            row["status"] = "PROVENANCE_UNVERIFIED"
+        functions.append(row)
 
     callers: list[dict[str, Any]] = []
     callees: list[dict[str, Any]] = []
@@ -234,6 +261,8 @@ def build_native_context_pack(
         "queryTerms": terms,
         "evidenceSetId": repository.evidence_set_id,
         "sourceFingerprint": repository.source_sha256,
+        "sourceTrust": source_trust,
+        "provenanceWarnings": provenance_warnings,
         "requestedBudget": int(budget),
         "effectiveBudget": effective_budget,
         "estimatedTokens": 0,
@@ -306,7 +335,22 @@ def render_native_context_pack(pack: dict[str, Any]) -> str:
         f"- Question: {pack.get('question', '')}",
         f"- Evidence set: `{pack.get('evidenceSetId', '')}`",
         f"- Source fingerprint: `{pack.get('sourceFingerprint', '')}`",
+        (
+            "- Source trust: "
+            f"`{(pack.get('sourceTrust') or {}).get('status', '')}`; formal="
+            f"`{(pack.get('sourceTrust') or {}).get('formalValidation', False)}`"
+        ),
         f"- Budget: {pack.get('estimatedTokens', 0)} / {pack.get('effectiveBudget', 0)} estimated tokens",
+        "",
+        "## Provenance",
+        "",
+        *bullets(
+            pack.get("provenanceWarnings"),
+            lambda row: (
+                f"`{row.get('code', '')}` [{row.get('status', '')}]: "
+                f"{row.get('detail', '')}"
+            ),
+        ),
         "",
         "## Relevant functions",
         "",

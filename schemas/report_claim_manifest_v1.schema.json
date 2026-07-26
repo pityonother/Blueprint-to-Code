@@ -74,14 +74,50 @@
           "reportMarkers": {"type": "array", "items": {"type": "string"}},
           "runtimeValidation": {
             "type": "object",
+            "additionalProperties": false,
             "required": ["status", "observationRefs"],
             "properties": {
-              "status": {"type": "string"},
+              "status": {
+                "type": "string",
+                "enum": [
+                  "NOT_RUN",
+                  "STATIC_REVERSED",
+                  "INSUFFICIENT_OBSERVATIONS",
+                  "RUNTIME_CALIBRATED",
+                  "RUNTIME_CONFIRMED",
+                  "RUNTIME_DIVERGED",
+                  "UNSUPPORTED_DYNAMIC_BRANCH"
+                ]
+              },
               "observationRefs": {
                 "type": "array",
+                "uniqueItems": true,
                 "items": {"type": "string"}
               }
-            }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "status": {"const": "NOT_RUN"},
+                  "observationRefs": {"maxItems": 0}
+                }
+              },
+              {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "STATIC_REVERSED",
+                      "INSUFFICIENT_OBSERVATIONS",
+                      "RUNTIME_CALIBRATED",
+                      "RUNTIME_CONFIRMED",
+                      "RUNTIME_DIVERGED",
+                      "UNSUPPORTED_DYNAMIC_BRANCH"
+                    ]
+                  },
+                  "observationRefs": {"minItems": 1}
+                }
+              }
+            ]
           }
         }
       }

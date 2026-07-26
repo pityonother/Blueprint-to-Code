@@ -22,6 +22,13 @@ NATIVE_ID = f"native://{SHA_A}/fixture.dll/0x1000"
 EVIDENCE_SET_ID = f"native-set://{SHA_A}/{SHA_C}"
 BP_ID = "bp://111111111111111111111111@222222222222222222222222/g/1/n/10"
 RUNTIME_ID = "runtime://fixture/quality-v1"
+RUNTIME_FIXTURE = (
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "runtime_observations"
+    / "harvest-linear-match.json"
+)
 HISTORICAL_REPORT_MANIFESTS = (
     "reports/manifests/tides-of-fortune-complete-native-2026-07-26.claims.json",
     "reports/manifests/ark-player-visible-reward-model-2026-07-26.claims.json",
@@ -134,6 +141,42 @@ def _valid_tree(root: Path, *, trust_status: str = "VERIFIED") -> Path:
     manifest_path = root / "reports" / "manifests" / "fixture.claims.json"
     _write_json(manifest_path, claims)
     return manifest_path
+
+
+def _attach_runtime_fixture(
+    root: Path,
+    manifest: Path,
+    *,
+    synthetic: bool,
+    declared_status: str,
+) -> tuple[Path, dict[str, object]]:
+    observation = json.loads(RUNTIME_FIXTURE.read_text(encoding="utf-8"))
+    observation["observationSetId"] = RUNTIME_ID
+    observation["synthetic"] = synthetic
+    runtime_path = (
+        root / "reports" / "evidence_manifests" / "fixture.runtime.json"
+    )
+    _write_json(runtime_path, observation)
+    runtime_sha = hashlib.sha256(runtime_path.read_bytes()).hexdigest()
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["dependencies"]["runtimeObservationSets"] = [
+        {
+            "manifestPath": "reports/evidence_manifests/fixture.runtime.json",
+            "observationSetId": RUNTIME_ID,
+            "sourceSha256": runtime_sha,
+        }
+    ]
+    payload["claims"][0]["evidenceRefs"].append(RUNTIME_ID)
+    payload["claims"][0]["sourceFingerprints"][
+        "runtimeObservationSha256"
+    ] = runtime_sha
+    payload["claims"][0]["runtimeValidation"] = {
+        "status": declared_status,
+        "observationRefs": [RUNTIME_ID],
+    }
+    _write_json(manifest, payload)
+    return runtime_path, payload
 
 
 class ReportClaimValidationTests(unittest.TestCase):
@@ -275,7 +318,30 @@ class ReportClaimValidationTests(unittest.TestCase):
                 {issue["code"] for issue in result["issues"]},
             )
 
-    def test_runtime_observation_hash_and_reference_are_verified(self):
+    def test_runtime_validation_schema_limits_status_and_reference_shape(self):
+        schema = json.loads(
+            (ROOT / "schemas" / "report_claim_manifest_v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        runtime_schema = schema["properties"]["claims"]["items"]["properties"][
+            "runtimeValidation"
+        ]
+        self.assertEqual(
+            set(runtime_schema["properties"]["status"]["enum"]),
+            {
+                "NOT_RUN",
+                "STATIC_REVERSED",
+                "INSUFFICIENT_OBSERVATIONS",
+                "RUNTIME_CALIBRATED",
+                "RUNTIME_CONFIRMED",
+                "RUNTIME_DIVERGED",
+                "UNSUPPORTED_DYNAMIC_BRANCH",
+            },
+        )
+        self.assertEqual(len(runtime_schema["oneOf"]), 2)
+
+    def test_malformed_runtime_observation_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             manifest = _valid_tree(root)
@@ -314,10 +380,96 @@ class ReportClaimValidationTests(unittest.TestCase):
             }
             _write_json(manifest, payload)
 
+            result = validate_claim_manifests(root, [manifest], formal=True)
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "RUNTIME_OBSERVATION_INVALID",
+                {issue["code"] for issue in result["issues"]},
+            )
+
+    def test_synthetic_runtime_observation_cannot_confirm_a_formal_claim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _valid_tree(root)
+            _attach_runtime_fixture(
+                root,
+                manifest,
+                synthetic=True,
+                declared_status="RUNTIME_CONFIRMED",
+            )
+
+            result = validate_claim_manifests(root, [manifest], formal=True)
+
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "RUNTIME_SYNTHETIC_NOT_ALLOWED",
+                {issue["code"] for issue in result["issues"]},
+            )
+
+    def test_declared_runtime_status_must_match_recomputed_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _valid_tree(root)
+            _attach_runtime_fixture(
+                root,
+                manifest,
+                synthetic=False,
+                declared_status="RUNTIME_CALIBRATED",
+            )
+
+            result = validate_claim_manifests(root, [manifest], formal=True)
+
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "RUNTIME_STATUS_MISMATCH",
+                {issue["code"] for issue in result["issues"]},
+            )
+
+    def test_runtime_status_reference_rules_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _valid_tree(root)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["claims"][0]["runtimeValidation"] = {
+                "status": "RUNTIME_CONFIRMED",
+                "observationRefs": [],
+            }
+            _write_json(manifest, payload)
+
+            missing = validate_claim_manifests(root, [manifest], formal=True)
+            self.assertFalse(missing["ok"])
+            self.assertIn(
+                "RUNTIME_VALIDATION_INVALID",
+                {issue["code"] for issue in missing["issues"]},
+            )
+
+            _attach_runtime_fixture(
+                root,
+                manifest,
+                synthetic=False,
+                declared_status="NOT_RUN",
+            )
+            unexpected = validate_claim_manifests(root, [manifest], formal=True)
+            self.assertFalse(unexpected["ok"])
+            self.assertIn(
+                "RUNTIME_VALIDATION_INVALID",
+                {issue["code"] for issue in unexpected["issues"]},
+            )
+
+    def test_real_runtime_observation_can_confirm_and_hash_drift_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _valid_tree(root)
+            _runtime_path, payload = _attach_runtime_fixture(
+                root,
+                manifest,
+                synthetic=False,
+                declared_status="RUNTIME_CONFIRMED",
+            )
+
             valid = validate_claim_manifests(root, [manifest], formal=True)
             self.assertTrue(valid["ok"], valid["issues"])
 
-            payload = json.loads(manifest.read_text(encoding="utf-8"))
             payload["dependencies"]["runtimeObservationSets"][0][
                 "sourceSha256"
             ] = "0" * 64

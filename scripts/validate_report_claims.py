@@ -17,6 +17,16 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from blueprint_translator.runtime_calibration import (
+    INSUFFICIENT_OBSERVATIONS,
+    RUNTIME_CALIBRATED,
+    RUNTIME_CONFIRMED,
+    RUNTIME_DIVERGED,
+    STATIC_REVERSED,
+    UNSUPPORTED_DYNAMIC_BRANCH,
+    compare_runtime_observations,
+)
+
 
 CLAIM_SCHEMA = "blueprint-to-code-report-claims/v1"
 SANITIZED_NATIVE_SCHEMA = "blueprint-to-code-sanitized-native-evidence/v1"
@@ -28,6 +38,29 @@ RUNTIME_OBSERVATION_SCHEMA = (
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 EVIDENCE_REF_RE = re.compile(r"^(?:bp|native|runtime)://[^\s]+$")
+RUNTIME_VALIDATION_STATUSES = frozenset(
+    {
+        "NOT_RUN",
+        STATIC_REVERSED,
+        INSUFFICIENT_OBSERVATIONS,
+        RUNTIME_CALIBRATED,
+        RUNTIME_CONFIRMED,
+        RUNTIME_DIVERGED,
+        UNSUPPORTED_DYNAMIC_BRANCH,
+    }
+)
+_RUNTIME_OBSERVATION_KEYS = frozenset(
+    {
+        "schema",
+        "observationSetId",
+        "synthetic",
+        "environment",
+        "subject",
+        "staticModel",
+        "policy",
+        "trials",
+    }
+)
 
 
 def _load_object(path: Path, label: str) -> dict[str, Any]:
@@ -81,6 +114,111 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _runtime_mapping(
+    value: object,
+    name: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be an object")
+    return value
+
+
+def _runtime_number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    number = float(value)
+    if number < 0:
+        raise ValueError(f"{name} cannot be negative")
+    return number
+
+
+def _validate_runtime_observation_shape(payload: Mapping[str, Any]) -> None:
+    missing = _RUNTIME_OBSERVATION_KEYS - set(payload)
+    extra = set(payload) - _RUNTIME_OBSERVATION_KEYS
+    if missing:
+        raise ValueError(
+            "runtime observation is missing fields: "
+            + ", ".join(sorted(missing))
+        )
+    if extra:
+        raise ValueError(
+            "runtime observation has unsupported fields: "
+            + ", ".join(sorted(extra))
+        )
+    if not isinstance(payload.get("synthetic"), bool):
+        raise ValueError("synthetic must be a boolean")
+
+    environment = _runtime_mapping(payload.get("environment"), "environment")
+    for field in ("gameBuild", "map", "notes"):
+        if not isinstance(environment.get(field), str):
+            raise ValueError(f"environment.{field} must be a string")
+    _runtime_mapping(
+        environment.get("serverSettings"),
+        "environment.serverSettings",
+    )
+    mods = environment.get("mods")
+    if not isinstance(mods, list) or any(
+        not isinstance(mod, str) for mod in mods
+    ):
+        raise ValueError("environment.mods must be an array of strings")
+
+    subject = _runtime_mapping(payload.get("subject"), "subject")
+    for field in ("nodeId", "resourceId", "speciesKey", "attackId"):
+        if not isinstance(subject.get(field), str):
+            raise ValueError(f"subject.{field} must be a string")
+
+    static_model = _runtime_mapping(
+        payload.get("staticModel"),
+        "staticModel",
+    )
+    if not isinstance(static_model.get("modelVersion"), str):
+        raise ValueError("staticModel.modelVersion must be a string")
+    _runtime_mapping(static_model.get("inputs"), "staticModel.inputs")
+    unsupported = static_model.get("unsupportedDynamicBranches")
+    if not isinstance(unsupported, list) or any(
+        not isinstance(branch, str) for branch in unsupported
+    ):
+        raise ValueError(
+            "staticModel.unsupportedDynamicBranches must be an array of strings"
+        )
+
+    policy = _runtime_mapping(payload.get("policy"), "policy")
+    _runtime_number(
+        policy.get("absoluteTolerance"),
+        "policy.absoluteTolerance",
+    )
+    _runtime_number(
+        policy.get("relativeTolerance"),
+        "policy.relativeTolerance",
+    )
+    minimum_trials = policy.get("minimumTrialsForConfirmation")
+    if (
+        isinstance(minimum_trials, bool)
+        or not isinstance(minimum_trials, int)
+        or minimum_trials < 1
+    ):
+        raise ValueError(
+            "policy.minimumTrialsForConfirmation must be a positive integer"
+        )
+
+    trials = payload.get("trials")
+    if not isinstance(trials, list):
+        raise ValueError("trials must be an array")
+    for index, trial_value in enumerate(trials):
+        trial = _runtime_mapping(trial_value, f"trials[{index}]")
+        if not isinstance(trial.get("trialId"), str):
+            raise ValueError(f"trials[{index}].trialId must be a string")
+        hits = trial.get("hits")
+        if not isinstance(hits, list) or any(
+            not isinstance(hit, Mapping) for hit in hits
+        ):
+            raise ValueError(f"trials[{index}].hits must be an array of objects")
+        _runtime_number(
+            trial.get("finalResourceUnits"),
+            f"trials[{index}].finalResourceUnits",
+        )
 
 
 def _dependency_value(payload: Mapping[str, Any], *keys: str) -> object:
@@ -288,6 +426,8 @@ def validate_claim_manifests(
             runtime_dependencies = []
         available_runtime_ids: set[str] = set()
         runtime_source_hashes: set[str] = set()
+        runtime_comparisons: dict[str, dict[str, Any]] = {}
+        runtime_synthetic: dict[str, bool] = {}
         for index, dependency in enumerate(runtime_dependencies):
             if not isinstance(dependency, Mapping):
                 issues.append(
@@ -330,6 +470,19 @@ def validate_claim_manifests(
                     )
                 )
                 continue
+            try:
+                comparison = compare_runtime_observations(runtime_manifest)
+                _validate_runtime_observation_shape(runtime_manifest)
+            except Exception as exc:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "RUNTIME_OBSERVATION_INVALID",
+                        f"{runtime_path.name}: {exc}",
+                        manifest=manifest_path,
+                    )
+                )
+                continue
             observation_id = str(
                 runtime_manifest.get("observationSetId") or ""
             )
@@ -364,6 +517,10 @@ def validate_claim_manifests(
                 )
             if observation_id:
                 available_runtime_ids.add(observation_id)
+                runtime_comparisons[observation_id] = comparison
+                runtime_synthetic[observation_id] = bool(
+                    runtime_manifest["synthetic"]
+                )
             runtime_source_hashes.add(actual_runtime_sha)
 
         native_dependencies = dependencies.get("nativeEvidenceSets", [])
@@ -781,11 +938,37 @@ def validate_claim_manifests(
                     )
 
             runtime_validation = claim.get("runtimeValidation")
-            if isinstance(runtime_validation, Mapping):
+            if not isinstance(runtime_validation, Mapping):
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "RUNTIME_VALIDATION_INVALID",
+                        f"{claim_id or index} runtimeValidation must be an object",
+                        manifest=manifest_path,
+                        claim_id=claim_id,
+                    )
+                )
+            else:
+                runtime_status = str(
+                    runtime_validation.get("status") or ""
+                ).strip()
                 observation_refs = runtime_validation.get(
                     "observationRefs",
                     [],
                 )
+                if runtime_status not in RUNTIME_VALIDATION_STATUSES:
+                    issues.append(
+                        _issue(
+                            "ERROR",
+                            "RUNTIME_VALIDATION_INVALID",
+                            (
+                                f"{claim_id or index} has unsupported runtime "
+                                f"status: {runtime_status or 'missing'}"
+                            ),
+                            manifest=manifest_path,
+                            claim_id=claim_id,
+                        )
+                    )
                 if not isinstance(observation_refs, list):
                     issues.append(
                         _issue(
@@ -800,11 +983,56 @@ def validate_claim_manifests(
                         )
                     )
                 else:
+                    normalized_refs = [
+                        str(observation_ref)
+                        for observation_ref in observation_refs
+                    ]
+                    if len(normalized_refs) != len(set(normalized_refs)):
+                        issues.append(
+                            _issue(
+                                "ERROR",
+                                "RUNTIME_VALIDATION_INVALID",
+                                (
+                                    f"{claim_id or index} observationRefs "
+                                    "must be unique"
+                                ),
+                                manifest=manifest_path,
+                                claim_id=claim_id,
+                            )
+                        )
+                    if runtime_status == "NOT_RUN" and normalized_refs:
+                        issues.append(
+                            _issue(
+                                "ERROR",
+                                "RUNTIME_VALIDATION_INVALID",
+                                (
+                                    f"{claim_id or index} NOT_RUN cannot "
+                                    "reference runtime observations"
+                                ),
+                                manifest=manifest_path,
+                                claim_id=claim_id,
+                            )
+                        )
+                    elif (
+                        runtime_status in RUNTIME_VALIDATION_STATUSES
+                        and runtime_status != "NOT_RUN"
+                        and not normalized_refs
+                    ):
+                        issues.append(
+                            _issue(
+                                "ERROR",
+                                "RUNTIME_VALIDATION_INVALID",
+                                (
+                                    f"{claim_id or index} {runtime_status} "
+                                    "requires at least one observation"
+                                ),
+                                manifest=manifest_path,
+                                claim_id=claim_id,
+                            )
+                        )
                     for observation_ref in observation_refs:
-                        if (
-                            str(observation_ref)
-                            not in available_runtime_ids
-                        ):
+                        ref = str(observation_ref)
+                        if ref not in available_runtime_ids:
                             issues.append(
                                 _issue(
                                     "ERROR",
@@ -812,6 +1040,42 @@ def validate_claim_manifests(
                                     (
                                         "runtime validation ref is not in "
                                         f"a dependency: {observation_ref}"
+                                    ),
+                                    manifest=manifest_path,
+                                    claim_id=claim_id,
+                                )
+                            )
+                            continue
+                        comparison_status = str(
+                            runtime_comparisons[ref].get("status") or ""
+                        )
+                        if runtime_status != comparison_status:
+                            issues.append(
+                                _issue(
+                                    "ERROR",
+                                    "RUNTIME_STATUS_MISMATCH",
+                                    (
+                                        f"{claim_id or index} declares "
+                                        f"{runtime_status}, but {ref} "
+                                        f"recomputes to {comparison_status}"
+                                    ),
+                                    manifest=manifest_path,
+                                    claim_id=claim_id,
+                                )
+                            )
+                        if (
+                            runtime_status
+                            in {RUNTIME_CALIBRATED, RUNTIME_CONFIRMED}
+                            and runtime_synthetic[ref]
+                        ):
+                            issues.append(
+                                _issue(
+                                    "ERROR",
+                                    "RUNTIME_SYNTHETIC_NOT_ALLOWED",
+                                    (
+                                        f"{claim_id or index} cannot declare "
+                                        f"{runtime_status} from synthetic "
+                                        f"observation {ref}"
                                     ),
                                     manifest=manifest_path,
                                     claim_id=claim_id,

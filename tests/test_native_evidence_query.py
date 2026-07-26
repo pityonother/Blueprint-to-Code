@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -48,6 +49,8 @@ class NativeEvidenceQueryTests(unittest.TestCase):
         self.assertLessEqual(overview["estimatedTokens"], 700)
         self.assertEqual(overview["evidenceSetId"], self.repository.evidence_set_id)
         self.assertEqual(overview["sourceFingerprint"], self.repository.source_sha256)
+        self.assertEqual(self.repository.trust_status, "VERIFIED")
+        self.assertTrue(self.repository.formal_validation)
 
         first = self.repository.query(
             {
@@ -168,6 +171,55 @@ class NativeEvidenceQueryTests(unittest.TestCase):
         self.assertTrue(pack["constants"])
         self.assertNotIn("FULL_DECOMPILE_SHOULD_NOT_APPEAR_IN_INDEX", rendered)
         self.assertTrue(pack["gaps"])
+        self.assertEqual(
+            pack["sourceTrust"],
+            {"status": "VERIFIED", "formalValidation": True},
+        )
+        self.assertEqual(pack["provenanceWarnings"], [])
+        self.assertTrue(
+            all(
+                row["status"] == row["evidenceStatus"]
+                for row in pack["functions"]
+            )
+        )
+
+    def test_experimental_context_pack_downgrades_functions_and_warns(self):
+        source = self.root / "experimental-source.json"
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        payload["trust"]["status"] = "EXPERIMENTAL"
+        source.write_text(json.dumps(payload), encoding="utf-8")
+        evidence_dir = self.root / "experimental-evidence"
+        write_native_evidence_artifacts(source, evidence_dir, formal=False)
+
+        with open_native_evidence_repository(evidence_dir) as repository:
+            self.assertEqual(repository.trust_status, "EXPERIMENTAL")
+            self.assertFalse(repository.formal_validation)
+            pack = build_native_context_pack(
+                repository,
+                question="How does ComputeQuality work?",
+                budget=500,
+            )
+
+        self.assertEqual(
+            pack["sourceTrust"],
+            {"status": "EXPERIMENTAL", "formalValidation": False},
+        )
+        self.assertEqual(
+            {warning["code"] for warning in pack["provenanceWarnings"]},
+            {"PROVENANCE_UNVERIFIED"},
+        )
+        self.assertTrue(pack["functions"])
+        self.assertTrue(
+            all(
+                row["status"] == "PROVENANCE_UNVERIFIED"
+                and row["evidenceStatus"] == "CONFIRMED"
+                for row in pack["functions"]
+            )
+        )
+        rendered = render_native_context_pack(pack)
+        self.assertLessEqual(estimate_tokens(rendered), 500)
+        self.assertIn("EXPERIMENTAL", rendered)
+        self.assertIn("PROVENANCE_UNVERIFIED", rendered)
 
     def test_budget_below_public_minimum_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "at least 500"):
