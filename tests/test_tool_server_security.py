@@ -271,6 +271,35 @@ class ToolServerSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotIn(token, json.dumps(payload))
 
+    def test_api_get_rejects_untrusted_host_and_cross_origin_requests(self) -> None:
+        with patch.object(tool_server, "api_state", return_value={"assets": []}):
+            status, payload, _headers = self.request(
+                "GET",
+                "/api/state",
+                headers={"Host": f"attacker.example:{self.port}"},
+            )
+            self.assertEqual(status, 403)
+            self.assertEqual(payload["code"], "HOST_FORBIDDEN")
+
+            status, payload, _headers = self.request(
+                "GET",
+                "/api/state",
+                headers={
+                    "Host": f"127.0.0.1:{self.port}",
+                    "Origin": "https://attacker.example",
+                },
+            )
+            self.assertEqual(status, 403)
+            self.assertEqual(payload["code"], "ORIGIN_FORBIDDEN")
+
+    def test_static_get_does_not_use_api_host_validation(self) -> None:
+        status, _payload, _headers = self.request(
+            "GET",
+            "/missing-static-security-probe.js",
+            headers={"Host": f"attacker.example:{self.port}"},
+        )
+        self.assertEqual(status, 404)
+
     def test_remote_bind_requires_allow_remote_and_nonempty_auth_token(self) -> None:
         with self.assertRaises(ValueError):
             tool_server.create_control_center_server("0.0.0.0", 0)
@@ -368,6 +397,54 @@ class ToolServerSecurityTests(unittest.TestCase):
                 )
             self.assertEqual(status, 200)
             self.assertTrue(payload["ok"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=3)
+
+    def test_remote_api_get_requires_bearer_auth(self) -> None:
+        auth_token = "remote-test-secret"
+        server = tool_server.create_control_center_server(
+            "0.0.0.0",
+            0,
+            allow_remote=True,
+            auth_token=auth_token,
+        )
+        port = int(server.server_address[1])
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+
+        def remote_get(headers: dict[str, str]) -> tuple[int, dict[str, object]]:
+            connection = HTTPConnection("127.0.0.1", port, timeout=3)
+            try:
+                connection.request("GET", "/api/state", headers=headers)
+                response = connection.getresponse()
+                return response.status, json.loads(
+                    response.read().decode("utf-8")
+                )
+            finally:
+                connection.close()
+
+        try:
+            with patch.object(
+                tool_server,
+                "api_state",
+                return_value={"sentinel": "protected"},
+            ):
+                status, payload = remote_get(
+                    {"Host": f"127.0.0.1:{port}"}
+                )
+                self.assertEqual(status, 403)
+                self.assertEqual(payload["code"], "REMOTE_AUTH_REQUIRED")
+
+                status, payload = remote_get(
+                    {
+                        "Host": f"127.0.0.1:{port}",
+                        "Authorization": f"Bearer {auth_token}",
+                    }
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["sentinel"], "protected")
         finally:
             server.shutdown()
             server.server_close()

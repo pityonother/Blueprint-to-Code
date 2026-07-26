@@ -37,7 +37,9 @@ const server = await createServer({
 });
 
 try {
-  const { api } = await server.ssrLoadModule('/src/shared/api.ts');
+  const { api, configureApiAuthToken } = await server.ssrLoadModule(
+    '/src/shared/api.ts',
+  );
   const { requestHarvestJson } = await server.ssrLoadModule(
     '/src/harvest/api.ts',
   );
@@ -52,14 +54,25 @@ try {
     body: JSON.stringify({ options: {} }),
   });
   await api('/api/state');
+  configureApiAuthToken('remote-contract-token');
+  await api('/api/state?remote=1');
+  await api('/api/open-captures', {
+    method: 'POST',
+    body: '{}',
+  });
+  await api('/health');
 
+  const sessionRequests = requests.filter(
+    (request) => request.path === '/api/session',
+  );
+  assert.equal(sessionRequests.length, 2);
+  assert.equal(sessionRequests[0].headers.get('Authorization'), null);
   assert.equal(
-    requests.filter((request) => request.path === '/api/session').length,
-    1,
-    'all clients should share one in-memory session bootstrap',
+    sessionRequests[1].headers.get('Authorization'),
+    'Bearer remote-contract-token',
   );
   const posts = requests.filter((request) => request.method === 'POST');
-  assert.equal(posts.length, 2);
+  assert.equal(posts.length, 3);
   for (const post of posts) {
     assert.equal(
       post.headers.get('X-Blueprint-Session'),
@@ -68,8 +81,25 @@ try {
     assert.equal(post.headers.get('Content-Type'), 'application/json');
   }
   assert.equal(posts[0].headers.get('X-Caller-Header'), 'kept');
+  assert.equal(posts[0].headers.get('Authorization'), null);
+  assert.equal(posts[1].headers.get('Authorization'), null);
+  assert.equal(
+    posts[2].headers.get('Authorization'),
+    'Bearer remote-contract-token',
+  );
   const stateGet = requests.find((request) => request.path === '/api/state');
   assert.equal(stateGet.headers.get('X-Blueprint-Session'), null);
+  assert.equal(stateGet.headers.get('Authorization'), null);
+  const remoteStateGet = requests.find(
+    (request) => request.path === '/api/state?remote=1',
+  );
+  assert.equal(
+    remoteStateGet.headers.get('Authorization'),
+    'Bearer remote-contract-token',
+  );
+  assert.equal(remoteStateGet.headers.get('X-Blueprint-Session'), null);
+  const nonApiGet = requests.find((request) => request.path === '/health');
+  assert.equal(nonApiGet.headers.get('Authorization'), null);
 } finally {
   await server.close();
   globalThis.fetch = originalFetch;

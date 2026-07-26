@@ -81,6 +81,7 @@ _ALLOWED_OPTIONS = frozenset(
 _PROMOTION_BEGIN_LINE = "[promotion-critical] begin"
 _PROMOTION_COMMIT_COMPLETE_LINE = "[promotion-critical] commit-complete"
 _PROMOTION_END_LINE = "[promotion-critical] end"
+_REAL_POPEN_TYPE = subprocess.Popen
 
 
 class HarvestBuildJobError(RuntimeError):
@@ -428,11 +429,19 @@ class HarvestBuildJobManager:
                         job.error = error
 
             return_code = process.wait()
-            for reader in readers:
-                reader.join()
+            readers_finished = self._join_reader_threads(readers)
+            cleanup_error = ""
+            if not readers_finished:
+                cleanup_error = self._cleanup_process_tree_after_root_exit(
+                    process,
+                    job,
+                )
+                readers_finished = self._join_reader_threads(readers)
 
             with self._condition:
                 job.return_code = return_code
+                if cleanup_error and not job.error:
+                    job.error = cleanup_error
                 if job.status not in TERMINAL_STATUSES:
                     if job.promotion_committed and return_code == 0:
                         if job.cancel_requested:
@@ -441,6 +450,23 @@ class HarvestBuildJobManager:
                         self._finish_locked(job, SUCCEEDED, return_code=return_code)
                     elif job.cancel_requested:
                         self._finish_locked(job, CANCELLED, return_code=return_code)
+                    elif not readers_finished:
+                        self._finish_locked(
+                            job,
+                            FAILED,
+                            return_code=return_code,
+                            error=(
+                                "Harvest build output streams did not close after "
+                                "the process tree was cleaned up."
+                            ),
+                        )
+                    elif cleanup_error:
+                        self._finish_locked(
+                            job,
+                            FAILED,
+                            return_code=return_code,
+                            error=cleanup_error,
+                        )
                     elif return_code == 0:
                         self._finish_locked(job, SUCCEEDED, return_code=return_code)
                     else:
@@ -482,6 +508,7 @@ class HarvestBuildJobManager:
         safe_line = redact_sensitive_text(
             line,
             path_roots=self._redaction_roots,
+            redact_absolute_paths=True,
         )
         entry = f"[{stream_name}] {safe_line}\n"
         with self._condition:
@@ -512,6 +539,7 @@ class HarvestBuildJobManager:
                 label = redact_sensitive_text(
                     match.group(3).strip(),
                     path_roots=self._redaction_roots,
+                    redact_absolute_paths=True,
                 )
                 job.progress = {
                     "current": current,
@@ -526,18 +554,32 @@ class HarvestBuildJobManager:
                     ]
             self._condition.notify_all()
 
+    def _join_reader_threads(
+        self,
+        readers: list[threading.Thread],
+    ) -> bool:
+        deadline = time.monotonic() + self.terminate_timeout_seconds
+        for reader in readers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            reader.join(timeout=remaining)
+        return all(not reader.is_alive() for reader in readers)
+
     def _stop_process(
         self,
         process: subprocess.Popen[str],
         job: _Job,
     ) -> tuple[bool, str]:
         if process.poll() is not None:
-            return True, ""
+            error = self._cleanup_process_tree_after_root_exit(process, job)
+            return not error, error
         try:
             self._signal_process_tree(process, force=False)
         except Exception as exc:
             if process.poll() is not None:
-                return True, ""
+                error = self._cleanup_process_tree_after_root_exit(process, job)
+                return not error, error
             terminate_error = f"Could not terminate harvest build process tree: {exc}"
         else:
             terminate_error = ""
@@ -569,7 +611,11 @@ class HarvestBuildJobManager:
             )
         except Exception as exc:
             if process.poll() is not None:
-                return True, terminate_error
+                cleanup_error = self._cleanup_process_tree_after_root_exit(
+                    process,
+                    job,
+                )
+                return not cleanup_error, cleanup_error or terminate_error
             return False, f"Could not kill harvest build process tree: {exc}"
         finally:
             if windows_job_handle is not None:
@@ -579,6 +625,25 @@ class HarvestBuildJobManager:
             return True, terminate_error
         except subprocess.TimeoutExpired:
             return False, "Harvest build process tree did not exit after forced termination."
+
+    def _cleanup_process_tree_after_root_exit(
+        self,
+        process: subprocess.Popen[str],
+        job: _Job,
+    ) -> str:
+        try:
+            if os.name == "nt":
+                self._cleanup_windows_job_after_root_exit(job)
+            elif isinstance(process, _REAL_POPEN_TYPE):
+                self._signal_process_tree(process, force=True)
+        except (ProcessLookupError, PermissionError):
+            return ""
+        except Exception as exc:
+            return (
+                "Could not clean up harvest build descendants after the root "
+                f"process exited: {exc}"
+            )
+        return ""
 
     @staticmethod
     def _signal_process_tree(
@@ -806,6 +871,7 @@ class HarvestBuildJobManager:
             "error": redact_sensitive_text(
                 job.error,
                 path_roots=self._redaction_roots,
+                redact_absolute_paths=True,
             ),
             "progress": dict(job.progress),
             "progressLines": list(job.progress_lines),

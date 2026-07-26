@@ -19,6 +19,9 @@ SESSION_HEADER = "X-Blueprint-Session"
 NON_BROWSER_HEADER = "X-Blueprint-Client"
 NON_BROWSER_VALUE = "non-browser"
 _DEFAULT_HOME = str(Path.home().resolve())
+_WINDOWS_ABSOLUTE_PATH = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\\\(?:\?\\)?)[^\r\n]*"
+)
 
 
 def is_loopback_host(host: str) -> bool:
@@ -74,6 +77,7 @@ def redact_sensitive_text(
     *,
     secrets_to_hide: tuple[str, ...] = (),
     path_roots: tuple[Path | str, ...] = (),
+    redact_absolute_paths: bool = False,
 ) -> str:
     """Remove known secrets and local roots from public text and logs."""
 
@@ -99,6 +103,8 @@ def redact_sensitive_text(
                     text,
                     flags=re.IGNORECASE,
                 )
+    if redact_absolute_paths:
+        text = _WINDOWS_ABSOLUTE_PATH.sub("<local-path>", text)
     return text
 
 
@@ -207,7 +213,7 @@ class SecurityPolicy:
                 "Cross-origin requests are not allowed.",
             )
 
-    def validate_session_request(
+    def validate_get_request(
         self,
         headers: object,
         *,
@@ -216,6 +222,14 @@ class SecurityPolicy:
         request_host = self._request_host(headers, server_port=server_port)
         self._validate_optional_origin(headers, request_host)
         self._validate_remote_auth(headers)
+
+    def validate_session_request(
+        self,
+        headers: object,
+        *,
+        server_port: int,
+    ) -> None:
+        self.validate_get_request(headers, server_port=server_port)
 
     def validate_post_request(
         self,

@@ -1714,12 +1714,13 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
-            if parsed.path == "/api/session":
-                policy = self.security_policy()
-                policy.validate_session_request(
+            if parsed.path.startswith("/api/"):
+                self.security_policy().validate_get_request(
                     self.headers,
                     server_port=int(self.server.server_address[1]),
                 )
+            if parsed.path == "/api/session":
+                policy = self.security_policy()
                 self.send_json(
                     {
                         "ok": True,
@@ -2152,7 +2153,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--auth-token",
-        help="Bearer token required for every remote session and POST request.",
+        help="Bearer token required for every remote API request.",
     )
     parser.add_argument("--open", action="store_true", help="Open the control center in the default browser.")
     return parser.parse_args(argv)

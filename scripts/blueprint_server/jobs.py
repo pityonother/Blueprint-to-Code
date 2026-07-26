@@ -373,15 +373,21 @@ class BackgroundJobManager:
         return {
             "id": job.id,
             "kind": job.kind,
-            "title": redact_sensitive_text(job.title, path_roots=roots),
+            "title": redact_sensitive_text(
+                job.title,
+                path_roots=roots,
+                redact_absolute_paths=True,
+            ),
             "status": job.status,
             "stdout": redact_sensitive_text(
                 job.stdout.value(),
                 path_roots=roots,
+                redact_absolute_paths=True,
             ),
             "stderr": redact_sensitive_text(
                 job.stderr.value(),
                 path_roots=roots,
+                redact_absolute_paths=True,
             ),
             "stdoutTruncated": job.stdout.truncated,
             "stderrTruncated": job.stderr.truncated,
@@ -390,7 +396,11 @@ class BackgroundJobManager:
             "createdAt": job.created_at,
             "startedAt": job.started_at,
             "finishedAt": job.finished_at,
-            "error": redact_sensitive_text(job.error, path_roots=roots),
+            "error": redact_sensitive_text(
+                job.error,
+                path_roots=roots,
+                redact_absolute_paths=True,
+            ),
             "result": self._sanitize_value(job.result),
         }
 
@@ -418,6 +428,7 @@ class BackgroundJobManager:
             return redact_sensitive_text(
                 value,
                 path_roots=(self.project_root, Path.home()),
+                redact_absolute_paths=True,
             )
         return value
 

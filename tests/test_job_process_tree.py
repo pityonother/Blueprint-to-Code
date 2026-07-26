@@ -100,6 +100,29 @@ class GenericJobSecurityTests(unittest.TestCase):
         self.assertNotIn(str(ROOT), serialized)
         self.assertNotIn(str(private_path), serialized)
 
+    def test_public_job_redacts_windows_paths_outside_known_roots(self) -> None:
+        devkit_path = (
+            r"C:\Program Files\Epic Games\ARKDevkit\Engine\Binaries\Win64"
+            r"\ShooterGameEditor-ShooterGame.pdb"
+        )
+        unc_path = r"\\build-server\private-share\native\symbols.pdb"
+        job = create_background_job(
+            "test",
+            "outside-root paths",
+            [
+                sys.executable,
+                "-c",
+                f"print({devkit_path!r}); print({unc_path!r})",
+            ],
+            lambda return_code: {"returnCode": return_code},
+        )
+        completed = wait_for_job(str(job["id"]))
+        serialized = repr(completed)
+
+        self.assertNotIn(devkit_path, serialized)
+        self.assertNotIn(unc_path, serialized)
+        self.assertIn("<local-path>", str(completed.get("stdout") or ""))
+
     def test_public_job_output_is_bounded(self) -> None:
         job = create_background_job(
             "test",

@@ -216,6 +216,23 @@ class HarvestBuildJobManagerTests(unittest.TestCase):
         self.assertIs(popen.call_args.kwargs["shell"], False)
         self.assertEqual(popen.call_args.kwargs["cwd"], str(ROOT.resolve()))
 
+    def test_public_log_redacts_devkit_path_outside_known_roots(self):
+        devkit_path = (
+            r"C:\Program Files\Epic Games\ARKDevkit\Engine\Binaries\Win64"
+            r"\ShooterGameEditor-ShooterGame.pdb"
+        )
+        process = FakeProcess(stdout=f"{devkit_path}\n")
+        with mock.patch(
+            "blueprint_translator.harvest_build_jobs.subprocess.Popen",
+            return_value=process,
+        ):
+            manager = HarvestBuildJobManager(project_root=ROOT)
+            accepted = manager.start()
+            completed = manager.wait(accepted["id"], timeout=2)
+
+        self.assertNotIn(devkit_path, completed["logTail"])
+        self.assertIn("<local-path>", completed["logTail"])
+
     def test_build_process_starts_in_an_independent_native_process_group(self):
         process = FakeProcess()
         with mock.patch(
@@ -566,6 +583,67 @@ class HarvestBuildJobManagerTests(unittest.TestCase):
                 self.assertFalse(
                     pid_is_running(child_pid),
                     "cancel left the spawned stage process running",
+                )
+            finally:
+                if child_pid is not None:
+                    force_kill_pid(child_pid)
+
+    def test_cancel_cleans_child_after_root_exits_while_pipe_is_open(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            scripts = project_root / "scripts"
+            scripts.mkdir()
+            child_pid_path = project_root / "orphan-stage-child.pid"
+            (scripts / "build_ark_harvest_explorer.py").write_text(
+                "\n".join(
+                    (
+                        "import subprocess, sys",
+                        "from pathlib import Path",
+                        "root = Path(__file__).resolve().parents[1]",
+                        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])",
+                        "(root / 'orphan-stage-child.pid').write_text(str(child.pid), encoding='utf-8')",
+                        "print('[1/1] root-exiting-with-live-child', flush=True)",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            manager = HarvestBuildJobManager(
+                project_root=project_root,
+                python_executable=sys.executable,
+                terminate_timeout_seconds=1.0,
+            )
+            accepted = manager.start()
+            child_pid: int | None = None
+            try:
+                deadline = time.monotonic() + 5
+                root_exited = False
+                while time.monotonic() < deadline:
+                    if child_pid_path.is_file():
+                        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+                    with manager._condition:
+                        job = manager._job
+                        root_exited = bool(
+                            job is not None
+                            and job.process is not None
+                            and job.process.poll() is not None
+                        )
+                    if child_pid is not None and root_exited:
+                        break
+                    time.sleep(0.02)
+
+                self.assertIsNotNone(child_pid)
+                assert child_pid is not None
+                self.assertTrue(root_exited, "root process did not exit during the probe")
+                self.assertTrue(pid_is_running(child_pid))
+
+                cancelled = manager.cancel(accepted["id"])
+                self.assertEqual(cancelled["status"], CANCELLED)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and pid_is_running(child_pid):
+                    time.sleep(0.02)
+                self.assertFalse(
+                    pid_is_running(child_pid),
+                    "cancel left a child alive after the root process exited",
                 )
             finally:
                 if child_pid is not None:

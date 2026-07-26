@@ -92,12 +92,12 @@ export async function api<T extends ApiResult>(
     if (!headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json');
     }
-    if (remoteAuthToken) {
-      headers.set('Authorization', `Bearer ${remoteAuthToken}`);
-    }
     if (request.body === undefined || request.body === null) {
       request.body = '{}';
     }
+  }
+  if (remoteAuthToken && path.startsWith('/api/')) {
+    headers.set('Authorization', `Bearer ${remoteAuthToken}`);
   }
   const response = await fetch(path, request);
   const payload = (await response.json()) as T;
