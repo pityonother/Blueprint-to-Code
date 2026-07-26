@@ -1509,6 +1509,32 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_asset_feature_target_update_uses_package_index(self):
+        import blueprint_translator.kb_discovery as discovery
+
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.executescript(discovery.DISCOVERY_SCHEMA_SQL)
+            indexes = {
+                str(row[1]) for row in connection.execute("PRAGMA index_list('assets')")
+            }
+            self.assertIn("idx_assets_package", indexes)
+            plan = " ".join(
+                str(row[3])
+                for row in connection.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    UPDATE assets
+                    SET cross_domain_reference_count=?
+                    WHERE object_path=? OR package_path=?
+                    """,
+                    (1, "/Game/A.A", "/Game/A"),
+                )
+            )
+            self.assertIn("idx_assets_package", plan)
+        finally:
+            connection.close()
+
     def test_sample_gap_rules_require_real_coverage_state(self):
         import blueprint_translator.kb_discovery as discovery
 

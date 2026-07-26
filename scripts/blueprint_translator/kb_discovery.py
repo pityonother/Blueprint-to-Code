@@ -410,6 +410,7 @@ CREATE TABLE sample_membership (
 );
 
 CREATE INDEX idx_assets_class ON assets(asset_class_path);
+CREATE INDEX idx_assets_package ON assets(package_path);
 CREATE INDEX idx_assets_generated_class ON assets(generated_class_path);
 CREATE INDEX idx_assets_parent ON assets(parent_class_path);
 CREATE INDEX idx_assets_native_parent ON assets(native_parent_class_path);
