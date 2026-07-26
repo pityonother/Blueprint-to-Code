@@ -1,0 +1,317 @@
+name: Native Fixture
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/native_analysis/**"
+      - "scripts/blueprint_translator/native_*.py"
+      - "scripts/import_native_evidence.py"
+      - "scripts/query_native_evidence.py"
+      - "scripts/validate_native_evidence.py"
+      - "scripts/validate_report_claims.py"
+      - "schemas/native_analysis_recipe_v1.schema.json"
+      - "tests/native_fixture/**"
+      - "tests/test_native_*.py"
+      - "tests/test_report_claims.py"
+      - "tests/fixtures/report_claims/**"
+      - ".github/workflows/native-fixture.yml"
+  pull_request:
+    paths:
+      - "scripts/native_analysis/**"
+      - "scripts/blueprint_translator/native_*.py"
+      - "scripts/import_native_evidence.py"
+      - "scripts/query_native_evidence.py"
+      - "scripts/validate_native_evidence.py"
+      - "scripts/validate_report_claims.py"
+      - "schemas/native_analysis_recipe_v1.schema.json"
+      - "tests/native_fixture/**"
+      - "tests/test_native_*.py"
+      - "tests/test_report_claims.py"
+      - "tests/fixtures/report_claims/**"
+      - ".github/workflows/native-fixture.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-fixture-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  public-native-fixture:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Read pinned toolchain and isolate mutable outputs
+        run: |
+          $ErrorActionPreference = "Stop"
+          $toolchain = Get-Content -LiteralPath "scripts/native_analysis/toolchain.json" `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+          $toolsRoot = Join-Path $env:RUNNER_TEMP "blueprint-native-tools"
+          $downloadRoot = Join-Path $env:RUNNER_TEMP "blueprint-native-downloads"
+          $workspaceRoot = Join-Path $env:RUNNER_TEMP "blueprint-native-workspace"
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "blueprint-native-evidence"
+          New-Item -ItemType Directory -Force `
+            -Path $toolsRoot, $downloadRoot, $workspaceRoot, $evidenceRoot |
+            Out-Null
+
+          @(
+            "GHIDRA_URL=$($toolchain.ghidra.releaseUrl)"
+            "GHIDRA_SHA256=$($toolchain.ghidra.sha256)"
+            "GHIDRA_FOLDER=$($toolchain.ghidra.folderName)"
+            "GHIDRA_ASSET=$($toolchain.ghidra.releaseAsset)"
+            "JAVA_URL=$($toolchain.java.releaseUrl)"
+            "JAVA_SHA256=$($toolchain.java.sha256)"
+            "JAVA_FOLDER=$($toolchain.java.folderName)"
+            "JAVA_ASSET=$($toolchain.java.releaseAsset)"
+            "NATIVE_TOOLS_ROOT=$toolsRoot"
+            "NATIVE_DOWNLOAD_ROOT=$downloadRoot"
+            "NATIVE_WORKSPACE_ROOT=$workspaceRoot"
+            "NATIVE_EVIDENCE_DIR=$evidenceRoot"
+          ) | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Download and verify pinned Ghidra and JDK archives
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+
+          function Assert-ArchiveSha256 {
+            param(
+              [Parameter(Mandatory)]
+              [string]$Archive,
+              [Parameter(Mandatory)]
+              [string]$Expected
+            )
+            $actualHash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).
+              Hash.ToLowerInvariant()
+            $expectedHash = $Expected.ToLowerInvariant()
+            if ($actualHash -ne $expectedHash) {
+              throw "Pinned archive checksum mismatch for $Archive."
+            }
+          }
+
+          $ghidraArchive = Join-Path $env:NATIVE_DOWNLOAD_ROOT $env:GHIDRA_ASSET
+          $javaArchive = Join-Path $env:NATIVE_DOWNLOAD_ROOT $env:JAVA_ASSET
+          Invoke-WebRequest -Uri $env:GHIDRA_URL -OutFile $ghidraArchive
+          Invoke-WebRequest -Uri $env:JAVA_URL -OutFile $javaArchive
+          Assert-ArchiveSha256 -Archive $ghidraArchive -Expected $env:GHIDRA_SHA256
+          Assert-ArchiveSha256 -Archive $javaArchive -Expected $env:JAVA_SHA256
+
+          Expand-Archive -LiteralPath $ghidraArchive `
+            -DestinationPath $env:NATIVE_TOOLS_ROOT -Force
+          Expand-Archive -LiteralPath $javaArchive `
+            -DestinationPath $env:NATIVE_TOOLS_ROOT -Force
+          $ghidraPath = Join-Path $env:NATIVE_TOOLS_ROOT $env:GHIDRA_FOLDER
+          $javaHome = Join-Path $env:NATIVE_TOOLS_ROOT $env:JAVA_FOLDER
+          if (-not (Test-Path -LiteralPath $ghidraPath -PathType Container)) {
+            throw "Verified Ghidra archive did not contain its pinned folder."
+          }
+          if (-not (Test-Path -LiteralPath $javaHome -PathType Container)) {
+            throw "Verified JDK archive did not contain its pinned folder."
+          }
+          @(
+            "GHIDRA_PATH=$ghidraPath"
+            "JAVA_HOME=$javaHome"
+          ) | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Build the public native fixture
+        run: |
+          $ErrorActionPreference = "Stop"
+          & ./tests/native_fixture/build.ps1
+          $fixtureRoot = (Resolve-Path "tests/native_fixture/build").Path
+          $dllPath = Join-Path $fixtureRoot "blueprint_native_fixture.dll"
+          $pdbPath = Join-Path $fixtureRoot "blueprint_native_fixture.pdb"
+          $buildManifestPath = Join-Path $fixtureRoot "build_manifest.json"
+          $buildManifest = Get-Content -LiteralPath $buildManifestPath `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+          $dllHash = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).
+            Hash.ToLowerInvariant()
+          $pdbHash = (Get-FileHash -LiteralPath $pdbPath -Algorithm SHA256).
+            Hash.ToLowerInvariant()
+          if ($dllHash -ne [string]$buildManifest.binary.sha256) {
+            throw "Fixture DLL differs from its build manifest."
+          }
+          if ($pdbHash -ne [string]$buildManifest.pdb.sha256) {
+            throw "Fixture PDB differs from its build manifest."
+          }
+          @(
+            "FIXTURE_DLL=$dllPath"
+            "FIXTURE_PDB=$pdbPath"
+          ) | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Run the formal public native recipe
+        run: |
+          $ErrorActionPreference = "Stop"
+          & ./scripts/native_analysis/Run-NativeRecipe.ps1 `
+            -Recipe "./scripts/native_analysis/recipes/test-native-fixture.v1.json" `
+            -DllPath $env:FIXTURE_DLL `
+            -PdbPath $env:FIXTURE_PDB `
+            -ToolsRoot $env:NATIVE_TOOLS_ROOT `
+            -GhidraPath $env:GHIDRA_PATH `
+            -JavaHome $env:JAVA_HOME `
+            -WorkspaceRoot $env:NATIVE_WORKSPACE_ROOT `
+            -EvidenceDir $env:NATIVE_EVIDENCE_DIR `
+            -MaxMemory "4G" `
+            -AnalysisTimeoutSeconds 1800
+
+      - name: Assert native evidence semantics and provenance
+        run: |
+          $ErrorActionPreference = "Stop"
+          $fullFiles = @(
+            Get-ChildItem -LiteralPath $env:NATIVE_EVIDENCE_DIR -Recurse `
+              -File -Filter "evidence.full.json"
+          )
+          $manifestFiles = @(
+            Get-ChildItem -LiteralPath $env:NATIVE_EVIDENCE_DIR -Recurse `
+              -File -Filter "evidence.manifest.json"
+          )
+          if ($fullFiles.Count -ne 1 -or $manifestFiles.Count -ne 1) {
+            throw "Expected exactly one Native Evidence Store and manifest."
+          }
+          $fullPath = $fullFiles[0].FullName
+          $manifestPath = $manifestFiles[0].FullName
+          if ($fullFiles[0].DirectoryName -ne $manifestFiles[0].DirectoryName) {
+            throw "Native evidence and manifest were written to different stores."
+          }
+          $evidence = Get-Content -LiteralPath $fullPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+
+          if (@($evidence.recipeTargets).Count -ne 8) {
+            throw "Expected all 8 recipe targets in evidence.full.json."
+          }
+          $unresolved = @(
+            $evidence.recipeTargets | Where-Object {
+              [string]$_.status -ne "CONFIRMED" -or
+              @($_.resolvedEvidenceIds).Count -ne [int]$_.expectedCount
+            }
+          )
+          if ($unresolved.Count -ne 0) {
+            throw "At least one recipe target was not resolved exactly."
+          }
+          $intTarget = $evidence.recipeTargets |
+            Where-Object targetId -eq "compute-quality-int" |
+            Select-Object -First 1
+          $doubleTarget = $evidence.recipeTargets |
+            Where-Object targetId -eq "compute-quality-double" |
+            Select-Object -First 1
+          $intId = @($intTarget.resolvedEvidenceIds)[0]
+          $doubleId = @($doubleTarget.resolvedEvidenceIds)[0]
+          if (-not $intId -or -not $doubleId -or $intId -eq $doubleId) {
+            throw "The two ComputeQuality overloads did not resolve distinctly."
+          }
+
+          if ($evidence.provenance.pdb.loaded -ne $true) {
+            throw "Fixture PDB was not loaded."
+          }
+          if ($evidence.provenance.pdb.matchesBinary -ne $true) {
+            throw "Fixture PDB did not match the analyzed binary."
+          }
+          $dllHash = (Get-FileHash -LiteralPath $env:FIXTURE_DLL `
+              -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ([string]$evidence.provenance.binary.sha256 -ne $dllHash) {
+            throw "Analyzed program hash differs from the fixture DLL hash."
+          }
+          if ([string]$evidence.trust.status -ne "VERIFIED" -or
+              $manifest.trust.formalValidation -ne $true) {
+            throw "Clean-checkout fixture evidence was not formally verified."
+          }
+
+          $requiredCounts = @(
+            "native_call_edges"
+            "native_field_accesses"
+            "native_constants"
+            "native_branches"
+            "native_vtable_slots"
+          )
+          foreach ($name in $requiredCounts) {
+            if ([int]$manifest.counts.$name -le 0) {
+              throw "Expected a positive $name count."
+            }
+          }
+          if ([int]$manifest.counts.native_recipe_targets -ne 8) {
+            throw "Evidence Store manifest did not index all 8 recipe targets."
+          }
+          $constantValues = @(
+            foreach ($target in @($evidence.targets)) {
+              foreach ($constant in @($target.numericConstants)) {
+                [double]$constant.value
+              }
+            }
+          )
+          $expectedConstants = @(42, 100, 1.25)
+          $matchedConstants = @(
+            $constantValues | Where-Object { $expectedConstants -contains $_ }
+          )
+          if ($matchedConstants.Count -eq 0) {
+            throw "Expected fixture constant 42, 100, or 1.25 was not indexed."
+          }
+          $fullHash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).
+            Hash.ToLowerInvariant()
+          if ([string]$manifest.source.sha256 -ne $fullHash) {
+            throw "Evidence Store manifest source hash is stale."
+          }
+
+          @(
+            "NATIVE_STORE_DIR=$($fullFiles[0].DirectoryName)"
+            "NATIVE_EVIDENCE_FULL=$fullPath"
+            "NATIVE_EVIDENCE_MANIFEST=$manifestPath"
+          ) | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Validate the generated native evidence
+        run: |
+          python scripts/validate_native_evidence.py `
+            --manifest "$env:NATIVE_EVIDENCE_FULL" `
+            --dll "$env:FIXTURE_DLL" `
+            --pdb "$env:FIXTURE_PDB" `
+            --pretty
+
+      - name: Exercise bounded native evidence queries
+        run: |
+          python scripts/query_native_evidence.py `
+            --evidence-dir "$env:NATIVE_STORE_DIR" `
+            overview --budget 700
+          python scripts/query_native_evidence.py `
+            --evidence-dir "$env:NATIVE_STORE_DIR" `
+            search --query "ComputeQuality" --page-size 10 --budget 900
+
+      - name: Run native unit gates
+        run: |
+          python tests/test_native_fixture_workflow.py
+          python tests/test_native_recipe.py
+          python tests/test_native_identity.py
+          python tests/test_native_evidence_store.py
+          python tests/test_native_evidence_query.py
+
+      - name: Run report-claim fixture gates
+        run: |
+          python tests/test_report_claims.py
+          python scripts/validate_report_claims.py `
+            --root tests/fixtures/report_claims `
+            tests/fixtures/report_claims/reports/manifests/fixture.claims.json
+          python scripts/validate_report_claims.py `
+            --formal `
+            --root tests/fixtures/report_claims `
+            tests/fixtures/report_claims/reports/manifests/fixture.claims.json
