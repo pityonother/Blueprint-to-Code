@@ -387,6 +387,8 @@ CREATE TABLE scan_failures (
     stage TEXT NOT NULL,
     error_code TEXT NOT NULL,
     status TEXT NOT NULL,
+    source_kind TEXT NOT NULL DEFAULT 'UNKNOWN',
+    confidence TEXT NOT NULL DEFAULT 'UNKNOWN',
     detail_redacted TEXT NOT NULL
 );
 
@@ -4012,14 +4014,16 @@ def _insert_registry_reference_rows(
                 """
                 INSERT OR IGNORE INTO scan_failures(
                     failure_id, object_path, stage, error_code, status,
-                    detail_redacted
+                    source_kind, confidence, detail_redacted
                 ) VALUES (?, ?, 'asset_registry_dependency', ?,
-                          'NOT_RECOVERED', ?)
+                          'NOT_RECOVERED', ?, ?, ?)
                 """,
                 (
                     failure_id,
                     source,
                     reason_code,
+                    dependency.get("source_kind", UNKNOWN),
+                    dependency.get("confidence", UNKNOWN),
                     canonical_json(
                         {
                             "targetIdentifier": target,
@@ -4931,6 +4935,8 @@ def _materialize_database(
                     "stage": "serialized_identity",
                     "error_code": error_code,
                     "status": "NOT_RECOVERED",
+                    "source_kind": "serialized_package_header",
+                    "confidence": "UNKNOWN",
                     "detail_redacted": error_code,
                 }
             )
@@ -4960,6 +4966,8 @@ def _materialize_database(
                         "stage": "serialized_reference_surface",
                         "error_code": error_code,
                         "status": status,
+                        "source_kind": "serialized_package_header",
+                        "confidence": "UNKNOWN",
                         "detail_redacted": error_code,
                     }
                 )

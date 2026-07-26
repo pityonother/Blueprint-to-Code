@@ -741,6 +741,7 @@ def _dependency_rows_for_package(registry, package_name, option_map, errors):
 
 def _checkpoint_is_resumable(
     checkpoint,
+    producer_source_sha256,
     inventory_signature,
     dependency_enabled,
     asset_total,
@@ -749,6 +750,8 @@ def _checkpoint_is_resumable(
     dependency_path,
 ):
     if not checkpoint:
+        return False
+    if checkpoint.get("producer_source_sha256") != producer_source_sha256:
         return False
     if not _valid_generation_id(checkpoint.get("generation_id")):
         return False
@@ -837,6 +840,7 @@ def _checkpoint_is_resumable(
 
 
 def _new_checkpoint(
+    producer_source_sha256,
     inventory_signature,
     dependency_enabled,
     batch_size,
@@ -851,6 +855,7 @@ def _new_checkpoint(
         "generation_id": uuid.uuid4().hex,
         "phase": "assets",
         "status": "IN_PROGRESS",
+        "producer_source_sha256": producer_source_sha256,
         "inventory_signature": inventory_signature,
         "dependencies_enabled": bool(dependency_enabled),
         "batch_size": int(batch_size),
@@ -1017,7 +1022,7 @@ def _manifest_from_checkpoint(
         "generated_at_utc": generated_at,
         "producer": {
             "script": os.path.basename(__file__),
-            "source_sha256": _sha256_file(os.path.abspath(__file__)),
+            "source_sha256": str(checkpoint.get("producer_source_sha256") or ""),
         },
         "publication": {
             "mode": "immutable_generation_manifest_commit",
@@ -1085,6 +1090,7 @@ def export_registry_snapshot():
         True,
     )
     batch_size = _env_batch_size()
+    producer_source_sha256 = _sha256_file(os.path.abspath(__file__))
 
     manifest_path = os.path.join(output_dir, MANIFEST_OUTPUT_NAME)
     staging_dir = os.path.join(output_dir, STAGING_DIRECTORY_NAME)
@@ -1134,6 +1140,7 @@ def export_registry_snapshot():
     checkpoint = _load_checkpoint(checkpoint_path)
     resumable = _checkpoint_is_resumable(
         checkpoint,
+        producer_source_sha256,
         inventory_signature,
         dependency_enabled,
         len(asset_entries),
@@ -1164,6 +1171,7 @@ def export_registry_snapshot():
         _truncate_file(asset_path, 0)
         _truncate_file(dependency_path, 0)
         checkpoint = _new_checkpoint(
+            producer_source_sha256,
             inventory_signature,
             dependency_enabled,
             batch_size,
@@ -1290,9 +1298,10 @@ def export_registry_snapshot():
     return manifest
 
 
-try:
-    EXPORT_RESULT = export_registry_snapshot()
-except Exception as exc:
-    safe_message = _sanitize_text(exc)
-    _log("FAILED: {}".format(safe_message))
-    raise RuntimeError(safe_message)
+if unreal is not None or __name__ == "__main__":
+    try:
+        EXPORT_RESULT = export_registry_snapshot()
+    except Exception as exc:
+        safe_message = _sanitize_text(exc)
+        _log("FAILED: {}".format(safe_message))
+        raise RuntimeError(safe_message)

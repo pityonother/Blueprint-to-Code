@@ -1251,21 +1251,37 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                 unresolved = connection.execute(
                     """
                     SELECT object_path, stage, error_code, status,
-                           detail_redacted
+                           source_kind, confidence, detail_redacted
                     FROM scan_failures
                     WHERE stage='asset_registry_dependency'
                     """
                 ).fetchone()
                 self.assertEqual(
-                    unresolved[:4],
+                    unresolved[:6],
                     (
                         "/Actual/TargetAsset",
                         "asset_registry_dependency",
                         "TARGET_NOT_PACKAGE_PATH",
                         "NOT_RECOVERED",
+                        "unreal_asset_registry",
+                        "LOW",
                     ),
                 )
-                self.assertIn("Function_42", unresolved[4])
+                self.assertIn("Function_42", unresolved[6])
+                self.assertEqual(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM asset_references
+                        WHERE source_kind='unreal_asset_registry'
+                          AND (
+                              source_object_path NOT LIKE '/%'
+                              OR target_object_path NOT LIKE '/%'
+                          )
+                        """
+                    ).fetchone()[0],
+                    0,
+                )
             finally:
                 connection.close()
 
@@ -1280,6 +1296,101 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                 "REGISTRY_ASSETS_(SHA256|BYTES|COUNT)_MISMATCH",
             ):
                 load_registry_snapshot(registry)
+
+    def test_registry_exporter_classifies_identifiers_and_binds_checkpoint_source(
+        self,
+    ):
+        from devkit_exporters import export_kb_registry_snapshot as exporter
+
+        class FakeRegistry:
+            def get_dependencies(self, _package_name, _options):
+                return ["/Game/ValidPackage", "Function_42"]
+
+        option_map = {
+            dependency_type: object()
+            for dependency_type, _option_name in exporter.DEPENDENCY_TYPES
+        }
+        rows = exporter._dependency_rows_for_package(
+            FakeRegistry(),
+            "/Game/SourcePackage",
+            option_map,
+            [],
+        )
+        unresolved = [
+            row for row in rows if row["target_package_name"] == "Function_42"
+        ]
+        self.assertEqual(len(unresolved), len(exporter.DEPENDENCY_TYPES))
+        self.assertTrue(
+            all(
+                row["dependency_type"] == "unresolved_identifier"
+                and row["confidence"] == "LOW"
+                and row["reason_code"] == "TARGET_NOT_PACKAGE_PATH"
+                for row in unresolved
+            )
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            asset_path = root / "assets.jsonl"
+            dependency_path = root / "dependencies.jsonl"
+            asset_path.write_bytes(b"")
+            dependency_path.write_bytes(b"")
+            checkpoint = exporter._new_checkpoint(
+                "current-source",
+                "f" * 64,
+                True,
+                500,
+                0,
+                0,
+                0,
+                0,
+            )
+            self.assertEqual(
+                checkpoint["producer_source_sha256"],
+                "current-source",
+            )
+            self.assertTrue(
+                exporter._checkpoint_is_resumable(
+                    checkpoint,
+                    "current-source",
+                    "f" * 64,
+                    True,
+                    0,
+                    0,
+                    asset_path,
+                    dependency_path,
+                )
+            )
+            manifest = exporter._manifest_from_checkpoint(
+                checkpoint,
+                500,
+                f"generations/{checkpoint['generation_id']}",
+                {
+                    "assets": {"sha256": "a" * 64, "bytes": 0, "lines": 0},
+                    "dependencies": {
+                        "sha256": "b" * 64,
+                        "bytes": 0,
+                        "lines": 0,
+                    },
+                    "checkpoint": {"sha256": "c" * 64, "bytes": 0},
+                },
+            )
+            self.assertEqual(
+                manifest["producer"]["source_sha256"],
+                "current-source",
+            )
+            checkpoint["producer_source_sha256"] = "old-source"
+            self.assertFalse(
+                exporter._checkpoint_is_resumable(
+                    checkpoint,
+                    "current-source",
+                    "f" * 64,
+                    True,
+                    0,
+                    0,
+                    asset_path,
+                    dependency_path,
+                )
+            )
 
     def test_registry_type_flags_require_authoritative_type_evidence(self):
         from blueprint_translator.kb_discovery import _registry_identity
