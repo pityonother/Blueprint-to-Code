@@ -20,6 +20,8 @@
     "nativeConfirmedFacts",
     "resolvedCrossSourceEdges",
     "assumptions",
+    "blueprintGaps",
+    "nativeGaps",
     "runtimeOnlyGaps",
     "staleProvenanceWarnings"
   ],
@@ -91,6 +93,20 @@
       }
     },
     "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "blueprintGaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "nativeGaps": {
       "type": "array",
       "items": {
         "type": "object",

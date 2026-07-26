@@ -97,6 +97,12 @@ def _native_gaps(repository: NativeEvidenceRepository) -> list[dict[str, Any]]:
     return [dict(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
+def _is_runtime_only_gap(gap: dict[str, Any]) -> bool:
+    reason = str(gap.get("reasonCode") or gap.get("kind") or "").upper()
+    status = str(gap.get("status") or "").upper()
+    return reason.startswith("RUNTIME_") or status == "UNSUPPORTED_DYNAMIC_BRANCH"
+
+
 def build_hybrid_context_pack(
     hybrid: HybridEvidenceRepository,
     native: NativeEvidenceRepository,
@@ -139,6 +145,7 @@ def build_hybrid_context_pack(
     native_facts: list[dict[str, Any]] = []
     resolved: list[dict[str, Any]] = []
     assumptions: list[dict[str, Any]] = []
+    blueprint_gaps: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     seen_native: set[str] = set()
     for edge in selected:
@@ -174,6 +181,16 @@ def build_hybrid_context_pack(
                 }
             )
         else:
+            if edge.get("status") == "NOT_RECOVERED":
+                blueprint_gaps.append(
+                    {
+                        "kind": "blueprint-gap",
+                        "edgeId": edge.get("edgeId", ""),
+                        "sourceId": edge.get("sourceId", ""),
+                        "status": "NOT_RECOVERED",
+                        "reasonCodes": edge.get("gaps", []),
+                    }
+                )
             assumptions.append(
                 {
                     "edgeId": edge.get("edgeId", ""),
@@ -185,10 +202,16 @@ def build_hybrid_context_pack(
                 }
             )
 
-    runtime_gaps = _native_gaps(native)
+    all_native_gaps = _native_gaps(native)
+    runtime_gaps = [
+        gap for gap in all_native_gaps if _is_runtime_only_gap(gap)
+    ]
+    native_gaps = [
+        gap for gap in all_native_gaps if not _is_runtime_only_gap(gap)
+    ]
     for edge in selected:
         if edge.get("status") == "SOURCE_NOT_AVAILABLE":
-            runtime_gaps.append(
+            native_gaps.append(
                 {
                     "kind": "hybrid-gap",
                     "edgeId": edge.get("edgeId", ""),
@@ -213,6 +236,8 @@ def build_hybrid_context_pack(
         "nativeConfirmedFacts": native_facts,
         "resolvedCrossSourceEdges": resolved,
         "assumptions": assumptions,
+        "blueprintGaps": blueprint_gaps[:12],
+        "nativeGaps": native_gaps[:12],
         "runtimeOnlyGaps": runtime_gaps[:12],
         "staleProvenanceWarnings": warnings,
     }
@@ -230,6 +255,8 @@ def build_hybrid_context_pack(
 
     removable = (
         "runtimeOnlyGaps",
+        "nativeGaps",
+        "blueprintGaps",
         "assumptions",
         "staleProvenanceWarnings",
         "nativeConfirmedFacts",
@@ -306,6 +333,20 @@ def render_hybrid_context_pack(pack: dict[str, Any]) -> str:
         )
         for row in rows("assumptions")
     ]
+    blueprint_gaps = [
+        (
+            f"`{row.get('sourceId', '')}` [{row.get('status', '')}]: "
+            f"{row.get('reasonCodes', [])}"
+        )
+        for row in rows("blueprintGaps")
+    ]
+    native_gaps = [
+        (
+            f"`{row.get('reasonCode', '')}` [{row.get('status', '')}]: "
+            f"{row.get('detail', '')}"
+        )
+        for row in rows("nativeGaps")
+    ]
     runtime_gaps = [
         (
             f"`{row.get('reasonCode', '')}` [{row.get('status', '')}]: "
@@ -336,6 +377,10 @@ def render_hybrid_context_pack(pack: dict[str, Any]) -> str:
             *section("Resolved cross-source edges", resolved),
             "",
             *section("Assumptions", assumptions),
+            "",
+            *section("Blueprint gaps", blueprint_gaps),
+            "",
+            *section("Native gaps", native_gaps),
             "",
             *section("Runtime-only gaps", runtime_gaps),
             "",

@@ -210,7 +210,19 @@ class HybridEvidenceTests(unittest.TestCase):
         self.assertTrue(pack["nativeConfirmedFacts"])
         self.assertTrue(pack["resolvedCrossSourceEdges"])
         self.assertTrue(pack["assumptions"])
+        self.assertTrue(pack["blueprintGaps"])
+        self.assertTrue(pack["nativeGaps"])
         self.assertTrue(pack["runtimeOnlyGaps"])
+        self.assertTrue(
+            all(
+                str(gap.get("reasonCode", "")).startswith("RUNTIME_")
+                for gap in pack["runtimeOnlyGaps"]
+            )
+        )
+        self.assertIn(
+            "DECOMPILE_FAILED",
+            {gap.get("reasonCode") for gap in pack["nativeGaps"]},
+        )
         self.assertEqual(pack["staleProvenanceWarnings"], [])
         self.assertNotIn("FULL_DECOMPILE_SHOULD_NOT_APPEAR_IN_INDEX", rendered)
 
