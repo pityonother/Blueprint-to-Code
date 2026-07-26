@@ -1,0 +1,51 @@
+{
+  "schema": "blueprint-to-code-runtime-observation-set/v1",
+  "observationSetId": "runtime://fixture/harvest-unsupported-branch-v1",
+  "synthetic": true,
+  "environment": {
+    "gameBuild": "synthetic",
+    "serverSettings": {
+      "HarvestAmountMultiplier": 1.0
+    },
+    "mods": [],
+    "map": "FixtureMap",
+    "notes": "Synthetic fixture proving unsupported branches do not receive a score."
+  },
+  "subject": {
+    "nodeId": "fixture-node",
+    "resourceId": "fixture-resource",
+    "speciesKey": "fixture-species",
+    "attackId": "unsupported-hook"
+  },
+  "staticModel": {
+    "modelVersion": "harvest-estimated-yield-per-node/v1-native-static-profile",
+    "inputs": {
+      "base_damage": 50.0,
+      "damage_multiplier": 1.0,
+      "harvest_quantity_multiplier": 1.0,
+      "max_harvest_health": 100.0,
+      "harvest_health_give_resource_interval": 40.0,
+      "resource_weight_share": 1.0,
+      "minimum_quantity": 1.0,
+      "maximum_quantity": 1.0,
+      "quantity_random_power": 1.0,
+      "clamp_resource_harvest_damage": true,
+      "harvest_amount_scale": 2.0
+    },
+    "unsupportedDynamicBranches": [
+      "BPOverrideHarvestYield"
+    ]
+  },
+  "policy": {
+    "absoluteTolerance": 0.01,
+    "relativeTolerance": 0.001,
+    "minimumTrialsForConfirmation": 3
+  },
+  "trials": [
+    {
+      "trialId": "trial-001",
+      "hits": [],
+      "finalResourceUnits": 999.0
+    }
+  ]
+}

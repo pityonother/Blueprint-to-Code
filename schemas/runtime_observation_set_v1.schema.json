@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/runtime_observation_set_v1.schema.json",
+  "title": "Blueprint to Code runtime observation set v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "observationSetId",
+    "synthetic",
+    "environment",
+    "subject",
+    "staticModel",
+    "policy",
+    "trials"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code-runtime-observation-set/v1"
+    },
+    "observationSetId": {
+      "type": "string",
+      "pattern": "^runtime://"
+    },
+    "synthetic": {
+      "type": "boolean"
+    },
+    "environment": {
+      "type": "object",
+      "required": ["gameBuild", "serverSettings", "mods", "map", "notes"],
+      "properties": {
+        "gameBuild": {"type": "string"},
+        "serverSettings": {"type": "object"},
+        "mods": {"type": "array", "items": {"type": "string"}},
+        "map": {"type": "string"},
+        "notes": {"type": "string"}
+      }
+    },
+    "subject": {
+      "type": "object",
+      "required": ["nodeId", "resourceId", "speciesKey", "attackId"],
+      "properties": {
+        "nodeId": {"type": "string"},
+        "resourceId": {"type": "string"},
+        "speciesKey": {"type": "string"},
+        "attackId": {"type": "string"}
+      }
+    },
+    "staticModel": {
+      "type": "object",
+      "required": ["modelVersion", "inputs", "unsupportedDynamicBranches"],
+      "properties": {
+        "modelVersion": {"type": "string"},
+        "inputs": {"type": "object"},
+        "unsupportedDynamicBranches": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "required": [
+        "absoluteTolerance",
+        "relativeTolerance",
+        "minimumTrialsForConfirmation"
+      ],
+      "properties": {
+        "absoluteTolerance": {"type": "number", "minimum": 0},
+        "relativeTolerance": {"type": "number", "minimum": 0},
+        "minimumTrialsForConfirmation": {"type": "integer", "minimum": 1}
+      }
+    },
+    "trials": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["trialId", "hits", "finalResourceUnits"],
+        "properties": {
+          "trialId": {"type": "string", "minLength": 1},
+          "hits": {"type": "array", "items": {"type": "object"}},
+          "finalResourceUnits": {"type": "number", "minimum": 0}
+        }
+      }
+    }
+  }
+}
