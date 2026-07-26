@@ -9,6 +9,7 @@ fail closed (the latter is an error in formal mode).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -19,6 +20,12 @@ from typing import Any
 
 CLAIM_SCHEMA = "blueprint-to-code-report-claims/v1"
 SANITIZED_NATIVE_SCHEMA = "blueprint-to-code-sanitized-native-evidence/v1"
+SANITIZED_BLUEPRINT_SCHEMA = (
+    "blueprint-to-code-sanitized-blueprint-evidence/v1"
+)
+RUNTIME_OBSERVATION_SCHEMA = (
+    "blueprint-to-code-runtime-observation-set/v1"
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 EVIDENCE_REF_RE = re.compile(r"^(?:bp|native|runtime)://[^\s]+$")
 
@@ -66,6 +73,14 @@ def _issue(
 
 def _sha(value: object) -> str:
     return str(value or "").strip().casefold()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _dependency_value(payload: Mapping[str, Any], *keys: str) -> object:
@@ -147,6 +162,210 @@ def validate_claim_manifests(
                 )
             )
             dependencies = {}
+
+        blueprint_dependencies = dependencies.get("blueprintAssets", [])
+        if not isinstance(blueprint_dependencies, list):
+            issues.append(
+                _issue(
+                    "ERROR",
+                    "CLAIM_DEPENDENCIES_INVALID",
+                    "dependencies.blueprintAssets must be an array",
+                    manifest=manifest_path,
+                )
+            )
+            blueprint_dependencies = []
+        available_blueprint_ids: set[str] = set()
+        blueprint_fingerprints: set[str] = set()
+        for index, dependency in enumerate(blueprint_dependencies):
+            if not isinstance(dependency, Mapping):
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "BLUEPRINT_DEPENDENCY_INVALID",
+                        f"blueprintAssets[{index}] must be an object",
+                        manifest=manifest_path,
+                    )
+                )
+                continue
+            try:
+                blueprint_path = _resolve_relative(
+                    root,
+                    dependency.get("manifestPath"),
+                    f"blueprintAssets[{index}].manifestPath",
+                )
+                blueprint_manifest = _load_object(
+                    blueprint_path,
+                    "sanitized Blueprint manifest",
+                )
+            except Exception as exc:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "BLUEPRINT_MANIFEST_INVALID",
+                        str(exc),
+                        manifest=manifest_path,
+                    )
+                )
+                continue
+            if blueprint_manifest.get("schema") != SANITIZED_BLUEPRINT_SCHEMA:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "BLUEPRINT_MANIFEST_SCHEMA_INVALID",
+                        f"{blueprint_path} has an unsupported schema",
+                        manifest=manifest_path,
+                    )
+                )
+                continue
+            comparisons = (
+                ("assetId", "STALE_SOURCE"),
+                ("revisionId", "STALE_SOURCE"),
+                ("sourceFingerprint", "STALE_SOURCE"),
+            )
+            for key, code in comparisons:
+                expected = str(dependency.get(key) or "")
+                actual = str(blueprint_manifest.get(key) or "")
+                if not expected or expected != actual:
+                    issues.append(
+                        _issue(
+                            "ERROR",
+                            code,
+                            f"{key} differs from {blueprint_path.name}",
+                            manifest=manifest_path,
+                        )
+                    )
+            source_fingerprint = _sha(
+                blueprint_manifest.get("sourceFingerprint")
+            )
+            if source_fingerprint:
+                blueprint_fingerprints.add(source_fingerprint)
+            refs = blueprint_manifest.get("evidenceRefs")
+            if not isinstance(refs, list):
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "BLUEPRINT_MANIFEST_INVALID",
+                        "evidenceRefs must be an array",
+                        manifest=manifest_path,
+                    )
+                )
+            else:
+                available_blueprint_ids.update(
+                    str(ref) for ref in refs if str(ref).startswith("bp://")
+                )
+            trust = blueprint_manifest.get("trust")
+            trust_status = (
+                str(trust.get("status") or "")
+                if isinstance(trust, Mapping)
+                else ""
+            )
+            if trust_status != "VERIFIED":
+                issues.append(
+                    _issue(
+                        "ERROR" if formal else "WARNING",
+                        "PROVENANCE_UNVERIFIED",
+                        (
+                            f"{blueprint_path.name} trust status is "
+                            f"{trust_status or 'missing'}"
+                        ),
+                        manifest=manifest_path,
+                    )
+                )
+
+        runtime_dependencies = dependencies.get(
+            "runtimeObservationSets",
+            [],
+        )
+        if not isinstance(runtime_dependencies, list):
+            issues.append(
+                _issue(
+                    "ERROR",
+                    "CLAIM_DEPENDENCIES_INVALID",
+                    "dependencies.runtimeObservationSets must be an array",
+                    manifest=manifest_path,
+                )
+            )
+            runtime_dependencies = []
+        available_runtime_ids: set[str] = set()
+        runtime_source_hashes: set[str] = set()
+        for index, dependency in enumerate(runtime_dependencies):
+            if not isinstance(dependency, Mapping):
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "RUNTIME_DEPENDENCY_INVALID",
+                        f"runtimeObservationSets[{index}] must be an object",
+                        manifest=manifest_path,
+                    )
+                )
+                continue
+            try:
+                runtime_path = _resolve_relative(
+                    root,
+                    dependency.get("manifestPath"),
+                    f"runtimeObservationSets[{index}].manifestPath",
+                )
+                runtime_manifest = _load_object(
+                    runtime_path,
+                    "runtime observation set",
+                )
+                actual_runtime_sha = _file_sha256(runtime_path)
+            except Exception as exc:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "RUNTIME_OBSERVATION_INVALID",
+                        str(exc),
+                        manifest=manifest_path,
+                    )
+                )
+                continue
+            if runtime_manifest.get("schema") != RUNTIME_OBSERVATION_SCHEMA:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "RUNTIME_OBSERVATION_SCHEMA_INVALID",
+                        f"{runtime_path} has an unsupported schema",
+                        manifest=manifest_path,
+                    )
+                )
+                continue
+            observation_id = str(
+                runtime_manifest.get("observationSetId") or ""
+            )
+            if (
+                not observation_id
+                or observation_id
+                != str(dependency.get("observationSetId") or "")
+            ):
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "STALE_RUNTIME_OBSERVATION",
+                        (
+                            "runtime observation set ID differs from "
+                            f"{runtime_path.name}"
+                        ),
+                        manifest=manifest_path,
+                    )
+                )
+            expected_runtime_sha = _sha(dependency.get("sourceSha256"))
+            if (
+                not SHA256_RE.fullmatch(expected_runtime_sha)
+                or expected_runtime_sha != actual_runtime_sha
+            ):
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "STALE_RUNTIME_OBSERVATION",
+                        f"sourceSha256 differs from {runtime_path.name}",
+                        manifest=manifest_path,
+                    )
+                )
+            if observation_id:
+                available_runtime_ids.add(observation_id)
+            runtime_source_hashes.add(actual_runtime_sha)
+
         native_dependencies = dependencies.get("nativeEvidenceSets", [])
         if not isinstance(native_dependencies, list):
             issues.append(
@@ -470,6 +689,32 @@ def validate_claim_manifests(
                                 claim_id=claim_id,
                             )
                         )
+                    elif text.startswith("bp://") and text not in available_blueprint_ids:
+                        issues.append(
+                            _issue(
+                                "ERROR",
+                                "EVIDENCE_REF_NOT_FOUND",
+                                (
+                                    "Blueprint evidence ref is not in a "
+                                    f"dependency: {text}"
+                                ),
+                                manifest=manifest_path,
+                                claim_id=claim_id,
+                            )
+                        )
+                    elif text.startswith("runtime://") and text not in available_runtime_ids:
+                        issues.append(
+                            _issue(
+                                "ERROR",
+                                "EVIDENCE_REF_NOT_FOUND",
+                                (
+                                    "runtime evidence ref is not in a "
+                                    f"dependency: {text}"
+                                ),
+                                manifest=manifest_path,
+                                claim_id=claim_id,
+                            )
+                        )
 
             fingerprints = claim.get("sourceFingerprints")
             if isinstance(fingerprints, Mapping):
@@ -502,6 +747,76 @@ def validate_claim_manifests(
                                 claim_id=claim_id,
                             )
                         )
+                blueprint_fingerprint = _sha(
+                    fingerprints.get("blueprintSourceFingerprint")
+                )
+                if (
+                    blueprint_fingerprint
+                    and blueprint_fingerprint not in blueprint_fingerprints
+                ):
+                    issues.append(
+                        _issue(
+                            "ERROR",
+                            "STALE_SOURCE",
+                            f"{claim_id} Blueprint fingerprint is stale",
+                            manifest=manifest_path,
+                            claim_id=claim_id,
+                        )
+                    )
+                runtime_fingerprint = _sha(
+                    fingerprints.get("runtimeObservationSha256")
+                )
+                if (
+                    runtime_fingerprint
+                    and runtime_fingerprint not in runtime_source_hashes
+                ):
+                    issues.append(
+                        _issue(
+                            "ERROR",
+                            "STALE_RUNTIME_OBSERVATION",
+                            f"{claim_id} runtime observation fingerprint is stale",
+                            manifest=manifest_path,
+                            claim_id=claim_id,
+                        )
+                    )
+
+            runtime_validation = claim.get("runtimeValidation")
+            if isinstance(runtime_validation, Mapping):
+                observation_refs = runtime_validation.get(
+                    "observationRefs",
+                    [],
+                )
+                if not isinstance(observation_refs, list):
+                    issues.append(
+                        _issue(
+                            "ERROR",
+                            "RUNTIME_VALIDATION_INVALID",
+                            (
+                                f"{claim_id or index} observationRefs must "
+                                "be an array"
+                            ),
+                            manifest=manifest_path,
+                            claim_id=claim_id,
+                        )
+                    )
+                else:
+                    for observation_ref in observation_refs:
+                        if (
+                            str(observation_ref)
+                            not in available_runtime_ids
+                        ):
+                            issues.append(
+                                _issue(
+                                    "ERROR",
+                                    "EVIDENCE_REF_NOT_FOUND",
+                                    (
+                                        "runtime validation ref is not in "
+                                        f"a dependency: {observation_ref}"
+                                    ),
+                                    manifest=manifest_path,
+                                    claim_id=claim_id,
+                                )
+                            )
                     if (
                         fingerprints.get("recipeSha256")
                         and _sha(fingerprints.get("recipeSha256"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,8 @@ SHA_C = "c" * 64
 SHA_D = "d" * 64
 NATIVE_ID = f"native://{SHA_A}/fixture.dll/0x1000"
 EVIDENCE_SET_ID = f"native-set://{SHA_A}/{SHA_C}"
+BP_ID = "bp://111111111111111111111111@222222222222222222222222/g/1/n/10"
+RUNTIME_ID = "runtime://fixture/quality-v1"
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -213,6 +216,103 @@ class ReportClaimValidationTests(unittest.TestCase):
             self.assertIn(
                 "DUPLICATE_CLAIM_ID",
                 {issue["code"] for issue in result["issues"]},
+            )
+
+    def test_blueprint_dependency_fingerprint_drift_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _valid_tree(root)
+            blueprint_manifest_path = (
+                root / "reports" / "evidence_manifests" / "fixture.blueprint.json"
+            )
+            _write_json(
+                blueprint_manifest_path,
+                {
+                    "schema": "blueprint-to-code-sanitized-blueprint-evidence/v1",
+                    "assetId": "/Game/Fixture/Quality_BP",
+                    "revisionId": "222222222222222222222222",
+                    "sourceFingerprint": "e" * 64,
+                    "trust": {"status": "VERIFIED"},
+                    "evidenceRefs": [BP_ID],
+                },
+            )
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["dependencies"]["blueprintAssets"] = [
+                {
+                    "manifestPath": (
+                        "reports/evidence_manifests/fixture.blueprint.json"
+                    ),
+                    "assetId": "/Game/Fixture/Quality_BP",
+                    "revisionId": "222222222222222222222222",
+                    "sourceFingerprint": "f" * 64,
+                }
+            ]
+            payload["claims"][0]["evidenceRefs"].append(BP_ID)
+            payload["claims"][0]["sourceFingerprints"][
+                "blueprintSourceFingerprint"
+            ] = "f" * 64
+            _write_json(manifest, payload)
+
+            result = validate_claim_manifests(root, [manifest], formal=True)
+
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "STALE_SOURCE",
+                {issue["code"] for issue in result["issues"]},
+            )
+
+    def test_runtime_observation_hash_and_reference_are_verified(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _valid_tree(root)
+            runtime_path = (
+                root / "reports" / "evidence_manifests" / "fixture.runtime.json"
+            )
+            _write_json(
+                runtime_path,
+                {
+                    "schema": "blueprint-to-code-runtime-observation-set/v1",
+                    "observationSetId": RUNTIME_ID,
+                    "synthetic": True,
+                    "environment": {},
+                    "subject": {},
+                    "staticModel": {},
+                    "policy": {},
+                    "unsupportedDynamicBranches": [],
+                    "trials": [],
+                },
+            )
+            runtime_sha = hashlib.sha256(runtime_path.read_bytes()).hexdigest()
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["dependencies"]["runtimeObservationSets"] = [
+                {
+                    "manifestPath": (
+                        "reports/evidence_manifests/fixture.runtime.json"
+                    ),
+                    "observationSetId": RUNTIME_ID,
+                    "sourceSha256": runtime_sha,
+                }
+            ]
+            payload["claims"][0]["evidenceRefs"].append(RUNTIME_ID)
+            payload["claims"][0]["runtimeValidation"] = {
+                "status": "RUNTIME_CALIBRATED",
+                "observationRefs": [RUNTIME_ID],
+            }
+            _write_json(manifest, payload)
+
+            valid = validate_claim_manifests(root, [manifest], formal=True)
+            self.assertTrue(valid["ok"], valid["issues"])
+
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["dependencies"]["runtimeObservationSets"][0][
+                "sourceSha256"
+            ] = "0" * 64
+            _write_json(manifest, payload)
+            stale = validate_claim_manifests(root, [manifest], formal=True)
+            self.assertFalse(stale["ok"])
+            self.assertIn(
+                "STALE_RUNTIME_OBSERVATION",
+                {issue["code"] for issue in stale["issues"]},
             )
 
 
