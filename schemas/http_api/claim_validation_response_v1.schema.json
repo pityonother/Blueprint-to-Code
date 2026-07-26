@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/claim-validation-response/v1",
+  "title": "Report claim validation response",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "ok",
+    "formal",
+    "summary",
+    "issues"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code-report-claim-validation/v1"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "formal": {
+      "type": "boolean"
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifests",
+        "claims",
+        "errors",
+        "warnings"
+      ],
+      "properties": {
+        "manifests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "claims": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "severity",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "ERROR",
+              "WARNING"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "manifest": {
+            "type": "string"
+          },
+          "claimId": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

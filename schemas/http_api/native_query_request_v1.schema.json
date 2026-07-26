@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/native-query-request/v1",
+  "title": "Native evidence query request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operation"
+  ],
+  "properties": {
+    "operation": {
+      "type": "string",
+      "enum": [
+        "overview",
+        "search",
+        "function",
+        "callers",
+        "callees",
+        "field-accesses",
+        "constants",
+        "gaps",
+        "blueprint-links"
+      ]
+    },
+    "query": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "id": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "sourceId": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "reasonCode": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "budgetTokens": {
+      "type": "integer",
+      "minimum": 500,
+      "maximum": 8000
+    },
+    "pageSize": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "cursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "includeDecompile": {
+      "type": "boolean"
+    },
+    "snippetChars": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2000
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3
+    }
+  }
+}

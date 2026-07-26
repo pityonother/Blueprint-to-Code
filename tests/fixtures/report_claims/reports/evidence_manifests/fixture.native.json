@@ -1,0 +1,37 @@
+{
+  "schema": "blueprint-to-code-sanitized-native-evidence/v1",
+  "evidenceSetId": "native-set://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "localEvidenceRelativePath": "native_evidence/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture",
+  "trust": {
+    "status": "VERIFIED"
+  },
+  "provenance": {
+    "binary": {
+      "module": "fixture.dll",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "pdb": {
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "guid": "12345678-1234-5678-90ab-cdef12345678",
+      "age": 1,
+      "loaded": true,
+      "matchesBinary": true
+    },
+    "generator": {
+      "repositoryDirty": false,
+      "recipeId": "test-native-fixture/v1",
+      "recipeSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "scriptSha256": {
+        "runner": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    }
+  },
+  "targets": [
+    {
+      "evidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1000",
+      "qualifiedName": "Fixture::ComputeQuality",
+      "rva": "0x1000"
+    }
+  ],
+  "gaps": []
+}

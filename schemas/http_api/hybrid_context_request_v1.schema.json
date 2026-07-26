@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/hybrid-context-request/v1",
+  "title": "Hybrid evidence context request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "question"
+  ],
+  "properties": {
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "budgetTokens": {
+      "type": "integer",
+      "minimum": 500,
+      "maximum": 8000
+    }
+  }
+}
