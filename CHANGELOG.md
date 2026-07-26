@@ -26,6 +26,8 @@ match it.
 - The legacy native import command delegates to the versioned loot/quality
   recipe; the local server and frontend entrypoints delegate shared security,
   response, routing, API, escaping, and error responsibilities to modules.
+- The former license-decision placeholder is resolved as an author-retained
+  rights policy; no open-source license is granted by default.
 
 ### Security
 

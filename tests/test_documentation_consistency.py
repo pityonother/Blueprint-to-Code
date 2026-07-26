@@ -82,6 +82,21 @@ class DocumentationConsistencyTests(unittest.TestCase):
         self.assertIn("-AllowHashMismatch -Experimental", ghidra)
         self.assertNotIn("ShooterGameNative_B0E67E1E", ghidra)
 
+    def test_author_retained_rights_policy_is_explicit(self):
+        policy_path = ROOT / "docs" / "LICENSE_POLICY.md"
+
+        self.assertTrue(policy_path.is_file())
+        self.assertIn(
+            "[授权与分发策略](docs/LICENSE_POLICY.md)",
+            self.readme,
+        )
+        self.assertNotIn("LICENSE_DECISION_REQUIRED", self.readme)
+        self.assertFalse((ROOT / "LICENSE").exists())
+
+        policy = policy_path.read_text(encoding="utf-8")
+        self.assertIn("不授予开源许可证", policy)
+        self.assertIn("版权由项目作者保留", policy)
+
 
 if __name__ == "__main__":
     unittest.main()
