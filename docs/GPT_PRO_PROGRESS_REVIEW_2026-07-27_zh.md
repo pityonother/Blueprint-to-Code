@@ -1,260 +1,190 @@
-# Blueprint to Code：给 GPT Pro 的实施进度审查说明
+# ARK Knowledge Discovery 当前完成情况（供 GPT Pro 视察）
 
-日期：2026-07-27  
-仓库：`https://github.com/pityonother/Blueprint-to-Code`  
-实施分支：`codex/fix-partner-devkit-root`  
-版本：`0.2.0`  
-实现完成点：`741a359`（本说明文档和最终审查修复位于后续提交）
+## 视察目的
 
-## 这份文档的用途
+这份文档只用于让 GPT Pro 检查 Codex 当前完成的工程工作、已经发现的知识、证据强度和剩余盲区，并据此给 Codex 下一阶段的方向与优先级。它不是交接文档，也不是要求 GPT Pro 接管实现。
 
-请 GPT Pro **只审查当前实施进度并给出下一阶段方向**。不需要接手项目、修改
-代码或重复实现已经完成的内容。
+本轮严格停留在“范围发现”阶段：没有重构或迁移最终知识库，没有把启发式结果伪装成已确认事实，也没有把 ARK 原始包、二进制、PDB、Ghidra 工程、完整反编译文本、本机绝对路径或秘密写入产物。
 
-希望 GPT Pro 回答：
+## Codex 已完成的工程工作
 
-1. 原改进计划的关键目标是否已经形成完整闭环；
-2. 当前证据平台最值得优先补强的 3 个方向；
-3. 哪些结论仍缺少足够证明，不能对外宣称完成；
-4. 下一阶段应优先做 runtime calibration、历史报告再生成、查询体验，还是其他事项；
-5. 是否发现会破坏 provenance、fail-closed 或兼容性的结构性风险。
+1. 实现了可断点、可增量运行的发现管线：
+   - `scripts/devkit_exporters/export_kb_registry_snapshot.py`
+   - `scripts/export_kb_discovery_bundle.py`
+   - `scripts/blueprint_translator/kb_discovery.py`
+   - `tests/test_knowledge_discovery_bundle.py`
+2. 建立 Asset Registry v2 快照协议：
+   - 每一代 Registry 导出不可变；
+   - manifest 原子发布；
+   - checkpoint 同时绑定输入清单、提取器源码和 producer SHA-256；
+   - Registry 或提取器变化后会使旧 checkpoint 失效。
+3. 把以下证据统一写入一个调查数据库：
+   - DevKit 文件清单；
+   - Asset Registry 资产、类和依赖；
+   - 序列化包头中的硬引用与软对象路径；
+   - 已有 Blueprint Evidence Store；
+   - 已有领域知识库；
+   - 当前 DLL/PDB 与 Ghidra 边界证据。
+4. 为缺口建立显式状态，而不是填空猜测：
+   - `UNKNOWN`
+   - `AMBIGUOUS`
+   - `NOT_RECOVERED`
+   - `NOT_MEASURED`
+   - `SOURCE_NOT_AVAILABLE`
+   - `STALE`
+5. 生成了：
+   - 20 张结构化调查表；
+   - 38 个代表性查询问题；
+   - 102 个可复核样本；
+   - 14 个规格问题的发现报告；
+   - 带逐文件 SHA-256、隐私审计和 ZIP64 校验的可上传 ZIP。
+6. 在完整 DevKit 实跑中发现并修正了四类真实问题：
+   - 同一 Registry package 内多个 asset 被覆盖；
+   - `Function_*` 等非 package 标识被错误当成 package 依赖；
+   - checkpoint 未绑定实际提取器来源；
+   - 576K 级资产查询缺少 package/object path 索引而显著变慢。
 
-## 已经完成的工作
+## 已发现的知识
 
-### 1. Native 构建身份和 provenance
+### 1. 全量目录规模与资产形态
 
-- Ghidra project 按真实 DLL SHA-256 隔离，不再跨版本静默复用。
-- 正式证据绑定 DLL/PDB SHA、PE CodeView、PDB GUID + Age、PDB 加载状态、
-  Ghidra/Java、language/compiler spec、recipe、生成器脚本和 Git 状态。
-- PDB、project、recipe 或输出身份不一致时正式模式 fail closed。
-- `-AllowHashMismatch` 只能与显式 `-Experimental` 一起使用。
+- Asset Registry：576,203 个 asset，574,969 个 package。
+- DevKit 文件系统清单：505,169 个物理 package，其中 503,679 个 `.uasset`、1,490 个 `.umap`。
+- 调查数据库中的 `assets`：577,579 行、576,341 个不同 package。该数值高于物理文件数是因为一个 package 可以暴露多个 Registry object，并且数据库还保留了其他证据源中的对象身份。
+- 精确类识别结果：
+  - Blueprint：25,686
+  - DataTable：611
+  - Map：1,541
+- 1,372 个对象的 Blueprint 适用性仍是 `UNKNOWN`。
+- `is_data_asset` 当前没有确认行。这不是“ARK 没有 Data Asset”，而是本轮坚持只接受 Registry 精确类，没有把未知子类启发式提升为确认事实。
 
-主要实现：
+### 2. 引用图谱
 
-- `scripts/blueprint_translator/native_identity.py`
-- `scripts/native_analysis/native_identity.py`
-- `scripts/native_analysis/Get-NativeBuildIdentity.ps1`
-- `scripts/native_analysis/NativeAnalysis.Common.ps1`
+- 共记录 3,480,942 条引用边。
+- Asset Registry 贡献 3,405,173 条合法 package 引用：
+  - hard package：2,736,029
+  - soft package：668,597
+  - searchable name：547
+- Registry 原始记录中另有 24 个非 package 标识；它们被单独存为低置信度 `TARGET_NOT_PACKAGE_PATH` 缺口，没有污染 package 图。
+- 其他证据源补充了：
+  - 序列化 package import 硬引用：30,537
+  - 序列化软对象引用：6,142
+  - Blueprint 未解析函数调用：24,424
+  - Blueprint 启发式未解析引用：14,629
+  - 已有知识库登记关系：27
+- 报告已经计算最常被继承、最常被引用和跨顶层领域引用的候选项。当前“跨领域”只使用顶层内容目录作为代理维度，尚不等同于最终业务领域分类。
 
-### 2. 声明式 Native Analysis Recipe
+### 3. Blueprint 默认值与覆盖状态
 
-- 新增 versioned recipe schema。
-- loot/quality、harvest 和公开 fixture 都已迁移到声明式 recipe。
-- selector、expected match count、caller/callee 深度、field、constant、vtable
-  和预算由 recipe 控制。
-- 统一执行入口为 `Run-NativeRecipe.ps1`。
+- 默认属性表面共 10,588 条：
+  - `CONFIRMED_FINGERPRINT_ONLY`：9,376
+  - `NOT_RECOVERED`：1,212
+- 所有 `NOT_RECOVERED` 行都没有伪造属性值。
+- Blueprint Evidence：
+  - `FRESH`：210
+  - `NOT_APPLICABLE`：550,514
+  - `NOT_MEASURED`：26,838
+  - `SOURCE_NOT_AVAILABLE`：2
+  - `STALE`：15
+- 即使是 `FRESH` 证据也仍可能有局部盲区：累计 52 个 `NOT_RECOVERED` 项和 1,392 个 `SOURCE_NOT_AVAILABLE` 项。因此“Evidence 新鲜”不等于“对象已完整恢复”。
 
-主要实现：
+### 4. Native / Ghidra 边界
 
-- `schemas/native_analysis_recipe_v1.schema.json`
-- `scripts/native_analysis/Run-NativeRecipe.ps1`
-- `scripts/native_analysis/ghidra/ExportNativeRecipe.java`
-- `scripts/native_analysis/recipes/`
+- 扫描到 13 个候选 native evidence store，最终只选择 2 个与当前二进制身份相符的来源；其余 11 个 fixture 或重复来源被过滤。
+- 当前 DLL 与 PDB 哈希匹配，并记录了 Ghidra 12.1.2、Java 21.0.11+10-LTS 的分析环境身份。
+- 收集到 204 个 native symbol。
+- 132 个 Blueprint/native 关系目前仅为 `NAME_ONLY_CANDIDATE`。
+- 已确认 native 关系：0。
+- 已恢复 native field access：0。
 
-### 3. Native Evidence Store 和有界查询
+这说明 native 边界已经被结构化地纳入同一调查包，但当前证据只够定位候选，不能把名称相似性升级成已确认调用或字段访问。
 
-- 新增 JSON + SQLite + compact index 的统一存储。
-- Native evidence 使用版本绑定的 `native://` ID。
-- 支持 overview、search、function、callers、callees、field accesses、
-  constants、gaps 和 Blueprint links。
-- 查询返回预算、截断、omitted 数量和下一步查询建议。
-- compact index 已区分“确实没有 gaps”和“存在 gaps、但明细因 token
-  budget 省略”，不会再把预算裁剪误写成无 gaps。
+### 5. 已有领域知识
 
-主要实现：
+发现并登记了 6 个现有 SQLite 知识库、74 张表、298,096 行：
 
-- `scripts/blueprint_translator/native_evidence_store.py`
-- `scripts/blueprint_translator/native_evidence_repository.py`
-- `scripts/blueprint_translator/native_evidence_query.py`
-- `schemas/native_evidence_set_v2.schema.json`
+| 领域表 | 行数 |
+| --- | ---: |
+| asset catalog | 289,181 |
+| buffs | 3,353 |
+| primal items | 3,340 |
+| status components | 874 |
+| primal game data | 676 |
+| loot | 672 |
 
-### 4. Blueprint、Native 和 Hybrid Evidence
+已有知识库还提供了 27 个系统登记关系：
 
-- 新增 Blueprint-to-Native 显式证据边。
-- resolved、unresolved、ambiguous 状态可机器读取。
-- Blueprint gaps 与 Native gaps 保持来源分离。
-- 未验证 Native 来源不会进入 `nativeConfirmedFacts`。
-- 可生成有 token 预算的 Hybrid Context Pack，无需把整份 pseudo-C 塞给模型。
+- buff：7
+- creature：4
+- item：2
+- global asset reference：14
 
-主要实现：
+这些关系已进入统一图谱，但登记覆盖率明显不足，不能据此推断只有这些全局系统入口。
 
-- `scripts/link_blueprint_native_evidence.py`
-- `scripts/build_hybrid_context_pack.py`
-- `scripts/blueprint_translator/hybrid_evidence.py`
-- `docs/decisions/ADR-003-hybrid-evidence-graph.md`
+### 6. 查询与抽样覆盖
 
-### 5. Report Claim Manifest 和 runtime calibration
+- 查询语料：38 个问题、13 个领域标签，其中 27 个涉及 native 边界、9 个涉及地图、28 个涉及运行时行为。
+- 复核样本：102 个。
+- 规定的抽样规则全部满足，没有样本短缺：
+  - 高 descendant：10
+  - 高 referencer：10
+  - 跨领域候选：10
+  - Blueprint/native 候选：10
+  - 全局候选：20
+  - leaf：10
+  - 易误导候选：5
+  - 完整 fresh 证据：5
+  - 高缺口或 stale：5
+  - 12 个领域各至少 2 个
 
-- 依赖 Ghidra 的主要历史报告已增加 machine-readable Claim Manifest。
-- Claim 绑定 evidence refs、source fingerprints、assumptions、confidence、
-  invalidation conditions 和 runtime validation。
-- 新增通用 runtime observation schema、synthetic fixtures 和 Harvest 实测协议。
-- validator 会重新计算 observation 状态；只修改 JSON 状态字段不能伪造确认。
-- Synthetic observation 不能正式升级为 `RUNTIME_CALIBRATED` 或
-  `RUNTIME_CONFIRMED`。
+## 最终产物与可验证身份
 
-主要实现：
+| 产物 | 仓库相对路径 | 大小 | SHA-256 |
+| --- | --- | ---: | --- |
+| 可上传调查包 | `knowledge_base/discovery_bundle.zip` | 505,740,267 bytes | `7eae98300ea5c1665c50222cc888580be8349aac1b92e5f8ee7f3713cae2292d` |
+| 调查数据库 | `knowledge_base/discovery_bundle/kb_discovery.sqlite` | 3,816,177,664 bytes | `9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50` |
+| 14 问发现报告 | `knowledge_base/discovery_bundle/discovery_report.md` | 11,736 bytes | `bc929d2e9ebac819ba9deca9b22138d748b1e0350f186599b033ad0847c08b54` |
+| 发现 manifest | `knowledge_base/discovery_bundle/discovery_manifest.json` | 3,721 bytes | `3495da024840a354bbc789c23520a5903f999b90e3ef8fc5cf24abe99958756a` |
 
-- `schemas/report_claim_manifest_v1.schema.json`
-- `schemas/runtime_observation_set_v1.schema.json`
-- `scripts/validate_report_claims.py`
-- `scripts/compare_runtime_observations.py`
-- `scripts/blueprint_translator/runtime_calibration.py`
+ZIP 中共有 215 个文件，SQLite 成员使用 ZIP64。manifest 记录的源代码提交为 `58b92ec0400fafb8a24431eeddef342b94a33d8d`；这是生成最终数据包时的干净代码状态，之后增加本视察文档不会改变数据包内容。
 
-### 6. 控制中心安全和模块化
+## 已完成的验证
 
-- 原服务器入口继续兼容，但请求、响应、安全、作业和路由已拆分。
-- 默认只绑定 loopback；remote 模式必须显式启用并提供 bearer token。
-- 所有 `/api` GET/POST 校验 Host，并按场景校验 Origin；remote API 额外校验
-  bearer token；mutation 再校验 session token、Content-Type 和 body size。
-- job 输出有界并脱敏本地路径。
-- 取消作业会终止 Windows 子进程树。
-- 前端只对 API 请求附加远程 bearer token。
+- SQLite `PRAGMA integrity_check`：`ok`
+- Bundle audit：
+  - `passed = true`
+  - `errors = []`
+  - `sqliteIntegrity = true`
+  - `pathRedaction = true`
+  - `zipVerified = true`
+- ZIP 内每个成员均按 SHA-256 重新读取验证。
+- 报告 14 个必答章节顺序完整。
+- 查询语料 38 行。
+- `SHA256SUMS.txt` 覆盖除其自身外的 214 个文件。
+- 报告、README、manifest 和样本清单没有 Unicode replacement character。
+- 发现工具专项测试：11/11 通过。
+- 仓库完整测试：635 项通过，0 失败。
+- Ruff、Python compile、Git diff whitespace 检查通过。
 
-主要实现：
+## 目前仍不能声称已经解决的内容
 
-- `scripts/blueprint_server/`
-- `scripts/blueprint_tool_server.py`
-- `scripts/blueprint_translator/harvest_build_jobs.py`
-- `src/shared/api.ts`
+1. 还没有最终知识库的表、索引、预计算边界、失效策略或查询路由定案；本轮只提供决定这些问题所需的调查证据。
+2. 132 个 native 关系只是名称候选，尚无已确认调用；native field access 仍为 0。
+3. 仍有 1,212 条默认值未恢复、26,838 个 Blueprint 未测量、15 个 stale Evidence 对象和 2 个当前来源不可用对象。
+4. Data Asset 子类需要下一轮类层级深读，当前的 0 只是保守分类结果。
+5. 跨领域统计目前使用顶层目录代理，最终领域本体尚未定义。
+6. 查询语料中的数量代表调查覆盖，不代表所有问题已经得到完整答案。
+7. 系统登记主要来自现有知识库，覆盖面不足，仍需从序列化与运行时证据扩大。
+8. 本轮没有改造最终知识库，也没有把 discovery 数据直接并入生产查询路径。
 
-### 7. CI、版本、文档和授权策略
+## 请 GPT Pro 重点视察并给 Codex 下一步方向
 
-- 单一版本来源为 `VERSION`，当前 `0.2.0`。
-- 新增 Python/前端/release CI 和公开 Native fixture workflow。
-- 公开 C++/PDB fixture 可验证完整 Native pipeline，不包含 ARK proprietary 文件。
-- README、用户指南、开发交接、Ghidra、Evidence、Claim 和 Runtime 文档已同步。
-- 当前不授予开源许可证，版权由作者保留，详见 `docs/LICENSE_POLICY.md`。
+请基于上述证据检查：
 
-## 已运行的验证
+1. 目前的调查规模、缺口表达和样本是否足以开始设计最终知识库；
+2. 下一轮优先级应放在 native 确认、Blueprint 高缺口深读、Data Asset 精确分类，还是系统登记扩展；
+3. 哪些候选可以进入“全局背景 / 领域知识 / 浅层实体索引”三层，哪些仍必须保持未知；
+4. 在进入最终方案前，还缺少哪些必须量化的验收阈值或反例样本；
+5. Codex 下一阶段应先补证据，还是可以开始提出数据库表、索引、增量失效和查询路由方案。
 
-### 最新通用门禁
-
-```text
-Python unittest:        624/624 passed
-Frontend build:         TypeScript + Vite passed
-Node contracts:         core/API/harvest passed
-npm audit high:         0 vulnerabilities
-Blueprint evidence:     227/227 passed, 0 failed
-git diff --check:       passed
-```
-
-该数字来自本分支提交前最后一次本地全量运行；GitHub Actions 是独立的 Linux
-环境结果，应另行列出，不能用任一方替代另一方。
-
-### Claim 门禁
-
-```text
-默认模式：
-3 manifests / 10 claims / 0 errors / 6 explicit warnings
-
-正式公开 fixture：
-1 manifest / 1 claim / 0 errors
-```
-
-三份历史报告仍为 `PROVENANCE_INCOMPLETE`。默认模式保留并警告，formal
-模式按设计拒绝；这不是需要用假 verified 状态消除的测试失败。
-
-### 公开 Native fixture
-
-```text
-targets:             8/8
-functions:           9
-field queries:       3
-vtable queries:      1
-branches:            5
-call edges:          4
-constants:           84
-field accesses:      3
-vtable slots:        1
-gaps:                0
-trust:               VERIFIED
-formal_validation:   true
-```
-
-### 真实 ARK Native 验证
-
-正式输入：
-
-```text
-DLL SHA-256:
-b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a
-
-PDB SHA-256:
-5285ae571d09fde9183a491f6bdef6e10a143857dd8b7fa5f9e6755b9c01bc16
-
-PDB GUID / age:
-b63263f4-93dd-4e82-a597-81e704da2a86 / 2
-```
-
-Loot recipe：
-
-```text
-14/14 targets CONFIRMED
-120 functions
-691 call edges/sites
-8000 constants（达到配置上限）
-639 explicit gaps
-trust VERIFIED
-formal_validation true
-```
-
-Harvest recipe：
-
-```text
-5/5 targets CONFIRMED
-100 functions
-338 call edges/sites
-8000 constants（达到配置上限）
-238 explicit gaps
-trust VERIFIED
-formal_validation true
-```
-
-完整本地 stores 被正确忽略，没有推送到 GitHub。
-
-## 当前不能宣称完成的部分
-
-1. 没有进入实际游戏做 runtime observation 手工采样。
-2. `formal_validation: true` 只证明 provenance、身份、recipe 和 schema
-   通过，不等于游戏运行时已经确认。
-3. Ghidra pseudo-C 不是原始 C++ 源码。
-4. loot/harvest constants 达到 8000 ceiling，属于有界覆盖，不是完整程序覆盖。
-5. 仍有 639/238 个显式 Native gaps，以及未支持 Blueprint 节点、字段和动态 hook。
-6. 三份历史报告尚未用当前 verified recipe evidence 重新生成，因此不能通过
-   全量 formal gate。
-7. ARK DLL/PDB、DevKit 资产和完整 proprietary evidence 不在 GitHub 中。
-8. 本机 ARK DevKit 基于 UE 5.6，未安装 Unreal MCP；本轮验证使用本仓库的
-   Object Path → `.uasset/.uexp` → Evidence Store 和本地诊断链路。不能把
-   standalone UE 5.8 的 MCP 经验直接套用到 ARK DevKit。
-9. 工具链 fingerprint 只覆盖登记的关键文件，并不表示整个解压目录逐字节一致。
-10. RVA 和 Native Evidence ID 只对当前 DLL hash 有效；DevKit 或游戏二进制
-    更新后必须重新运行身份验证和相应 recipe。
-
-## 请 GPT Pro 给出的审查结果格式
-
-请只返回审查意见，不修改代码：
-
-```text
-1. 当前完成度判断
-   - 已闭环：
-   - 部分闭环：
-   - 尚未闭环：
-
-2. 最重要的风险
-   - P0：
-   - P1：
-   - P2：
-
-3. 建议的下一阶段方向
-   - 第一优先：
-   - 第二优先：
-   - 第三优先：
-
-4. 不应继续投入的低价值方向
-
-5. 需要 Codex 下一步执行的具体任务清单
-```
-
-审查时请以仓库中的代码、测试、schema、Claim Manifest 和公开 fixture 为准；
-不要把文档中的自述当成唯一证据。
+请给出审查结论与下一阶段方向即可；不需要接管或重写 Codex 已完成的实现。
