@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -180,6 +181,22 @@ def _attach_runtime_fixture(
 
 
 class ReportClaimValidationTests(unittest.TestCase):
+    def test_cli_runs_from_repository_root_with_bundled_python(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "validate_report_claims.py"),
+                "--help",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Validate report claim manifests", result.stdout)
+
     def test_verified_sanitized_manifest_is_sufficient_when_local_full_evidence_is_absent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
