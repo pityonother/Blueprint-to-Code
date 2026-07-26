@@ -122,6 +122,59 @@ def _expected_matches(value: Mapping[str, Any], label: str) -> int:
     return count
 
 
+def _canonical_qualified_name(value: Any) -> str:
+    text = str(value or "").replace("\\", "/").replace("::", "/")
+    return re.sub(r"/+", "/", text).lstrip("/")
+
+
+def _normalize_signature(value: Any) -> str:
+    canonical = _canonical_qualified_name(value)
+    return re.sub(r"\s+", "", canonical).replace("__cdecl", "")
+
+
+def _candidate_matches_selector(
+    candidate: Mapping[str, Any],
+    selector: Mapping[str, Any],
+    *,
+    formal: bool,
+) -> bool:
+    if "rva" in selector:
+        try:
+            return int(str(candidate.get("rva") or ""), 16) == int(
+                str(selector["rva"]),
+                16,
+            )
+        except ValueError:
+            return False
+    if "qualifiedName" in selector:
+        if _canonical_qualified_name(candidate.get("qualifiedName")) != (
+            _canonical_qualified_name(selector["qualifiedName"])
+        ):
+            return False
+        if "signature" in selector:
+            actual_signature = candidate.get(
+                "canonicalSignature",
+                candidate.get("signature"),
+            )
+            return _normalize_signature(actual_signature) == (
+                _normalize_signature(selector["signature"])
+            )
+        return True
+    if "simpleName" in selector:
+        return (
+            selector.get("allowSimpleName") is True
+            and str(candidate.get("name") or "") == str(selector["simpleName"])
+        )
+    if "regex" in selector:
+        if formal:
+            return False
+        return re.search(
+            str(selector["regex"]),
+            str(candidate.get("qualifiedName") or ""),
+        ) is not None
+    return False
+
+
 def _validate_selector(
     value: Any,
     *,
@@ -326,8 +379,10 @@ def validate_native_recipe(
         target_ids.add(target_id)
 
     query_ids: set[str] = set()
+    query_rows_by_kind: dict[str, list[Mapping[str, Any]]] = {}
     for key, kind in (("fieldQueries", "field"), ("vtableQueries", "vtable")):
         rows = _objects(root.get(key), f"recipe.{key}")
+        query_rows_by_kind[kind] = rows
         for index, row in enumerate(rows):
             query_id = _validate_query(
                 row,
@@ -351,14 +406,68 @@ def validate_native_recipe(
                         f"{', '.join(unknown)}.",
                     )
 
+    field_requested = {
+        str(target["id"])
+        for target in targets
+        if _mapping(target.get("exports"), "target exports").get(
+            "fieldAccesses"
+        )
+        is True
+    }
+    field_queries = query_rows_by_kind["field"]
+    if field_requested:
+        if not field_queries:
+            _fail(
+                "NATIVE_RECIPE_SCHEMA_INVALID",
+                "fieldAccesses=true requires at least one field query.",
+            )
+        applies_to_all = any(
+            "functionTargetIds" not in query for query in field_queries
+        )
+        covered_targets = {
+            str(target_id)
+            for query in field_queries
+            for target_id in query.get("functionTargetIds") or []
+        }
+        uncovered = sorted(
+            set() if applies_to_all else field_requested - covered_targets
+        )
+        if uncovered:
+            _fail(
+                "NATIVE_RECIPE_SCHEMA_INVALID",
+                "fieldAccesses=true targets are not covered by a field query: "
+                f"{', '.join(uncovered)}.",
+            )
+
+    if any(
+        _mapping(target.get("exports"), "target exports").get("vtable")
+        is True
+        for target in targets
+    ) and not query_rows_by_kind["vtable"]:
+        _fail(
+            "NATIVE_RECIPE_SCHEMA_INVALID",
+            "vtable=true requires at least one vtable query.",
+        )
+
     budgets = _mapping(root.get("budgets"), "recipe.budgets")
     _only_keys(budgets, BUDGET_KEYS, "recipe.budgets")
+    expected_target_matches = sum(
+        int(target["expectedMatches"]) for target in targets
+    )
+    expected_field_matches = sum(
+        int(query["expectedMatches"])
+        for query in query_rows_by_kind["field"]
+    )
+    expected_vtable_matches = sum(
+        int(query["expectedMatches"])
+        for query in query_rows_by_kind["vtable"]
+    )
     minimums = {
-        "maxFunctions": len(targets),
+        "maxFunctions": expected_target_matches + expected_vtable_matches,
         "maxCallEdges": 0,
-        "maxFieldAccesses": 0,
+        "maxFieldAccesses": expected_field_matches,
         "maxConstants": 0,
-        "maxVtableMatches": 0,
+        "maxVtableMatches": expected_vtable_matches,
         "maxDecompiledCharactersPerFunction": 1,
         "maxTotalDecompiledCharacters": 1,
     }
@@ -468,6 +577,8 @@ def _validate_candidates(
     *,
     label: str,
     expected: int,
+    selector: Mapping[str, Any] | None = None,
+    formal: bool,
 ) -> list[str]:
     match_count = result.get("matchCount")
     resolved = result.get("resolvedEvidenceIds")
@@ -497,6 +608,12 @@ def _validate_candidates(
                 "rejectionReason.",
             )
         if accepted:
+            if rejection_reason:
+                _fail(
+                    "NATIVE_RECIPE_SCHEMA_INVALID",
+                    f"{label}.candidates[{index}] was accepted with a "
+                    "rejectionReason.",
+                )
             accepted_count += 1
             evidence_id = str(candidate.get("evidenceId") or "")
             if not evidence_id:
@@ -511,6 +628,18 @@ def _validate_candidates(
                 "NATIVE_RECIPE_SCHEMA_INVALID",
                 f"{label}.candidates[{index}] rejected without a reason.",
             )
+        if selector is not None:
+            independently_matched = _candidate_matches_selector(
+                candidate,
+                selector,
+                formal=formal,
+            )
+            if independently_matched is not accepted:
+                _fail(
+                    "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+                    f"{label}.candidates[{index}] acceptance disagrees with "
+                    "independent selector validation.",
+                )
     if (
         match_count != expected
         or len(resolved) != expected
@@ -581,10 +710,12 @@ def create_native_recipe_evidence_manifest(
     binary = _mapping(identity.get("binary"), "native identity binary")
     pdb = _mapping(identity.get("pdb"), "native identity PDB")
     if (
-        raw.get("program") != binary.get("module")
+        str(raw.get("program") or "").casefold()
+        != str(binary.get("module") or "").casefold()
         or str(raw.get("binarySha256") or "").lower()
         != str(binary.get("sha256") or "").lower()
-        or recipe.get("binaryModule") != binary.get("module")
+        or str(recipe.get("binaryModule") or "").casefold()
+        != str(binary.get("module") or "").casefold()
     ):
         _fail(
             "NATIVE_PROJECT_PROGRAM_HASH_MISMATCH",
@@ -622,6 +753,7 @@ def create_native_recipe_evidence_manifest(
 
     recipe_targets: list[dict[str, Any]] = []
     resolved_ids: set[str] = set()
+    resolved_ids_by_target: dict[str, set[str]] = {}
     for target in _objects(recipe.get("targets"), "recipe targets"):
         target_id = str(target["id"])
         result = results_by_id.get(target_id)
@@ -633,6 +765,7 @@ def create_native_recipe_evidence_manifest(
         if (
             result.get("selector") != target.get("selector")
             or result.get("expectedMatches") != target.get("expectedMatches")
+            or result.get("exports") != target.get("exports")
         ):
             _fail(
                 "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
@@ -642,12 +775,16 @@ def create_native_recipe_evidence_manifest(
             result,
             label=target_id,
             expected=int(target["expectedMatches"]),
+            selector=_mapping(target["selector"], f"{target_id}.selector"),
+            formal=formal,
         )
         resolved_ids.update(resolved)
+        resolved_ids_by_target[target_id] = set(resolved)
         recipe_targets.append(
             {
                 "targetId": target_id,
                 "selector": deepcopy(target["selector"]),
+                "exports": deepcopy(target["exports"]),
                 "expectedCount": int(target["expectedMatches"]),
                 "resolvedEvidenceIds": resolved,
                 "candidates": deepcopy(result.get("candidates") or []),
@@ -662,6 +799,19 @@ def create_native_recipe_evidence_manifest(
             "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
             f"Unexpected target results: {', '.join(unexpected_results)}.",
         )
+
+    functions = _objects(raw.get("functions"), "recipe export functions")
+    functions_by_id: dict[str, Mapping[str, Any]] = {}
+    for function in functions:
+        evidence_id = str(function.get("evidenceId") or "")
+        if not evidence_id:
+            continue
+        if evidence_id in functions_by_id:
+            _fail(
+                "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+                f"Duplicate exported function evidence ID: {evidence_id}.",
+            )
+        functions_by_id[evidence_id] = function
 
     for key, recipe_key in (
         ("fieldQueryResults", "fieldQueries"),
@@ -729,18 +879,66 @@ def create_native_recipe_evidence_manifest(
                     f"Query result {query_id} does not echo its recipe "
                     "contract.",
                 )
-            _validate_candidates(
+            query_resolved = _validate_candidates(
                 result,
                 label=query_id,
                 expected=int(query["expectedMatches"]),
+                formal=formal,
             )
+            if (
+                recipe_key == "fieldQueries"
+                and "functionTargetIds" in query
+            ):
+                allowed_ids: set[str] = set()
+                for target_id in query["functionTargetIds"]:
+                    allowed_ids.update(
+                        resolved_ids_by_target.get(str(target_id), set())
+                    )
+                unexpected_resolved = sorted(
+                    set(query_resolved) - allowed_ids
+                )
+                if unexpected_resolved:
+                    _fail(
+                        "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+                        f"Field query {query_id} resolved functions outside "
+                        "its declared functionTargetIds.",
+                    )
+            for evidence_id in query_resolved:
+                function = functions_by_id.get(evidence_id)
+                if function is None:
+                    _fail(
+                        "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+                        f"Query {query_id} resolved a function absent from "
+                        "the exported function set.",
+                    )
+                if recipe_key == "fieldQueries":
+                    evidence_rows = function.get("fieldAccesses")
+                    exact_match = isinstance(evidence_rows, list) and any(
+                        isinstance(row, Mapping)
+                        and row.get("queryId") == query_id
+                        and row.get("structureName")
+                        == query.get("structureName")
+                        and row.get("fieldName") == query.get("fieldName")
+                        for row in evidence_rows
+                    )
+                else:
+                    evidence_rows = function.get("vtableSlots")
+                    exact_match = isinstance(evidence_rows, list) and any(
+                        isinstance(row, Mapping)
+                        and row.get("queryId") == query_id
+                        and row.get("targetEvidenceId") == evidence_id
+                        and row.get("ownerType") == query.get("className")
+                        and row.get("slotOffset") == query.get("slotOffset")
+                        for row in evidence_rows
+                    )
+                if not exact_match:
+                    _fail(
+                        "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+                        f"Query {query_id} has no exact evidence row on "
+                        f"{evidence_id}.",
+                    )
 
-    functions = _objects(raw.get("functions"), "recipe export functions")
-    function_ids = {
-        str(function.get("evidenceId") or "")
-        for function in functions
-        if function.get("evidenceId")
-    }
+    function_ids = set(functions_by_id)
     if not resolved_ids.issubset(function_ids):
         _fail(
             "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",

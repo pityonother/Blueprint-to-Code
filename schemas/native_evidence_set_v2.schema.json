@@ -151,6 +151,7 @@
           "required": [
             "version",
             "releaseAssetSha256",
+            "installationFingerprint",
             "languageId",
             "compilerSpecId",
             "analysisOptionsSha256"
@@ -162,6 +163,9 @@
             },
             "releaseAssetSha256": {
               "$ref": "#/$defs/sha256"
+            },
+            "installationFingerprint": {
+              "$ref": "#/$defs/installationFingerprint"
             },
             "languageId": {
               "type": "string",
@@ -181,7 +185,8 @@
           "type": "object",
           "required": [
             "vendor",
-            "version"
+            "version",
+            "installationFingerprint"
           ],
           "properties": {
             "vendor": {
@@ -191,6 +196,9 @@
             "version": {
               "type": "string",
               "minLength": 1
+            },
+            "installationFingerprint": {
+              "$ref": "#/$defs/installationFingerprint"
             }
           },
           "additionalProperties": false
@@ -269,6 +277,7 @@
         "required": [
           "targetId",
           "selector",
+          "exports",
           "expectedCount",
           "resolvedEvidenceIds",
           "candidates",
@@ -280,6 +289,9 @@
             "minLength": 1
           },
           "selector": {
+            "type": "object"
+          },
+          "exports": {
             "type": "object"
           },
           "expectedCount": {
@@ -322,6 +334,41 @@
     "guid": {
       "type": "string",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "installationFingerprint": {
+      "type": "object",
+      "required": [
+        "sha256",
+        "files"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?![A-Za-z]:)(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

@@ -387,8 +387,11 @@ function Remove-NativeRunDirectory {
     if (-not $runParent.Equals(
             $resolvedTempBase,
             [System.StringComparison]::OrdinalIgnoreCase
-        ) -or $runName -notmatch '^[0-9a-f]{12}-[0-9a-f]{12}-[0-9]{8}-[0-9]{6}$') {
+        ) -or $runName -notmatch '^[0-9a-f]{12}-[0-9a-f]{12}-[0-9]{8}-[0-9]{6}-[0-9a-f]{32}$') {
         throw "NATIVE_TEMP_PATH_INVALID: Refusing to remove a path that is not an exact native run directory."
+    }
+    if (Test-Path -LiteralPath $resolvedRunRoot -PathType Leaf) {
+        throw "NATIVE_TEMP_PATH_INVALID: Refusing to remove a regular file in place of a native run directory."
     }
     if (Test-Path -LiteralPath $resolvedRunRoot -PathType Container) {
         $item = Get-Item -LiteralPath $resolvedRunRoot -Force

@@ -52,7 +52,8 @@ trap {
     )
     $diagnosticPath = Join-Path $diagnosticRoot (
         "native-diagnostic-" +
-        (Get-Date -Format "yyyyMMdd-HHmmss-fff") + ".json"
+        (Get-Date -Format "yyyyMMdd-HHmmss-fff") + "-" +
+        [Guid]::NewGuid().ToString("N") + ".json"
     )
     $diagnostic = [ordered]@{
         schema = "blueprint-to-code-native-run-diagnostic/v1"
@@ -87,6 +88,9 @@ if ($Help) {
 }
 if (-not $RecipePath) {
     throw "NATIVE_RECIPE_SCHEMA_INVALID: -Recipe is required."
+}
+if ($AllowHashMismatch -and -not $Experimental) {
+    throw "NATIVE_HASH_BYPASS_REQUIRES_EXPERIMENTAL: -AllowHashMismatch may only be used with -Experimental."
 }
 
 function Copy-NativeRunInput {
@@ -133,6 +137,14 @@ function Invoke-NativePythonCommand {
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $context = Resolve-NativeAnalysisContext -GhidraPath $GhidraPath -JavaHome $JavaHome -ToolsRoot $ToolsRoot
 $config = $context.Config
+$toolchainPath = Join-Path $PSScriptRoot "toolchain.json"
+$toolchainArguments = @(
+    "verify-toolchain",
+    "--toolchain", $toolchainPath,
+    "--ghidra-home", $context.GhidraPath,
+    "--java-home", $context.JavaHome
+)
+Invoke-NativeIdentityTool -ProjectRoot $projectRoot -Arguments $toolchainArguments | Out-Null
 Set-NativeAnalysisProcessEnvironment -Context $context -MaxMemory $MaxMemory
 if (-not $AnalysisTimeoutSeconds) {
     $AnalysisTimeoutSeconds = [int]$config.workspace.analysisTimeoutSeconds
@@ -176,7 +188,11 @@ $PdbPath = [string]$inputPaths.PdbPath
 $identity = Get-NativeBuildIdentityObject -DllPath $DllPath -PdbPath $PdbPath -Config $config -ProjectRoot $projectRoot
 $dllHash = [string]$identity.binary.sha256
 $pdbHash = [string]$identity.pdb.sha256
-if ([string]$recipe.binaryModule -ne [string]$identity.binary.module) {
+if (-not [string]::Equals(
+        [string]$recipe.binaryModule,
+        [string]$identity.binary.module,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
     throw "NATIVE_PROJECT_PROGRAM_HASH_MISMATCH: Recipe module $($recipe.binaryModule) does not match input module $($identity.binary.module)."
 }
 
@@ -219,15 +235,21 @@ $logDir = Join-Path $projectRoot "logs\native_analysis"
 New-Item -ItemType Directory -Force -Path $WorkspaceRoot, $EvidenceDir, $logDir | Out-Null
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$runNonce = [Guid]::NewGuid().ToString("N")
 $recipeSlug = ([string]$recipe.recipeId -replace '[^A-Za-z0-9._-]+', '-').Trim('-')
 $localTempBase = Join-Path ([System.IO.Path]::GetTempPath()) "BlueprintToCodeNative"
 $runRoot = Join-Path $localTempBase (
-    $dllHash.Substring(0, 12) + "-" + $recipeHash.Substring(0, 12) + "-" + $timestamp
+    $dllHash.Substring(0, 12) + "-" + $recipeHash.Substring(0, 12) + "-" +
+    $timestamp + "-" + $runNonce
 )
 $runScriptDir = Join-Path $runRoot "scripts"
 $runInputDir = Join-Path $runRoot "input"
+$runRootCreated = $false
 try {
-    New-Item -ItemType Directory -Force -Path $runScriptDir, $runInputDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $localTempBase | Out-Null
+    New-Item -ItemType Directory -Path $runRoot -ErrorAction Stop | Out-Null
+    $runRootCreated = $true
+    New-Item -ItemType Directory -Path $runScriptDir, $runInputDir -ErrorAction Stop | Out-Null
 
 $stagedDll = Join-Path $runInputDir ([System.IO.Path]::GetFileName($DllPath))
 $stagedPdb = Join-Path $runInputDir ([System.IO.Path]::GetFileName($PdbPath))
@@ -245,20 +267,26 @@ if ((Get-LowerSha256 -Path $stagedDll) -ne $dllHash -or
     throw "NATIVE_EVIDENCE_PROVENANCE_MISMATCH: No-space staging changed a native-analysis input."
 }
 
-$rawTempPath = Join-Path $runRoot "recipe-export.raw-v1.json"
-$pendingTempPath = Join-Path $runRoot "evidence.pending-v2.json"
-$logTempPath = Join-Path $runRoot "ghidra.log"
-$scriptLogTempPath = Join-Path $runRoot "ghidra-script.log"
+$rawTempPath = Join-Path $runRoot ("recipe-export-" + $runNonce + ".raw-v1.json")
+$pendingTempPath = Join-Path $runRoot ("evidence-" + $runNonce + ".pending-v2.json")
+$logTempPath = Join-Path $runRoot ("ghidra-" + $runNonce + ".log")
+$scriptLogTempPath = Join-Path $runRoot ("ghidra-script-" + $runNonce + ".log")
 $rawEvidencePath = Join-Path $EvidenceDir (
     "native-recipe-raw-" + $dllHash.Substring(0, 12) + "-" +
-    $recipeSlug + "-" + $recipeHash.Substring(0, 12) + "-" + $timestamp + ".json"
+    $recipeSlug + "-" + $recipeHash.Substring(0, 12) + "-" + $timestamp + "-" +
+    $runNonce + ".json"
 )
 $evidencePath = Join-Path $EvidenceDir (
     "native-evidence-set-" + $dllHash.Substring(0, 12) + "-" +
-    $recipeSlug + "-" + $recipeHash.Substring(0, 12) + "-" + $timestamp + ".json"
+    $recipeSlug + "-" + $recipeHash.Substring(0, 12) + "-" + $timestamp + "-" +
+    $runNonce + ".json"
 )
-$logPath = Join-Path $logDir ("ghidra-recipe-" + $timestamp + ".log")
-$scriptLogPath = Join-Path $logDir ("ghidra-recipe-script-" + $timestamp + ".log")
+$logPath = Join-Path $logDir (
+    "ghidra-recipe-" + $timestamp + "-" + $runNonce + ".log"
+)
+$scriptLogPath = Join-Path $logDir (
+    "ghidra-recipe-script-" + $timestamp + "-" + $runNonce + ".log"
+)
 
 $projectExists = Test-Path -LiteralPath $projectFile -PathType Leaf
 if ($projectExists) {
@@ -316,6 +344,12 @@ if (Test-Path -LiteralPath $logTempPath -PathType Leaf) {
 if (Test-Path -LiteralPath $scriptLogTempPath -PathType Leaf) {
     Copy-Item -LiteralPath $scriptLogTempPath -Destination $scriptLogPath
 }
+$analysisTimedOut = Select-String -LiteralPath $logTempPath `
+    -SimpleMatch "REPORT: Analysis timed out" `
+    -ErrorAction SilentlyContinue
+if ($analysisTimedOut) {
+    throw "NATIVE_ANALYSIS_TIMEOUT: Ghidra reported that analysis timed out. See $logPath"
+}
 if ($ghidraExitCode -ne 0) {
     throw "Ghidra headless analysis failed (exit code $ghidraExitCode). See $logPath"
 }
@@ -348,7 +382,9 @@ $wrapArguments = @(
     "--project-hash-length", [string]$config.workspace.projectHashLength,
     "--recipe", $RecipePath,
     "--raw-export", $rawTempPath,
-    "--toolchain", (Join-Path $PSScriptRoot "toolchain.json"),
+    "--toolchain", $toolchainPath,
+    "--ghidra-home", $context.GhidraPath,
+    "--java-home", $context.JavaHome,
     "--repository-root", $projectRoot,
     "--runner", $PSCommandPath,
     "--exporter", $exporterPath,
@@ -382,7 +418,8 @@ Copy-Item -LiteralPath $pendingTempPath -Destination $evidencePath
 $evidence = Get-Content -LiteralPath $evidencePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $storeDir = Join-Path $EvidenceDir (
     "stores\" + $dllHash.Substring(0, 12) + "\" +
-    $recipeSlug + "-" + $recipeHash.Substring(0, 12) + "-" + $timestamp
+    $recipeSlug + "-" + $recipeHash.Substring(0, 12) + "-" + $timestamp + "-" +
+    $runNonce
 )
 $pythonExe = Resolve-NativeIdentityPython -ProjectRoot $projectRoot
 $importArguments = @(
@@ -445,10 +482,12 @@ Write-Host "Store overview:"
 Write-Host $overviewOutput
 }
 finally {
-    try {
-        Remove-NativeRunDirectory -RunRoot $runRoot -TempBase $localTempBase
-    }
-    catch {
-        throw "NATIVE_TEMP_CLEANUP_FAILED: $($_.Exception.Message)"
+    if ($runRootCreated) {
+        try {
+            Remove-NativeRunDirectory -RunRoot $runRoot -TempBase $localTempBase
+        }
+        catch {
+            throw "NATIVE_TEMP_CLEANUP_FAILED: $($_.Exception.Message)"
+        }
     }
 }

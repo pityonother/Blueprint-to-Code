@@ -9,6 +9,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "native-fixture.yml"
 TOOLCHAIN = ROOT / "scripts" / "native_analysis" / "toolchain.json"
+RUNNER = ROOT / "scripts" / "native_analysis" / "Run-NativeRecipe.ps1"
+COMMON = ROOT / "scripts" / "native_analysis" / "NativeAnalysis.Common.ps1"
+EXPORTER = (
+    ROOT
+    / "scripts"
+    / "native_analysis"
+    / "ghidra"
+    / "ExportNativeRecipe.java"
+)
+FIXTURE_SOURCE = ROOT / "tests" / "native_fixture" / "fixture.cpp"
+FIXTURE_RECIPE = (
+    ROOT
+    / "scripts"
+    / "native_analysis"
+    / "recipes"
+    / "test-native-fixture.v1.json"
+)
 
 
 class NativeFixtureWorkflowContractTests(unittest.TestCase):
@@ -66,6 +83,35 @@ class NativeFixtureWorkflowContractTests(unittest.TestCase):
                 )
                 self.assertNotIn(toolchain[section]["releaseUrl"], workflow)
                 self.assertNotIn(toolchain[section]["sha256"], workflow)
+
+    def test_local_toolchain_critical_files_are_individually_pinned(self) -> None:
+        toolchain = json.loads(TOOLCHAIN.read_text(encoding="utf-8"))
+        self.assertEqual(
+            toolchain["ghidra"]["installationFiles"],
+            {
+                "ghidraRun.bat": (
+                    "9374c936fc8c2e4f59bd85760c7b32ca"
+                    "5498cad6852672dbd68162823cdb1357"
+                ),
+                "support/analyzeHeadless.bat": (
+                    "dd7b9d17d32ed70a71df82a43a21cdae"
+                    "d6c4ce67064e30f8642c149f81c2ae07"
+                ),
+                "Ghidra/application.properties": (
+                    "80890f309379ef60ecbb376a95448bd79"
+                    "e874145544ffcfabb5ba1835ac8a2cf"
+                ),
+            },
+        )
+        self.assertEqual(
+            toolchain["java"]["installationFiles"],
+            {
+                "bin/java.exe": (
+                    "5e0fab9f07952ceb6e71eb9fd33e1ed6"
+                    "9959904ca00cf70869b7baf516a98016"
+                )
+            },
+        )
 
     def test_public_fixture_runs_formally_with_isolated_mutable_outputs(self) -> None:
         workflow = self.workflow()
@@ -164,6 +210,92 @@ class NativeFixtureWorkflowContractTests(unittest.TestCase):
             ),
         )
         self.assertNotRegex(workflow, r"https?://")
+
+    def test_runner_fails_closed_on_hash_bypass_timeout_and_name_collisions(
+        self,
+    ) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "if ($AllowHashMismatch -and -not $Experimental)",
+            runner,
+        )
+        self.assertIn("NATIVE_HASH_BYPASS_REQUIRES_EXPERIMENTAL", runner)
+        self.assertIn("REPORT: Analysis timed out", runner)
+        self.assertIn("NATIVE_ANALYSIS_TIMEOUT", runner)
+        self.assertIn('[Guid]::NewGuid().ToString("N")', runner)
+        self.assertIn(
+            "New-Item -ItemType Directory -Path $runRoot "
+            "-ErrorAction Stop",
+            runner,
+        )
+        self.assertNotIn(
+            "New-Item -ItemType Directory -Force -Path $runRoot",
+            runner,
+        )
+        self.assertIn("$runRootCreated = $false", runner)
+        self.assertIn("$runRootCreated = $true", runner)
+        self.assertIn("if ($runRootCreated)", runner)
+        for artifact in (
+            "$rawEvidencePath",
+            "$evidencePath",
+            "$logPath",
+            "$scriptLogPath",
+            "$storeDir",
+        ):
+            with self.subTest(artifact=artifact):
+                self.assertRegex(
+                    runner,
+                    re.escape(artifact) + r"[\s\S]{0,350}\$runNonce",
+                )
+
+    def test_cleanup_rejects_a_regular_file_in_place_of_the_run_directory(
+        self,
+    ) -> None:
+        common = COMMON.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            common,
+            r"Test-Path\s+-LiteralPath\s+\$resolvedRunRoot\s+"
+            r"-PathType\s+Leaf",
+        )
+        self.assertIn("NATIVE_TEMP_PATH_INVALID", common)
+
+    def test_exporter_filters_external_functions_and_uses_exact_queries(
+        self,
+    ) -> None:
+        exporter = EXPORTER.read_text(encoding="utf-8")
+
+        self.assertIn("isExportableFunction", exporter)
+        self.assertIn("isMemoryAddress()", exporter)
+        self.assertIn("isExternal()", exporter)
+        self.assertIn("entryPoint.getAddressSpace().equals(", exporter)
+        self.assertIn(
+            "currentProgram.getImageBase().getAddressSpace()",
+            exporter,
+        )
+        self.assertIn("expectedVftableName", exporter)
+        self.assertIn(".equals(expectedVftableName)", exporter)
+        self.assertIn("getDefaultOperandRepresentation", exporter)
+        self.assertRegex(exporter, r"RSP\|RBP")
+        self.assertIn("decompilerReferencesField", exporter)
+        self.assertIn('result.add("exports"', exporter)
+
+    def test_public_fixture_exercises_an_imported_external_callee(self) -> None:
+        source = FIXTURE_SOURCE.read_text(encoding="utf-8")
+        recipe = json.loads(FIXTURE_RECIPE.read_text(encoding="utf-8"))
+        quality_leaf = next(
+            target
+            for target in recipe["targets"]
+            if target["id"] == "quality-leaf"
+        )
+
+        self.assertIn("#include <Windows.h>", source)
+        self.assertIn("GetCurrentProcessId()", source)
+        self.assertGreaterEqual(
+            quality_leaf["exports"]["calleesDepth"],
+            1,
+        )
 
 
 if __name__ == "__main__":

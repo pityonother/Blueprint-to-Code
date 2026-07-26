@@ -5,7 +5,12 @@
     "folderName": "ghidra_12.1.2_PUBLIC",
     "releaseAsset": "ghidra_12.1.2_PUBLIC_20260605.zip",
     "releaseUrl": "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip",
-    "sha256": "b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d"
+    "sha256": "b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d",
+    "installationFiles": {
+      "ghidraRun.bat": "9374c936fc8c2e4f59bd85760c7b32ca5498cad6852672dbd68162823cdb1357",
+      "support/analyzeHeadless.bat": "dd7b9d17d32ed70a71df82a43a21cdaed6c4ce67064e30f8642c149f81c2ae07",
+      "Ghidra/application.properties": "80890f309379ef60ecbb376a95448bd79e874145544ffcfabb5ba1835ac8a2cf"
+    }
   },
   "java": {
     "distribution": "Eclipse Temurin",
@@ -15,7 +20,10 @@
     "folderName": "jdk-21.0.11+10",
     "releaseAsset": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
     "releaseUrl": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
-    "sha256": "d3625e7cadf23787ea540229544b6e2ab494b3b54da1801879e583e1dfee0a64"
+    "sha256": "d3625e7cadf23787ea540229544b6e2ab494b3b54da1801879e583e1dfee0a64",
+    "installationFiles": {
+      "bin/java.exe": "5e0fab9f07952ceb6e71eb9fd33e1ed69959904ca00cf70869b7baf516a98016"
+    }
   },
   "shooterGame": {
     "defaultDevKitRoot": "C:\\Program Files\\Epic Games\\ARKDevkit",

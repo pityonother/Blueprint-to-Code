@@ -8,6 +8,7 @@ program contents.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import mmap
 import re
@@ -103,6 +104,159 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _canonical_installation_path(value: Any) -> str:
+    if not isinstance(value, str) or not value or "\\" in value:
+        _fail(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            "Toolchain installation paths must be canonical relative paths.",
+        )
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        _fail(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            "Toolchain installation paths must be canonical relative paths.",
+        )
+    return value
+
+
+def _installation_fingerprint_sha256(
+    files: list[dict[str, str]],
+) -> str:
+    source = json.dumps(
+        files,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(source).hexdigest()
+
+
+def validate_installation_fingerprint(
+    fingerprint: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Validate a path-free fingerprint for exact toolchain installation files."""
+
+    if not isinstance(fingerprint, Mapping) or set(fingerprint) != {
+        "sha256",
+        "files",
+    }:
+        _fail(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            "Toolchain installation fingerprint has an invalid shape.",
+        )
+    files = fingerprint.get("files")
+    if not isinstance(files, list) or not files:
+        _fail(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            "Toolchain installation fingerprint must list at least one file.",
+        )
+
+    canonical_files: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for row in files:
+        if not isinstance(row, Mapping) or set(row) != {"path", "sha256"}:
+            _fail(
+                "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+                "Toolchain installation fingerprint file entry is invalid.",
+            )
+        path = _canonical_installation_path(row.get("path"))
+        digest = str(row.get("sha256") or "")
+        if not SHA256_PATTERN.fullmatch(digest):
+            _fail(
+                "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+                "Toolchain installation file hash must be lowercase SHA-256.",
+            )
+        if path in seen_paths:
+            _fail(
+                "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+                "Toolchain installation fingerprint contains duplicate paths.",
+            )
+        seen_paths.add(path)
+        canonical_files.append({"path": path, "sha256": digest})
+
+    canonical_files.sort(key=lambda row: row["path"])
+    if files != canonical_files:
+        _fail(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            "Toolchain installation fingerprint files are not canonical.",
+        )
+    expected = _installation_fingerprint_sha256(canonical_files)
+    if fingerprint.get("sha256") != expected:
+        _fail(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            "Toolchain installation fingerprint does not match its files.",
+        )
+    return fingerprint
+
+
+def build_installation_fingerprint(
+    installation_root: Path | str,
+    expected_files: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Hash exact registered files beneath one toolchain installation root."""
+
+    if not isinstance(expected_files, Mapping) or not expected_files:
+        _fail(
+            "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+            "Toolchain installation has no registered file hashes.",
+        )
+    root = Path(installation_root).resolve()
+    if not root.is_dir():
+        _fail(
+            "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+            "Toolchain installation root is missing or is not a directory.",
+        )
+
+    files: list[dict[str, str]] = []
+    for raw_path, raw_expected_digest in expected_files.items():
+        try:
+            path = _canonical_installation_path(raw_path)
+        except NativeIdentityError as exc:
+            _fail("NATIVE_TOOLCHAIN_HASH_MISMATCH", exc.message)
+        expected_digest = str(raw_expected_digest or "")
+        if not SHA256_PATTERN.fullmatch(expected_digest):
+            _fail(
+                "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+                f"Registered toolchain hash is invalid for {path}.",
+            )
+        candidate = (root / Path(*PurePosixPath(path).parts)).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            _fail(
+                "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+                f"Toolchain file escapes its installation root: {path}.",
+            )
+        if not candidate.is_file():
+            _fail(
+                "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+                f"Registered toolchain file is missing: {path}.",
+            )
+        actual_digest = _sha256_file(candidate)
+        if actual_digest != expected_digest:
+            _fail(
+                "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+                f"Toolchain file hash mismatch: {path}.",
+                details={
+                    "path": path,
+                    "expectedSha256": expected_digest,
+                    "actualSha256": actual_digest,
+                },
+            )
+        files.append({"path": path, "sha256": actual_digest})
+
+    files.sort(key=lambda row: row["path"])
+    fingerprint = {
+        "sha256": _installation_fingerprint_sha256(files),
+        "files": files,
+    }
+    validate_installation_fingerprint(fingerprint)
+    return fingerprint
 
 
 def _basename(value: str) -> str:
@@ -800,13 +954,18 @@ def validate_native_evidence_manifest(
         {
             "version",
             "releaseAssetSha256",
+            "installationFingerprint",
             "languageId",
             "compilerSpecId",
             "analysisOptionsSha256",
         },
         "provenance.ghidra",
     )
-    _require_only_keys(java, {"vendor", "version"}, "provenance.java")
+    _require_only_keys(
+        java,
+        {"vendor", "version", "installationFingerprint"},
+        "provenance.java",
+    )
     _require_only_keys(
         generator,
         {
@@ -828,6 +987,19 @@ def validate_native_evidence_manifest(
     _require_sha256(
         ghidra.get("analysisOptionsSha256"), "ghidra.analysisOptionsSha256"
     )
+    for source, label in (
+        (ghidra, "Ghidra"),
+        (java, "Java"),
+    ):
+        fingerprint = source.get("installationFingerprint")
+        if fingerprint is None:
+            if formal:
+                _fail(
+                    "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+                    f"Formal native evidence requires a {label} installation fingerprint.",
+                )
+        else:
+            validate_installation_fingerprint(fingerprint)
     recipe_sha = _require_sha256(
         generator.get("recipeSha256"), "generator.recipeSha256"
     )
@@ -911,7 +1083,8 @@ def validate_native_evidence_manifest(
         )
         if (
             binary_sha != str(expected_binary.get("sha256", "")).lower()
-            or binary.get("module") != expected_binary.get("module")
+            or str(binary.get("module", "")).casefold()
+            != str(expected_binary.get("module", "")).casefold()
             or binary.get("size") != expected_binary.get("size")
             or codeview != expected_binary.get("codeView")
         ):
@@ -1004,7 +1177,8 @@ def create_native_evidence_manifest(
     if (
         str(raw.get("binarySha256", "")).lower()
         != str(binary.get("sha256", "")).lower()
-        or raw.get("program") != binary.get("module")
+        or str(raw.get("program", "")).casefold()
+        != str(binary.get("module", "")).casefold()
     ):
         _fail(
             "NATIVE_PROJECT_PROGRAM_HASH_MISMATCH",

@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 import struct
 import sys
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import blueprint_translator.native_identity as native_identity  # noqa: E402
 from blueprint_translator.native_identity import (  # noqa: E402
     NativeIdentityError,
     build_native_identity,
@@ -23,6 +25,22 @@ from blueprint_translator.native_identity import (  # noqa: E402
 
 
 MSF7_MAGIC = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\x00\x00\x00"
+
+
+def _installation_fingerprint(files: dict[str, str]) -> dict:
+    rows = [
+        {"path": path, "sha256": digest}
+        for path, digest in sorted(files.items())
+    ]
+    source = json.dumps(
+        rows,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "sha256": hashlib.sha256(source).hexdigest(),
+        "files": rows,
+    }
 
 
 def _write_synthetic_pe(path: Path, guid: uuid.UUID, age: int) -> None:
@@ -161,6 +179,13 @@ def _formal_manifest(identity: dict) -> dict:
             "ghidra": {
                 "version": "12.1.2",
                 "releaseAssetSha256": "1" * 64,
+                "installationFingerprint": _installation_fingerprint(
+                    {
+                        "Ghidra/application.properties": "6" * 64,
+                        "ghidraRun.bat": "7" * 64,
+                        "support/analyzeHeadless.bat": "8" * 64,
+                    }
+                ),
                 "languageId": "x86:LE:64:default",
                 "compilerSpecId": "windows",
                 "analysisOptionsSha256": "2" * 64,
@@ -168,6 +193,9 @@ def _formal_manifest(identity: dict) -> dict:
             "java": {
                 "vendor": "Eclipse Adoptium",
                 "version": "21.0.11+10-LTS",
+                "installationFingerprint": _installation_fingerprint(
+                    {"bin/java.exe": "9" * 64}
+                ),
             },
             "generator": {
                 "repositoryCommit": "a" * 40,
@@ -214,6 +242,63 @@ class NativeIdentityTests(unittest.TestCase):
 
         self.assertEqual(first, "ShooterGameNative_abcdef012345")
         self.assertEqual(second, first)
+
+    def test_toolchain_installation_fingerprint_hashes_exact_relative_files(self):
+        tool_root = self.root / "tool"
+        (tool_root / "support").mkdir(parents=True)
+        (tool_root / "run.bat").write_bytes(b"run")
+        (tool_root / "support" / "headless.bat").write_bytes(b"headless")
+        expected = {
+            "run.bat": hashlib.sha256(b"run").hexdigest(),
+            "support/headless.bat": hashlib.sha256(b"headless").hexdigest(),
+        }
+
+        fingerprint = native_identity.build_installation_fingerprint(
+            tool_root,
+            expected,
+        )
+        self.assertEqual(
+            {row["path"]: row["sha256"] for row in fingerprint["files"]},
+            expected,
+        )
+        native_identity.validate_installation_fingerprint(fingerprint)
+
+        (tool_root / "run.bat").write_bytes(b"changed")
+        self.assert_error_code(
+            "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+            lambda: native_identity.build_installation_fingerprint(
+                tool_root,
+                expected,
+            ),
+        )
+
+    def test_formal_manifest_requires_self_consistent_installation_fingerprints(
+        self,
+    ):
+        identity = build_native_identity(self.dll_path, self.pdb_path)
+        missing = _formal_manifest(identity)
+        missing["provenance"]["ghidra"].pop("installationFingerprint")
+        self.assert_error_code(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            lambda: validate_native_evidence_manifest(
+                missing,
+                expected_identity=identity,
+                formal=True,
+            ),
+        )
+
+        tampered = _formal_manifest(identity)
+        tampered["provenance"]["java"]["installationFingerprint"][
+            "sha256"
+        ] = "f" * 64
+        self.assert_error_code(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            lambda: validate_native_evidence_manifest(
+                tampered,
+                expected_identity=identity,
+                formal=True,
+            ),
+        )
 
     def test_matching_pe_codeview_and_pdb_stream_one_are_verified(self):
         identity = build_native_identity(self.dll_path, self.pdb_path)
@@ -411,11 +496,17 @@ class NativeIdentityTests(unittest.TestCase):
             ghidra={
                 "version": "12.1.2",
                 "releaseAssetSha256": "1" * 64,
+                "installationFingerprint": _installation_fingerprint(
+                    {"Ghidra/application.properties": "6" * 64}
+                ),
                 "analysisOptionsSha256": "2" * 64,
             },
             java={
                 "vendor": "Eclipse Adoptium",
                 "version": "21.0.11+10-LTS",
+                "installationFingerprint": _installation_fingerprint(
+                    {"bin/java.exe": "7" * 64}
+                ),
             },
             generator={
                 "repositoryCommit": "a" * 40,

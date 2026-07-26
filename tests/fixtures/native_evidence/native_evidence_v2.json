@@ -30,13 +30,31 @@
     "ghidra": {
       "version": "12.1.2",
       "releaseAssetSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "installationFingerprint": {
+        "sha256": "d869296c0367a72e1e38ffe567a1ba93bdab0e18f85968fc7f91cdf9d32dd0c5",
+        "files": [
+          {
+            "path": "Ghidra/application.properties",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+          }
+        ]
+      },
       "languageId": "x86:LE:64:default",
       "compilerSpecId": "windows",
       "analysisOptionsSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     },
     "java": {
       "vendor": "Eclipse Adoptium",
-      "version": "21.0.11+10-LTS"
+      "version": "21.0.11+10-LTS",
+      "installationFingerprint": {
+        "sha256": "d1ed4faf637175c9f76d91fa5316790293aebb3df63f75ed4947090d3ef6ce89",
+        "files": [
+          {
+            "path": "bin/java.exe",
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+          }
+        ]
+      }
     },
     "generator": {
       "repositoryCommit": "1111111111111111111111111111111111111111",

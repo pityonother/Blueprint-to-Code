@@ -23,6 +23,42 @@ SHA_A = "a" * 64
 SHA_B = "b" * 64
 
 
+def _installation_fingerprint(path: str, digest: str) -> dict:
+    rows = [{"path": path, "sha256": digest}]
+    source = json.dumps(
+        rows,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "sha256": hashlib.sha256(source).hexdigest(),
+        "files": rows,
+    }
+
+
+def _ghidra_provenance() -> dict:
+    return {
+        "version": "12.1.2",
+        "releaseAssetSha256": "d" * 64,
+        "installationFingerprint": _installation_fingerprint(
+            "ghidraRun.bat",
+            "6" * 64,
+        ),
+        "analysisOptionsSha256": "e" * 64,
+    }
+
+
+def _java_provenance() -> dict:
+    return {
+        "vendor": "Eclipse Adoptium",
+        "version": "21",
+        "installationFingerprint": _installation_fingerprint(
+            "bin/java.exe",
+            "7" * 64,
+        ),
+    }
+
+
 def _target(target_id: str, selector: dict) -> dict:
     return {
         "id": target_id,
@@ -132,8 +168,16 @@ def _identity() -> dict:
     }
 
 
-def _raw_export(recipe_sha: str) -> dict:
+def _raw_export(recipe_sha: str, *, exports: dict | None = None) -> dict:
     evidence_id = f"native://{SHA_A}/fixture.dll/0x1000"
+    target_exports = copy.deepcopy(
+        exports
+        if exports is not None
+        else _target(
+            "quality-qualified",
+            {"qualifiedName": "Fixture::ComputeQuality"},
+        )["exports"]
+    )
     return {
         "schema": "blueprint-to-code-native-recipe-export/v1",
         "program": "fixture.dll",
@@ -149,13 +193,19 @@ def _raw_export(recipe_sha: str) -> dict:
             {
                 "targetId": "quality-qualified",
                 "selector": {"qualifiedName": "Fixture::ComputeQuality"},
+                "exports": target_exports,
                 "expectedMatches": 1,
                 "matchCount": 1,
                 "resolvedEvidenceIds": [evidence_id],
                 "candidates": [
                     {
                         "evidenceId": evidence_id,
+                        "name": "ComputeQuality",
                         "qualifiedName": "Fixture::ComputeQuality",
+                        "rva": "0x1000",
+                        "canonicalSignature": (
+                            "int Fixture::ComputeQuality(int,int)"
+                        ),
                         "accepted": True,
                         "rejectionReason": "",
                     }
@@ -212,17 +262,21 @@ def _document(recipe: dict) -> dict:
     }
 
 
+def _disable_query_exports(recipe: dict) -> None:
+    recipe["fieldQueries"] = []
+    recipe["vtableQueries"] = []
+    for target in recipe["targets"]:
+        target["exports"]["fieldAccesses"] = False
+        target["exports"]["vtable"] = False
+
+
 def _wrap(raw: dict, document: dict) -> dict:
     return create_native_recipe_evidence_manifest(
         raw,
         recipe_document=document,
         identity=_identity(),
-        ghidra={
-            "version": "12.1.2",
-            "releaseAssetSha256": "d" * 64,
-            "analysisOptionsSha256": "e" * 64,
-        },
-        java={"vendor": "Eclipse Adoptium", "version": "21"},
+        ghidra=_ghidra_provenance(),
+        java=_java_provenance(),
         generator={
             "repositoryCommit": "f" * 40,
             "repositoryDirty": False,
@@ -272,6 +326,46 @@ class NativeRecipeTests(unittest.TestCase):
         self.assert_error_code(
             "NATIVE_RECIPE_SELECTOR_FORBIDDEN",
             lambda: validate_native_recipe(unsafe_simple, formal=True),
+        )
+
+    def test_budget_minimums_cover_expected_target_and_query_matches(self):
+        too_few_functions = _recipe()
+        too_few_functions["targets"][0]["expectedMatches"] = 2
+        too_few_functions["budgets"]["maxFunctions"] = len(
+            too_few_functions["targets"]
+        )
+        self.assert_error_code(
+            "NATIVE_RECIPE_SCHEMA_INVALID",
+            lambda: validate_native_recipe(too_few_functions, formal=True),
+        )
+
+        too_few_fields = _recipe()
+        too_few_fields["budgets"]["maxFieldAccesses"] = 0
+        self.assert_error_code(
+            "NATIVE_RECIPE_SCHEMA_INVALID",
+            lambda: validate_native_recipe(too_few_fields, formal=True),
+        )
+
+        too_few_vtables = _recipe()
+        too_few_vtables["budgets"]["maxVtableMatches"] = 0
+        self.assert_error_code(
+            "NATIVE_RECIPE_SCHEMA_INVALID",
+            lambda: validate_native_recipe(too_few_vtables, formal=True),
+        )
+
+    def test_field_and_vtable_export_requests_require_explicit_queries(self):
+        missing_field_query = _recipe()
+        missing_field_query["fieldQueries"] = []
+        self.assert_error_code(
+            "NATIVE_RECIPE_SCHEMA_INVALID",
+            lambda: validate_native_recipe(missing_field_query, formal=True),
+        )
+
+        missing_vtable_query = _recipe()
+        missing_vtable_query["vtableQueries"] = []
+        self.assert_error_code(
+            "NATIVE_RECIPE_SCHEMA_INVALID",
+            lambda: validate_native_recipe(missing_vtable_query, formal=True),
         )
 
     def test_recipe_hash_is_raw_file_sha256_and_document_is_path_free(self):
@@ -398,19 +492,172 @@ class NativeRecipeTests(unittest.TestCase):
                         selectors["primal-item-initialize-item"],
                         {"rva": "0x1448C40"},
                     )
+                if file_name.startswith("ark-"):
+                    self.assertTrue(
+                        all(
+                            target["exports"]["fieldAccesses"] is False
+                            and target["exports"]["vtable"] is False
+                            for target in document["recipe"]["targets"]
+                        )
+                    )
+
+    def test_wrapper_replays_every_formal_selector_against_candidates(self):
+        cases = (
+            (
+                "qualified",
+                {"qualifiedName": "Fixture::ComputeQuality"},
+                {
+                    "name": "ComputeQuality",
+                    "qualifiedName": "Wrong::ComputeQuality",
+                    "rva": "0x1000",
+                    "canonicalSignature": (
+                        "int Wrong::ComputeQuality(int,int)"
+                    ),
+                },
+                True,
+            ),
+            (
+                "signature",
+                {
+                    "qualifiedName": "Fixture::ComputeQuality",
+                    "signature": "int Fixture::ComputeQuality(int,int)",
+                },
+                {
+                    "name": "ComputeQuality",
+                    "qualifiedName": "Fixture::ComputeQuality",
+                    "rva": "0x1000",
+                    "canonicalSignature": (
+                        "double Fixture::ComputeQuality(double,double)"
+                    ),
+                },
+                True,
+            ),
+            (
+                "rva",
+                {"rva": "0x2000"},
+                {
+                    "name": "ComputeQuality",
+                    "qualifiedName": "Fixture::ComputeQuality",
+                    "rva": "0x1000",
+                    "canonicalSignature": (
+                        "int Fixture::ComputeQuality(int,int)"
+                    ),
+                },
+                True,
+            ),
+            (
+                "simple",
+                {"simpleName": "ExpectedLeaf", "allowSimpleName": True},
+                {
+                    "name": "WrongLeaf",
+                    "qualifiedName": "Fixture::WrongLeaf",
+                    "rva": "0x1000",
+                    "canonicalSignature": "int Fixture::WrongLeaf()",
+                },
+                True,
+            ),
+            (
+                "regex",
+                {"regex": r"^Fixture::Expected.*"},
+                {
+                    "name": "WrongLeaf",
+                    "qualifiedName": "Fixture::WrongLeaf",
+                    "rva": "0x1000",
+                    "canonicalSignature": "int Fixture::WrongLeaf()",
+                },
+                False,
+            ),
+        )
+        for label, selector, candidate_identity, formal in cases:
+            with self.subTest(selector=label):
+                recipe = _recipe()
+                recipe["targets"] = [_target("selector-check", selector)]
+                _disable_query_exports(recipe)
+                document = _document(recipe)
+                raw = _raw_export(document["sha256"])
+                result = raw["targetResults"][0]
+                result["targetId"] = "selector-check"
+                result["selector"] = copy.deepcopy(selector)
+                result["exports"] = copy.deepcopy(
+                    recipe["targets"][0]["exports"]
+                )
+                result["candidates"][0].update(candidate_identity)
+                raw["functions"][0].update(candidate_identity)
+
+                self.assert_error_code(
+                    "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+                    lambda raw=raw, document=document, formal=formal: (
+                        create_native_recipe_evidence_manifest(
+                            raw,
+                            recipe_document=document,
+                            identity=_identity(),
+                            ghidra=_ghidra_provenance(),
+                            java=_java_provenance(),
+                            generator={
+                                "repositoryCommit": "f" * 40,
+                                "repositoryDirty": not formal,
+                                "recipeId": recipe["recipeId"],
+                                "recipeSha256": document["sha256"],
+                                "scriptSha256": {
+                                    "runner": "1" * 64,
+                                    "exporter": "2" * 64,
+                                    "pdbConfigurator": "3" * 64,
+                                },
+                            },
+                            formal=formal,
+                        )
+                    ),
+                )
+
+    def test_wrapper_rejects_exports_contract_drift(self):
+        recipe = _recipe()
+        recipe["targets"] = [recipe["targets"][0]]
+        _disable_query_exports(recipe)
+        document = _document(recipe)
+        raw = _raw_export(
+            document["sha256"],
+            exports=recipe["targets"][0]["exports"],
+        )
+        raw["targetResults"][0]["exports"]["constants"] = False
+
+        self.assert_error_code(
+            "NATIVE_EVIDENCE_PROVENANCE_MISMATCH",
+            lambda: _wrap(raw, document),
+        )
+
+    def test_module_names_are_compared_case_insensitively_on_windows(self):
+        recipe = _recipe()
+        recipe["binaryModule"] = "FIXTURE.DLL"
+        recipe["targets"] = [recipe["targets"][0]]
+        _disable_query_exports(recipe)
+        document = _document(recipe)
+        raw = _raw_export(
+            document["sha256"],
+            exports=recipe["targets"][0]["exports"],
+        )
+        raw["program"] = "FiXtUrE.DlL"
+
+        manifest = _wrap(raw, document)
+
+        self.assertEqual(
+            manifest["provenance"]["binary"]["module"],
+            "fixture.dll",
+        )
 
     def test_export_count_mismatch_fails_even_when_exporter_claims_success(self):
         recipe = _recipe()
         recipe["targets"] = [recipe["targets"][0]]
-        recipe["fieldQueries"] = []
-        recipe["vtableQueries"] = []
+        _disable_query_exports(recipe)
         source = json.dumps(recipe, sort_keys=True).encode("utf-8")
         document = {
             "schema": "blueprint-to-code-native-analysis-recipe-document/v1",
             "sha256": hashlib.sha256(source).hexdigest(),
             "recipe": recipe,
         }
-        raw = _raw_export(document["sha256"])
+        raw = _raw_export(
+            document["sha256"],
+            exports=recipe["targets"][0]["exports"],
+        )
         raw["targetResults"][0]["matchCount"] = 2
 
         self.assert_error_code(
@@ -419,12 +666,8 @@ class NativeRecipeTests(unittest.TestCase):
                 raw,
                 recipe_document=document,
                 identity=_identity(),
-                ghidra={
-                    "version": "12.1.2",
-                    "releaseAssetSha256": "d" * 64,
-                    "analysisOptionsSha256": "e" * 64,
-                },
-                java={"vendor": "Eclipse Adoptium", "version": "21"},
+                ghidra=_ghidra_provenance(),
+                java=_java_provenance(),
                 generator={
                     "repositoryCommit": "f" * 40,
                     "repositoryDirty": False,
@@ -440,7 +683,10 @@ class NativeRecipeTests(unittest.TestCase):
             ),
         )
 
-        mismatched_candidate = _raw_export(document["sha256"])
+        mismatched_candidate = _raw_export(
+            document["sha256"],
+            exports=recipe["targets"][0]["exports"],
+        )
         mismatched_candidate["targetResults"][0]["candidates"][0][
             "evidenceId"
         ] = f"native://{SHA_A}/fixture.dll/0x2000"
@@ -490,6 +736,21 @@ class NativeRecipeTests(unittest.TestCase):
                 ],
             }
         ]
+        raw["functions"][0]["fieldAccesses"] = [
+            {
+                "queryId": "quality-scale-field",
+                "structureName": "Fixture::QualityInputs",
+                "fieldName": "multiplier",
+            }
+        ]
+        raw["functions"][0]["vtableSlots"] = [
+            {
+                "queryId": "quality-adjust-slot",
+                "ownerType": "Fixture::QualityModel",
+                "slotOffset": "0x8",
+                "targetEvidenceId": evidence_id,
+            }
+        ]
         _wrap(raw, document)
 
         duplicate = copy.deepcopy(raw)
@@ -517,11 +778,124 @@ class NativeRecipeTests(unittest.TestCase):
             lambda: _wrap(drifted, document),
         )
 
+        missing_query_function = copy.deepcopy(raw)
+        missing_id = f"native://{SHA_A}/fixture.dll/0xDEAD"
+        missing_query_function["fieldQueryResults"][0][
+            "resolvedEvidenceIds"
+        ] = [missing_id]
+        missing_query_function["fieldQueryResults"][0]["candidates"][0][
+            "evidenceId"
+        ] = missing_id
+        self.assert_error_code(
+            "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+            lambda: _wrap(missing_query_function, document),
+        )
+
+        wrong_query_evidence = copy.deepcopy(raw)
+        wrong_query_evidence["functions"][0]["fieldAccesses"][0][
+            "queryId"
+        ] = "another-query"
+        self.assert_error_code(
+            "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+            lambda: _wrap(wrong_query_evidence, document),
+        )
+
+    def test_field_query_resolved_ids_must_belong_to_declared_targets(self):
+        recipe = _recipe()
+        recipe["targets"] = [
+            recipe["targets"][0],
+            _target(
+                "other-qualified",
+                {"qualifiedName": "Fixture::Other"},
+            ),
+        ]
+        for target in recipe["targets"]:
+            target["exports"]["vtable"] = False
+        recipe["targets"][1]["exports"]["fieldAccesses"] = False
+        recipe["fieldQueries"] = [
+            {
+                "id": "quality-scale-field",
+                "structureName": "Fixture::QualityInputs",
+                "fieldName": "multiplier",
+                "functionTargetIds": ["quality-qualified"],
+                "expectedMatches": 1,
+            }
+        ]
+        recipe["vtableQueries"] = []
+        document = _document(recipe)
+        raw = _raw_export(
+            document["sha256"],
+            exports=recipe["targets"][0]["exports"],
+        )
+        other_id = f"native://{SHA_A}/fixture.dll/0x2000"
+        raw["targetResults"].append(
+            {
+                "targetId": "other-qualified",
+                "selector": {"qualifiedName": "Fixture::Other"},
+                "exports": copy.deepcopy(recipe["targets"][1]["exports"]),
+                "expectedMatches": 1,
+                "matchCount": 1,
+                "resolvedEvidenceIds": [other_id],
+                "candidates": [
+                    {
+                        "evidenceId": other_id,
+                        "name": "Other",
+                        "qualifiedName": "Fixture::Other",
+                        "rva": "0x2000",
+                        "canonicalSignature": "int Fixture::Other()",
+                        "accepted": True,
+                        "rejectionReason": "",
+                    }
+                ],
+                "status": "CONFIRMED",
+            }
+        )
+        other_function = copy.deepcopy(raw["functions"][0])
+        other_function.update(
+            {
+                "evidenceId": other_id,
+                "name": "Other",
+                "qualifiedName": "Fixture::Other",
+                "rva": "0x2000",
+                "signature": "int Fixture::Other()",
+            }
+        )
+        other_function["fieldAccesses"] = [
+            {
+                "queryId": "quality-scale-field",
+                "structureName": "Fixture::QualityInputs",
+                "fieldName": "multiplier",
+            }
+        ]
+        raw["functions"].append(other_function)
+        raw["fieldQueryResults"] = [
+            {
+                "queryId": "quality-scale-field",
+                "structureName": "Fixture::QualityInputs",
+                "fieldName": "multiplier",
+                "functionTargetIds": ["quality-qualified"],
+                "expectedMatches": 1,
+                "matchCount": 1,
+                "resolvedEvidenceIds": [other_id],
+                "candidates": [
+                    {
+                        "evidenceId": other_id,
+                        "accepted": True,
+                        "rejectionReason": "",
+                    }
+                ],
+            }
+        ]
+
+        self.assert_error_code(
+            "NATIVE_RECIPE_TARGET_COUNT_MISMATCH",
+            lambda: _wrap(raw, document),
+        )
+
     def test_recipe_export_wraps_v2_targets_and_candidate_diagnostics(self):
         recipe = _recipe()
         recipe["targets"] = [recipe["targets"][0]]
-        recipe["fieldQueries"] = []
-        recipe["vtableQueries"] = []
+        _disable_query_exports(recipe)
         source = json.dumps(recipe, sort_keys=True).encode("utf-8")
         document = {
             "schema": "blueprint-to-code-native-analysis-recipe-document/v1",
@@ -529,15 +903,14 @@ class NativeRecipeTests(unittest.TestCase):
             "recipe": recipe,
         }
         manifest = create_native_recipe_evidence_manifest(
-            _raw_export(document["sha256"]),
+            _raw_export(
+                document["sha256"],
+                exports=recipe["targets"][0]["exports"],
+            ),
             recipe_document=document,
             identity=_identity(),
-            ghidra={
-                "version": "12.1.2",
-                "releaseAssetSha256": "d" * 64,
-                "analysisOptionsSha256": "e" * 64,
-            },
-            java={"vendor": "Eclipse Adoptium", "version": "21"},
+            ghidra=_ghidra_provenance(),
+            java=_java_provenance(),
             generator={
                 "repositoryCommit": "f" * 40,
                 "repositoryDirty": False,
@@ -561,6 +934,10 @@ class NativeRecipeTests(unittest.TestCase):
         self.assertEqual(
             manifest["recipeTargets"][0]["resolvedEvidenceIds"],
             [manifest["targets"][0]["evidenceId"]],
+        )
+        self.assertEqual(
+            manifest["recipeTargets"][0]["exports"],
+            recipe["targets"][0]["exports"],
         )
         self.assertEqual(
             manifest["recipeTargets"][0]["candidates"][0]["accepted"],

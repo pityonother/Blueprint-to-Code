@@ -19,7 +19,7 @@
         "callersDepth": 1,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -35,7 +35,7 @@
         "callersDepth": 2,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -51,7 +51,7 @@
         "callersDepth": 2,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -67,7 +67,7 @@
         "callersDepth": 2,
         "calleesDepth": 1,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -83,7 +83,7 @@
         "callersDepth": 2,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -99,7 +99,7 @@
         "callersDepth": 2,
         "calleesDepth": 1,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -115,7 +115,7 @@
         "callersDepth": 2,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -131,7 +131,7 @@
         "callersDepth": 2,
         "calleesDepth": 1,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -163,7 +163,7 @@
         "callersDepth": 2,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -179,7 +179,7 @@
         "callersDepth": 2,
         "calleesDepth": 1,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -195,7 +195,7 @@
         "callersDepth": 2,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -211,7 +211,7 @@
         "callersDepth": 2,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }
@@ -227,7 +227,7 @@
         "callersDepth": 2,
         "calleesDepth": 2,
         "constants": true,
-        "fieldAccesses": true,
+        "fieldAccesses": false,
         "branches": true,
         "vtable": false
       }

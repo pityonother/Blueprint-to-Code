@@ -1,5 +1,8 @@
 #include "fixture.h"
 
+#define NOMINMAX
+#include <Windows.h>
+
 #include <algorithm>
 
 namespace BlueprintToCodeFixture {
@@ -31,6 +34,10 @@ BTC_FIXTURE_NOINLINE double ComputeQuality(double base_rating,
 }
 
 BTC_FIXTURE_NOINLINE int QualityLeaf(int value) {
+  const DWORD process_id = GetCurrentProcessId();
+  if (process_id == 0) {
+    return -1;
+  }
   return ComputeQuality(value, 11);
 }
 

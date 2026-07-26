@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from blueprint_translator.native_identity import (  # noqa: E402
     NativeIdentityError,
+    build_installation_fingerprint,
     build_native_identity,
     create_native_evidence_manifest,
     create_native_project_manifest,
@@ -153,6 +154,46 @@ def _command_recipe_info(args: argparse.Namespace) -> dict[str, Any]:
     return document
 
 
+def _toolchain_installation_fingerprints(
+    toolchain: dict[str, Any],
+    *,
+    ghidra_home: Path,
+    java_home: Path,
+) -> dict[str, Any]:
+    ghidra_config = toolchain.get("ghidra")
+    java_config = toolchain.get("java")
+    if not isinstance(ghidra_config, dict) or not isinstance(java_config, dict):
+        raise NativeIdentityError(
+            "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+            "Toolchain config must define Ghidra and Java installations.",
+        )
+    return {
+        "schema": "blueprint-to-code-native-toolchain-installation/v1",
+        "ghidra": build_installation_fingerprint(
+            ghidra_home,
+            ghidra_config.get("installationFiles"),
+        ),
+        "java": build_installation_fingerprint(
+            java_home,
+            java_config.get("installationFiles"),
+        ),
+    }
+
+
+def _command_verify_toolchain(args: argparse.Namespace) -> dict[str, Any]:
+    toolchain = _read_json(args.toolchain)
+    if not isinstance(toolchain, dict):
+        raise NativeIdentityError(
+            "NATIVE_TOOLCHAIN_HASH_MISMATCH",
+            "Toolchain config must be a JSON object.",
+        )
+    return _toolchain_installation_fingerprints(
+        toolchain,
+        ghidra_home=args.ghidra_home,
+        java_home=args.java_home,
+    )
+
+
 def _command_wrap_legacy(args: argparse.Namespace) -> dict[str, Any]:
     identity = _identity_from_args(args)
     raw_export = _read_json(args.raw_export)
@@ -194,17 +235,24 @@ def _command_wrap_legacy(args: argparse.Namespace) -> dict[str, Any]:
     }
     ghidra_config = toolchain.get("ghidra") or {}
     java_config = toolchain.get("java") or {}
+    installation = _toolchain_installation_fingerprints(
+        toolchain,
+        ghidra_home=args.ghidra_home,
+        java_home=args.java_home,
+    )
     return create_native_evidence_manifest(
         raw_export,
         identity=identity,
         ghidra={
             "version": args.ghidra_version or ghidra_config.get("version"),
             "releaseAssetSha256": ghidra_config.get("sha256"),
+            "installationFingerprint": installation["ghidra"],
             "analysisOptionsSha256": analysis_options_sha,
         },
         java={
             "vendor": args.java_vendor or java_config.get("distribution"),
             "version": args.java_version or java_config.get("version"),
+            "installationFingerprint": installation["java"],
         },
         generator=generator,
         formal=not args.experimental,
@@ -248,6 +296,11 @@ def _command_wrap_recipe(args: argparse.Namespace) -> dict[str, Any]:
     }
     ghidra_config = toolchain.get("ghidra") or {}
     java_config = toolchain.get("java") or {}
+    installation = _toolchain_installation_fingerprints(
+        toolchain,
+        ghidra_home=args.ghidra_home,
+        java_home=args.java_home,
+    )
     return create_native_recipe_evidence_manifest(
         raw_export,
         recipe_document=recipe_document,
@@ -255,11 +308,13 @@ def _command_wrap_recipe(args: argparse.Namespace) -> dict[str, Any]:
         ghidra={
             "version": args.ghidra_version or ghidra_config.get("version"),
             "releaseAssetSha256": ghidra_config.get("sha256"),
+            "installationFingerprint": installation["ghidra"],
             "analysisOptionsSha256": analysis_options_sha,
         },
         java={
             "vendor": args.java_vendor or java_config.get("distribution"),
             "version": args.java_version or java_config.get("version"),
+            "installationFingerprint": installation["java"],
         },
         generator=generator,
         formal=not args.experimental,
@@ -309,10 +364,18 @@ def build_parser() -> argparse.ArgumentParser:
     recipe_info.add_argument("--experimental", action="store_true")
     recipe_info.set_defaults(handler=_command_recipe_info)
 
+    verify_toolchain = subparsers.add_parser("verify-toolchain")
+    verify_toolchain.add_argument("--toolchain", type=Path, required=True)
+    verify_toolchain.add_argument("--ghidra-home", type=Path, required=True)
+    verify_toolchain.add_argument("--java-home", type=Path, required=True)
+    verify_toolchain.set_defaults(handler=_command_verify_toolchain)
+
     wrap = subparsers.add_parser("wrap-legacy")
     _add_identity_arguments(wrap)
     wrap.add_argument("--raw-export", type=Path, required=True)
     wrap.add_argument("--toolchain", type=Path, required=True)
+    wrap.add_argument("--ghidra-home", type=Path, required=True)
+    wrap.add_argument("--java-home", type=Path, required=True)
     wrap.add_argument(
         "--repository-root",
         type=Path,
@@ -348,6 +411,8 @@ def build_parser() -> argparse.ArgumentParser:
     wrap_recipe.add_argument("--recipe", type=Path, required=True)
     wrap_recipe.add_argument("--raw-export", type=Path, required=True)
     wrap_recipe.add_argument("--toolchain", type=Path, required=True)
+    wrap_recipe.add_argument("--ghidra-home", type=Path, required=True)
+    wrap_recipe.add_argument("--java-home", type=Path, required=True)
     wrap_recipe.add_argument(
         "--repository-root",
         type=Path,

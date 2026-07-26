@@ -66,6 +66,7 @@ public class ExportNativeRecipe extends GhidraScript {
 	private final JsonArray gaps = new JsonArray();
 	private final Map<String, Function> functionsByEvidenceId = new LinkedHashMap<>();
 	private final Map<String, JsonObject> exportedFunctions = new LinkedHashMap<>();
+	private final Map<String, JsonObject> exportsByEvidenceId = new LinkedHashMap<>();
 	private final Map<String, List<Function>> targetMatches = new LinkedHashMap<>();
 	private final Map<String, JsonArray> vtableSlotsByEvidenceId = new LinkedHashMap<>();
 
@@ -159,7 +160,10 @@ public class ExportNativeRecipe extends GhidraScript {
 		List<Function> functions = new ArrayList<>();
 		FunctionIterator iterator = currentProgram.getFunctionManager().getFunctions(true);
 		while (iterator.hasNext() && !monitor.isCancelled()) {
-			functions.add(iterator.next());
+			Function function = iterator.next();
+			if (isExportableFunction(function)) {
+				functions.add(function);
+			}
 		}
 		functions.sort(Comparator
 			.comparing((Function function) -> function.getName(true))
@@ -185,7 +189,10 @@ public class ExportNativeRecipe extends GhidraScript {
 				candidateJson.add(row);
 				if (isAccepted) {
 					accepted.add(candidate);
-					addFunction(candidate, "recipe target " + targetId);
+					addFunction(
+						candidate,
+						"recipe target " + targetId,
+						target.getAsJsonObject("exports"));
 				}
 			}
 			accepted.sort(Comparator.comparing(function -> function.getEntryPoint().toString()));
@@ -193,6 +200,7 @@ public class ExportNativeRecipe extends GhidraScript {
 			JsonObject result = new JsonObject();
 			result.addProperty("targetId", targetId);
 			result.add("selector", selector.deepCopy());
+			result.add("exports", target.getAsJsonObject("exports").deepCopy());
 			result.addProperty("expectedMatches", target.get("expectedMatches").getAsInt());
 			result.addProperty("matchCount", accepted.size());
 			result.add("resolvedEvidenceIds", evidenceIds(accepted));
@@ -215,7 +223,7 @@ public class ExportNativeRecipe extends GhidraScript {
 			long rva = Long.decode(selector.get("rva").getAsString());
 			Address address = currentProgram.getImageBase().add(rva);
 			Function function = currentProgram.getFunctionManager().getFunctionAt(address);
-			if (function != null) {
+			if (isExportableFunction(function)) {
 				candidates.add(function);
 			}
 			return candidates;
@@ -330,8 +338,8 @@ public class ExportNativeRecipe extends GhidraScript {
 			int calleesDepth = exports.has("calleesDepth")
 				? exports.get("calleesDepth").getAsInt() : 0;
 			for (Function function : targetMatches.getOrDefault(targetId, List.of())) {
-				collectDirection(function, callersDepth, true, targetId);
-				collectDirection(function, calleesDepth, false, targetId);
+				collectDirection(function, callersDepth, true, targetId, exports);
+				collectDirection(function, calleesDepth, false, targetId, exports);
 			}
 		}
 	}
@@ -340,7 +348,8 @@ public class ExportNativeRecipe extends GhidraScript {
 			Function start,
 			int maxDepth,
 			boolean callers,
-			String targetId) {
+			String targetId,
+			JsonObject exports) {
 		if (maxDepth <= 0) {
 			return;
 		}
@@ -359,6 +368,9 @@ public class ExportNativeRecipe extends GhidraScript {
 			List<Function> sorted = new ArrayList<>(adjacent);
 			sorted.sort(Comparator.comparing(function -> function.getEntryPoint().toString()));
 			for (Function function : sorted) {
+				if (!isExportableFunction(function)) {
+					continue;
+				}
 				if (callEdgeCount >= budget("maxCallEdges")) {
 					addGap(
 						"BUDGET_EXCEEDED",
@@ -370,7 +382,8 @@ public class ExportNativeRecipe extends GhidraScript {
 				callEdgeCount++;
 				addFunction(
 					function,
-					(callers ? "caller" : "callee") + " traversal for " + targetId);
+					(callers ? "caller" : "callee") + " traversal for " + targetId,
+					exports);
 				if (visited.add(function.getEntryPoint())) {
 					queue.add(new TraversalNode(function, node.depth + 1));
 				}
@@ -378,9 +391,16 @@ public class ExportNativeRecipe extends GhidraScript {
 		}
 	}
 
-	private void addFunction(Function function, String context) {
+	private void addFunction(
+			Function function,
+			String context,
+			JsonObject requestedExports) {
+		if (!isExportableFunction(function)) {
+			return;
+		}
 		String evidenceId = evidenceId(function);
 		if (functionsByEvidenceId.containsKey(evidenceId)) {
+			mergeExports(evidenceId, requestedExports);
 			return;
 		}
 		if (functionsByEvidenceId.size() >= budget("maxFunctions")) {
@@ -392,6 +412,28 @@ public class ExportNativeRecipe extends GhidraScript {
 			return;
 		}
 		functionsByEvidenceId.put(evidenceId, function);
+		mergeExports(evidenceId, requestedExports);
+	}
+
+	private void mergeExports(String evidenceId, JsonObject requestedExports) {
+		JsonObject merged = exportsByEvidenceId.computeIfAbsent(
+			evidenceId,
+			ignored -> new JsonObject());
+		for (String key : List.of("decompile", "constants", "branches")) {
+			boolean enabled = merged.has(key) && merged.get(key).getAsBoolean();
+			boolean requested = requestedExports != null &&
+				requestedExports.has(key) &&
+				requestedExports.get(key).getAsBoolean();
+			merged.addProperty(key, enabled || requested);
+		}
+	}
+
+	private JsonObject fullFunctionExports() {
+		JsonObject exports = new JsonObject();
+		exports.addProperty("decompile", true);
+		exports.addProperty("constants", true);
+		exports.addProperty("branches", true);
+		return exports;
 	}
 
 	private JsonArray resolveVtableQueries() {
@@ -402,6 +444,8 @@ public class ExportNativeRecipe extends GhidraScript {
 		for (JsonElement queryElement : recipe.getAsJsonArray("vtableQueries")) {
 			JsonObject query = queryElement.getAsJsonObject();
 			String className = query.get("className").getAsString();
+			String expectedVftableName =
+				normalizeQualifiedName(className) + "/vftable";
 			long slotOffset = Long.decode(query.get("slotOffset").getAsString());
 			JsonArray candidates = new JsonArray();
 			List<Function> accepted = new ArrayList<>();
@@ -410,8 +454,7 @@ public class ExportNativeRecipe extends GhidraScript {
 				Symbol symbol = symbols.next();
 				String qualifiedName = symbol.getName(true);
 				String normalized = normalizeQualifiedName(qualifiedName);
-				if (!normalized.contains(normalizeQualifiedName(className)) ||
-						!qualifiedName.toLowerCase(Locale.ROOT).contains("vftable")) {
+				if (!normalized.equals(expectedVftableName)) {
 					continue;
 				}
 				JsonObject candidate = new JsonObject();
@@ -433,8 +476,9 @@ public class ExportNativeRecipe extends GhidraScript {
 						candidate.addProperty("rawPointer", String.format("0x%016X", pointer));
 						candidate.addProperty("targetAddress", targetAddress.toString());
 						target = currentProgram.getFunctionManager().getFunctionAt(targetAddress);
-						if (target == null) {
+						if (!isExportableFunction(target)) {
 							rejection = "Vtable slot does not point to a defined function.";
+							target = null;
 						}
 						else if (accepted.size() >= budget("maxVtableMatches")) {
 							rejection = "Vtable match budget was reached.";
@@ -453,7 +497,10 @@ public class ExportNativeRecipe extends GhidraScript {
 				}
 				if (isAccepted) {
 					accepted.add(target);
-					addFunction(target, "vtable query " + query.get("id").getAsString());
+					addFunction(
+						target,
+						"vtable query " + query.get("id").getAsString(),
+						fullFunctionExports());
 					JsonObject slot = new JsonObject();
 					slot.addProperty("queryId", query.get("id").getAsString());
 					slot.addProperty("ownerType", className);
@@ -506,6 +553,10 @@ public class ExportNativeRecipe extends GhidraScript {
 
 	private JsonObject exportFunction(Function function, DecompInterface decompiler) {
 		JsonObject json = functionIdentity(function);
+		JsonObject exports = exportsByEvidenceId.get(evidenceId(function));
+		boolean includeDecompile = exportEnabled(exports, "decompile");
+		boolean includeConstants = exportEnabled(exports, "constants");
+		boolean includeBranches = exportEnabled(exports, "branches");
 		json.addProperty("owner", function.getParentNamespace().getName(true));
 		json.addProperty("symbolSource", function.getSymbol().getSource().toString());
 		json.addProperty("status", "CONFIRMED");
@@ -543,7 +594,7 @@ public class ExportNativeRecipe extends GhidraScript {
 			call.addProperty("referenceType", reference.getReferenceType().getName());
 			Function caller = currentProgram.getFunctionManager()
 				.getFunctionContaining(reference.getFromAddress());
-			if (caller != null) {
+			if (isExportableFunction(caller)) {
 				call.addProperty("callerEvidenceId", evidenceId(caller));
 				call.addProperty("callerQualifiedName", caller.getName(true));
 				if (callerIds.add(evidenceId(caller))) {
@@ -558,6 +609,7 @@ public class ExportNativeRecipe extends GhidraScript {
 		JsonArray calledFunctions = new JsonArray();
 		JsonArray calls = new JsonArray();
 		List<Function> callees = new ArrayList<>(function.getCalledFunctions(monitor));
+		callees.removeIf(callee -> !isExportableFunction(callee));
 		callees.sort(Comparator.comparing(this::formatRva));
 		for (Function callee : callees) {
 			calledFunctions.add(functionIdentity(callee));
@@ -582,11 +634,14 @@ public class ExportNativeRecipe extends GhidraScript {
 			currentProgram.getListing().getInstructions(function.getBody(), true);
 		while (instructions.hasNext() && !monitor.isCancelled()) {
 			Instruction instruction = instructions.next();
-			if (instruction.getFlowType().isConditional()) {
+			if (includeBranches && instruction.getFlowType().isConditional()) {
 				JsonObject branch = new JsonObject();
 				branch.addProperty("address", instruction.getAddress().toString());
 				branch.addProperty("instruction", instruction.toString());
 				branches.add(branch);
+			}
+			if (!includeConstants) {
+				continue;
 			}
 			for (int operand = 0; operand < instruction.getNumOperands(); operand++) {
 				for (Object object : instruction.getOpObjects(operand)) {
@@ -635,6 +690,13 @@ public class ExportNativeRecipe extends GhidraScript {
 			vtableSlots == null ? new JsonArray() : vtableSlots.deepCopy());
 		json.add("gaps", new JsonArray());
 
+		if (!includeDecompile) {
+			JsonObject decompile = new JsonObject();
+			decompile.addProperty("completed", false);
+			decompile.addProperty("skipped", true);
+			json.add("decompile", decompile);
+			return json;
+		}
 		DecompileResults results =
 			decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, monitor);
 		boolean completed = results != null && results.decompileCompleted() &&
@@ -703,8 +765,8 @@ public class ExportNativeRecipe extends GhidraScript {
 						function,
 						field.getOffset(),
 						Math.max(field.getLength(), 1));
-					boolean decompilerNamesField = decompiledText(function)
-						.contains(fieldName);
+					boolean decompilerNamesField =
+						decompilerReferencesField(function, fieldName);
 					boolean isMatch = instructions.size() > 0 || decompilerNamesField;
 					rejection = isMatch
 						? ""
@@ -821,6 +883,18 @@ public class ExportNativeRecipe extends GhidraScript {
 			Instruction instruction = instructions.next();
 			boolean found = false;
 			for (int operand = 0; operand < instruction.getNumOperands(); operand++) {
+				String operandRepresentation =
+					instruction.getDefaultOperandRepresentation(operand);
+				boolean memoryOperand =
+					operandRepresentation.contains("[") &&
+					operandRepresentation.contains("]");
+				boolean stackOrFrameOperand = Pattern
+					.compile("(?i)\\b(?:RSP|RBP)\\b")
+					.matcher(operandRepresentation)
+					.find();
+				if (!memoryOperand || stackOrFrameOperand) {
+					continue;
+				}
 				for (Object object : instruction.getOpObjects(operand)) {
 					if (object instanceof Scalar) {
 						long value = ((Scalar) object).getUnsignedValue();
@@ -848,6 +922,14 @@ public class ExportNativeRecipe extends GhidraScript {
 		return exported.get("decompiledC").getAsString();
 	}
 
+	private boolean decompilerReferencesField(
+			Function function,
+			String fieldName) {
+		Pattern memberExpression = Pattern.compile(
+			"(?:->|\\.)\\s*" + Pattern.quote(fieldName) + "\\b");
+		return memberExpression.matcher(decompiledText(function)).find();
+	}
+
 	private DecompInterface createDecompiler() {
 		DecompInterface decompiler = new DecompInterface();
 		DecompileOptions options = new DecompileOptions();
@@ -857,6 +939,23 @@ public class ExportNativeRecipe extends GhidraScript {
 			throw new IllegalStateException("Decompiler could not open " + currentProgram.getName());
 		}
 		return decompiler;
+	}
+
+	private boolean exportEnabled(JsonObject exports, String name) {
+		return exports != null &&
+			exports.has(name) &&
+			exports.get(name).getAsBoolean();
+	}
+
+	private boolean isExportableFunction(Function function) {
+		if (function == null || function.isExternal()) {
+			return false;
+		}
+		Address entryPoint = function.getEntryPoint();
+		return entryPoint != null &&
+			entryPoint.isMemoryAddress() &&
+			entryPoint.getAddressSpace().equals(
+				currentProgram.getImageBase().getAddressSpace());
 	}
 
 	private JsonObject functionIdentity(Function function) {
@@ -877,6 +976,10 @@ public class ExportNativeRecipe extends GhidraScript {
 	}
 
 	private String formatRva(Function function) {
+		if (!isExportableFunction(function)) {
+			throw new IllegalArgumentException(
+				"Cannot compute an RVA for an external, non-memory, or foreign-address-space function.");
+		}
 		long rva = function.getEntryPoint().subtract(currentProgram.getImageBase());
 		return String.format("0x%X", rva);
 	}
