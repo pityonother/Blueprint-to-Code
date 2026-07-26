@@ -1013,9 +1013,14 @@ public class ExportNativeRecipe extends GhidraScript {
 			String detail,
 			String nextProbe) {
 		JsonObject gap = new JsonObject();
+		String functionRva = function.get("rva").getAsString()
+			.toLowerCase(Locale.ROOT)
+			.replaceFirst("^0x", "");
+		int functionGapOrdinal = function.getAsJsonArray("gaps").size();
 		gap.addProperty(
 			"gapId",
-			"native-gap://recipe/function/" + formatGapOrdinal(gaps.size()));
+			"native-gap://recipe/function/" + functionRva + "/" +
+				formatGapOrdinal(functionGapOrdinal));
 		gap.addProperty("functionEvidenceId", function.get("evidenceId").getAsString());
 		gap.addProperty("status", "NOT_RECOVERED");
 		gap.addProperty("reasonCode", reasonCode);

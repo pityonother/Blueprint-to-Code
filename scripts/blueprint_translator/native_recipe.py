@@ -675,7 +675,7 @@ def _gap(value: Mapping[str, Any], ordinal: int) -> dict[str, Any]:
         value.get("reasonCode") or value.get("kind") or "SOURCE_NOT_AVAILABLE"
     )
     return {
-        "gapId": str(value.get("gapId") or f"native-gap://recipe/{ordinal}"),
+        "gapId": f"native-gap://recipe/{ordinal:04d}",
         "functionEvidenceId": value.get("functionEvidenceId")
         or value.get("evidenceId"),
         "status": str(value.get("status") or "NOT_RECOVERED"),

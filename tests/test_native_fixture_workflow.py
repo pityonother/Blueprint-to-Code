@@ -280,6 +280,12 @@ class NativeFixtureWorkflowContractTests(unittest.TestCase):
         self.assertRegex(exporter, r"RSP\|RBP")
         self.assertIn("decompilerReferencesField", exporter)
         self.assertIn('result.add("exports"', exporter)
+        self.assertIn("functionRva", exporter)
+        self.assertIn("functionGapOrdinal", exporter)
+        self.assertIn(
+            '"native-gap://recipe/function/" + functionRva',
+            exporter,
+        )
 
     def test_public_fixture_exercises_an_imported_external_callee(self) -> None:
         source = FIXTURE_SOURCE.read_text(encoding="utf-8")

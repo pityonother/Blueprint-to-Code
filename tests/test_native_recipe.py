@@ -625,6 +625,42 @@ class NativeRecipeTests(unittest.TestCase):
             lambda: _wrap(raw, document),
         )
 
+    def test_wrapper_assigns_unique_canonical_gap_ids(self):
+        recipe = _recipe()
+        recipe["targets"] = [recipe["targets"][0]]
+        _disable_query_exports(recipe)
+        document = _document(recipe)
+        raw = _raw_export(
+            document["sha256"],
+            exports=recipe["targets"][0]["exports"],
+        )
+        raw["functions"][0]["gaps"] = [
+            {
+                "gapId": "native-gap://recipe/function/duplicate",
+                "status": "NOT_RECOVERED",
+                "reasonCode": "BUDGET_EXCEEDED",
+                "detail": "first",
+                "nextProbe": "review",
+            },
+            {
+                "gapId": "native-gap://recipe/function/duplicate",
+                "status": "NOT_RECOVERED",
+                "reasonCode": "BUDGET_EXCEEDED",
+                "detail": "second",
+                "nextProbe": "review",
+            },
+        ]
+
+        manifest = _wrap(raw, document)
+
+        self.assertEqual(
+            [gap["gapId"] for gap in manifest["gaps"]],
+            [
+                "native-gap://recipe/0000",
+                "native-gap://recipe/0001",
+            ],
+        )
+
     def test_module_names_are_compared_case_insensitively_on_windows(self):
         recipe = _recipe()
         recipe["binaryModule"] = "FIXTURE.DLL"
