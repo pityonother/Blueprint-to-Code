@@ -24,6 +24,10 @@ analysis/
 
 # Generated per-analysis comparison packages; root-level reports are durable docs
 reports/*/
+!reports/manifests/
+!reports/manifests/*.json
+!reports/evidence_manifests/
+!reports/evidence_manifests/*.json
 
 # Machine-local ARK DevKit configuration
 devkit_content_root.txt
@@ -32,6 +36,8 @@ devkit_path_mappings.txt
 # Machine-local Ghidra projects, logs, and exported native evidence
 native_analysis/runtime/
 native_evidence/
+!tests/fixtures/native_evidence/
+!tests/fixtures/native_evidence/*.json
 *.gpr
 *.rep/
 
@@ -47,6 +53,7 @@ dist-ssr
 
 # Reproducible release packages are generated locally, not committed.
 release/*.zip
+tests/native_fixture/build/
 
 # Local review/session notes are preserved on this workstation, not published.
 docs/GPT_PRO_*.md

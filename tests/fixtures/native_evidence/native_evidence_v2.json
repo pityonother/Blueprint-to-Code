@@ -1,0 +1,252 @@
+{
+  "schema": "blueprint-to-code-native-evidence-set/v2",
+  "evidenceSetId": "native-set://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "generatedAtUtc": "2026-07-27T00:00:00Z",
+  "provenance": {
+    "binary": {
+      "module": "fixture.dll",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 4096,
+      "machine": "x86_64",
+      "machineCode": "0x8664",
+      "peTimestamp": 0,
+      "imageBase": "0x140000000",
+      "codeView": {
+        "format": "RSDS",
+        "guid": "11111111-2222-3333-4444-555555555555",
+        "age": 1,
+        "pdbFileName": "fixture.pdb"
+      }
+    },
+    "pdb": {
+      "fileName": "fixture.pdb",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "size": 2048,
+      "guid": "11111111-2222-3333-4444-555555555555",
+      "age": 1,
+      "loaded": true,
+      "matchesBinary": true
+    },
+    "ghidra": {
+      "version": "12.1.2",
+      "releaseAssetSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "languageId": "x86:LE:64:default",
+      "compilerSpecId": "windows",
+      "analysisOptionsSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "java": {
+      "vendor": "Eclipse Adoptium",
+      "version": "21.0.11+10-LTS"
+    },
+    "generator": {
+      "repositoryCommit": "1111111111111111111111111111111111111111",
+      "repositoryDirty": false,
+      "recipeId": "native-recipe://fixture/quality-v1",
+      "recipeSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "scriptSha256": {
+        "runner": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "exporter": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "pdbConfigurator": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  },
+  "trust": {
+    "status": "VERIFIED"
+  },
+  "selection": {
+    "patterns": [
+      "ComputeQuality",
+      "ApplyClamp",
+      "BuildReward"
+    ],
+    "matchCount": 4
+  },
+  "targets": [
+    {
+      "evidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1000",
+      "name": "ComputeQuality",
+      "qualifiedName": "FixtureMath::ComputeQuality(int)",
+      "owner": "FixtureMath",
+      "rva": "0x1000",
+      "signature": "int FixtureMath::ComputeQuality(int base)",
+      "status": "CONFIRMED",
+      "confidence": "HIGH",
+      "source": "PDB_AND_DECOMPILER",
+      "parameters": [
+        {
+          "ordinal": 0,
+          "name": "base",
+          "type": "int"
+        }
+      ],
+      "calls": [
+        {
+          "targetEvidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1200",
+          "callsiteRva": "0x1010",
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "fieldAccesses": [
+        {
+          "fieldAccessId": "field-access://fixture/quality-scale",
+          "ownerType": "FixtureState",
+          "fieldName": "QualityScale",
+          "offset": "0x10",
+          "access": "READ",
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "constants": [
+        {
+          "constantId": "constant://fixture/quality-multiplier",
+          "value": 1.5,
+          "valueType": "float",
+          "context": "quality multiplier",
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "branches": [
+        {
+          "branchId": "branch://fixture/quality-positive",
+          "condition": "base > 0",
+          "trueTargetRva": "0x1020",
+          "falseTargetRva": "0x1030",
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "decompiledC": "int FixtureMath::ComputeQuality(int base) { /* FULL_DECOMPILE_SHOULD_NOT_APPEAR_IN_INDEX */ return base > 0 ? ApplyClamp((int)(base * state.QualityScale * 1.5f)) : 0; }"
+    },
+    {
+      "evidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1100",
+      "name": "ComputeQuality",
+      "qualifiedName": "FixtureMath::ComputeQuality(float)",
+      "owner": "FixtureMath",
+      "rva": "0x1100",
+      "signature": "float FixtureMath::ComputeQuality(float base)",
+      "status": "CONFIRMED",
+      "confidence": "HIGH",
+      "source": "PDB_AND_DECOMPILER",
+      "parameters": [
+        {
+          "ordinal": 0,
+          "name": "base",
+          "type": "float"
+        }
+      ],
+      "calls": [],
+      "fieldAccesses": [
+        {
+          "fieldAccessId": "field-access://fixture/quality-scale-float",
+          "ownerType": "FixtureState",
+          "fieldName": "QualityScale",
+          "offset": "0x10",
+          "access": "READ",
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "constants": [
+        {
+          "constantId": "constant://fixture/quality-float-cap",
+          "value": 100.0,
+          "valueType": "float",
+          "context": "maximum quality",
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "branches": [],
+      "decompiledC": "float FixtureMath::ComputeQuality(float base) { /* FULL_DECOMPILE_SHOULD_NOT_APPEAR_IN_INDEX */ return base * state.QualityScale; }"
+    },
+    {
+      "evidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1200",
+      "name": "ApplyClamp",
+      "qualifiedName": "FixtureMath::ApplyClamp(int)",
+      "owner": "FixtureMath",
+      "rva": "0x1200",
+      "signature": "int FixtureMath::ApplyClamp(int value)",
+      "status": "CONFIRMED",
+      "confidence": "HIGH",
+      "source": "PDB_AND_DECOMPILER",
+      "parameters": [
+        {
+          "ordinal": 0,
+          "name": "value",
+          "type": "int"
+        }
+      ],
+      "calls": [],
+      "fieldAccesses": [],
+      "constants": [
+        {
+          "constantId": "constant://fixture/clamp-cap",
+          "value": 100,
+          "valueType": "int",
+          "context": "clamp ceiling",
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "branches": [],
+      "vtableSlots": [
+        {
+          "vtableSlotId": "vtable-slot://fixture/apply-clamp",
+          "ownerType": "FixtureMath",
+          "slot": 2,
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "decompiledC": "int FixtureMath::ApplyClamp(int value) { /* FULL_DECOMPILE_SHOULD_NOT_APPEAR_IN_INDEX */ return value > 100 ? 100 : value; }"
+    },
+    {
+      "evidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1300",
+      "name": "BuildReward",
+      "qualifiedName": "FixtureRewards::BuildReward(int)",
+      "owner": "FixtureRewards",
+      "rva": "0x1300",
+      "signature": "int FixtureRewards::BuildReward(int base)",
+      "status": "CONFIRMED",
+      "confidence": "HIGH",
+      "source": "PDB_AND_DECOMPILER",
+      "parameters": [
+        {
+          "ordinal": 0,
+          "name": "base",
+          "type": "int"
+        }
+      ],
+      "calls": [
+        {
+          "targetEvidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1000",
+          "callsiteRva": "0x1310",
+          "status": "CONFIRMED",
+          "confidence": "HIGH"
+        }
+      ],
+      "fieldAccesses": [],
+      "constants": [],
+      "branches": [],
+      "decompiledC": "int FixtureRewards::BuildReward(int base) { /* FULL_DECOMPILE_SHOULD_NOT_APPEAR_IN_INDEX */ return FixtureMath::ComputeQuality(base); }"
+    }
+  ],
+  "gaps": [
+    {
+      "gapId": "native-gap://fixture/runtime-random",
+      "functionEvidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1000",
+      "status": "SOURCE_NOT_AVAILABLE",
+      "reasonCode": "RUNTIME_RANDOM_SOURCE",
+      "detail": "The runtime random source is outside the fixture binary.",
+      "nextProbe": "Record a synthetic runtime observation."
+    },
+    {
+      "kind": "DECOMPILE_FAILED",
+      "evidenceId": "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1300",
+      "reason": "Fixture decompiler timeout."
+    }
+  ]
+}

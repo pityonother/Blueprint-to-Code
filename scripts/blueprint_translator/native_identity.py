@@ -723,6 +723,7 @@ def validate_native_evidence_manifest(
             "trust",
             "selection",
             "targets",
+            "recipeTargets",
             "gaps",
         },
         "manifest",
@@ -969,6 +970,13 @@ def validate_native_evidence_manifest(
         _fail(
             "NATIVE_EXPORT_SCHEMA_INVALID",
             "Native evidence targets and gaps must be JSON arrays.",
+        )
+    if "recipeTargets" in root and not isinstance(
+        root.get("recipeTargets"), list
+    ):
+        _fail(
+            "NATIVE_EXPORT_SCHEMA_INVALID",
+            "Native evidence recipeTargets must be a JSON array.",
         )
     return manifest
 

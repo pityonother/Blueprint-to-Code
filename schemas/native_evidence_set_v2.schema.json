@@ -262,6 +262,51 @@
         "type": "object"
       }
     },
+    "recipeTargets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "targetId",
+          "selector",
+          "expectedCount",
+          "resolvedEvidenceIds",
+          "candidates",
+          "status"
+        ],
+        "properties": {
+          "targetId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "selector": {
+            "type": "object"
+          },
+          "expectedCount": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "resolvedEvidenceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "gaps": {
       "type": "array",
       "items": {
