@@ -16,14 +16,24 @@ __pycache__/
 # Generated Blueprint captures and reports
 captures/
 output/
+.tmp/
 .tmp_*/
 knowledge_base/
 analysis/
 .playwright-cli/
 
+# Generated per-analysis comparison packages; root-level reports are durable docs
+reports/*/
+
 # Machine-local ARK DevKit configuration
 devkit_content_root.txt
 devkit_path_mappings.txt
+
+# Machine-local Ghidra projects, logs, and exported native evidence
+native_analysis/runtime/
+native_evidence/
+*.gpr
+*.rep/
 
 # Unreal plugin build output
 devkit_plugins/**/Binaries/

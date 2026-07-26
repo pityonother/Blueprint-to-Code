@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "ghidra": {
+    "version": "12.1.2",
+    "folderName": "ghidra_12.1.2_PUBLIC",
+    "releaseAsset": "ghidra_12.1.2_PUBLIC_20260605.zip",
+    "releaseUrl": "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip",
+    "sha256": "b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d"
+  },
+  "java": {
+    "distribution": "Eclipse Temurin",
+    "version": "21.0.11+10",
+    "folderName": "jdk-21.0.11+10",
+    "releaseAsset": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
+    "releaseUrl": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
+    "sha256": "d3625e7cadf23787ea540229544b6e2ab494b3b54da1801879e583e1dfee0a64"
+  },
+  "shooterGame": {
+    "defaultDevKitRoot": "C:\\Program Files\\Epic Games\\ARKDevkit",
+    "binaryRelativePath": "Engine\\Binaries\\Win64\\ShooterGameEditor-ShooterGame.dll",
+    "pdbRelativePath": "Engine\\Binaries\\Win64\\ShooterGameEditor-ShooterGame.pdb",
+    "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+    "pdbSha256": "5285ae571d09fde9183a491f6bdef6e10a143857dd8b7fa5f9e6755b9c01bc16"
+  },
+  "workspace": {
+    "folderName": "ghidra-workspaces\\BlueprintToCode",
+    "projectName": "ShooterGameNative_B0E67E1E",
+    "headlessMaxMemory": "8G",
+    "analysisTimeoutSeconds": 1800
+  },
+  "evidence": {
+    "schema": "blueprint-to-code-native-targets/v1",
+    "uriFormat": "native://<binary-sha256>/<module>/<rva>"
+  }
+}

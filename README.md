@@ -445,6 +445,23 @@ python scripts\bp_clipboard_to_prompt.py --compare-asset captures\OldAsset_BP ca
 
 Asset compare writes `compare_report.md`, `compare_summary.md`, `compare.json`, and `behavior_impact_report.md`. The behavior impact report groups changes by likely ARK behavior areas such as Parachute, Glide, Sliding, Nursing, MultiUse, Damage, Passenger, Movement, HUD, and Replication.
 
+### Optional Ghidra Native Evidence
+
+Blueprint to Code remains the source of truth for `.uasset` / `.uexp`, Class
+Defaults, Components, and Blueprint graph evidence. When an important formula
+ends at an unrecovered native C++ function, the optional Ghidra helper can bind
+decompiler evidence to the exact local ShooterGame DLL/PDB hashes without
+committing binaries, Ghidra projects, or generated evidence:
+
+```powershell
+.\scripts\native_analysis\Test-NativeAnalysisSetup.ps1
+.\scripts\native_analysis\Import-ShooterGameNative.ps1
+```
+
+Use `START_GHIDRA.bat` to open the configured workspace. Version pins,
+environment overrides, evidence IDs, and safety boundaries are documented in
+[`docs/GHIDRA_NATIVE_ANALYSIS_zh.md`](docs/GHIDRA_NATIVE_ANALYSIS_zh.md).
+
 Run the full Python regression suite and frontend build:
 
 ```powershell
