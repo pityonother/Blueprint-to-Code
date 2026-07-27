@@ -10,7 +10,6 @@ import sqlite3
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -1049,10 +1048,6 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _modified_iso(path: Path) -> str:
-    return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
-
-
 def _current_package_metadata(path: Path) -> dict[str, object]:
     extension = path.suffix.casefold()
     uexp = path.with_suffix(".uexp") if extension == ".uasset" else None
@@ -1065,7 +1060,6 @@ def _current_package_metadata(path: Path) -> dict[str, object]:
             + (uexp.stat().st_size if uexp_exists and uexp else 0)
             + (ubulk.stat().st_size if ubulk_exists and ubulk else 0)
         ),
-        "source_modified": _modified_iso(path),
         "has_uasset": int(extension == ".uasset"),
         "has_uexp": int(uexp_exists),
         "has_ubulk": int(ubulk_exists),
@@ -1111,7 +1105,6 @@ def _validate_current_package(
     current_metadata = _current_package_metadata(package_path)
     discovery_metadata = {
         "file_size_total": candidate.file_size_total,
-        "source_modified": candidate.source_modified,
         "has_uasset": candidate.has_uasset,
         "has_uexp": candidate.has_uexp,
         "has_ubulk": candidate.has_ubulk,
@@ -1119,9 +1112,11 @@ def _validate_current_package(
     # Discovery's final source_fingerprint also folds in a Registry fingerprint,
     # but the per-asset Registry fingerprint is not retained in the published
     # bundle.  Do not pretend it can be recomputed here.  Instead, require the
-    # composite identifier to be well formed, compare every retained package
-    # metadata field, and cryptographically verify the current binaries against
-    # Evidence source_manifest above.
+    # composite identifier to be well formed, compare stable package shape
+    # fields, and cryptographically verify the current binaries against
+    # Evidence source_manifest above.  File modification time is deliberately
+    # excluded: touching an otherwise identical verified package must not
+    # change semantic ingestion.
     if (
         not re.fullmatch(
             r"[0-9a-fA-F]{64}",
@@ -1408,7 +1403,7 @@ def materialize_blueprint_defaults(
                 for row in default_rows:
                     property_name = str(row["name"] or "")
                     if (
-                        not property_name
+                        not property_name.strip()
                         or _contains_local_path(property_name)
                         or str(row["revision_id"] or "") != identity.revision_id
                         or str(row["default_ref"] or "")
@@ -1443,7 +1438,7 @@ def materialize_blueprint_defaults(
             for row in default_rows:
                 property_name = str(row["name"] or "")
                 if (
-                    not property_name
+                    not property_name.strip()
                     or str(row["revision_id"] or "") != identity.revision_id
                     or _contains_local_path(property_name)
                 ):

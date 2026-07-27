@@ -16,6 +16,10 @@ from .invalidation import validate_effective_resolution_dependencies
 from .ontology import load_ontology
 from .projections import DOMAIN_PROJECTIONS
 from .registrations import classify_registration_property
+from .schema_capabilities import (
+    CORE_SCHEMA_VERSION,
+    supports_typed_map_usage_evidence,
+)
 from .semantic_quality import semantic_quality_gates
 
 
@@ -42,6 +46,29 @@ EFFECTIVE_CANDIDATE_REJECTION_REASONS = (
     "ASSIGNMENT_UNVERIFIED",
     "MULTIPLE_PARENT_CANDIDATES",
     "INHERITANCE_CYCLE",
+)
+CONFIRMED_RELATIONSHIP_STATUSES = (
+    "CONFIRMED",
+    "VERIFIED",
+    "RESOLVED",
+)
+CONFIRMED_MAP_VIEW_REQUIRED_COLUMNS = frozenset(
+    {
+        "edge_id",
+        "edge_type",
+        "status",
+        "confidence",
+        "source_revision_id",
+        "evidence_uri",
+        "map_usage_id",
+        "evidence_layer",
+        "source_evidence_status",
+        "usage_status",
+        "freshness_status",
+        "claims_complete_map_usage",
+        "claims_spawn_coordinates",
+        "evidence_count",
+    }
 )
 
 
@@ -302,6 +329,64 @@ def _gate(
     }
 
 
+def _registration_confidence_metrics(
+    core: sqlite3.Connection,
+) -> dict[str, int]:
+    """Count open registration claims carrying complete confidence."""
+
+    incomplete_high = """
+        upper(status) NOT IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+        AND upper(confidence) IN ('HIGH', 'CONFIRMED')
+    """
+    metrics = {
+        "typedRegistrations": int(
+            core.execute(
+                f"""
+                SELECT COUNT(*) FROM typed_registrations
+                WHERE {incomplete_high}
+                """
+            ).fetchone()[0]
+        ),
+        "registrationEdges": int(
+            core.execute(
+                f"""
+                SELECT COUNT(*) FROM edges
+                WHERE edge_type='REGISTERS'
+                  AND {incomplete_high}
+                """
+            ).fetchone()[0]
+        ),
+        "typedMemberships": int(
+            core.execute(
+                f"""
+                SELECT COUNT(*) FROM domain_memberships
+                WHERE membership_kind='TYPED_REGISTRATION'
+                  AND {incomplete_high}
+                """
+            ).fetchone()[0]
+        ),
+    }
+    metrics["total"] = sum(metrics.values())
+    return metrics
+
+
+def _registration_confidence_gate(
+    metrics: Mapping[str, object],
+) -> dict[str, object]:
+    contradictions = int(metrics.get("total") or 0)
+    return _gate(
+        "registrations.noncomplete_high_confidence",
+        "registrations",
+        target=0,
+        actual=dict(metrics),
+        passed=contradictions == 0,
+        detail=(
+            "Candidate and legacy registration claims, REGISTERS edges, "
+            "and typed memberships must not carry complete confidence."
+        ),
+    )
+
+
 def _registration_gold_metrics(project_root: Path) -> dict[str, object]:
     gold_path = (
         project_root
@@ -496,6 +581,477 @@ def _privacy_scan(value: object) -> list[str]:
     return sorted(hits)
 
 
+def _query_benchmark_gates(
+    benchmark: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Evaluate only fixed-gold v2 semantics; deprecated v1 aliases are ignored."""
+
+    raw_gold = benchmark.get("goldSet")
+    gold = raw_gold if isinstance(raw_gold, Mapping) else {}
+
+    def integer(
+        source: Mapping[str, object],
+        key: str,
+    ) -> int | None:
+        try:
+            value = source.get(key)
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def rate(key: str) -> float | None:
+        try:
+            value = benchmark.get(key)
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    fixed_gold = integer(gold, "fixedGoldCases")
+    human_gold = integer(gold, "humanGoldCases")
+    protocol = rate("protocolComplianceRate")
+    semantic_exact = rate("semanticExactMatchRate")
+    usable_value = rate("usableValueAnswerRate")
+    evidence_complete = rate("evidenceBackedCompleteRate")
+    expected_gap = rate("expectedGapMatchedRate")
+    wrong_answer = rate("wrongAnswerRate")
+    ambiguous_answer = rate("unexpectedAmbiguousAnswerRate")
+    stale_leak = rate("staleLeakRate")
+    candidate_complete = rate("candidateEdgeCompleteRate")
+    raw_storage_paths = benchmark.get("storagePathCoverage")
+    storage_paths = (
+        raw_storage_paths
+        if isinstance(raw_storage_paths, Mapping)
+        else {}
+    )
+    required_storage_paths = ("core", "search", "cache", "complete")
+    storage_paths_complete = all(
+        storage_paths.get(path) is True for path in required_storage_paths
+    )
+    fixed_corpus = (
+        benchmark.get("schema") == "ark-kb-query-benchmark/v2"
+        and gold.get("selectionMode") == "MANUAL_FIXED"
+        and gold.get("generatedFromCore") is False
+    )
+    return [
+        _gate(
+            "queries.fixed_gold_cases",
+            "queries",
+            target=">=120 manually fixed cases",
+            actual={
+                "count": fixed_gold,
+                "selectionMode": gold.get("selectionMode"),
+                "generatedFromCore": gold.get("generatedFromCore"),
+            },
+            passed=bool(
+                fixed_corpus
+                and fixed_gold is not None
+                and fixed_gold >= 120
+            ),
+            detail="Gold cases are checked in and never selected from Core.",
+        ),
+        _gate(
+            "queries.human_gold_cases",
+            "queries",
+            target=">=120 HUMAN_REVIEWED or EMPIRICAL cases",
+            actual=human_gold,
+            passed=human_gold is not None and human_gold >= 120,
+            detail="Fixture-exact protocol cases do not count as human gold.",
+        ),
+        _gate(
+            "queries.corpus_ready_for_cutover",
+            "queries",
+            target=True,
+            actual=gold.get("corpusReadyForCutover"),
+            passed=gold.get("corpusReadyForCutover") is True,
+            detail="The fixed corpus itself declares no outstanding review gap.",
+        ),
+        _gate(
+            "queries.protocol_compliance",
+            "queries",
+            target=1.0,
+            actual=protocol,
+            passed=protocol is not None and protocol >= 1.0,
+            detail="Every request follows the answer-mode and explicit-gap protocol.",
+        ),
+        _gate(
+            "queries.semantic_exact_match",
+            "queries",
+            target=">=0.95",
+            actual=semantic_exact,
+            passed=semantic_exact is not None and semantic_exact >= 0.95,
+            detail="Exact semantic answers are measured only on eligible gold.",
+        ),
+        _gate(
+            "queries.usable_value_answer",
+            "queries",
+            target=">=0.95",
+            actual=usable_value,
+            passed=usable_value is not None and usable_value >= 0.95,
+            detail="Typed value materialization is independently measured.",
+        ),
+        _gate(
+            "queries.evidence_backed_complete",
+            "queries",
+            target=">=0.95",
+            actual=evidence_complete,
+            passed=(
+                evidence_complete is not None
+                and evidence_complete >= 0.95
+            ),
+            detail="Complete semantic answers carry usable fresh Evidence.",
+        ),
+        _gate(
+            "queries.expected_gap_match",
+            "queries",
+            target=">=0.95",
+            actual=expected_gap,
+            passed=expected_gap is not None and expected_gap >= 0.95,
+            detail="Expected bounded gaps use their reviewed stable codes.",
+        ),
+        _gate(
+            "queries.no_wrong_answers",
+            "queries",
+            target=0.0,
+            actual=wrong_answer,
+            passed=wrong_answer is not None and wrong_answer == 0.0,
+            detail="Wrong answers are never exchanged for a higher coverage rate.",
+        ),
+        _gate(
+            "queries.no_unexpected_ambiguous_answers",
+            "queries",
+            target=0.0,
+            actual=ambiguous_answer,
+            passed=(
+                ambiguous_answer is not None
+                and ambiguous_answer == 0.0
+            ),
+            detail=(
+                "Only unexpected ambiguity is an error; reviewed ambiguous "
+                "negative cases remain valid explicit gaps."
+            ),
+        ),
+        _gate(
+            "queries.no_stale_leaks",
+            "queries",
+            target=0.0,
+            actual=stale_leak,
+            passed=stale_leak is not None and stale_leak == 0.0,
+            detail="STALE Evidence cannot satisfy a complete answer.",
+        ),
+        _gate(
+            "queries.no_candidate_edge_completion",
+            "queries",
+            target=0.0,
+            actual=candidate_complete,
+            passed=(
+                candidate_complete is not None
+                and candidate_complete == 0.0
+            ),
+            detail="Candidate relationship rows cannot close a requirement.",
+        ),
+        _gate(
+            "queries.identity_not_semantic",
+            "queries",
+            target=True,
+            actual=benchmark.get("identityOnlyNotCountedAsSemantic"),
+            passed=(
+                benchmark.get("identityOnlyNotCountedAsSemantic") is True
+            ),
+            detail="Identity-only completion is excluded from semantic coverage.",
+        ),
+        _gate(
+            "queries.storage_paths_covered",
+            "queries",
+            target={
+                "core": True,
+                "search": True,
+                "cache": True,
+                "complete": True,
+            },
+            actual={
+                path: storage_paths.get(path)
+                for path in required_storage_paths
+            },
+            passed=storage_paths_complete,
+            detail=(
+                "The fixed benchmark must exercise Core, Search, and Cache "
+                "read paths before cutover."
+            ),
+        ),
+    ]
+
+
+def _typed_map_usage_metrics(
+    core: sqlite3.Connection,
+) -> dict[str, object]:
+    """Validate the v4 typed map view against its base Evidence and revisions."""
+
+    metrics: dict[str, object] = {
+        "coreSchemaVersion": "",
+        "capability": False,
+        "confirmedViewFieldsPresent": False,
+        "typedEdgeCount": 0,
+        "confirmedCount": 0,
+        "candidateCount": 0,
+        "staleCount": 0,
+        "invalidConfirmedRows": 0,
+        "confirmedViewCoverageMismatch": 0,
+        "domainMembershipRows": 0,
+        "domainMembershipFallbackUsed": False,
+        "claimsCompleteMapUsageTrue": 0,
+        "claimsSpawnCoordinatesTrue": 0,
+        "error": "TYPED_MAP_USAGE_CAPABILITY_MISSING",
+    }
+    try:
+        schema_row = core.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone()
+        schema_version = str(schema_row[0]) if schema_row is not None else ""
+        metrics["coreSchemaVersion"] = schema_version
+        view_columns = {
+            str(row[1])
+            for row in core.execute(
+                'PRAGMA table_info("confirmed_map_usage_edges")'
+            )
+        }
+        fields_present = CONFIRMED_MAP_VIEW_REQUIRED_COLUMNS.issubset(
+            view_columns
+        )
+        metrics["confirmedViewFieldsPresent"] = fields_present
+        capability = (
+            schema_version == CORE_SCHEMA_VERSION
+            and supports_typed_map_usage_evidence(core)
+            and fields_present
+        )
+        metrics["capability"] = capability
+        if not capability:
+            return metrics
+        view_row = core.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type='view' AND name='confirmed_map_usage_edges'
+            """
+        ).fetchone()
+        view_sql = str(view_row[0] or "") if view_row is not None else ""
+        domain_membership_rows = int(
+            core.execute(
+                """
+                SELECT COUNT(*)
+                FROM domain_memberships
+                WHERE domain_id IN ('map_world', 'pcg_world_partition')
+                """
+            ).fetchone()[0]
+            or 0
+        )
+        row = core.execute(
+            """
+            WITH typed AS (
+                SELECT
+                    edge.edge_id,
+                    CASE
+                        WHEN edge.status IN (
+                            'CONFIRMED', 'VERIFIED', 'RESOLVED'
+                        )
+                         AND edge.confidence IN ('HIGH', 'CONFIRMED')
+                         AND evidence.source_evidence_status IN (
+                            'CONFIRMED', 'VERIFIED', 'RESOLVED'
+                         )
+                         AND evidence.usage_status IN (
+                            'CONFIRMED', 'VERIFIED', 'RESOLVED'
+                         )
+                         AND evidence.freshness_status='FRESH'
+                         AND revision.freshness_status='FRESH'
+                         AND edge.evidence_uri<>''
+                         AND evidence.map_usage_id<>''
+                         AND evidence.evidence_layer<>''
+                         AND evidence.evidence_count>=1
+                        THEN 1 ELSE 0
+                    END AS confirmed,
+                    CASE
+                        WHEN edge.status='STALE'
+                          OR evidence.freshness_status<>'FRESH'
+                          OR revision.freshness_status<>'FRESH'
+                        THEN 1 ELSE 0
+                    END AS stale
+                FROM edges AS edge
+                JOIN map_usage_edge_evidence AS evidence
+                  ON evidence.edge_id=edge.edge_id
+                JOIN source_revisions AS revision
+                  ON revision.revision_id=edge.source_revision_id
+                WHERE edge.edge_type IN (
+                    'MAP_DIRECT_REFERENCE',
+                    'MAP_PCG_DEPENDENCY',
+                    'MAP_WORLD_PARTITION_REFERENCE'
+                )
+            )
+            SELECT
+                COUNT(*),
+                SUM(confirmed),
+                SUM(CASE WHEN confirmed=0 AND stale=0 THEN 1 ELSE 0 END),
+                SUM(stale)
+            FROM typed
+            """
+        ).fetchone()
+        typed_count = int(row[0] or 0)
+        eligible_confirmed = int(row[1] or 0)
+        candidate_count = int(row[2] or 0)
+        stale_count = int(row[3] or 0)
+        confirmed_count = int(
+            core.execute(
+                "SELECT COUNT(*) FROM confirmed_map_usage_edges"
+            ).fetchone()[0]
+            or 0
+        )
+        invalid_confirmed = int(
+            core.execute(
+                """
+                SELECT COUNT(*)
+                FROM confirmed_map_usage_edges AS confirmed
+                JOIN source_revisions AS revision
+                  ON revision.revision_id=confirmed.source_revision_id
+                WHERE confirmed.status NOT IN (
+                        'CONFIRMED', 'VERIFIED', 'RESOLVED'
+                      )
+                   OR confirmed.confidence NOT IN ('HIGH', 'CONFIRMED')
+                   OR confirmed.source_evidence_status NOT IN (
+                        'CONFIRMED', 'VERIFIED', 'RESOLVED'
+                      )
+                   OR confirmed.usage_status NOT IN (
+                        'CONFIRMED', 'VERIFIED', 'RESOLVED'
+                      )
+                   OR confirmed.freshness_status<>'FRESH'
+                   OR revision.freshness_status<>'FRESH'
+                   OR confirmed.evidence_uri=''
+                   OR confirmed.map_usage_id=''
+                   OR confirmed.evidence_layer=''
+                   OR confirmed.evidence_count<1
+                   OR confirmed.claims_complete_map_usage NOT IN (0, 1)
+                   OR confirmed.claims_spawn_coordinates NOT IN (0, 1)
+                """
+            ).fetchone()[0]
+            or 0
+        )
+        claims = core.execute(
+            """
+            SELECT
+                SUM(CASE WHEN claims_complete_map_usage=1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN claims_spawn_coordinates=1 THEN 1 ELSE 0 END)
+            FROM confirmed_map_usage_edges
+            """
+        ).fetchone()
+        fallback_layer = int(
+            core.execute(
+                """
+                SELECT COUNT(*)
+                FROM map_usage_edge_evidence
+                WHERE UPPER(evidence_layer) LIKE '%DOMAIN_MEMBERSHIP%'
+                """
+            ).fetchone()[0]
+            or 0
+        )
+        metrics.update(
+            {
+                "typedEdgeCount": typed_count,
+                "confirmedCount": confirmed_count,
+                "candidateCount": candidate_count,
+                "staleCount": stale_count,
+                "invalidConfirmedRows": invalid_confirmed,
+                "confirmedViewCoverageMismatch": abs(
+                    confirmed_count - eligible_confirmed
+                ),
+                "domainMembershipRows": domain_membership_rows,
+                "domainMembershipFallbackUsed": (
+                    "domain_memberships" in view_sql.lower()
+                    or fallback_layer > 0
+                ),
+                "claimsCompleteMapUsageTrue": int(claims[0] or 0),
+                "claimsSpawnCoordinatesTrue": int(claims[1] or 0),
+                "error": "",
+            }
+        )
+    except sqlite3.DatabaseError as error:
+        metrics["capability"] = False
+        metrics["error"] = (
+            "TYPED_MAP_USAGE_METRICS_ERROR:"
+            + type(error).__name__
+        )
+    return metrics
+
+
+def _typed_map_usage_gates(
+    metrics: Mapping[str, object],
+) -> list[dict[str, object]]:
+    capability = metrics.get("capability") is True
+    typed_count = int(metrics.get("typedEdgeCount") or 0)
+    invalid_rows = int(metrics.get("invalidConfirmedRows") or 0)
+    coverage_mismatch = int(
+        metrics.get("confirmedViewCoverageMismatch") or 0
+    )
+    return [
+        _gate(
+            "maps.typed_usage_capability",
+            "maps",
+            target=f"{CORE_SCHEMA_VERSION} typed map contract",
+            actual={
+                "coreSchemaVersion": metrics.get("coreSchemaVersion"),
+                "capability": capability,
+                "confirmedViewFieldsPresent": metrics.get(
+                    "confirmedViewFieldsPresent"
+                ),
+                "error": metrics.get("error"),
+            },
+            passed=capability,
+            detail="Core exposes typed map Evidence and a confirmed-only view.",
+        ),
+        _gate(
+            "maps.typed_usage_nonzero",
+            "maps",
+            target=">0 typed map relationship rows",
+            actual=metrics,
+            passed=capability and typed_count > 0,
+            detail="Domain membership alone never satisfies map usage.",
+        ),
+        _gate(
+            "maps.confirmed_view_integrity",
+            "maps",
+            target="zero invalid rows and exact confirmed-view coverage",
+            actual={
+                "confirmed": metrics.get("confirmedCount"),
+                "candidate": metrics.get("candidateCount"),
+                "stale": metrics.get("staleCount"),
+                "invalidConfirmedRows": invalid_rows,
+                "coverageMismatch": coverage_mismatch,
+            },
+            passed=(
+                capability
+                and typed_count > 0
+                and invalid_rows == 0
+                and coverage_mismatch == 0
+            ),
+            detail=(
+                "Confirmed rows require confirmed/high edge and Evidence, "
+                "fresh revision lineage, non-empty Evidence, and explicit "
+                "map/spawn claim fields."
+            ),
+        ),
+        _gate(
+            "maps.no_domain_membership_substitution",
+            "maps",
+            target=False,
+            actual=metrics.get("domainMembershipFallbackUsed"),
+            passed=(
+                capability
+                and metrics.get("domainMembershipFallbackUsed") is False
+            ),
+            detail=(
+                "map_world or PCG domain membership is never queried as "
+                "map-usage proof."
+            ),
+        ),
+    ]
+
+
 def evaluate_quality_gates(
     *,
     project_root: Path,
@@ -520,6 +1076,8 @@ def evaluate_quality_gates(
     core = _read_only(snapshot_root / "core.sqlite")
     discovery = _read_only(discovery_database)
     gates: list[dict[str, object]] = []
+    map_usage = _typed_map_usage_metrics(core)
+    gates.extend(_typed_map_usage_gates(map_usage))
     try:
         blueprint_total, class_known, parent_known = discovery.execute(
             """
@@ -546,6 +1104,44 @@ def evaluate_quality_gates(
                 actual=class_rate,
                 passed=class_rate >= 0.99,
                 detail=f"{class_known}/{blueprint_total} Blueprint assets",
+            )
+        )
+        package_total, package_revision_valid = core.execute(
+            """
+            SELECT
+                COUNT(*),
+                SUM(
+                    CASE
+                      WHEN revision.revision_id IS NOT NULL
+                       AND revision.source_kind='asset_package'
+                       AND revision.freshness_status='FRESH'
+                       AND revision.source_uri=
+                           'package://' || package.package_path
+                       AND revision.source_fingerprint<>''
+                      THEN 1 ELSE 0
+                    END
+                )
+            FROM packages AS package
+            LEFT JOIN source_revisions AS revision
+              ON revision.revision_id=package.current_revision_id
+            """
+        ).fetchone()
+        package_total = int(package_total or 0)
+        package_revision_valid = int(package_revision_valid or 0)
+        gates.append(
+            _gate(
+                "identity.package_revision_provenance",
+                "identity",
+                target="100% package-specific fresh revisions",
+                actual=_ratio(package_revision_valid, package_total),
+                passed=(
+                    package_total > 0
+                    and package_revision_valid == package_total
+                ),
+                detail=(
+                    f"{package_revision_valid}/{package_total} packages "
+                    "bind their own fingerprint revision."
+                ),
             )
         )
         closure_metrics = _class_closure_metrics(core)
@@ -617,6 +1213,41 @@ def evaluate_quality_gates(
         role_total = int(
             core.execute("SELECT COUNT(*) FROM knowledge_roles").fetchone()[0]
         )
+        role_revision_valid = int(
+            core.execute(
+                """
+                SELECT COUNT(*)
+                FROM knowledge_roles AS role
+                JOIN source_revisions AS revision
+                  ON revision.revision_id=role.source_revision_id
+                WHERE revision.freshness_status='FRESH'
+                  AND revision.source_kind='role_classifier'
+                  AND revision.source_uri<>''
+                  AND revision.source_fingerprint<>''
+                """
+            ).fetchone()[0]
+        )
+        domain_total, domain_revision_valid = core.execute(
+            """
+            SELECT
+                COUNT(*),
+                SUM(
+                    CASE
+                      WHEN revision.revision_id IS NOT NULL
+                       AND revision.freshness_status='FRESH'
+                       AND revision.source_kind='ontology'
+                       AND revision.source_uri<>''
+                       AND revision.source_fingerprint<>''
+                      THEN 1 ELSE 0
+                    END
+                )
+            FROM domain_memberships AS membership
+            LEFT JOIN source_revisions AS revision
+              ON revision.revision_id=membership.source_revision_id
+            """
+        ).fetchone()
+        domain_total = int(domain_total or 0)
+        domain_revision_valid = int(domain_revision_valid or 0)
         unexplained_roles = int(
             core.execute(
                 """
@@ -664,7 +1295,42 @@ def evaluate_quality_gates(
                     passed=visual_rate < 0.02,
                     detail=f"{visual_deep}/{visual_total} visual entities deep/semantic",
                 ),
+                _gate(
+                    "roles.source_revision_provenance",
+                    "roles",
+                    target="100% fresh role-classifier revisions",
+                    actual=_ratio(role_revision_valid, role_total),
+                    passed=(
+                        role_total > 0
+                        and role_revision_valid == role_total
+                    ),
+                    detail=(
+                        f"{role_revision_valid}/{role_total} role rows "
+                        "have an independent fresh classifier revision."
+                    ),
+                ),
+                _gate(
+                    "domains.source_revision_provenance",
+                    "domains",
+                    target="100% fresh ontology revisions",
+                    actual=_ratio(
+                        domain_revision_valid,
+                        domain_total,
+                    ),
+                    passed=(
+                        domain_total > 0
+                        and domain_revision_valid == domain_total
+                    ),
+                    detail=(
+                        f"{domain_revision_valid}/{domain_total} domain "
+                        "rows have an independent fresh ontology revision."
+                    ),
+                ),
             ]
+        )
+        registration_confidence = _registration_confidence_metrics(core)
+        gates.append(
+            _registration_confidence_gate(registration_confidence)
         )
         registration_gold = _registration_gold_metrics(project_root)
         typed_total, typed_incomplete = core.execute(
@@ -726,8 +1392,19 @@ def evaluate_quality_gates(
                      AND link.native_function_id IS NOT NULL
                      AND link.blueprint_graph_evidence_uri<>''
                      AND link.native_evidence_uri<>''
+                     AND graph_revision.revision_id IS NOT NULL
+                     AND graph_revision.freshness_status='FRESH'
+                     AND native_revision.revision_id IS NOT NULL
+                     AND native_revision.freshness_status='FRESH'
                     THEN 1 ELSE 0 END)
             FROM native_blueprint_links AS link
+            LEFT JOIN source_revisions AS graph_revision
+              ON graph_revision.revision_id=
+                 link.blueprint_graph_source_revision_id
+            LEFT JOIN native_functions AS function
+              ON function.native_function_id=link.native_function_id
+            LEFT JOIN source_revisions AS native_revision
+              ON native_revision.revision_id=function.source_revision_id
             """
         ).fetchone()
         confirmed_links = int(confirmed_links or 0)
@@ -771,6 +1448,7 @@ def evaluate_quality_gates(
                       ON revision.revision_id=evidence.source_revision_id
                     WHERE evidence.fact_id=fact.fact_id
                       AND evidence.evidence_uri<>''
+                      AND revision.freshness_status='FRESH'
                 ) THEN 1 ELSE 0 END)
             FROM facts AS fact WHERE fact.current=1
             """
@@ -913,32 +1591,9 @@ def evaluate_quality_gates(
                 ),
             )
         )
+        gates.extend(_query_benchmark_gates(benchmark))
         gates.extend(
             [
-                _gate(
-                    "queries.complete_or_bounded",
-                    "queries",
-                    target=">=0.70",
-                    actual=benchmark["completeOrBoundedRate"],
-                    passed=float(benchmark["completeOrBoundedRate"]) >= 0.70,
-                    detail=f"{benchmark['completeOrBounded']}/{benchmark['total']} benchmark cases",
-                ),
-                _gate(
-                    "queries.simple_db_only",
-                    "queries",
-                    target=">=0.90",
-                    actual=benchmark["simpleDbOnlyRate"],
-                    passed=float(benchmark["simpleDbOnlyRate"]) >= 0.90,
-                    detail=f"{benchmark['simpleDbOnly']}/30 simple queries",
-                ),
-                _gate(
-                    "queries.no_silent_unresolved",
-                    "queries",
-                    target=0,
-                    actual=benchmark["unresolved"],
-                    passed=int(benchmark["unresolved"]) == 0,
-                    detail="Every incomplete query must return a gap and probe.",
-                ),
                 _gate(
                     "queries.single_entity_p95_ms",
                     "performance",
@@ -1070,6 +1725,7 @@ def evaluate_quality_gates(
         },
         "gates": gates,
         "benchmark": benchmark,
+        "mapUsage": map_usage,
     }
     privacy_hits = _privacy_scan(report)
     privacy_gate = _gate(

@@ -11,20 +11,37 @@ from typing import Mapping
 from .adapters import materialize_semantic_adapters
 from .benchmark import materialize_benchmark_queries
 from .blueprint_ingest import materialize_blueprint_defaults
-from .class_hierarchy import CLASS_TABLES_SQL, materialize_discovery_classes
+from .class_hierarchy import (
+    CLASS_HIERARCHY_PRODUCER_VERSION,
+    CLASS_HIERARCHY_SOURCE_URI,
+    CLASS_SCHEMA_VERSION,
+    CLASS_TABLES_SQL,
+    class_hierarchy_source_fingerprint,
+    materialize_discovery_classes,
+)
 from .fact_store import (
     materialize_declared_defaults,
     materialize_effective_defaults,
 )
 from .legacy import import_legacy_lineage
+from .map_usage import (
+    MAP_USAGE_TABLES_SQL,
+    materialize_map_usage_edges,
+)
 from .native_gold_set import materialize_native_gold_set
 from .invalidation import rebuild_invalidation_dependencies
 from .ontology import OntologyBundle, infer_domain_memberships
 from .registrations import (
+    REGISTRATION_EXTRACTOR_VERSION,
     REGISTRATION_TABLES_SQL,
+    effective_registration_provenance,
     materialize_typed_registrations,
 )
-from .roles import ROLE_TABLES_SQL, materialize_discovery_roles
+from .roles import (
+    ROLE_CLASSIFIER_VERSION,
+    ROLE_TABLES_SQL,
+    materialize_discovery_roles,
+)
 from .schema_capabilities import CORE_SCHEMA_VERSION
 
 
@@ -316,8 +333,10 @@ CREATE TABLE domain_memberships(
     status TEXT NOT NULL,
     evidence_id TEXT NOT NULL,
     ontology_version TEXT NOT NULL,
+    source_revision_id INTEGER,
     PRIMARY KEY(entity_id, domain_id, membership_kind, evidence_id),
-    FOREIGN KEY(entity_id) REFERENCES entities(entity_id)
+    FOREIGN KEY(entity_id) REFERENCES entities(entity_id),
+    FOREIGN KEY(source_revision_id) REFERENCES source_revisions(revision_id)
 ) WITHOUT ROWID;
 
 CREATE TABLE coverage(
@@ -499,9 +518,12 @@ CREATE TABLE native_blueprint_links(
     resolution_method TEXT NOT NULL,
     status TEXT NOT NULL,
     confidence TEXT NOT NULL,
+    blueprint_graph_source_revision_id INTEGER NOT NULL,
     FOREIGN KEY(blueprint_entity_id) REFERENCES entities(entity_id),
     FOREIGN KEY(native_function_id)
-      REFERENCES native_functions(native_function_id)
+      REFERENCES native_functions(native_function_id),
+    FOREIGN KEY(blueprint_graph_source_revision_id)
+      REFERENCES source_revisions(revision_id)
 ) WITHOUT ROWID;
 
 CREATE TABLE benchmark_queries(
@@ -563,6 +585,8 @@ FULL_CORE_SCHEMA_SQL = (
     + ROLE_TABLES_SQL
     + "\n"
     + REGISTRATION_TABLES_SQL
+    + "\n"
+    + MAP_USAGE_TABLES_SQL
 )
 
 SEARCH_SCHEMA_SQL = """
@@ -686,6 +710,8 @@ def build_catalog_database(
     output_path: Path,
     source_fingerprint: str,
     generated_at: str,
+    snapshot_build_id: str,
+    snapshot_source_fingerprint: str,
 ) -> dict[str, int]:
     connection = _connect(output_path, CATALOG_SCHEMA_SQL)
     try:
@@ -705,6 +731,10 @@ def build_catalog_database(
                 "schema_version": CATALOG_SCHEMA_VERSION,
                 "source_fingerprint": source_fingerprint,
                 "generated_at": generated_at,
+                "snapshot_build_id": snapshot_build_id,
+                "snapshot_source_fingerprint": (
+                    snapshot_source_fingerprint
+                ),
             },
         )
         connection.execute(
@@ -918,6 +948,8 @@ def _entity_category_map(
 def _materialize_domains(
     connection: sqlite3.Connection,
     ontology: OntologyBundle,
+    *,
+    source_revision_id: int,
 ) -> int:
     category_to_domains: dict[str, list[str]] = {}
     for domain_id, definition in ontology.domains.items():
@@ -941,18 +973,195 @@ def _materialize_domains(
                     "CONFIRMED",
                     f"class-category://{class_id}/{category}",
                     ontology.version,
+                    source_revision_id,
                 )
             )
     if rows:
         connection.executemany(
             """
             INSERT OR IGNORE INTO domain_memberships VALUES (
-                ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             rows,
         )
     return len(rows)
+
+
+def _semantic_revision(
+    connection: sqlite3.Connection,
+    *,
+    source_kind: str,
+    source_uri: str,
+    source_fingerprint: str,
+    producer_version: str,
+    generated_at: str,
+    schema_version: str = CORE_SCHEMA_VERSION,
+) -> int:
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO source_revisions(
+            source_kind, source_uri, source_fingerprint,
+            producer_version, schema_version, generated_at,
+            freshness_status
+        ) VALUES (?, ?, ?, ?, ?, ?, 'FRESH')
+        """,
+        (
+            source_kind,
+            source_uri,
+            source_fingerprint,
+            producer_version,
+            schema_version,
+            generated_at,
+        ),
+    )
+    row = connection.execute(
+        """
+        SELECT revision_id
+        FROM source_revisions
+        WHERE source_kind=? AND source_uri=? AND source_fingerprint=?
+        """,
+        (source_kind, source_uri, source_fingerprint),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Failed to materialize semantic source revision")
+    return int(row[0])
+
+
+def _ontology_semantic_fingerprint(
+    ontology: OntologyBundle,
+    *,
+    discovery_fingerprint: str,
+) -> str:
+    payload = {
+        "discoveryFingerprint": discovery_fingerprint,
+        "version": ontology.version,
+        "domains": {
+            domain_id: {
+                "label": definition.label,
+                "classCategories": definition.class_categories,
+                "registrationTypes": definition.registration_types,
+                "componentCategories": definition.component_categories,
+                "functionTokens": definition.function_tokens,
+                "propertyTokens": definition.property_tokens,
+                "pathTokens": definition.path_tokens,
+            }
+            for domain_id, definition in sorted(ontology.domains.items())
+        },
+        "roles": ontology.roles,
+        "depthPolicies": ontology.depth_policies,
+        "edgeTypes": ontology.edge_types,
+        "factValueKinds": ontology.fact_value_kinds,
+        "scopeKinds": ontology.scope_kinds,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _materialize_package_revisions(
+    discovery: sqlite3.Connection,
+    target: sqlite3.Connection,
+    *,
+    generated_at: str,
+) -> int:
+    cursor = discovery.execute(
+        """
+        SELECT package_path, object_path, source_fingerprint
+        FROM assets
+        ORDER BY package_path, object_path
+        """
+    )
+    batch: list[tuple[str, str, str, str, str]] = []
+    package_count = 0
+    current_package: str | None = None
+    digest = hashlib.sha256()
+
+    def flush_package() -> None:
+        nonlocal package_count
+        if current_package is None:
+            return
+        batch.append(
+            (
+                f"package://{current_package}",
+                digest.hexdigest(),
+                "Blueprint-to-Code",
+                "ark-asset-package/v1",
+                generated_at,
+            )
+        )
+        package_count += 1
+        if len(batch) >= 10_000:
+            target.executemany(
+                """
+                INSERT OR IGNORE INTO source_revisions(
+                    source_kind, source_uri, source_fingerprint,
+                    producer_version, schema_version, generated_at,
+                    freshness_status
+                ) VALUES (
+                    'asset_package', ?, ?, ?, ?, ?, 'FRESH'
+                )
+                """,
+                batch,
+            )
+            batch.clear()
+
+    for package_path, object_path, asset_fingerprint in cursor:
+        normalized_package = str(package_path)
+        if normalized_package != current_package:
+            flush_package()
+            current_package = normalized_package
+            digest = hashlib.sha256()
+        digest.update(str(object_path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(asset_fingerprint).encode("utf-8"))
+        digest.update(b"\0")
+    flush_package()
+    if batch:
+        target.executemany(
+            """
+            INSERT OR IGNORE INTO source_revisions(
+                source_kind, source_uri, source_fingerprint,
+                producer_version, schema_version, generated_at,
+                freshness_status
+            ) VALUES (
+                'asset_package', ?, ?, ?, ?, ?, 'FRESH'
+            )
+            """,
+            batch,
+        )
+    target.execute(
+        """
+        UPDATE packages
+        SET current_revision_id=(
+            SELECT revision.revision_id
+            FROM source_revisions AS revision
+            WHERE revision.source_kind='asset_package'
+              AND revision.source_uri=
+                  'package://' || packages.package_path
+            ORDER BY revision.revision_id DESC
+            LIMIT 1
+        )
+        """
+    )
+    missing = int(
+        target.execute(
+            """
+            SELECT COUNT(*) FROM packages
+            WHERE current_revision_id IS NULL
+            """
+        ).fetchone()[0]
+    )
+    if missing:
+        raise RuntimeError(
+            f"{missing} packages lack an asset-package source revision"
+        )
+    return package_count
 
 
 def _registration_entity_id(
@@ -982,6 +1191,9 @@ def _registration_entity_id(
 def _materialize_registration_edges(
     connection: sqlite3.Connection,
     ontology: OntologyBundle,
+    *,
+    edge_source_revision_id: int,
+    domain_source_revision_id: int,
 ) -> tuple[int, int]:
     edge_rows: list[tuple[object, ...]] = []
     domain_rows: list[tuple[object, ...]] = []
@@ -999,16 +1211,24 @@ def _materialize_registration_edges(
         if owner_id is None or target_id is None:
             continue
         registration_type = str(row[2])
+        evidence_uri = str(row[4])
+        registration_status, registration_confidence = (
+            effective_registration_provenance(
+                row[6],
+                row[5],
+                evidence_uri,
+            )
+        )
         edge_rows.append(
             (
                 owner_id,
                 target_id,
                 "REGISTERS",
                 "HARD",
-                str(row[6]),
-                str(row[5]),
-                1,
-                str(row[4]),
+                registration_status,
+                registration_confidence,
+                edge_source_revision_id,
+                evidence_uri,
                 str(row[3]),
                 "",
             )
@@ -1019,6 +1239,9 @@ def _materialize_registration_edges(
                 {
                     "entity_uri": owner_uri,
                     "registration_types": ["global_asset_reference"],
+                    "registration_status": registration_status,
+                    "registration_confidence": registration_confidence,
+                    "registration_evidence_uri": evidence_uri,
                 },
             ),
             (
@@ -1026,6 +1249,9 @@ def _materialize_registration_edges(
                 {
                     "entity_uri": target_uri,
                     "registration_types": [registration_type],
+                    "registration_status": registration_status,
+                    "registration_confidence": registration_confidence,
+                    "registration_evidence_uri": evidence_uri,
                 },
             ),
         ):
@@ -1041,6 +1267,7 @@ def _materialize_registration_edges(
                         membership.status,
                         membership.evidence_id,
                         ontology.version,
+                        domain_source_revision_id,
                     )
                 )
     if edge_rows:
@@ -1058,7 +1285,7 @@ def _materialize_registration_edges(
         connection.executemany(
             """
             INSERT OR IGNORE INTO domain_memberships VALUES (
-                ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             domain_rows,
@@ -1076,6 +1303,11 @@ def build_core_database(
     ontology: OntologyBundle,
     legacy_kb_root: Path,
     native_gold_set_path: Path,
+    benchmark_gold_set_path: Path,
+    projection_review_path: Path,
+    map_evidence_path: Path | None = None,
+    snapshot_build_id: str,
+    snapshot_source_fingerprint: str,
 ) -> dict[str, int]:
     connection = _connect(output_path, FULL_CORE_SCHEMA_SQL)
     discovery = sqlite3.connect(
@@ -1100,6 +1332,10 @@ def build_core_database(
                 "ontology_version": ontology.version,
                 "source_fingerprint": source_fingerprint,
                 "generated_at": generated_at,
+                "snapshot_build_id": snapshot_build_id,
+                "snapshot_source_fingerprint": (
+                    snapshot_source_fingerprint
+                ),
             },
         )
         connection.execute(
@@ -1172,10 +1408,71 @@ def build_core_database(
         )
         connection.commit()
         connection.execute("DETACH DATABASE discovery")
+        package_revision_count = _materialize_package_revisions(
+            discovery,
+            connection,
+            generated_at=generated_at,
+        )
+        class_hierarchy_revision_id = _semantic_revision(
+            connection,
+            source_kind="class_hierarchy",
+            source_uri=CLASS_HIERARCHY_SOURCE_URI,
+            source_fingerprint=class_hierarchy_source_fingerprint(
+                discovery
+            ),
+            producer_version=CLASS_HIERARCHY_PRODUCER_VERSION,
+            schema_version=CLASS_SCHEMA_VERSION,
+            generated_at=generated_at,
+        )
+        role_revision_id = _semantic_revision(
+            connection,
+            source_kind="role_classifier",
+            source_uri=f"classifier://{ROLE_CLASSIFIER_VERSION}",
+            source_fingerprint=hashlib.sha256(
+                json.dumps(
+                    [source_fingerprint, ROLE_CLASSIFIER_VERSION],
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            producer_version=ROLE_CLASSIFIER_VERSION,
+            generated_at=generated_at,
+        )
+        ontology_revision_fingerprint = _ontology_semantic_fingerprint(
+            ontology,
+            discovery_fingerprint=source_fingerprint,
+        )
+        domain_revision_id = _semantic_revision(
+            connection,
+            source_kind="ontology",
+            source_uri=f"ontology://{ontology.version}",
+            source_fingerprint=ontology_revision_fingerprint,
+            producer_version=ontology.version,
+            generated_at=generated_at,
+        )
+        registration_revision_id = _semantic_revision(
+            connection,
+            source_kind="registry_generation",
+            source_uri=(
+                "registry://ark/typed-registrations/"
+                f"{REGISTRATION_EXTRACTOR_VERSION}"
+            ),
+            source_fingerprint=hashlib.sha256(
+                json.dumps(
+                    [
+                        source_fingerprint,
+                        ontology_revision_fingerprint,
+                        REGISTRATION_EXTRACTOR_VERSION,
+                    ],
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            producer_version=REGISTRATION_EXTRACTOR_VERSION,
+            generated_at=generated_at,
+        )
         class_counts = materialize_discovery_classes(
             discovery,
             connection,
-            source_revision_id=1,
+            source_revision_id=class_hierarchy_revision_id,
         )
         connection.execute(
             """
@@ -1192,17 +1489,37 @@ def build_core_database(
             )
             """
         )
-        role_counts = materialize_discovery_roles(discovery, connection)
         category_map = _entity_category_map(connection)
         registration_counts = materialize_typed_registrations(
             discovery,
             connection,
-            source_revision_id=1,
+            source_revision_id=registration_revision_id,
             target_categories_by_uri=category_map,
         )
-        domain_count = _materialize_domains(connection, ontology)
+        role_counts = materialize_discovery_roles(
+            discovery,
+            connection,
+            source_revision_id=role_revision_id,
+        )
+        domain_count = _materialize_domains(
+            connection,
+            ontology,
+            source_revision_id=domain_revision_id,
+        )
         registration_edge_count, registration_domain_count = (
-            _materialize_registration_edges(connection, ontology)
+            _materialize_registration_edges(
+                connection,
+                ontology,
+                edge_source_revision_id=registration_revision_id,
+                domain_source_revision_id=domain_revision_id,
+            )
+        )
+        map_usage_counts = materialize_map_usage_edges(
+            discovery,
+            connection,
+            source_revision_id=1,
+            resource_catalog_path=map_evidence_path,
+            generated_at=generated_at,
         )
         blueprint_result = materialize_blueprint_defaults(
             discovery,
@@ -1210,7 +1527,7 @@ def build_core_database(
             capture_root=capture_root,
             ontology=ontology,
         )
-        materialize_declared_defaults(
+        fallback_fact_counts = materialize_declared_defaults(
             discovery,
             connection,
             ontology=ontology,
@@ -1252,6 +1569,9 @@ def build_core_database(
                     """
                 ).fetchone()[0]
             ),
+            "invalidDefaultIdentityRows": int(
+                fallback_fact_counts["invalidIdentityRows"]
+            ),
         }
         effective_counts = materialize_effective_defaults(connection)
         native_counts = materialize_native_gold_set(
@@ -1272,10 +1592,15 @@ def build_core_database(
             generated_at=generated_at,
         )
         invalidation_counts = rebuild_invalidation_dependencies(connection)
-        benchmark_counts = materialize_benchmark_queries(connection)
+        benchmark_counts = materialize_benchmark_queries(
+            connection,
+            gold_set_path=benchmark_gold_set_path,
+            projection_review_path=projection_review_path,
+        )
         connection.execute("ANALYZE main")
         connection.commit()
         return {
+            "packageSourceRevisions": package_revision_count,
             "packages": int(
                 connection.execute("SELECT COUNT(*) FROM packages").fetchone()[0]
             ),
@@ -1287,6 +1612,7 @@ def build_core_database(
             ),
             "domainMemberships": domain_count + registration_domain_count,
             "registrationEdges": registration_edge_count,
+            **map_usage_counts,
             **class_counts,
             **role_counts,
             **registration_counts,
@@ -1348,6 +1674,8 @@ def build_search_database(
     output_path: Path,
     source_fingerprint: str,
     generated_at: str,
+    snapshot_build_id: str,
+    snapshot_source_fingerprint: str,
 ) -> dict[str, int]:
     connection = _connect(output_path, SEARCH_SCHEMA_SQL)
     core = sqlite3.connect(
@@ -1362,6 +1690,10 @@ def build_search_database(
                 "schema_version": SEARCH_SCHEMA_VERSION,
                 "source_fingerprint": source_fingerprint,
                 "generated_at": generated_at,
+                "snapshot_build_id": snapshot_build_id,
+                "snapshot_source_fingerprint": (
+                    snapshot_source_fingerprint
+                ),
             },
         )
         cursor = core.execute(
@@ -1433,6 +1765,8 @@ def build_cache_database(
     output_path: Path,
     source_fingerprint: str,
     generated_at: str,
+    snapshot_build_id: str,
+    snapshot_source_fingerprint: str,
 ) -> dict[str, int]:
     connection = _connect(output_path, CACHE_SCHEMA_SQL)
     try:
@@ -1443,6 +1777,10 @@ def build_cache_database(
                 "source_fingerprint": source_fingerprint,
                 "generated_at": generated_at,
                 "disposable": "true",
+                "snapshot_build_id": snapshot_build_id,
+                "snapshot_source_fingerprint": (
+                    snapshot_source_fingerprint
+                ),
             },
         )
         connection.commit()
@@ -1474,6 +1812,7 @@ def database_metrics(path: Path) -> dict[str, object]:
         ]
         return {
             "bytes": path.stat().st_size,
+            "sha256": _sha256_database_file(path),
             "integrity": str(
                 connection.execute("PRAGMA integrity_check").fetchone()[0]
             ),
@@ -1494,6 +1833,14 @@ def database_metrics(path: Path) -> dict[str, object]:
         }
     finally:
         connection.close()
+
+
+def _sha256_database_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def source_revision_hash(fingerprints: Mapping[str, str]) -> str:

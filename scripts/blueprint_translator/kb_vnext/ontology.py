@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from .registrations import effective_registration_provenance
+
 
 REQUIRED_DOMAINS = {
     "global_registration",
@@ -97,7 +99,7 @@ def load_ontology(root: Path) -> OntologyBundle:
     root = root.resolve()
     domains_data = _load_json(root / "ark_domains.v1.json")
     roles_data = _load_json(root / "ark_roles.v1.json")
-    edges_data = _load_json(root / "ark_edge_types.v1.json")
+    edges_data = _load_json(root / "ark_edge_types.v2.json")
     facts_data = _load_json(root / "ark_fact_types.v2.json")
 
     raw_domains = domains_data.get("domains")
@@ -237,6 +239,22 @@ def infer_domain_memberships(
     entity_uri = str(context.get("entity_uri") or "UNKNOWN")
     class_categories = set(_strings(context, "class_categories"))
     registration_types = set(_strings(context, "registration_types"))
+    registration_status = str(
+        context.get("registration_status") or "UNKNOWN"
+    ).upper()
+    registration_confidence = str(
+        context.get("registration_confidence") or "UNKNOWN"
+    ).upper()
+    registration_evidence_uri = str(
+        context.get("registration_evidence_uri") or ""
+    )
+    registration_status, registration_confidence = (
+        effective_registration_provenance(
+            registration_status,
+            registration_confidence,
+            registration_evidence_uri,
+        )
+    )
     component_categories = set(_strings(context, "component_categories"))
     function_names = _strings(context, "function_names")
     property_names = _strings(context, "property_names")
@@ -259,9 +277,13 @@ def infer_domain_memberships(
         *,
         confidence: str,
         status: str,
+        evidence_value: str | None = None,
     ) -> None:
         evidence = _evidence_id(
-            entity_uri, domain_id, kind, matched_value
+            entity_uri,
+            domain_id,
+            kind,
+            evidence_value or matched_value,
         )
         membership = DomainMembership(
             domain_id=domain_id,
@@ -284,12 +306,23 @@ def infer_domain_memberships(
         if match := registration_types.intersection(
             domain.registration_types
         ):
+            registration_type = sorted(match)[0]
             add(
                 domain_id,
                 "TYPED_REGISTRATION",
-                sorted(match)[0],
-                confidence="HIGH",
-                status="CONFIRMED",
+                registration_type,
+                confidence=registration_confidence,
+                status=registration_status,
+                evidence_value=(
+                    "\0".join(
+                        (
+                            registration_type,
+                            registration_evidence_uri,
+                        )
+                    )
+                    if registration_evidence_uri
+                    else registration_type
+                ),
             )
         if match := component_categories.intersection(
             domain.component_categories

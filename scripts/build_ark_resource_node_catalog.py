@@ -614,10 +614,22 @@ def _dataset_revision(
     nodes: list[dict[str, Any]],
     ranking_report: dict[str, Any],
     evaluation_catalog: dict[str, Any] | None = None,
+    *,
+    map_coverage: dict[str, Any],
+    source_status: str,
 ) -> str:
     """Fingerprint every semantic node fact plus the ranking dataset it joins."""
 
     digest = hashlib.sha256()
+    digest.update(source_status.encode("utf-8"))
+    digest.update(
+        json.dumps(
+            map_coverage,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
     digest.update(
         str(
             ranking_report.get("datasetRevision")
@@ -1074,7 +1086,6 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
                 references["indirectStatus"] = map_coverage["indirectReferences"]
 
     generated_at = datetime.now(timezone.utc).isoformat()
-    revision = _dataset_revision(nodes, ranking_report, evaluation_catalog)
     resource_count = sum(
         int(node.get("resources", {}).get("count") or 0)
         for node in nodes
@@ -1111,6 +1122,13 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
         source_status = "PARTIAL"
     else:
         source_status = "CURRENT_AT_GENERATION"
+    revision = _dataset_revision(
+        nodes,
+        ranking_report,
+        evaluation_catalog,
+        map_coverage=map_coverage,
+        source_status=source_status,
+    )
     evaluation_dataset = (
         evaluation_catalog.get("dataset") if isinstance(evaluation_catalog, dict) else {}
     )

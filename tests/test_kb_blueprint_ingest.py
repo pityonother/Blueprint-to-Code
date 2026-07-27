@@ -1035,6 +1035,48 @@ class BlueprintIngestTests(unittest.TestCase):
             core.close()
             discovery.close()
 
+    def test_rejects_whitespace_only_default_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            revision, database_path, package_fingerprint = _write_capture(
+                root / "captures"
+            )
+            evidence = sqlite3.connect(database_path)
+            evidence.execute(
+                """
+                UPDATE class_defaults
+                SET name=?, default_ref=?
+                WHERE name='Count'
+                """,
+                (
+                    " ",
+                    make_default_ref(ASSET_ID, revision, " "),
+                ),
+            )
+            evidence.commit()
+            evidence.close()
+            discovery = _discovery(
+                revision,
+                package_path=database_path.parents[1] / "BP_Test.uasset",
+                package_fingerprint=package_fingerprint,
+            )
+            core = _core()
+
+            result = materialize_blueprint_defaults(
+                discovery,
+                core,
+                capture_root=root / "captures",
+                ontology=self.ontology,
+            )
+
+            self.assertEqual(result.counts["rejectedAssets"], 1)
+            self.assertEqual(
+                core.execute("SELECT COUNT(*) FROM facts").fetchone()[0],
+                0,
+            )
+            core.close()
+            discovery.close()
+
     def test_rejects_asset_id_mismatch_and_malformed_manifest_size(
         self,
     ) -> None:
@@ -1829,8 +1871,9 @@ class BlueprintIngestTests(unittest.TestCase):
                 capture_root=root / "captures",
                 ontology=self.ontology,
             )
-            self.assertEqual(result.counts["freshnessGapAssets"], 1)
-            self.assertEqual(
+            self.assertEqual(result.counts["freshnessGapAssets"], 0)
+            self.assertEqual(result.counts["freshAssets"], 1)
+            self.assertGreater(
                 core.execute("SELECT COUNT(*) FROM facts").fetchone()[0], 0
             )
             core.close()

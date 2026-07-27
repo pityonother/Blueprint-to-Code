@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
+from urllib.parse import quote
 
 
 UNKNOWN = "UNKNOWN"
 CLASS_SCHEMA_VERSION = "ark-kb-classes/v1"
+CLASS_HIERARCHY_PRODUCER_VERSION = "ark-kb-class-hierarchy/v2"
+CLASS_HIERARCHY_SOURCE_URI = (
+    f"class-hierarchy://ark/{CLASS_HIERARCHY_PRODUCER_VERSION}"
+)
 CONFIRMED_CLASS_STATUSES = frozenset(
     {"IDENTIFIED", "CONFIRMED", "VERIFIED", "RESOLVED"}
 )
@@ -22,6 +28,11 @@ DIRECT_PARENT_EDGE_KINDS = frozenset(
     {"blueprint_parent", "native_parent", "parent"}
 )
 NATIVE_BOUNDARY_HINT_KIND = "native_boundary_hint"
+
+
+def _assignment_evidence_uri(entity_uri: str, assignment_kind: str) -> str:
+    encoded_entity = quote(entity_uri, safe="")
+    return f"discovery://asset/{encoded_entity}#{assignment_kind}"
 
 ANCESTRY_ROOTS: dict[str, tuple[str, ...]] = {
     "DATA_ASSET": ("/Script/Engine.DataAsset",),
@@ -115,6 +126,7 @@ CREATE TABLE IF NOT EXISTS asset_class_assignments (
     evidence_uri TEXT NOT NULL,
     status TEXT NOT NULL,
     confidence TEXT NOT NULL,
+    source_revision_id INTEGER,
     PRIMARY KEY(entity_id, assignment_kind),
     FOREIGN KEY(entity_id) REFERENCES entities(entity_id),
     FOREIGN KEY(class_id) REFERENCES classes(class_id)
@@ -194,6 +206,76 @@ def _source_rows(
 ) -> list[dict[str, object]]:
     discovery.row_factory = sqlite3.Row
     return [dict(row) for row in discovery.execute(sql, parameters)]
+
+
+def class_hierarchy_source_fingerprint(
+    discovery: sqlite3.Connection,
+) -> str:
+    """Hash every semantic input used to materialize the class hierarchy."""
+
+    digest = hashlib.sha256()
+    digest.update(b"class-hierarchy-contract\0")
+    digest.update(class_hierarchy_contract_fingerprint().encode("ascii"))
+
+    def update_record(record_kind: str, values: Sequence[object]) -> None:
+        encoded = json.dumps(
+            [record_kind, *values],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+
+    for row in discovery.execute(
+        """
+        SELECT
+            object_path, asset_class_path, generated_class_path,
+            parent_class_path, native_parent_class_path,
+            identity_status, identity_confidence
+        FROM assets
+        ORDER BY object_path
+        """
+    ):
+        update_record("assetClassInput", row)
+    for row in discovery.execute(
+        """
+        SELECT
+            child_class_path, parent_class_path, edge_kind,
+            source_kind, confidence
+        FROM class_edges
+        ORDER BY
+            child_class_path, parent_class_path, edge_kind,
+            source_kind, confidence
+        """
+    ):
+        update_record("discoveryEdgeInput", row)
+    return digest.hexdigest()
+
+
+def class_hierarchy_contract_fingerprint() -> str:
+    """Hash the versioned builtin rules that can change class output."""
+
+    payload = {
+        "producerVersion": CLASS_HIERARCHY_PRODUCER_VERSION,
+        "schemaVersion": CLASS_SCHEMA_VERSION,
+        "ancestryRoots": {
+            category: list(paths)
+            for category, paths in sorted(ANCESTRY_ROOTS.items())
+        },
+        "builtinClassEdges": [
+            list(edge) for edge in BUILTIN_CLASS_EDGES
+        ],
+        "directParentEdgeKinds": sorted(DIRECT_PARENT_EDGE_KINDS),
+        "nativeBoundaryHintKind": NATIVE_BOUNDARY_HINT_KIND,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _all_class_paths(
@@ -322,6 +404,98 @@ def materialize_discovery_classes(
             "SELECT canonical_uri, entity_id FROM entities"
         )
     }
+    entity_columns = {
+        str(row[1])
+        for row in target.execute("PRAGMA table_info(entities)")
+    }
+    has_packages = target.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type='table' AND name='packages'
+        """
+    ).fetchone()
+    if has_packages is not None and "package_id" in entity_columns:
+        entity_revision_ids = {
+            int(entity_id): (
+                int(revision_id) if revision_id is not None else None
+            )
+            for entity_id, revision_id in target.execute(
+                """
+                SELECT entity.entity_id, package.current_revision_id
+                FROM entities AS entity
+                LEFT JOIN packages AS package
+                  ON package.package_id=entity.package_id
+                """
+            )
+        }
+    else:
+        entity_revision_ids = {
+            entity_id: source_revision_id
+            for entity_id in entity_ids.values()
+        }
+
+    generated_class_revision_ids: dict[str, int | None] = {}
+    asset_class_revision_ids: dict[str, int | None] = {}
+
+    def record_class_revision(
+        revisions: dict[str, int | None],
+        candidate: object,
+        revision_id: int,
+    ) -> None:
+        class_path = _known_path(candidate)
+        if not class_path or class_path.startswith("/Script/"):
+            return
+        if class_path not in revisions:
+            revisions[class_path] = revision_id
+        elif revisions[class_path] != revision_id:
+            revisions[class_path] = source_revision_id
+
+    for object_path, asset_class_path, generated_class_path in (
+        discovery.execute(
+            """
+            SELECT
+                object_path, asset_class_path, generated_class_path
+            FROM assets
+            ORDER BY object_path
+            """
+        )
+    ):
+        entity_id = entity_ids.get(str(object_path))
+        revision_id = (
+            entity_revision_ids.get(entity_id)
+            if entity_id is not None
+            else None
+        )
+        if revision_id is None:
+            continue
+        record_class_revision(
+            asset_class_revision_ids,
+            asset_class_path,
+            revision_id,
+        )
+        record_class_revision(
+            generated_class_revision_ids,
+            generated_class_path,
+            revision_id,
+        )
+    class_source_revision_ids = {
+        **asset_class_revision_ids,
+        **generated_class_revision_ids,
+    }
+    target.executemany(
+        """
+        UPDATE classes
+        SET source_revision_id=?
+        WHERE class_path=?
+        """,
+        [
+            (revision_id, class_path)
+            for class_path, revision_id in sorted(
+                class_source_revision_ids.items()
+            )
+        ],
+    )
 
     normalized_edges: dict[tuple[int, int, str, str], tuple[object, ...]] = {}
     for row in edge_rows:
@@ -357,7 +531,9 @@ def materialize_discovery_classes(
         )
         normalized_edges[key] = (
             *key,
-            source_revision_id,
+            class_source_revision_ids.get(
+                child_path, source_revision_id
+            ),
             status,
             confidence,
         )
@@ -417,9 +593,13 @@ def materialize_discovery_classes(
                         entity_id,
                         class_ids[generated],
                         "GENERATED_CLASS",
-                        f"discovery://asset/{entity_uri}#generated-class",
+                        _assignment_evidence_uri(
+                            entity_uri,
+                            "generated-class",
+                        ),
                         status,
                         confidence,
+                        entity_revision_ids.get(entity_id),
                     )
                 )
             elif (
@@ -440,17 +620,21 @@ def materialize_discovery_classes(
                         entity_id,
                         class_ids[asset_class],
                         "ASSET_CLASS",
-                        f"discovery://asset/{entity_uri}#asset-class",
+                        _assignment_evidence_uri(
+                            entity_uri,
+                            "asset-class",
+                        ),
                         status,
                         confidence,
+                        entity_revision_ids.get(entity_id),
                     )
                 )
         target.executemany(
             """
             INSERT INTO asset_class_assignments(
                 entity_id, class_id, assignment_kind, evidence_uri,
-                status, confidence
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                status, confidence, source_revision_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             assignments,
         )

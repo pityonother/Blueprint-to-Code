@@ -86,6 +86,60 @@ class KnowledgeFactStoreTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.ontology = load_ontology(PROJECT_ROOT / "ontology")
 
+    def test_whitespace_only_fact_name_is_not_a_semantic_identity(self):
+        core = _core()
+
+        with self.assertRaisesRegex(ValueError, "fact_name is required"):
+            store_fact(
+                core,
+                ontology=self.ontology,
+                subject_entity_id=1,
+                fact_type="DECLARED_DEFAULT",
+                fact_name=" ",
+                scope_kind="DECLARED",
+                declared_on_entity_id=1,
+                value=FactValue("TEXT", value_text="value"),
+                status="CONFIRMED",
+                confidence="HIGH",
+                source_revision_id=1,
+                evidence_uri="fixture://fact/blank-name",
+                evidence_role="DECLARED_VALUE",
+            )
+        self.assertEqual(
+            core.execute("SELECT COUNT(*) FROM facts").fetchone()[0],
+            0,
+        )
+        core.close()
+
+    def test_discovery_fallback_reports_and_skips_blank_property_identity(self):
+        core = _core()
+        source = _discovery()
+        source.execute(
+            """
+            INSERT INTO default_property_surface VALUES (
+                'blank', '/Game/Test/BP_Base.BP_Base', ' ',
+                'SoftObjectProperty', 1, 'CONFIRMED_FINGERPRINT_ONLY',
+                'abc123', 'bp://fixture/default/%20', 'LOW'
+            )
+            """
+        )
+
+        result = materialize_declared_defaults(
+            source,
+            core,
+            ontology=self.ontology,
+            source_revision_id=1,
+        )
+
+        self.assertEqual(result["invalidIdentityRows"], 1)
+        self.assertEqual(result["declaredFacts"], 0)
+        self.assertEqual(
+            core.execute("SELECT COUNT(*) FROM facts").fetchone()[0],
+            0,
+        )
+        core.close()
+        source.close()
+
     def test_identical_fact_merges_independent_evidence(self):
         core = _core()
         source = _discovery()

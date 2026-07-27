@@ -17,6 +17,9 @@ from blueprint_translator.kb_vnext.roles import (  # noqa: E402
     enrich_type_percentiles,
     materialize_discovery_roles,
 )
+from blueprint_translator.kb_vnext.registrations import (  # noqa: E402
+    create_registration_tables,
+)
 
 
 def _base_asset(**overrides: object) -> dict[str, object]:
@@ -293,6 +296,15 @@ class KnowledgeRoleTests(unittest.TestCase):
         self.assertEqual(
             target.execute(
                 """
+                SELECT DISTINCT source_revision_id
+                FROM knowledge_roles
+                """
+            ).fetchall(),
+            [(None,)],
+        )
+        self.assertEqual(
+            target.execute(
+                """
                 SELECT depth_policy
                 FROM knowledge_depth_policies
                 WHERE entity_id=1
@@ -306,6 +318,249 @@ class KnowledgeRoleTests(unittest.TestCase):
         )
         discovery.close()
         target.close()
+
+    def test_materialized_registration_roles_require_fresh_canonical_rows(
+        self,
+    ) -> None:
+        discovery = sqlite3.connect(":memory:")
+        discovery.executescript(
+            """
+            CREATE TABLE assets(
+                object_path TEXT PRIMARY KEY,
+                asset_class_path TEXT NOT NULL,
+                generated_class_path TEXT NOT NULL,
+                parent_class_path TEXT NOT NULL,
+                native_parent_class_path TEXT NOT NULL,
+                identity_status TEXT NOT NULL,
+                identity_confidence TEXT NOT NULL,
+                is_blueprint INTEGER NOT NULL,
+                descendant_count INTEGER NOT NULL,
+                referencer_count INTEGER NOT NULL,
+                component_reuse_count INTEGER NOT NULL,
+                cross_domain_reference_count INTEGER NOT NULL,
+                registry_usage_count INTEGER NOT NULL,
+                query_hit_count INTEGER,
+                existing_report_count INTEGER
+            );
+            CREATE TABLE system_registrations(
+                owner_object_path TEXT NOT NULL,
+                registration_type TEXT NOT NULL
+            );
+            INSERT INTO assets VALUES(
+                '/Game/Test/Owner.Owner',
+                '/Script/Engine.Blueprint',
+                '/Game/Test/Owner.Owner_C',
+                '/Script/Engine.Actor',
+                '/Script/Engine.Actor',
+                'CONFIRMED', 'HIGH', 1,
+                0, 0, 0, 0, 0, 0, 0
+            );
+            INSERT INTO system_registrations VALUES(
+                '/Game/Test/Owner.Owner', 'buff_registration'
+            );
+            INSERT INTO system_registrations VALUES(
+                '/Game/Test/Owner.Owner', 'item_registration'
+            );
+            """
+        )
+        target = sqlite3.connect(":memory:")
+        target.executescript(
+            """
+            CREATE TABLE entities(
+                entity_id INTEGER PRIMARY KEY,
+                canonical_uri TEXT UNIQUE NOT NULL
+            );
+            CREATE TABLE source_revisions(
+                revision_id INTEGER PRIMARY KEY,
+                source_kind TEXT NOT NULL,
+                source_uri TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                producer_version TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                freshness_status TEXT NOT NULL
+            );
+            INSERT INTO entities VALUES(
+                1, '/Game/Test/Owner.Owner'
+            );
+            INSERT INTO source_revisions VALUES(
+                1, 'registry_generation',
+                'registry://fixture',
+                'fixture-sha', 'fixture', 'fixture/v1',
+                '2026-07-27T00:00:00Z', 'FRESH'
+            );
+            """
+        )
+        create_registration_tables(target)
+        target.executemany(
+            """
+            INSERT INTO typed_registrations VALUES(
+                ?, '/Game/Test/Owner.Owner', ?, ?, ?,
+                ?, 'DECLARED', ?, ?, 1, 'fixture', ?
+            )
+            """,
+            [
+                (
+                    "candidate",
+                    "/Game/Test/Buff.Buff",
+                    "buff_registration",
+                    "BuffClass",
+                    "bp://fixture/candidate",
+                    "LOW",
+                    "CANDIDATE",
+                    "property_token_candidate",
+                ),
+                (
+                    "legacy",
+                    "/Game/Test/Item.Item",
+                    "item_registration",
+                    "ItemClass",
+                    "existing-kb://fixture/legacy",
+                    "MEDIUM",
+                    "LEGACY_UNVERIFIED",
+                    "legacy_reference_candidate",
+                ),
+            ],
+        )
+        target.commit()
+
+        try:
+            materialize_discovery_roles(
+                discovery,
+                target,
+                source_revision_id=1,
+            )
+            self.assertFalse(
+                {
+                    "registration_owner",
+                    "global_system_hub",
+                }
+                & {
+                    str(row[0])
+                    for row in target.execute(
+                        "SELECT role FROM knowledge_roles"
+                    )
+                }
+            )
+
+            target.execute(
+                """
+                UPDATE typed_registrations
+                SET status='CONFIRMED', confidence='HIGH',
+                    evidence_uri='UNKNOWN'
+                """
+            )
+            target.commit()
+            materialize_discovery_roles(
+                discovery,
+                target,
+                source_revision_id=1,
+            )
+            self.assertFalse(
+                {
+                    "registration_owner",
+                    "global_system_hub",
+                }
+                & {
+                    str(row[0])
+                    for row in target.execute(
+                        "SELECT role FROM knowledge_roles"
+                    )
+                }
+            )
+
+            target.executemany(
+                """
+                UPDATE typed_registrations
+                SET evidence_uri=?
+                WHERE registration_id=?
+                """,
+                (
+                    ("bp://fixture/candidate", "candidate"),
+                    ("bp://fixture/legacy", "legacy"),
+                ),
+            )
+            target.commit()
+            materialize_discovery_roles(
+                discovery,
+                target,
+                source_revision_id=1,
+            )
+            self.assertFalse(
+                {
+                    "registration_owner",
+                    "global_system_hub",
+                }
+                & {
+                    str(row[0])
+                    for row in target.execute(
+                        "SELECT role FROM knowledge_roles"
+                    )
+                }
+            )
+
+            target.executemany(
+                "INSERT INTO entities VALUES(?, ?)",
+                (
+                    (2, "/Game/Test/Buff.Buff"),
+                    (3, "/Game/Test/Item.Item"),
+                ),
+            )
+            target.execute(
+                """
+                UPDATE source_revisions
+                SET freshness_status='STALE'
+                WHERE revision_id=1
+                """
+            )
+            target.commit()
+            materialize_discovery_roles(
+                discovery,
+                target,
+                source_revision_id=1,
+            )
+            self.assertFalse(
+                {
+                    "registration_owner",
+                    "global_system_hub",
+                }
+                & {
+                    str(row[0])
+                    for row in target.execute(
+                        "SELECT role FROM knowledge_roles"
+                    )
+                }
+            )
+
+            target.execute(
+                """
+                UPDATE source_revisions
+                SET freshness_status='FRESH'
+                WHERE revision_id=1
+                """
+            )
+            target.commit()
+            materialize_discovery_roles(
+                discovery,
+                target,
+                source_revision_id=1,
+            )
+            self.assertTrue(
+                {
+                    "registration_owner",
+                    "global_system_hub",
+                }.issubset(
+                    {
+                        str(row[0])
+                        for row in target.execute(
+                            "SELECT role FROM knowledge_roles"
+                        )
+                    }
+                )
+            )
+        finally:
+            discovery.close()
+            target.close()
 
 
 if __name__ == "__main__":

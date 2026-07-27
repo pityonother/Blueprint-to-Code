@@ -49,6 +49,7 @@ _NATIVE_ROOT_PROOF_FIELDS = {
     "edges",
     "sourceRevision",
 }
+RevisionIdentity = tuple[str, str, str, str, str, str, str]
 _MAX_EFFECTIVE_DEPENDENCY_CLASSES = 4096
 
 
@@ -90,7 +91,7 @@ def _required_int(value: object, *, field: str) -> int:
 
 
 def _stable_revision_hash(
-    identities: Iterable[tuple[str, str, str, str]],
+    identities: Iterable[RevisionIdentity],
 ) -> str:
     payload = sorted(set(identities))
     return hashlib.sha256(
@@ -254,6 +255,9 @@ def validate_effective_resolution_dependencies(
             str(source_kind),
             str(source_uri),
             str(source_fingerprint),
+            str(producer_version),
+            str(schema_version),
+            str(generated_at),
             str(freshness_status).upper(),
         )
         for (
@@ -261,11 +265,15 @@ def validate_effective_resolution_dependencies(
             source_kind,
             source_uri,
             source_fingerprint,
+            producer_version,
+            schema_version,
+            generated_at,
             freshness_status,
         ) in connection.execute(
             """
             SELECT revision_id, source_kind, source_uri,
-                   source_fingerprint, freshness_status
+                   source_fingerprint, producer_version,
+                   schema_version, generated_at, freshness_status
             FROM source_revisions
             """
         )
@@ -357,13 +365,13 @@ def validate_effective_resolution_dependencies(
     }
     fresh_fact_revisions: dict[
         int,
-        set[tuple[str, str, str, str]],
+        set[RevisionIdentity],
     ] = {}
     for fact_id, revision_id in connection.execute(
         "SELECT fact_id, source_revision_id FROM fact_evidence"
     ):
         identity = revision_identities.get(int(revision_id))
-        if identity is not None and identity[3] == "FRESH":
+        if identity is not None and identity[6] == "FRESH":
             fresh_fact_revisions.setdefault(int(fact_id), set()).add(identity)
     selected_candidate_values: dict[
         tuple[int, str, str],
@@ -467,6 +475,9 @@ def validate_effective_resolution_dependencies(
         source_kind,
         source_uri,
         source_fingerprint,
+        producer_version,
+        schema_version,
+        generated_at,
         freshness_status,
     ) in connection.execute(
         """
@@ -474,7 +485,9 @@ def validate_effective_resolution_dependencies(
             class.class_id, class.source_revision_id,
             class.status, class.confidence,
             revision.source_kind, revision.source_uri,
-            revision.source_fingerprint, revision.freshness_status
+            revision.source_fingerprint, revision.producer_version,
+            revision.schema_version, revision.generated_at,
+            revision.freshness_status
         FROM classes AS class
         LEFT JOIN source_revisions AS revision
           ON revision.revision_id=class.source_revision_id
@@ -506,6 +519,9 @@ def validate_effective_resolution_dependencies(
                 "sourceKind": str(source_kind),
                 "sourceUri": str(source_uri),
                 "sourceFingerprint": str(source_fingerprint),
+                "producerVersion": str(producer_version),
+                "schemaVersion": str(schema_version),
+                "generatedAt": str(generated_at),
                 "freshnessStatus": str(freshness_status).upper(),
             },
         )
@@ -906,11 +922,42 @@ def _replace_invalidation_dependencies(
         """
         INSERT OR IGNORE INTO invalidation_dependencies
         SELECT
+            link.blueprint_graph_source_revision_id,
+            'BLUEPRINT_NATIVE_ENTITY',
+            link.blueprint_entity_id,
+            'BLUEPRINT_GRAPH_BINDING'
+        FROM native_blueprint_links AS link
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO invalidation_dependencies
+        SELECT
             source_revision_id, 'REGISTRATION_ENTITY',
             owner.entity_id, 'REGISTRY_GENERATION'
         FROM typed_registrations AS registration
         JOIN entities AS owner
           ON owner.canonical_uri=registration.owner_uri
+        WHERE source_revision_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO invalidation_dependencies
+        SELECT
+            source_revision_id, 'ROLE_ENTITY',
+            entity_id, 'ROLE_CLASSIFIER_REVISION'
+        FROM knowledge_roles
+        WHERE source_revision_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO invalidation_dependencies
+        SELECT
+            source_revision_id, 'DOMAIN_ENTITY',
+            entity_id, 'DOMAIN_ONTOLOGY_REVISION'
+        FROM domain_memberships
         WHERE source_revision_id IS NOT NULL
         """
     )
@@ -1258,6 +1305,16 @@ def apply_invalidation_plan(
             WHERE native_function_id IN ({placeholders})
             """,
             native_functions,
+        )
+    if blueprint_native_entities := values("BLUEPRINT_NATIVE_ENTITY"):
+        placeholders = ",".join("?" for _ in blueprint_native_entities)
+        connection.execute(
+            f"""
+            UPDATE native_blueprint_links
+            SET status='CANDIDATE', confidence='LOW'
+            WHERE blueprint_entity_id IN ({placeholders})
+            """,
+            blueprint_native_entities,
         )
     if values("PROJECTION"):
         connection.execute(

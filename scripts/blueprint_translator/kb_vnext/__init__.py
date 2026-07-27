@@ -16,6 +16,7 @@ from .class_hierarchy import (
 )
 from .ontology import infer_domain_memberships, load_ontology
 from .registrations import materialize_typed_registrations
+from .map_usage import materialize_map_usage_edges
 from .snapshot import build_vnext_snapshot
 from .legacy import import_legacy_lineage
 from .fact_store import (
@@ -74,6 +75,7 @@ __all__ = [
     "infer_domain_memberships",
     "load_ontology",
     "materialize_typed_registrations",
+    "materialize_map_usage_edges",
     "build_vnext_snapshot",
     "import_legacy_lineage",
     "FactValue",

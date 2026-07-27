@@ -6,9 +6,128 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass
 from typing import Mapping, Sequence
+from urllib.parse import unquote, urlsplit
 
 
 REGISTRATION_EXTRACTOR_VERSION = "ark-kb-registrations/v1"
+COMPLETE_REGISTRATION_STATUSES = frozenset(
+    {"CONFIRMED", "VERIFIED", "RESOLVED"}
+)
+COMPLETE_REGISTRATION_CONFIDENCE = frozenset({"HIGH", "CONFIRMED"})
+REGISTRATION_EVIDENCE_SCHEMES = frozenset(
+    {
+        "bp",
+        "blueprint-reference",
+        "discovery-reference",
+        "registration-reference",
+        "serialized-import-evidence",
+        "serialized-soft-path-evidence",
+    }
+)
+UNRECOVERED_REGISTRATION_EVIDENCE = frozenset(
+    {
+        "AMBIGUOUS",
+        "CONFIRMED_FINGERPRINT_ONLY",
+        "LEGACY_UNVERIFIED",
+        "MISSING",
+        "NONE",
+        "NOT_AVAILABLE",
+        "NOT_MEASURED",
+        "NOT_RECOVERED",
+        "NULL",
+        "SOURCE_NOT_AVAILABLE",
+        "UNKNOWN",
+        "UNAVAILABLE",
+        "UNRESOLVED",
+    }
+)
+
+
+def _normalized_evidence_identity(value: object) -> str:
+    return "_".join(
+        str(value or "")
+        .strip()
+        .upper()
+        .replace("-", " ")
+        .replace("_", " ")
+        .split()
+    )
+
+
+def is_valid_registration_evidence_uri(value: object) -> bool:
+    """Require a recovered identity from a registration-producing scheme."""
+
+    text = str(value or "").strip()
+    if (
+        not text
+        or "://" not in text
+        or any(character.isspace() for character in text)
+    ):
+        return False
+    parsed = urlsplit(text)
+    if parsed.scheme.casefold() not in REGISTRATION_EVIDENCE_SCHEMES:
+        return False
+    identities = [
+        unquote(parsed.netloc),
+        *(
+            unquote(part)
+            for part in parsed.path.split("/")
+            if part
+        ),
+    ]
+    return bool(identities) and all(
+        identity
+        and not any(character.isspace() for character in identity)
+        and _normalized_evidence_identity(identity)
+        not in UNRECOVERED_REGISTRATION_EVIDENCE
+        for identity in identities
+    )
+
+
+def registration_provenance_is_confirmed(
+    status: object,
+    confidence: object,
+    evidence_uri: object,
+) -> bool:
+    return (
+        str(status or "").upper() in COMPLETE_REGISTRATION_STATUSES
+        and str(confidence or "").upper()
+        in COMPLETE_REGISTRATION_CONFIDENCE
+        and is_valid_registration_evidence_uri(evidence_uri)
+    )
+
+
+def effective_registration_provenance(
+    status: object,
+    confidence: object,
+    evidence_uri: object,
+) -> tuple[str, str]:
+    """Downgrade attempted complete claims that lack usable provenance."""
+
+    normalized_status = str(status or "UNKNOWN").upper()
+    normalized_confidence = str(confidence or "UNKNOWN").upper()
+    if (
+        normalized_status in COMPLETE_REGISTRATION_STATUSES
+        and not registration_provenance_is_confirmed(
+            normalized_status,
+            normalized_confidence,
+            evidence_uri,
+        )
+    ):
+        return (
+            "CANDIDATE",
+            (
+                normalized_confidence
+                if is_valid_registration_evidence_uri(evidence_uri)
+                else "LOW"
+            ),
+        )
+    if (
+        normalized_status not in COMPLETE_REGISTRATION_STATUSES
+        and normalized_confidence in COMPLETE_REGISTRATION_CONFIDENCE
+    ):
+        normalized_confidence = "LOW"
+    return normalized_status, normalized_confidence
 
 
 @dataclass(frozen=True)
@@ -289,10 +408,10 @@ def _registration_id(
 
 
 def _legacy_status(confidence: str, evidence_uri: str) -> str:
-    if (
-        confidence.upper() in {"HIGH", "CONFIRMED"}
-        and evidence_uri
-        and not evidence_uri.startswith("existing-kb://")
+    if registration_provenance_is_confirmed(
+        "CONFIRMED",
+        confidence,
+        evidence_uri,
     ):
         return "CONFIRMED"
     return "LEGACY_UNVERIFIED"
@@ -353,6 +472,11 @@ def materialize_typed_registrations(
         source_property = str(source["source_property"])
         evidence_uri = str(source["source_evidence_id"])
         confidence = str(source["confidence"] or "UNKNOWN").upper()
+        status, confidence = effective_registration_provenance(
+            _legacy_status(confidence, evidence_uri),
+            confidence,
+            evidence_uri,
+        )
         registration_id = _registration_id(
             owner_uri,
             target_uri,
@@ -369,7 +493,7 @@ def materialize_typed_registrations(
             evidence_uri,
             "DECLARED",
             confidence,
-            _legacy_status(confidence, evidence_uri),
+            status,
             source_revision_id,
             REGISTRATION_EXTRACTOR_VERSION,
             "legacy_typed_registration",
@@ -422,6 +546,13 @@ def materialize_typed_registrations(
                 output_status = classification.status
                 output_confidence = classification.confidence
                 match_method = classification.match_method
+            output_status, output_confidence = (
+                effective_registration_provenance(
+                    output_status,
+                    output_confidence,
+                    evidence_uri,
+                )
+            )
             registration_id = _registration_id(
                 owner_uri,
                 target_uri,

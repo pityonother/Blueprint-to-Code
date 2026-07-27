@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
 import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,11 +21,18 @@ if str(SCRIPT_ROOT) not in sys.path:
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     build_vnext_snapshot,
 )
+import blueprint_translator.kb_vnext.snapshot as snapshot_module  # noqa: E402
+from blueprint_translator.kb_vnext import (  # noqa: E402
+    registrations as registrations_module,
+)
 from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     _effective_resolution_metrics,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CORE_SCHEMA_VERSION,
+)
+from blueprint_translator.kb_vnext.class_hierarchy import (  # noqa: E402
+    class_hierarchy_source_fingerprint,
 )
 from blueprint_translator.evidence_schema import (  # noqa: E402
     make_asset_id,
@@ -475,7 +485,7 @@ def _discovery_fixture(
         INSERT INTO system_registrations VALUES (
             's1', '/Game/Test/BP_Base.BP_Base', 'global_asset_reference',
             '/Game/Test/T_Texture.T_Texture', 'Texture',
-            'existing-kb://fixture/1', 'MEDIUM',
+            'existing-kb://fixture/1', 'HIGH',
             'existing_knowledge_database'
         )
         """
@@ -503,6 +513,67 @@ def _discovery_fixture(
     connection.close()
 
 
+def _snapshot_identity_for_inputs(
+    *,
+    project_root: Path,
+    discovery_database: Path,
+    legacy_kb_root: Path,
+    capture_root: Path,
+    native_root: Path,
+    output_dir: Path,
+    map_evidence_path: Path,
+    generated_at: str = "2026-07-27T00:00:00+00:00",
+) -> dict[str, object]:
+    metrics = {
+        "integrity": "ok",
+        "foreignKeyViolations": 0,
+    }
+    with (
+        patch.object(
+            snapshot_module,
+            "build_catalog_database",
+            return_value={},
+        ),
+        patch.object(
+            snapshot_module,
+            "build_core_database",
+            return_value={},
+        ),
+        patch.object(
+            snapshot_module,
+            "build_domain_projections",
+            return_value={},
+        ),
+        patch.object(
+            snapshot_module,
+            "build_search_database",
+            return_value={},
+        ),
+        patch.object(
+            snapshot_module,
+            "build_cache_database",
+            return_value={},
+        ),
+        patch.object(
+            snapshot_module,
+            "database_metrics",
+            return_value=metrics,
+        ),
+        patch.object(snapshot_module, "_promote_snapshot"),
+    ):
+        return build_vnext_snapshot(
+            project_root=project_root,
+            discovery_database=discovery_database,
+            legacy_kb_root=legacy_kb_root,
+            capture_root=capture_root,
+            native_root=native_root,
+            output_dir=output_dir,
+            full_snapshot=True,
+            generated_at=generated_at,
+            map_evidence_path=map_evidence_path,
+        )
+
+
 class KnowledgeStorageTests(unittest.TestCase):
     def test_builds_four_normalized_stores_and_keeps_legacy_default(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -524,6 +595,15 @@ class KnowledgeStorageTests(unittest.TestCase):
                 package_size=package_size,
                 package_modified=package_modified,
             )
+            discovery_connection = sqlite3.connect(discovery)
+            try:
+                expected_class_fingerprint = (
+                    class_hierarchy_source_fingerprint(
+                        discovery_connection
+                    )
+                )
+            finally:
+                discovery_connection.close()
             result = build_vnext_snapshot(
                 project_root=PROJECT_ROOT,
                 discovery_database=discovery,
@@ -554,6 +634,27 @@ class KnowledgeStorageTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     result["databases"][name]["foreignKeyViolations"], 0
+                )
+                self.assertEqual(
+                    result["databases"][name]["sha256"],
+                    hashlib.sha256((output / name).read_bytes()).hexdigest(),
+                )
+                database = sqlite3.connect(output / name)
+                try:
+                    database_metadata = dict(
+                        database.execute(
+                            "SELECT key, value FROM metadata"
+                        )
+                    )
+                finally:
+                    database.close()
+                self.assertEqual(
+                    database_metadata["snapshot_build_id"],
+                    result["buildId"],
+                )
+                self.assertEqual(
+                    database_metadata["snapshot_source_fingerprint"],
+                    result["sourceSha256"],
                 )
             catalog = sqlite3.connect(output / "catalog.sqlite")
             core = sqlite3.connect(output / "core.sqlite")
@@ -598,6 +699,143 @@ class KnowledgeStorageTests(unittest.TestCase):
                 }
                 self.assertIn("visual_support_asset", roles)
                 self.assertNotIn("global_system_hub", roles)
+                base_registration_owner_id = core.execute(
+                    """
+                    SELECT entity_id FROM entities
+                    WHERE canonical_uri='/Game/Test/BP_Base.BP_Base'
+                    """
+                ).fetchone()[0]
+                base_registration_roles = {
+                    str(row[0])
+                    for row in core.execute(
+                        """
+                        SELECT role FROM knowledge_roles
+                        WHERE entity_id=?
+                        """,
+                        (base_registration_owner_id,),
+                    )
+                }
+                self.assertNotIn(
+                    "registration_owner",
+                    base_registration_roles,
+                )
+                self.assertNotIn(
+                    "global_system_hub",
+                    base_registration_roles,
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT status, confidence
+                        FROM typed_registrations
+                        WHERE owner_uri='/Game/Test/BP_Base.BP_Base'
+                        """
+                    ).fetchall(),
+                    [("LEGACY_UNVERIFIED", "LOW")],
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT status, confidence
+                        FROM edges
+                        WHERE source_entity_id=?
+                          AND edge_type='REGISTERS'
+                        """,
+                        (base_registration_owner_id,),
+                    ).fetchall(),
+                    [("LEGACY_UNVERIFIED", "LOW")],
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT DISTINCT status, confidence
+                        FROM domain_memberships
+                        WHERE membership_kind='TYPED_REGISTRATION'
+                        """
+                    ).fetchall(),
+                    [("LEGACY_UNVERIFIED", "LOW")],
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT DISTINCT revision.source_kind
+                        FROM knowledge_roles AS role
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=
+                             role.source_revision_id
+                        """
+                    ).fetchall(),
+                    [("role_classifier",)],
+                )
+                role_revision_ids = {
+                    int(row[0])
+                    for row in core.execute(
+                        """
+                        SELECT DISTINCT source_revision_id
+                        FROM knowledge_roles
+                        """
+                    )
+                }
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM domain_memberships AS membership
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=
+                             membership.source_revision_id
+                        WHERE revision.source_kind<>'ontology'
+                           OR revision.freshness_status<>'FRESH'
+                        """
+                    ).fetchone()[0],
+                    0,
+                )
+                domain_revision_ids = {
+                    int(row[0])
+                    for row in core.execute(
+                        """
+                        SELECT DISTINCT source_revision_id
+                        FROM domain_memberships
+                        """
+                    )
+                }
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM packages AS package
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=
+                             package.current_revision_id
+                        WHERE revision.source_kind='asset_package'
+                        """
+                    ).fetchone()[0],
+                    core.execute(
+                        "SELECT COUNT(*) FROM packages"
+                    ).fetchone()[0],
+                )
+                package_revision_ids = {
+                    int(row[0])
+                    for row in core.execute(
+                        """
+                        SELECT DISTINCT current_revision_id
+                        FROM packages
+                        """
+                    )
+                }
+                self.assertNotIn(1, package_revision_ids)
+                self.assertTrue(role_revision_ids)
+                self.assertTrue(domain_revision_ids)
+                self.assertTrue(package_revision_ids)
+                self.assertTrue(
+                    role_revision_ids.isdisjoint(domain_revision_ids)
+                )
+                self.assertTrue(
+                    role_revision_ids.isdisjoint(package_revision_ids)
+                )
+                self.assertTrue(
+                    domain_revision_ids.isdisjoint(package_revision_ids)
+                )
                 self.assertEqual(
                     core.execute(
                         """
@@ -637,7 +875,7 @@ class KnowledgeStorageTests(unittest.TestCase):
                 self.assertEqual(
                     metadata["schema_version"], CORE_SCHEMA_VERSION
                 )
-                self.assertEqual(CORE_SCHEMA_VERSION, "ark-kb-core/v3")
+                self.assertEqual(CORE_SCHEMA_VERSION, "ark-kb-core/v4")
                 child_entity_id = core.execute(
                     """
                     SELECT entity_id FROM entities
@@ -674,6 +912,167 @@ class KnowledgeStorageTests(unittest.TestCase):
                     WHERE class_path='/Script/CoreUObject.Object'
                     """
                 ).fetchone()[0]
+                class_revision_rows = core.execute(
+                    """
+                    SELECT DISTINCT
+                        revision.source_kind,
+                        revision.source_uri,
+                        revision.source_fingerprint,
+                        revision.producer_version,
+                        revision.schema_version,
+                        revision.generated_at,
+                        revision.freshness_status
+                    FROM classes AS class
+                    JOIN source_revisions AS revision
+                      ON revision.revision_id=class.source_revision_id
+                    """
+                ).fetchall()
+                self.assertTrue(class_revision_rows)
+                self.assertNotIn(
+                    "discovery",
+                    {str(row[0]) for row in class_revision_rows},
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM classes AS class
+                        LEFT JOIN source_revisions AS revision
+                          ON revision.revision_id=class.source_revision_id
+                        WHERE revision.revision_id IS NULL
+                           OR revision.source_kind='discovery'
+                           OR trim(revision.source_kind)=''
+                           OR trim(revision.source_uri)=''
+                           OR trim(revision.source_fingerprint)=''
+                           OR trim(revision.producer_version)=''
+                           OR trim(revision.schema_version)=''
+                           OR trim(revision.generated_at)=''
+                           OR revision.freshness_status<>'FRESH'
+                        """
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertTrue(
+                    all(
+                        all(str(value).strip() for value in row)
+                        and row[-1] == "FRESH"
+                        for row in class_revision_rows
+                    )
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT revision.source_kind, revision.source_uri
+                        FROM classes AS class
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=class.source_revision_id
+                        WHERE class.class_id=?
+                        """,
+                        (actor_class_id,),
+                    ).fetchone(),
+                    (
+                        "class_hierarchy",
+                        "class-hierarchy://ark/"
+                        "ark-kb-class-hierarchy/v2",
+                    ),
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT DISTINCT source_fingerprint
+                        FROM source_revisions
+                        WHERE source_kind='class_hierarchy'
+                          AND source_uri=?
+                        """,
+                        (
+                            "class-hierarchy://ark/"
+                            "ark-kb-class-hierarchy/v2",
+                        ),
+                    ).fetchall(),
+                    [(expected_class_fingerprint,)],
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT revision.source_kind, revision.source_uri
+                        FROM classes AS class
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=class.source_revision_id
+                        WHERE class.class_id=?
+                        """,
+                        (child_class_id,),
+                    ).fetchone(),
+                    (
+                        "asset_package",
+                        "package:///Game/Test/BP_Child",
+                    ),
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT revision.source_kind, revision.source_uri
+                        FROM class_edges AS edge
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=edge.source_revision_id
+                        WHERE edge.child_class_id=?
+                          AND edge.parent_class_id=?
+                          AND edge.edge_kind='blueprint_parent'
+                        """,
+                        (child_class_id, base_class_id),
+                    ).fetchone(),
+                    (
+                        "asset_package",
+                        "package:///Game/Test/BP_Child",
+                    ),
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT DISTINCT
+                            revision.source_kind,
+                            revision.source_uri
+                        FROM class_edges AS edge
+                        JOIN classes AS child
+                          ON child.class_id=edge.child_class_id
+                        JOIN classes AS parent
+                          ON parent.class_id=edge.parent_class_id
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=edge.source_revision_id
+                        WHERE child.class_path=
+                                '/Script/Engine.PrimaryDataAsset'
+                          AND parent.class_path=
+                                '/Script/Engine.DataAsset'
+                          AND edge.edge_kind='native_parent'
+                        """
+                    ).fetchall(),
+                    [
+                        (
+                            "class_hierarchy",
+                            "class-hierarchy://ark/"
+                            "ark-kb-class-hierarchy/v2",
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM class_edges AS edge
+                        LEFT JOIN source_revisions AS revision
+                          ON revision.revision_id=edge.source_revision_id
+                        WHERE revision.revision_id IS NULL
+                           OR revision.source_kind='discovery'
+                           OR trim(revision.source_kind)=''
+                           OR trim(revision.source_uri)=''
+                           OR trim(revision.source_fingerprint)=''
+                           OR trim(revision.producer_version)=''
+                           OR trim(revision.schema_version)=''
+                           OR trim(revision.generated_at)=''
+                           OR revision.freshness_status<>'FRESH'
+                        """
+                    ).fetchone()[0],
+                    0,
+                )
                 self.assertEqual(
                     core.execute(
                         """
@@ -730,6 +1129,9 @@ class KnowledgeStorageTests(unittest.TestCase):
                         revision.source_kind,
                         revision.source_uri,
                         revision.source_fingerprint,
+                        revision.producer_version,
+                        revision.schema_version,
+                        revision.generated_at,
                         revision.freshness_status
                     FROM classes AS class
                     JOIN source_revisions AS revision
@@ -785,7 +1187,10 @@ class KnowledgeStorageTests(unittest.TestCase):
                                 "sourceKind": native_source[0],
                                 "sourceUri": native_source[1],
                                 "sourceFingerprint": native_source[2],
-                                "freshnessStatus": native_source[3],
+                                "producerVersion": native_source[3],
+                                "schemaVersion": native_source[4],
+                                "generatedAt": native_source[5],
+                                "freshnessStatus": native_source[6],
                             },
                         },
                     },
@@ -912,6 +1317,789 @@ class KnowledgeStorageTests(unittest.TestCase):
                 finally:
                     replay.close()
                     source.close()
+
+    def test_snapshot_identity_covers_class_hierarchy_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "capture_root": root / "captures",
+                "native_root": root / "native",
+                "map_evidence_path": map_evidence,
+            }
+            with patch.object(
+                snapshot_module,
+                "class_hierarchy_contract_fingerprint",
+                return_value="a" * 64,
+            ):
+                baseline = _snapshot_identity_for_inputs(
+                    output_dir=root / "out-baseline",
+                    **common,
+                )
+            with patch.object(
+                snapshot_module,
+                "class_hierarchy_contract_fingerprint",
+                return_value="b" * 64,
+            ):
+                variant = _snapshot_identity_for_inputs(
+                    output_dir=root / "out-variant",
+                    **common,
+                )
+
+        self.assertEqual(
+            variant["discoverySha256"],
+            baseline["discoverySha256"],
+        )
+        self.assertNotEqual(
+            variant["sourceSha256"],
+            baseline["sourceSha256"],
+        )
+        self.assertNotEqual(variant["buildId"], baseline["buildId"])
+
+    def test_snapshot_identity_covers_semantic_producer_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "capture_root": root / "captures",
+                "native_root": root / "native",
+                "map_evidence_path": map_evidence,
+            }
+            baseline = _snapshot_identity_for_inputs(
+                output_dir=root / "out-baseline",
+                **common,
+            )
+            added_rule = registrations_module.RegistrationRule(
+                "fixture_contract_registration",
+                ("FixtureContractProperty",),
+                ("fixturecontract",),
+                ("FIXTURE",),
+            )
+            with patch.object(
+                registrations_module,
+                "REGISTRATION_RULES",
+                (*registrations_module.REGISTRATION_RULES, added_rule),
+            ):
+                variant = _snapshot_identity_for_inputs(
+                    output_dir=root / "out-variant",
+                    **common,
+                )
+
+        self.assertEqual(
+            variant["discoverySha256"],
+            baseline["discoverySha256"],
+        )
+        self.assertNotEqual(
+            variant["sourceSha256"],
+            baseline["sourceSha256"],
+        )
+        self.assertNotEqual(variant["buildId"], baseline["buildId"])
+
+    def test_snapshot_identity_covers_every_semantic_input_family(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_a = root / "map-a.json"
+            map_b = root / "map-b.json"
+            map_a.write_bytes(b'{"catalog":"a"}')
+            map_b.write_bytes(b'{"catalog":"b"}')
+
+            capture_a = root / "captures-a" / "BP_Test" / "evidence"
+            capture_b = root / "captures-b" / "BP_Test" / "evidence"
+            capture_a.mkdir(parents=True)
+            capture_b.mkdir(parents=True)
+            (capture_a / "evidence.sqlite").write_bytes(
+                b"capture-evidence-a"
+            )
+            (capture_b / "evidence.sqlite").write_bytes(
+                b"capture-evidence-b"
+            )
+
+            changed_project = root / "changed-project"
+            shutil.copytree(
+                PROJECT_ROOT / "ontology",
+                changed_project / "ontology",
+            )
+            shutil.copytree(
+                PROJECT_ROOT / "tests" / "fixtures",
+                changed_project / "tests" / "fixtures",
+            )
+            changed_roles = (
+                changed_project / "ontology" / "ark_roles.v1.json"
+            )
+            changed_roles.write_text(
+                changed_roles.read_text(encoding="utf-8") + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            common = {
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "native_root": root / "native",
+            }
+            baseline = _snapshot_identity_for_inputs(
+                project_root=PROJECT_ROOT,
+                capture_root=root / "captures-a",
+                output_dir=root / "out-baseline",
+                map_evidence_path=map_a,
+                **common,
+            )
+            variants = {
+                "map catalog": _snapshot_identity_for_inputs(
+                    project_root=PROJECT_ROOT,
+                    capture_root=root / "captures-a",
+                    output_dir=root / "out-map",
+                    map_evidence_path=map_b,
+                    **common,
+                ),
+                "capture evidence": _snapshot_identity_for_inputs(
+                    project_root=PROJECT_ROOT,
+                    capture_root=root / "captures-b",
+                    output_dir=root / "out-capture",
+                    map_evidence_path=map_a,
+                    **common,
+                ),
+                "ontology": _snapshot_identity_for_inputs(
+                    project_root=changed_project,
+                    capture_root=root / "captures-a",
+                    output_dir=root / "out-ontology",
+                    map_evidence_path=map_a,
+                    **common,
+                ),
+            }
+
+        for input_family, variant in variants.items():
+            with self.subTest(input_family=input_family):
+                self.assertEqual(
+                    variant["discoverySha256"],
+                    baseline["discoverySha256"],
+                )
+                self.assertNotEqual(
+                    variant["sourceSha256"],
+                    baseline["sourceSha256"],
+                )
+                self.assertNotEqual(
+                    variant["buildId"],
+                    baseline["buildId"],
+                )
+
+    def test_snapshot_build_rejects_input_changed_after_initial_hash(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            captures = root / "captures"
+            (
+                revision,
+                evidence_ref,
+                package_fingerprint,
+                package_size,
+                package_modified,
+            ) = _blueprint_capture_fixture(captures)
+            _discovery_fixture(
+                discovery,
+                evidence_revision=revision,
+                evidence_ref=evidence_ref,
+                package_fingerprint=package_fingerprint,
+                package_size=package_size,
+                package_modified=package_modified,
+            )
+            output = root / "vnext"
+            original_capture_hash = (
+                snapshot_module._capture_semantic_inputs_sha256
+            )
+            mutated = False
+
+            def hash_captures_then_mutate(path: Path) -> str:
+                nonlocal mutated
+                digest = original_capture_hash(path)
+                if not mutated:
+                    connection = sqlite3.connect(discovery)
+                    try:
+                        connection.execute(
+                            """
+                            UPDATE assets
+                            SET asset_name='BP_Child_MUTATED'
+                            WHERE object_path=
+                                  '/Game/Test/BP_Child.BP_Child'
+                            """
+                        )
+                        connection.commit()
+                    finally:
+                        connection.close()
+                    mutated = True
+                return digest
+
+            with (
+                patch.object(
+                    snapshot_module,
+                    "_capture_semantic_inputs_sha256",
+                    side_effect=hash_captures_then_mutate,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "semantic inputs changed during build.*discovery",
+                ),
+            ):
+                build_vnext_snapshot(
+                    project_root=PROJECT_ROOT,
+                    discovery_database=discovery,
+                    legacy_kb_root=root / "legacy",
+                    capture_root=captures,
+                    native_root=root / "native",
+                    output_dir=output,
+                    full_snapshot=True,
+                    generated_at="2026-07-27T00:00:00+00:00",
+                )
+
+            self.assertFalse(
+                (output / "manifests" / "current.json").exists()
+            )
+            self.assertFalse((output / "core.sqlite").exists())
+
+    def test_snapshot_rechecks_every_semantic_input_before_promotion(self):
+        baseline = {
+            key: "a" * 64
+            for key in snapshot_module.SNAPSHOT_SEMANTIC_INPUT_KEYS
+        }
+        metrics = {
+            "integrity": "ok",
+            "foreignKeyViolations": 0,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            for changed_key in sorted(
+                snapshot_module.SNAPSHOT_SEMANTIC_INPUT_KEYS
+            ):
+                changed = {**baseline, changed_key: "b" * 64}
+                with (
+                    self.subTest(changed_key=changed_key),
+                    patch.object(
+                        snapshot_module,
+                        "_snapshot_semantic_input_hashes",
+                        side_effect=(baseline, changed),
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "build_catalog_database",
+                        return_value={},
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "build_core_database",
+                        return_value={},
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "build_domain_projections",
+                        return_value={},
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "build_search_database",
+                        return_value={},
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "build_cache_database",
+                        return_value={},
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "database_metrics",
+                        return_value=metrics,
+                    ),
+                    patch.object(snapshot_module, "_promote_snapshot"),
+                    self.assertRaisesRegex(RuntimeError, changed_key),
+                ):
+                    build_vnext_snapshot(
+                        project_root=PROJECT_ROOT,
+                        discovery_database=discovery,
+                        legacy_kb_root=root / "legacy",
+                        capture_root=root / "captures",
+                        native_root=root / "native",
+                        output_dir=root / f"out-{changed_key}",
+                        full_snapshot=True,
+                        generated_at="2026-07-27T00:00:00+00:00",
+                    )
+
+    def test_snapshot_generated_at_is_strict_and_normalized_to_utc(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "capture_root": root / "captures",
+                "native_root": root / "native",
+                "map_evidence_path": map_evidence,
+            }
+
+            normalized = _snapshot_identity_for_inputs(
+                output_dir=root / "out-normalized",
+                generated_at="2026-07-27T08:30:00+08:00",
+                **common,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "RFC3339",
+            ):
+                _snapshot_identity_for_inputs(
+                    output_dir=root / "out-invalid",
+                    generated_at="not-a-time",
+                    **common,
+                )
+
+        self.assertTrue(
+            str(normalized["buildId"]).startswith("20260727T003000-")
+        )
+        self.assertEqual(
+            snapshot_module.normalize_snapshot_generated_at(
+                "2026-07-27T08:30:00+08:00"
+            ),
+            "2026-07-27T00:30:00+00:00",
+        )
+
+    def test_snapshot_identity_covers_capture_manifest_and_package_binary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+
+            baseline_captures = root / "captures-baseline"
+            _blueprint_capture_fixture(baseline_captures)
+            evidence_database = (
+                baseline_captures
+                / "BP_Base"
+                / "evidence"
+                / "evidence.sqlite"
+            )
+            evidence = sqlite3.connect(evidence_database)
+            try:
+                evidence.execute(
+                    "UPDATE asset_revisions SET uasset_path=?",
+                    ("BP_Base.uasset",),
+                )
+                evidence.commit()
+            finally:
+                evidence.close()
+            manifest_captures = root / "captures-manifest"
+            package_captures = root / "captures-package"
+            shutil.copytree(baseline_captures, manifest_captures)
+            shutil.copytree(baseline_captures, package_captures)
+
+            manifest_path = (
+                manifest_captures
+                / "BP_Base"
+                / "evidence"
+                / "manifest.json"
+            )
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            manifest["parser_version"] = "tampered-parser-version"
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True),
+                encoding="utf-8",
+            )
+            (
+                package_captures / "BP_Base" / "BP_Base.uasset"
+            ).write_bytes(b"changed-package-binary")
+
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "native_root": root / "native",
+                "map_evidence_path": map_evidence,
+            }
+            baseline = _snapshot_identity_for_inputs(
+                capture_root=baseline_captures,
+                output_dir=root / "out-baseline",
+                **common,
+            )
+            variants = {
+                "capture manifest": _snapshot_identity_for_inputs(
+                    capture_root=manifest_captures,
+                    output_dir=root / "out-manifest",
+                    **common,
+                ),
+                "package binary": _snapshot_identity_for_inputs(
+                    capture_root=package_captures,
+                    output_dir=root / "out-package",
+                    **common,
+                ),
+            }
+
+        for input_kind, variant in variants.items():
+            with self.subTest(input_kind=input_kind):
+                self.assertNotEqual(
+                    variant["sourceSha256"],
+                    baseline["sourceSha256"],
+                )
+                self.assertNotEqual(
+                    variant["buildId"],
+                    baseline["buildId"],
+                )
+
+    def test_capture_identity_is_portable_across_absolute_package_roots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            capture_a = root / "captures-a"
+            capture_b = root / "captures-b"
+            _blueprint_capture_fixture(capture_a)
+            _blueprint_capture_fixture(capture_b)
+            evidence_a = (
+                capture_a
+                / "BP_Base"
+                / "evidence"
+                / "evidence.sqlite"
+            )
+            evidence_b = (
+                capture_b
+                / "BP_Base"
+                / "evidence"
+                / "evidence.sqlite"
+            )
+            self.assertNotEqual(
+                hashlib.sha256(evidence_a.read_bytes()).hexdigest(),
+                hashlib.sha256(evidence_b.read_bytes()).hexdigest(),
+            )
+
+            digest_a = (
+                snapshot_module._capture_semantic_inputs_sha256(
+                    capture_a
+                )
+            )
+            digest_b = (
+                snapshot_module._capture_semantic_inputs_sha256(
+                    capture_b
+                )
+            )
+            self.assertEqual(digest_b, digest_a)
+
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "native_root": root / "native",
+                "map_evidence_path": map_evidence,
+            }
+            result_a = _snapshot_identity_for_inputs(
+                capture_root=capture_a,
+                output_dir=root / "out-a",
+                **common,
+            )
+            result_b = _snapshot_identity_for_inputs(
+                capture_root=capture_b,
+                output_dir=root / "out-b",
+                **common,
+            )
+
+        self.assertEqual(result_b["sourceSha256"], result_a["sourceSha256"])
+        self.assertEqual(result_b["buildId"], result_a["buildId"])
+
+    def test_capture_semantic_identity_changes_with_evidence_fact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            capture_a = root / "captures-a"
+            capture_b = root / "captures-b"
+            _blueprint_capture_fixture(capture_a)
+            shutil.copytree(capture_a, capture_b)
+            evidence_b = sqlite3.connect(
+                capture_b
+                / "BP_Base"
+                / "evidence"
+                / "evidence.sqlite"
+            )
+            try:
+                evidence_b.execute(
+                    """
+                    UPDATE class_defaults
+                    SET value_json='8'
+                    WHERE name='Count'
+                    """
+                )
+                evidence_b.commit()
+            finally:
+                evidence_b.close()
+
+            digest_a = (
+                snapshot_module._capture_semantic_inputs_sha256(
+                    capture_a
+                )
+            )
+            digest_b = (
+                snapshot_module._capture_semantic_inputs_sha256(
+                    capture_b
+                )
+            )
+            self.assertNotEqual(digest_b, digest_a)
+
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "native_root": root / "native",
+                "map_evidence_path": map_evidence,
+            }
+            result_a = _snapshot_identity_for_inputs(
+                capture_root=capture_a,
+                output_dir=root / "out-a",
+                **common,
+            )
+            result_b = _snapshot_identity_for_inputs(
+                capture_root=capture_b,
+                output_dir=root / "out-b",
+                **common,
+            )
+
+        self.assertNotEqual(result_b["sourceSha256"], result_a["sourceSha256"])
+        self.assertNotEqual(result_b["buildId"], result_a["buildId"])
+
+    def test_touching_verified_package_preserves_identity_and_ingestion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            captures_a = root / "captures-a"
+            (
+                revision,
+                evidence_ref,
+                package_fingerprint,
+                package_size,
+                package_modified,
+            ) = _blueprint_capture_fixture(captures_a)
+            evidence_a = sqlite3.connect(
+                captures_a
+                / "BP_Base"
+                / "evidence"
+                / "evidence.sqlite"
+            )
+            try:
+                evidence_a.execute(
+                    "UPDATE asset_revisions SET uasset_path=?",
+                    ("BP_Base.uasset",),
+                )
+                evidence_a.commit()
+            finally:
+                evidence_a.close()
+            captures_b = root / "captures-b"
+            shutil.copytree(captures_a, captures_b)
+            package_b = captures_b / "BP_Base" / "BP_Base.uasset"
+            stat_b = package_b.stat()
+            os.utime(
+                package_b,
+                ns=(
+                    stat_b.st_atime_ns,
+                    stat_b.st_mtime_ns + 5_000_000_000,
+                ),
+            )
+
+            self.assertEqual(
+                snapshot_module._capture_semantic_inputs_sha256(
+                    captures_b
+                ),
+                snapshot_module._capture_semantic_inputs_sha256(
+                    captures_a
+                ),
+            )
+            discovery = root / "discovery.sqlite"
+            _discovery_fixture(
+                discovery,
+                evidence_revision=revision,
+                evidence_ref=evidence_ref,
+                package_fingerprint=package_fingerprint,
+                package_size=package_size,
+                package_modified=package_modified,
+            )
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "native_root": root / "native",
+                "full_snapshot": True,
+                "generated_at": "2026-07-27T00:00:00+00:00",
+            }
+            result_a = build_vnext_snapshot(
+                capture_root=captures_a,
+                output_dir=root / "out-a",
+                **common,
+            )
+            result_b = build_vnext_snapshot(
+                capture_root=captures_b,
+                output_dir=root / "out-b",
+                **common,
+            )
+
+        self.assertEqual(result_b["buildId"], result_a["buildId"])
+        self.assertEqual(
+            result_a["counts"]["core"]["blueprintPackageVerifiedAssets"],
+            1,
+        )
+        self.assertEqual(
+            result_b["counts"]["core"]["blueprintPackageVerifiedAssets"],
+            1,
+        )
+        self.assertEqual(
+            result_a["counts"]["core"]["blueprintFreshnessGapAssets"],
+            0,
+        )
+        self.assertEqual(
+            result_b["counts"]["core"]["blueprintFreshnessGapAssets"],
+            0,
+        )
+
+    def test_capture_identity_hashes_external_package_and_missing_sidecars(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            capture_root = root / "captures"
+            evidence_root = (
+                capture_root / "BP_External" / "evidence"
+            )
+            evidence_root.mkdir(parents=True)
+            external_package = (
+                root / "devkit-content" / "BP_External.uasset"
+            )
+            external_package.parent.mkdir()
+            external_package.write_bytes(b"external-uasset-v1")
+            evidence = sqlite3.connect(
+                evidence_root / "evidence.sqlite"
+            )
+            try:
+                evidence.executescript(
+                    """
+                    CREATE TABLE asset_revisions(
+                        revision_id TEXT PRIMARY KEY,
+                        uasset_path TEXT NOT NULL
+                    );
+                    CREATE TABLE source_manifest(
+                        revision_id TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        source_kind TEXT NOT NULL
+                    );
+                    """
+                )
+                evidence.execute(
+                    "INSERT INTO asset_revisions VALUES (?, ?)",
+                    ("revision-1", str(external_package)),
+                )
+                evidence.execute(
+                    "INSERT INTO source_manifest VALUES (?, ?, ?)",
+                    (
+                        "revision-1",
+                        "binary/BP_External.uasset",
+                        "package_binary",
+                    ),
+                )
+                evidence.commit()
+            finally:
+                evidence.close()
+            (evidence_root / "manifest.json").write_text(
+                '{"schema":"fixture"}',
+                encoding="utf-8",
+            )
+
+            baseline = (
+                snapshot_module._capture_semantic_inputs_sha256(
+                    capture_root
+                )
+            )
+            external_package.write_bytes(b"external-uasset-v2")
+            changed_primary = (
+                snapshot_module._capture_semantic_inputs_sha256(
+                    capture_root
+                )
+            )
+            external_package.write_bytes(b"external-uasset-v1")
+            restored = snapshot_module._capture_semantic_inputs_sha256(
+                capture_root
+            )
+            external_package.with_suffix(".uexp").write_bytes(
+                b"new-sidecar"
+            )
+            added_sidecar = (
+                snapshot_module._capture_semantic_inputs_sha256(
+                    capture_root
+                )
+            )
+
+        self.assertNotEqual(changed_primary, baseline)
+        self.assertEqual(restored, baseline)
+        self.assertNotEqual(added_sidecar, baseline)
+
+    def test_snapshot_identity_ignores_unused_native_root_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+            capture = root / "captures" / "BP_Test" / "evidence"
+            capture.mkdir(parents=True)
+            (capture / "evidence.sqlite").write_bytes(
+                b"stable-capture-evidence"
+            )
+            native_root = root / "native"
+            native_root.mkdir()
+            unused_native_file = native_root / "not-consumed-by-core.json"
+            unused_native_file.write_text(
+                '{"revision":"a"}',
+                encoding="utf-8",
+            )
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "capture_root": root / "captures",
+                "native_root": native_root,
+                "map_evidence_path": map_evidence,
+            }
+            baseline = _snapshot_identity_for_inputs(
+                output_dir=root / "out-baseline",
+                **common,
+            )
+            unused_native_file.write_text(
+                '{"revision":"b"}',
+                encoding="utf-8",
+            )
+            variant = _snapshot_identity_for_inputs(
+                output_dir=root / "out-variant",
+                **common,
+            )
+
+        self.assertEqual(
+            variant["sourceSha256"],
+            baseline["sourceSha256"],
+        )
+        self.assertEqual(variant["buildId"], baseline["buildId"])
 
     def test_refuses_first_build_without_full_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:

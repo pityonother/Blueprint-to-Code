@@ -52,14 +52,17 @@ def _fixture(path: Path) -> sqlite3.Connection:
                 f"Asset {index}",
                 f"Asset_{index}",
             )
-            for index in range(1, 13)
+            for index in range(1, len(MAJOR_DOMAINS) + 1)
         ],
     )
     connection.executemany(
         """
-        INSERT INTO domain_memberships VALUES (
+        INSERT INTO domain_memberships(
+            entity_id, domain_id, membership_kind, confidence,
+            status, evidence_id, ontology_version, source_revision_id
+        ) VALUES (
             ?, ?, 'TEST', 'HIGH', 'CONFIRMED',
-            'fixture://domain', 'test/v1'
+            'fixture://domain', 'test/v1', 1
         )
         """,
         [
@@ -77,8 +80,8 @@ def _fixture(path: Path) -> sqlite3.Connection:
                   'fixture://edge', 'FixtureProperty', '')
         """,
         [
-            (index, (index % 12) + 1)
-            for index in range(1, 13)
+            (index, (index % len(MAJOR_DOMAINS)) + 1)
+            for index in range(1, len(MAJOR_DOMAINS) + 1)
         ],
     )
     connection.commit()
@@ -86,7 +89,7 @@ def _fixture(path: Path) -> sqlite3.Connection:
 
 
 class KnowledgeBenchmarkContractTests(unittest.TestCase):
-    def test_balanced_shape_has_all_negative_cases_and_domain_floor(self):
+    def test_fixed_shape_has_all_categories_and_negative_families(self):
         connection = sqlite3.connect(":memory:")
         connection.executescript(FULL_CORE_SCHEMA_SQL)
         connection.execute(
@@ -109,29 +112,77 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
             {case.negative_case for case in cases if case.negative_case},
             set(NEGATIVE_CASES),
         )
-        domains = Counter(case.primary_domain for case in cases)
-        self.assertTrue(
-            all(domains[domain] >= 5 for domain in MAJOR_DOMAINS)
+        self.assertGreaterEqual(len(cases), 130)
+        self.assertGreaterEqual(
+            sum(bool(case.negative_case) for case in cases),
+            20,
         )
         connection.close()
 
-    def test_materialized_120_queries_run_with_bounded_results(self):
+    def test_sparse_core_exposes_strict_route_mismatches_without_semantic_credit(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "core.sqlite"
             connection = _fixture(path)
+            expected_routes = {
+                case.query_id: str(case.expected["route"])
+                for case in build_benchmark_cases(connection)
+            }
             counts = materialize_benchmark_queries(connection)
             connection.commit()
             connection.close()
-            self.assertEqual(counts["benchmarkQueries"], 120)
+            self.assertEqual(counts["benchmarkQueries"], 130)
             result = run_query_benchmark(path)
-        self.assertEqual(result["total"], 120)
+        route_matches = [
+            item
+            for item in result["results"]
+            if item["route"] == expected_routes[item["queryId"]]
+        ]
+        route_mismatches = [
+            item
+            for item in result["results"]
+            if item["route"] != expected_routes[item["queryId"]]
+        ]
+        self.assertEqual(result["total"], 130)
         self.assertEqual(result["tierCounts"], TIER_COUNTS)
-        self.assertEqual(result["unresolved"], 0)
-        self.assertGreaterEqual(result["completeOrBoundedRate"], 0.70)
-        self.assertGreaterEqual(result["simpleDbOnlyRate"], 0.90)
+        self.assertEqual(len(route_matches), 42)
+        self.assertEqual(len(route_mismatches), 88)
+        self.assertEqual(
+            sum(item["protocolCompliance"] for item in route_matches),
+            1,
+        )
+        self.assertTrue(
+            all(not item["protocolCompliance"] for item in route_mismatches)
+        )
+        self.assertEqual(
+            sum(item["wrongAnswer"] for item in route_matches),
+            41,
+        )
+        self.assertTrue(all(item["wrongAnswer"] for item in route_mismatches))
+        self.assertEqual(result["unresolved"], 129)
+        self.assertEqual(
+            result["protocolComplianceRate"],
+            1 / result["total"],
+        )
+        self.assertEqual(result["semanticAnswerRate"], 0.0)
+        self.assertEqual(
+            result["wrongAnswerRate"],
+            129 / result["total"],
+        )
+        self.assertEqual(
+            sum(item["expectedGapMatched"] for item in result["results"]),
+            1,
+        )
+        self.assertEqual(result["goldSet"]["fixedGoldCases"], 130)
+        self.assertEqual(result["goldSet"]["humanGoldCases"], 5)
+        self.assertFalse(result["goldSet"]["corpusReadyForCutover"])
+        self.assertTrue(result["identityOnlyNotCountedAsSemantic"])
         self.assertLessEqual(result["contextTokens"]["maximum"], 2_000)
         self.assertLess(result["latencyMs"]["p95"], 250)
+        self.assertLess(result["latencyMs"]["p99"], 250)
         self.assertLess(result["latencyMs"]["twoHopP95"], 800)
+        self.assertFalse(result["storagePathCoverage"]["complete"])
 
 
 if __name__ == "__main__":

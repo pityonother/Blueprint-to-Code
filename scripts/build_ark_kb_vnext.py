@@ -41,6 +41,20 @@ def _parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT / "native_evidence",
     )
     parser.add_argument(
+        "--map-evidence-catalog",
+        type=Path,
+        default=(
+            PROJECT_ROOT
+            / "analysis"
+            / "harvest_nodes"
+            / "resource_node_catalog.json"
+        ),
+        help=(
+            "Revision-validated resource-node catalog used only for typed "
+            "PCG and World Partition map evidence."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=PROJECT_ROOT / "knowledge_base" / "vnext",
@@ -61,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         legacy_kb_root=_absolute(args.legacy_kb_root),
         capture_root=_absolute(args.capture_root),
         native_root=_absolute(args.native_root),
+        map_evidence_path=_absolute(args.map_evidence_catalog),
         output_dir=_absolute(args.output),
         full_snapshot=args.full_snapshot,
     )

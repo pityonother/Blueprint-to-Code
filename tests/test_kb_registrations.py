@@ -223,6 +223,80 @@ class KnowledgeRegistrationTests(unittest.TestCase):
             "property_semantic_and_class_ancestry",
         )
 
+    def test_legacy_high_confidence_requires_recovered_allowed_evidence(self):
+        discovery = sqlite3.connect(":memory:")
+        discovery.executescript(
+            """
+            CREATE TABLE system_registrations(
+                registration_id TEXT PRIMARY KEY,
+                owner_object_path TEXT NOT NULL,
+                target_object_path TEXT NOT NULL,
+                registration_type TEXT NOT NULL,
+                source_property TEXT NOT NULL,
+                source_evidence_id TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                source_kind TEXT NOT NULL
+            );
+            CREATE TABLE asset_references(
+                reference_id TEXT PRIMARY KEY,
+                source_object_path TEXT NOT NULL,
+                target_object_path TEXT NOT NULL,
+                source_property TEXT NOT NULL,
+                source_evidence_id TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                edge_kind TEXT NOT NULL
+            );
+            """
+        )
+        invalid_evidence = (
+            "UNKNOWN",
+            "NOT_RECOVERED",
+            "bp://fixture/NOT_AVAILABLE",
+            "evidence-without-scheme",
+            "existing-kb://primal_game_data/game_data_references",
+            "ftp://fixture/registration",
+        )
+        discovery.executemany(
+            """
+            INSERT INTO system_registrations VALUES(
+                ?, '/Game/Test/Owner.Owner',
+                '/Game/Test/Target.Target', 'buff_registration',
+                'BuffClass', ?, 'HIGH', 'auditor_fixture'
+            )
+            """,
+            (
+                (f"invalid-{index}", evidence_uri)
+                for index, evidence_uri in enumerate(invalid_evidence)
+            ),
+        )
+        target = sqlite3.connect(":memory:")
+
+        try:
+            materialize_typed_registrations(
+                discovery,
+                target,
+                source_revision_id=1,
+            )
+            statuses = target.execute(
+                """
+                SELECT evidence_uri, status, confidence
+                FROM typed_registrations
+                ORDER BY evidence_uri
+                """
+            ).fetchall()
+        finally:
+            discovery.close()
+            target.close()
+
+        self.assertEqual(
+            statuses,
+            sorted(
+                (evidence_uri, "LEGACY_UNVERIFIED", "LOW")
+                for evidence_uri in invalid_evidence
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

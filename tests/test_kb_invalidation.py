@@ -17,6 +17,7 @@ from blueprint_translator.kb_vnext.fact_store import (  # noqa: E402
     store_fact,
 )
 from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
+    InvalidationPlan,
     apply_invalidation_plan,
     plan_invalidation,
     rebuild_invalidation_dependencies,
@@ -159,7 +160,7 @@ def _fixture() -> tuple[sqlite3.Connection, dict[str, int]]:
         """
         INSERT INTO asset_class_assignments VALUES (
             ?, ?, 'GENERATED_CLASS', 'fixture://class',
-            'EXTRACTED', 'HIGH'
+            'EXTRACTED', 'HIGH', 1
         )
         """,
         [(1, 11), (2, 12), (3, 13), (4, 14)],
@@ -204,7 +205,8 @@ def _fixture() -> tuple[sqlite3.Connection, dict[str, int]]:
         connection.execute(
             """
             INSERT INTO knowledge_roles VALUES (
-                ?, 'entity_definition', 'HIGH', 'CONFIRMED', '[]', 'v1'
+                ?, 'entity_definition', 'HIGH', 'CONFIRMED',
+                '[]', 'v1', 1
             )
             """,
             (entity_id,),
@@ -213,7 +215,7 @@ def _fixture() -> tuple[sqlite3.Connection, dict[str, int]]:
             """
             INSERT INTO domain_memberships VALUES (
                 ?, 'item_use', 'CLASS_ANCESTRY', 'HIGH', 'CONFIRMED',
-                ?, 'v1'
+                ?, 'v1', 1
             )
             """,
             (entity_id, f"ontology://{entity_id}"),
@@ -249,7 +251,7 @@ def _fixture() -> tuple[sqlite3.Connection, dict[str, int]]:
         INSERT INTO native_blueprint_links VALUES (
             'link-1', 2, 'bp://fixture/callsite', 'Rate', 21,
             'native://fixture/function', 'verified_callsite',
-            'CONFIRMED', 'HIGH'
+            'CONFIRMED', 'HIGH', 1
         )
         """
     )
@@ -948,6 +950,158 @@ class KnowledgeInvalidationTests(unittest.TestCase):
                 (fact_ids["base"],),
             ).fetchone()[0],
             1,
+        )
+        connection.close()
+
+    def test_native_function_only_invalidation_also_downgrades_its_links(
+        self,
+    ):
+        connection, _ = _fixture()
+        plan = InvalidationPlan(
+            event_kind="NATIVE",
+            upstream_revision_id=2,
+            downstream={"NATIVE_FUNCTION": (21,)},
+            reasons={"NATIVE_FUNCTION": "NATIVE_EVIDENCE_CHANGED"},
+        )
+
+        apply_invalidation_plan(
+            connection,
+            plan,
+            created_at="2026-07-27T01:04:00Z",
+        )
+
+        self.assertEqual(
+            connection.execute(
+                """
+                SELECT status
+                FROM native_functions
+                WHERE native_function_id=21
+                """
+            ).fetchone()[0],
+            "STALE",
+        )
+        self.assertEqual(
+            connection.execute(
+                """
+                SELECT status, confidence
+                FROM native_blueprint_links
+                WHERE link_id='link-1'
+                """
+            ).fetchone(),
+            ("CANDIDATE", "LOW"),
+        )
+        connection.close()
+
+    def test_blueprint_native_entity_only_invalidation_is_independent(
+        self,
+    ):
+        connection, _ = _fixture()
+        plan = InvalidationPlan(
+            event_kind="NATIVE",
+            upstream_revision_id=2,
+            downstream={"BLUEPRINT_NATIVE_ENTITY": (2,)},
+            reasons={
+                "BLUEPRINT_NATIVE_ENTITY": "BLUEPRINT_GRAPH_CHANGED"
+            },
+        )
+
+        apply_invalidation_plan(
+            connection,
+            plan,
+            created_at="2026-07-27T01:05:00Z",
+        )
+
+        self.assertEqual(
+            connection.execute(
+                """
+                SELECT status, confidence
+                FROM native_blueprint_links
+                WHERE link_id='link-1'
+                """
+            ).fetchone(),
+            ("CANDIDATE", "LOW"),
+        )
+        self.assertEqual(
+            connection.execute(
+                """
+                SELECT status
+                FROM native_functions
+                WHERE native_function_id=21
+                """
+            ).fetchone()[0],
+            "CONFIRMED",
+        )
+        connection.close()
+
+    def test_native_invalidation_uses_each_downstream_set_for_its_bindings(
+        self,
+    ):
+        connection, _ = _fixture()
+        connection.execute(
+            """
+            INSERT INTO native_functions
+            SELECT
+                22, 'native://fixture/function-22', 'UItem::Rate22',
+                module_name, '0x22', 'void Rate22()',
+                binary_sha256, pdb_sha256, pdb_guid_age,
+                recipe_ids_json, evidence_set_ids_json,
+                caller_count, callee_count, callsite_status,
+                status, confidence, source_revision_id
+            FROM native_functions
+            WHERE native_function_id=21
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO native_blueprint_links VALUES(
+                'link-2', 3, 'bp://fixture/callsite-2', 'Rate22', 22,
+                'native://fixture/function-22', 'verified_callsite',
+                'CONFIRMED', 'HIGH', 1
+            )
+            """
+        )
+        plan = InvalidationPlan(
+            event_kind="NATIVE",
+            upstream_revision_id=2,
+            downstream={
+                "NATIVE_FUNCTION": (21,),
+                "BLUEPRINT_NATIVE_ENTITY": (3, 4),
+            },
+            reasons={
+                "NATIVE_FUNCTION": "NATIVE_EVIDENCE_CHANGED",
+                "BLUEPRINT_NATIVE_ENTITY": "BLUEPRINT_GRAPH_CHANGED",
+            },
+        )
+
+        apply_invalidation_plan(
+            connection,
+            plan,
+            created_at="2026-07-27T01:06:00Z",
+        )
+
+        self.assertEqual(
+            dict(
+                connection.execute(
+                    """
+                    SELECT link_id, status
+                    FROM native_blueprint_links
+                    ORDER BY link_id
+                    """
+                )
+            ),
+            {"link-1": "CANDIDATE", "link-2": "CANDIDATE"},
+        )
+        self.assertEqual(
+            dict(
+                connection.execute(
+                    """
+                    SELECT native_function_id, status
+                    FROM native_functions
+                    ORDER BY native_function_id
+                    """
+                )
+            ),
+            {21: "STALE", 22: "CONFIRMED"},
         )
         connection.close()
 

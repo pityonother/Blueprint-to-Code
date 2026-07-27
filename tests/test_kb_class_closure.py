@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -12,10 +13,19 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from blueprint_translator.kb_vnext.class_hierarchy import (  # noqa: E402
+    BUILTIN_CLASS_EDGES,
+    class_hierarchy_contract_fingerprint,
+    class_hierarchy_source_fingerprint,
     create_class_tables,
     inheritance_path_to_native_root,
     materialize_discovery_classes,
     rebuild_class_closure,
+)
+from blueprint_translator.kb_vnext import (  # noqa: E402
+    class_hierarchy as class_hierarchy_module,
+)
+from blueprint_translator.kb_vnext.query_planner import (  # noqa: E402
+    is_valid_generic_evidence_uri,
 )
 
 
@@ -148,6 +158,171 @@ def _target_fixture() -> sqlite3.Connection:
 
 
 class KnowledgeClassClosureTests(unittest.TestCase):
+    def test_contract_fingerprint_covers_builtin_hierarchy(self):
+        discovery = _discovery_fixture()
+        baseline_contract = class_hierarchy_contract_fingerprint()
+        baseline_source = class_hierarchy_source_fingerprint(discovery)
+        changed_edges = (
+            *BUILTIN_CLASS_EDGES,
+            (
+                "/Script/Engine.Actor",
+                "/Script/CoreUObject.Object",
+                "native_parent",
+            ),
+        )
+
+        with patch.object(
+            class_hierarchy_module,
+            "BUILTIN_CLASS_EDGES",
+            changed_edges,
+        ):
+            changed_contract = class_hierarchy_contract_fingerprint()
+            changed_source = class_hierarchy_source_fingerprint(discovery)
+
+        self.assertNotEqual(changed_contract, baseline_contract)
+        self.assertNotEqual(changed_source, baseline_source)
+        discovery.close()
+
+    def test_semantic_fingerprint_changes_with_hierarchy_input(self):
+        discovery = _discovery_fixture()
+        baseline = class_hierarchy_source_fingerprint(discovery)
+
+        discovery.execute(
+            """
+            UPDATE class_edges
+            SET confidence='MEDIUM'
+            WHERE child_class_path='/Game/Test/PDA_Child.PDA_Child_C'
+              AND parent_class_path='/Game/Test/PDA_Base.PDA_Base_C'
+              AND edge_kind='blueprint_parent'
+            """
+        )
+        changed = class_hierarchy_source_fingerprint(discovery)
+
+        self.assertNotEqual(changed, baseline)
+        discovery.close()
+
+    def test_source_fingerprint_covers_assignment_identity_evidence(self):
+        discovery = _discovery_fixture()
+        baseline = class_hierarchy_source_fingerprint(discovery)
+
+        discovery.execute(
+            """
+            UPDATE assets
+            SET identity_status='AMBIGUOUS',
+                identity_confidence='LOW'
+            WHERE object_path='/Game/Test/PDA_Child.PDA_Child'
+            """
+        )
+        changed = class_hierarchy_source_fingerprint(discovery)
+
+        self.assertNotEqual(changed, baseline)
+        discovery.close()
+
+    def test_assignment_evidence_uri_encodes_the_full_entity_identity(self):
+        discovery = _discovery_fixture()
+        entity_uri = "/Game/Test/Unknown/BP Test.BP Test"
+        discovery.execute(
+            """
+            INSERT INTO assets VALUES (
+                ?, '/Script/Engine.ParticleSystem', '', '', '',
+                'EXTRACTED', 'HIGH'
+            )
+            """,
+            (entity_uri,),
+        )
+        target = _target_fixture()
+        target.execute(
+            "INSERT INTO entities VALUES (4, ?)",
+            (entity_uri,),
+        )
+
+        materialize_discovery_classes(discovery, target)
+
+        evidence_uri = target.execute(
+            """
+            SELECT evidence_uri
+            FROM asset_class_assignments
+            WHERE entity_id=4 AND assignment_kind='ASSET_CLASS'
+            """
+        ).fetchone()[0]
+        self.assertEqual(
+            evidence_uri,
+            (
+                "discovery://asset/"
+                "%2FGame%2FTest%2FUnknown%2FBP%20Test.BP%20Test"
+                "#asset-class"
+            ),
+        )
+        self.assertTrue(is_valid_generic_evidence_uri(evidence_uri))
+        discovery.close()
+        target.close()
+
+    def test_generated_class_prefers_defining_package_revision(self):
+        discovery = _discovery_fixture()
+        discovery.execute(
+            """
+            UPDATE assets
+            SET asset_class_path='/Game/Test/PDA_Child.PDA_Child_C'
+            WHERE object_path='/Game/Test/BP_Actor.BP_Actor'
+            """
+        )
+        target = sqlite3.connect(":memory:")
+        target.executescript(
+            """
+            CREATE TABLE packages(
+                package_id INTEGER PRIMARY KEY,
+                current_revision_id INTEGER
+            );
+            CREATE TABLE entities(
+                entity_id INTEGER PRIMARY KEY,
+                canonical_uri TEXT UNIQUE NOT NULL,
+                package_id INTEGER
+            );
+            INSERT INTO packages VALUES (1, 10), (2, 20), (3, 30);
+            INSERT INTO entities VALUES
+                (1, '/Game/Test/PDA_Child.PDA_Child', 1),
+                (2, '/Game/Test/BP_Actor.BP_Actor', 2),
+                (3, '/Game/Test/BP_Open.BP_Open', 3);
+            """
+        )
+
+        materialize_discovery_classes(
+            discovery,
+            target,
+            source_revision_id=99,
+        )
+
+        generated_revision = target.execute(
+            """
+            SELECT source_revision_id
+            FROM classes
+            WHERE class_path='/Game/Test/PDA_Child.PDA_Child_C'
+            """
+        ).fetchone()[0]
+        edge_revisions = target.execute(
+            """
+            SELECT DISTINCT edge.source_revision_id
+            FROM class_edges AS edge
+            JOIN classes AS child
+              ON child.class_id=edge.child_class_id
+            WHERE child.class_path='/Game/Test/PDA_Child.PDA_Child_C'
+              AND edge.edge_kind='blueprint_parent'
+            """
+        ).fetchall()
+        actor_revision = target.execute(
+            """
+            SELECT source_revision_id
+            FROM classes
+            WHERE class_path='/Script/Engine.Actor'
+            """
+        ).fetchone()[0]
+
+        self.assertEqual(generated_revision, 10)
+        self.assertEqual(edge_revisions, [(10,)])
+        self.assertEqual(actor_revision, 99)
+        discovery.close()
+        target.close()
+
     def test_unifies_blueprint_and_native_classes_and_classifies_data_asset(self):
         discovery = _discovery_fixture()
         target = _target_fixture()

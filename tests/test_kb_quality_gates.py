@@ -24,6 +24,11 @@ from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     _effective_candidate_metrics,
     _integrity_metrics,
     _privacy_scan,
+    _query_benchmark_gates,
+    _registration_confidence_gate,
+    _registration_confidence_metrics,
+    _typed_map_usage_gates,
+    _typed_map_usage_metrics,
     publish_gate_report,
 )
 from blueprint_translator.kb_vnext.ontology import (  # noqa: E402
@@ -38,6 +43,9 @@ from blueprint_translator.kb_vnext.semantic_quality import (  # noqa: E402
     _semantic_fact_metrics,
     _semantic_projection_metrics,
     semantic_quality_gates,
+)
+from blueprint_translator.kb_vnext.storage import (  # noqa: E402
+    FULL_CORE_SCHEMA_SQL,
 )
 
 
@@ -623,6 +631,345 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             ],
             "benchmark": {"total": 120},
         }
+
+    def test_benchmark_v2_gates_replace_legacy_self_selected_metrics(self):
+        benchmark = {
+            "schema": "ark-kb-query-benchmark/v2",
+            "total": 120,
+            "goldSet": {
+                "selectionMode": "MANUAL_FIXED",
+                "generatedFromCore": False,
+                "fixedGoldCases": 120,
+                "humanGoldCases": 120,
+                "corpusReadyForCutover": True,
+            },
+            "protocolComplianceRate": 1.0,
+            "semanticExactMatchRate": 0.95,
+            "usableValueAnswerRate": 0.95,
+            "evidenceBackedCompleteRate": 0.95,
+            "expectedGapMatchedRate": 1.0,
+            "wrongAnswerRate": 0.0,
+            "unexpectedAmbiguousAnswerRate": 0.0,
+            "staleLeakRate": 0.0,
+            "candidateEdgeCompleteRate": 0.0,
+            "identityOnlyNotCountedAsSemantic": True,
+            "storagePathCoverage": {
+                "core": True,
+                "search": True,
+                "cache": True,
+                "complete": True,
+            },
+            "completeOrBoundedRate": 0.0,
+            "simpleDbOnlyRate": 0.0,
+            "unresolved": 120,
+        }
+
+        gates = _query_benchmark_gates(benchmark)
+
+        gate_ids = {str(gate["id"]) for gate in gates}
+        self.assertNotIn("queries.complete_or_bounded", gate_ids)
+        self.assertNotIn("queries.simple_db_only", gate_ids)
+        self.assertNotIn("queries.no_silent_unresolved", gate_ids)
+        self.assertTrue(all(bool(gate["passed"]) for gate in gates))
+
+    def test_registration_gate_rejects_noncomplete_high_confidence(self):
+        core = sqlite3.connect(":memory:")
+        core.executescript(
+            """
+            CREATE TABLE typed_registrations(
+                status TEXT NOT NULL,
+                confidence TEXT NOT NULL
+            );
+            CREATE TABLE edges(
+                edge_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                confidence TEXT NOT NULL
+            );
+            CREATE TABLE domain_memberships(
+                membership_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                confidence TEXT NOT NULL
+            );
+            INSERT INTO typed_registrations VALUES
+                ('LEGACY_UNVERIFIED', 'HIGH'),
+                ('CONFIRMED', 'HIGH');
+            INSERT INTO edges VALUES
+                ('REGISTERS', 'CANDIDATE', 'CONFIRMED'),
+                ('REFERENCES', 'CANDIDATE', 'HIGH');
+            INSERT INTO domain_memberships VALUES
+                ('TYPED_REGISTRATION', 'LEGACY_UNVERIFIED', 'HIGH'),
+                ('CLASS_ANCESTRY', 'CANDIDATE', 'HIGH');
+            """
+        )
+
+        metrics = _registration_confidence_metrics(core)
+        failed = _registration_confidence_gate(metrics)
+        core.execute(
+            """
+            UPDATE typed_registrations
+            SET confidence='LOW'
+            WHERE status='LEGACY_UNVERIFIED'
+            """
+        )
+        core.execute(
+            """
+            UPDATE edges
+            SET confidence='LOW'
+            WHERE edge_type='REGISTERS' AND status='CANDIDATE'
+            """
+        )
+        core.execute(
+            """
+            UPDATE domain_memberships
+            SET confidence='LOW'
+            WHERE membership_kind='TYPED_REGISTRATION'
+              AND status='LEGACY_UNVERIFIED'
+            """
+        )
+        passed = _registration_confidence_gate(
+            _registration_confidence_metrics(core)
+        )
+        core.close()
+
+        self.assertEqual(
+            metrics,
+            {
+                "typedRegistrations": 1,
+                "registrationEdges": 1,
+                "typedMemberships": 1,
+                "total": 3,
+            },
+        )
+        self.assertEqual(
+            failed["id"],
+            "registrations.noncomplete_high_confidence",
+        )
+        self.assertFalse(failed["passed"])
+        self.assertTrue(passed["passed"])
+
+    def test_benchmark_v2_gates_fail_closed_for_current_corpus_gaps(self):
+        gates = _query_benchmark_gates(
+            {
+                "schema": "ark-kb-query-benchmark/v2",
+                "total": 120,
+                "goldSet": {
+                    "selectionMode": "MANUAL_FIXED",
+                    "generatedFromCore": False,
+                    "fixedGoldCases": 120,
+                    "humanGoldCases": 5,
+                    "corpusReadyForCutover": False,
+                },
+                "protocolComplianceRate": 1.0,
+                "semanticExactMatchRate": 0.0,
+                "usableValueAnswerRate": 0.0,
+                "evidenceBackedCompleteRate": 0.0,
+                "expectedGapMatchedRate": 1.0,
+                "wrongAnswerRate": 0.0,
+                "unexpectedAmbiguousAnswerRate": 0.0,
+                "staleLeakRate": 0.0,
+                "candidateEdgeCompleteRate": 0.0,
+                "identityOnlyNotCountedAsSemantic": True,
+                "storagePathCoverage": {
+                    "core": True,
+                    "search": True,
+                    "cache": True,
+                    "complete": True,
+                },
+            }
+        )
+        by_id = {str(gate["id"]): gate for gate in gates}
+
+        self.assertFalse(by_id["queries.human_gold_cases"]["passed"])
+        self.assertFalse(by_id["queries.corpus_ready_for_cutover"]["passed"])
+        self.assertFalse(by_id["queries.semantic_exact_match"]["passed"])
+        self.assertFalse(by_id["queries.usable_value_answer"]["passed"])
+        self.assertFalse(
+            by_id["queries.evidence_backed_complete"]["passed"]
+        )
+        self.assertTrue(by_id["queries.protocol_compliance"]["passed"])
+        self.assertTrue(by_id["queries.no_wrong_answers"]["passed"])
+
+    def test_benchmark_storage_paths_fail_closed_until_all_are_exercised(
+        self,
+    ):
+        benchmark = {
+            "schema": "ark-kb-query-benchmark/v2",
+            "goldSet": {
+                "selectionMode": "MANUAL_FIXED",
+                "generatedFromCore": False,
+                "fixedGoldCases": 120,
+                "humanGoldCases": 120,
+                "corpusReadyForCutover": True,
+            },
+            "protocolComplianceRate": 1.0,
+            "semanticExactMatchRate": 1.0,
+            "usableValueAnswerRate": 1.0,
+            "evidenceBackedCompleteRate": 1.0,
+            "expectedGapMatchedRate": 1.0,
+            "wrongAnswerRate": 0.0,
+            "unexpectedAmbiguousAnswerRate": 0.0,
+            "staleLeakRate": 0.0,
+            "candidateEdgeCompleteRate": 0.0,
+            "identityOnlyNotCountedAsSemantic": True,
+            "storagePathCoverage": {
+                "core": True,
+                "search": False,
+                "cache": False,
+                "complete": False,
+            },
+        }
+
+        by_id = {
+            str(gate["id"]): gate
+            for gate in _query_benchmark_gates(benchmark)
+        }
+
+        self.assertFalse(
+            by_id["queries.storage_paths_covered"]["passed"]
+        )
+
+    def test_benchmark_v2_gates_fail_closed_without_metric_key_errors(self):
+        gates = _query_benchmark_gates({})
+
+        self.assertTrue(gates)
+        self.assertTrue(all(not bool(gate["passed"]) for gate in gates))
+
+    def test_typed_map_metrics_fail_closed_when_core_v4_contract_is_absent(self):
+        core = sqlite3.connect(":memory:")
+        core.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)")
+
+        metrics = _typed_map_usage_metrics(core)
+        gates = _typed_map_usage_gates(metrics)
+
+        self.assertFalse(metrics["capability"])
+        self.assertEqual(
+            metrics["error"],
+            "TYPED_MAP_USAGE_CAPABILITY_MISSING",
+        )
+        self.assertTrue(all(not bool(gate["passed"]) for gate in gates))
+        core.close()
+
+    def test_typed_map_metrics_validate_confirmed_candidate_and_stale_rows(
+        self,
+    ):
+        core = sqlite3.connect(":memory:")
+        core.executescript(FULL_CORE_SCHEMA_SQL)
+        core.execute(
+            "INSERT INTO metadata VALUES ('schema_version', 'ark-kb-core/v4')"
+        )
+        core.executemany(
+            """
+            INSERT INTO source_revisions(
+                revision_id, source_kind, source_uri, source_fingerprint,
+                producer_version, schema_version, generated_at,
+                freshness_status
+            ) VALUES (?, 'map_fixture', ?, ?, 'test', 'v1',
+                      '2026-07-27T00:00:00Z', ?)
+            """,
+            [
+                (1, "map://fresh", "fresh-sha", "FRESH"),
+                (2, "map://stale", "stale-sha", "STALE"),
+            ],
+        )
+        core.executemany(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, display_name,
+                internal_name, status, confidence
+            ) VALUES (?, ?, 'MAP_ASSET', '', '', 'CONFIRMED', 'HIGH')
+            """,
+            [
+                (1, "/Game/Maps/Test.Test"),
+                (2, "/Game/Test/A.A"),
+                (3, "/Game/Test/B.B"),
+                (4, "/Game/Test/C.C"),
+            ],
+        )
+        core.executemany(
+            """
+            INSERT INTO edges(
+                edge_id, source_entity_id, target_entity_id, edge_type,
+                edge_strength, status, confidence, source_revision_id,
+                evidence_uri, source_property, source_graph
+            ) VALUES (?, 1, ?, 'MAP_DIRECT_REFERENCE', 'HARD', ?, 'HIGH',
+                      ?, ?, 'AssetRegistryDependency', '')
+            """,
+            [
+                (
+                    1,
+                    2,
+                    "CONFIRMED",
+                    1,
+                    "map-evidence://asset-registry/confirmed",
+                ),
+                (
+                    2,
+                    3,
+                    "CANDIDATE",
+                    1,
+                    "map-evidence://asset-registry/candidate",
+                ),
+                (
+                    3,
+                    4,
+                    "STALE",
+                    2,
+                    "map-evidence://asset-registry/stale",
+                ),
+            ],
+        )
+        core.executemany(
+            """
+            INSERT INTO map_usage_edge_evidence(
+                map_usage_id, edge_id, source_item_id, evidence_layer,
+                map_family, map_kind, source_evidence_status, usage_status,
+                freshness_status, claims_complete_map_usage,
+                claims_spawn_coordinates, evidence_count,
+                evidence_examples_json, extractor_version
+            ) VALUES (?, ?, ?, 'ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY',
+                      'test', 'PLAYABLE_MAP_EVIDENCE', ?, ?, ?, 0, 0, 1,
+                      '[]', 'ark-kb-map-usage/v1')
+            """,
+            [
+                (
+                    "map-confirmed",
+                    1,
+                    "item-confirmed",
+                    "CONFIRMED",
+                    "CONFIRMED",
+                    "FRESH",
+                ),
+                (
+                    "map-candidate",
+                    2,
+                    "item-candidate",
+                    "CANDIDATE",
+                    "CANDIDATE",
+                    "FRESH",
+                ),
+                (
+                    "map-stale",
+                    3,
+                    "item-stale",
+                    "CONFIRMED",
+                    "CONFIRMED",
+                    "STALE",
+                ),
+            ],
+        )
+
+        metrics = _typed_map_usage_metrics(core)
+        gates = _typed_map_usage_gates(metrics)
+
+        self.assertTrue(metrics["capability"])
+        self.assertEqual(metrics["typedEdgeCount"], 3)
+        self.assertEqual(metrics["confirmedCount"], 1)
+        self.assertEqual(metrics["candidateCount"], 1)
+        self.assertEqual(metrics["staleCount"], 1)
+        self.assertEqual(metrics["invalidConfirmedRows"], 0)
+        self.assertFalse(metrics["domainMembershipFallbackUsed"])
+        self.assertTrue(all(bool(gate["passed"]) for gate in gates))
+        core.close()
 
     def test_failed_gate_report_keeps_legacy_default(self):
         with tempfile.TemporaryDirectory() as temporary:

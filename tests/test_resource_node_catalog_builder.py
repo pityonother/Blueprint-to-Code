@@ -227,7 +227,18 @@ class ResourceNodeCatalogBuilderTests(unittest.TestCase):
         }
         ranking = {"datasetRevision": "3" * 64}
         evaluation = {"dataset": {"revision": "5" * 64}}
-        first = _dataset_revision([base], ranking, evaluation)
+        revision_options = {
+            "map_coverage": {
+                "status": "REFERENCE_SCAN_COMPLETE",
+            },
+            "source_status": "CURRENT_AT_GENERATION",
+        }
+        first = _dataset_revision(
+            [base],
+            ranking,
+            evaluation,
+            **revision_options,
+        )
 
         with_map = {
             **base,
@@ -246,10 +257,44 @@ class ResourceNodeCatalogBuilderTests(unittest.TestCase):
             "image": {"status": "AVAILABLE", "sha256": "4" * 64},
         }
 
-        self.assertNotEqual(first, _dataset_revision([with_map], ranking, evaluation))
-        self.assertNotEqual(first, _dataset_revision([with_image_change], ranking, evaluation))
+        self.assertNotEqual(
+            first,
+            _dataset_revision(
+                [with_map],
+                ranking,
+                evaluation,
+                **revision_options,
+            ),
+        )
+        self.assertNotEqual(
+            first,
+            _dataset_revision(
+                [with_image_change],
+                ranking,
+                evaluation,
+                **revision_options,
+            ),
+        )
         changed_evaluation = {"dataset": {"revision": "6" * 64}}
-        self.assertNotEqual(first, _dataset_revision([base], ranking, changed_evaluation))
+        self.assertNotEqual(
+            first,
+            _dataset_revision(
+                [base],
+                ranking,
+                changed_evaluation,
+                **revision_options,
+            ),
+        )
+        self.assertNotEqual(
+            first,
+            _dataset_revision(
+                [base],
+                ranking,
+                evaluation,
+                map_coverage={"status": "REFERENCE_SCAN_PARTIAL"},
+                source_status="CURRENT_AT_GENERATION",
+            ),
+        )
 
     def test_node_thumbnail_attachment_is_explicit_when_enabled_or_skipped(self):
         node = {"id": "node-1", "image": {"status": "NOT_EXTRACTED"}}

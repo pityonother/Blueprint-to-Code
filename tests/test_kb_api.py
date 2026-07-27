@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -28,16 +30,79 @@ from blueprint_translator.kb_vnext.kb_context import (  # noqa: E402
     build_bounded_context_pack,
 )
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
+from blueprint_translator.kb_vnext.projections import (  # noqa: E402
+    DOMAIN_PROJECTIONS,
+    PROJECTION_SCHEMA_SQL,
+    PROJECTION_SCHEMA_VERSION,
+)
+from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
+    semantic_inputs_sha256,
+    snapshot_build_id,
+)
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CACHE_SCHEMA_SQL,
+    CACHE_SCHEMA_VERSION,
+    CATALOG_SCHEMA_VERSION,
     CORE_SCHEMA_VERSION,
+    FULL_CATALOG_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
+    SEARCH_SCHEMA_SQL,
+    SEARCH_SCHEMA_VERSION,
+    database_metrics,
 )
 import blueprint_tool_server as tool_server  # noqa: E402
 
 
+def _write_snapshot_manifest(
+    root: Path,
+    manifest: dict[str, object],
+) -> None:
+    manifest_text = json.dumps(manifest)
+    (root / "manifests" / "current.json").write_text(
+        manifest_text,
+        encoding="utf-8",
+    )
+    (root / "manifests" / f"{manifest['buildId']}.json").write_text(
+        manifest_text,
+        encoding="utf-8",
+    )
+
+
+def _refresh_snapshot_database_metrics(root: Path) -> None:
+    manifest = json.loads(
+        (root / "manifests" / "current.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    databases = manifest["databases"]
+    for name in databases:
+        path = root / name
+        if not path.is_file():
+            continue
+        databases[name]["bytes"] = path.stat().st_size
+        databases[name]["sha256"] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    _write_snapshot_manifest(root, manifest)
+
+
 def _snapshot(root: Path) -> VNextKnowledgeService:
     ontology = load_ontology(PROJECT_ROOT / "ontology")
+    generated_at = "2026-07-27T00:00:00+00:00"
+    semantic_inputs = {
+        "discovery": "d" * 64,
+        "captures": "c" * 64,
+        "classHierarchyContract": "b" * 64,
+        "semanticProducerContract": "e" * 64,
+        "legacy": "1" * 64,
+        "ontology": "2" * 64,
+        "benchmarkGold": "3" * 64,
+        "qualityGold": "4" * 64,
+        "mapEvidence": "5" * 64,
+    }
+    discovery_fingerprint = semantic_inputs["discovery"]
+    semantic_fingerprint = semantic_inputs_sha256(semantic_inputs)
+    build_id = snapshot_build_id(generated_at, semantic_fingerprint)
     root.mkdir(parents=True)
     (root / "manifests").mkdir()
     core = sqlite3.connect(root / "core.sqlite")
@@ -48,6 +113,13 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
         [
             ("schema_version", CORE_SCHEMA_VERSION),
             ("ontology_version", ontology.version),
+            ("source_fingerprint", discovery_fingerprint),
+            ("snapshot_build_id", build_id),
+            (
+                "snapshot_source_fingerprint",
+                semantic_fingerprint,
+            ),
+            ("generated_at", generated_at),
         ],
     )
     core.execute(
@@ -58,12 +130,24 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
         )
         """
     )
+    core.execute(
+        """
+        INSERT INTO packages(
+            package_id, package_path, mount_point, current_revision_id
+        ) VALUES (
+            1, '/Game/Test', '/Game', 1
+        )
+        """
+    )
     core.executemany(
         """
         INSERT INTO entities(
-            entity_id, canonical_uri, entity_kind,
+            entity_id, canonical_uri, entity_kind, package_id,
             display_name, internal_name, status, confidence
-        ) VALUES (?, ?, 'BLUEPRINT_ASSET', ?, ?, 'CONFIRMED', 'HIGH')
+        ) VALUES (
+            ?, ?, 'BLUEPRINT_ASSET', 1, ?, ?,
+            'CONFIRMED', 'HIGH'
+        )
         """,
         [
             (1, "/Game/Test/ItemA.ItemA", "Item A", "ItemA"),
@@ -90,7 +174,7 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
         """
         INSERT INTO knowledge_roles VALUES (
             1, 'entity_definition', 'HIGH', 'CONFIRMED',
-            '["class ancestry"]', 'v1'
+            '["class ancestry"]', 'v1', 1
         )
         """
     )
@@ -98,7 +182,31 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
         """
         INSERT INTO domain_memberships VALUES (
             1, 'item_use', 'CLASS_ANCESTRY', 'HIGH', 'CONFIRMED',
-            'ontology://fixture/item-use', 'v1'
+            'ontology://fixture/item-use', 'v1', 1
+        )
+        """
+    )
+    core.execute(
+        """
+        INSERT INTO classes(
+            class_id, class_path, class_name, module_or_package,
+            class_kind, is_native, source_revision_id,
+            status, confidence
+        ) VALUES (
+            1, '/Game/Test/Baseline.Baseline_C', 'Baseline_C', '/Game/Test',
+            'BLUEPRINT_GENERATED_CLASS', 0, 1,
+            'IDENTIFIED', 'HIGH'
+        )
+        """
+    )
+    core.execute(
+        """
+        INSERT INTO asset_class_assignments(
+            entity_id, class_id, assignment_kind, evidence_uri,
+            status, confidence, source_revision_id
+        ) VALUES (
+            1, 1, 'BASELINE_CLASS', 'bp://fixture/item-a/baseline-class',
+            'EXTRACTED', 'HIGH', 1
         )
         """
     )
@@ -121,27 +229,132 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
     )
     core.commit()
     core.close()
+
+    catalog = sqlite3.connect(root / "catalog.sqlite")
+    catalog.executescript(FULL_CATALOG_SCHEMA_SQL)
+    catalog.executemany(
+        "INSERT INTO metadata VALUES (?, ?)",
+        [
+            ("schema_version", CATALOG_SCHEMA_VERSION),
+            ("source_fingerprint", discovery_fingerprint),
+            ("snapshot_build_id", build_id),
+            (
+                "snapshot_source_fingerprint",
+                semantic_fingerprint,
+            ),
+            ("generated_at", generated_at),
+        ],
+    )
+    catalog.commit()
+    catalog.close()
+
+    search = sqlite3.connect(root / "search.sqlite")
+    search.executescript(SEARCH_SCHEMA_SQL)
+    search.executemany(
+        "INSERT INTO metadata VALUES (?, ?)",
+        [
+            ("schema_version", SEARCH_SCHEMA_VERSION),
+            ("source_fingerprint", semantic_fingerprint),
+            ("snapshot_build_id", build_id),
+            (
+                "snapshot_source_fingerprint",
+                semantic_fingerprint,
+            ),
+            ("generated_at", generated_at),
+        ],
+    )
+    search.commit()
+    search.close()
+
     cache = sqlite3.connect(root / "cache.sqlite")
     cache.executescript(CACHE_SCHEMA_SQL)
+    cache.executemany(
+        "INSERT INTO metadata VALUES (?, ?)",
+        [
+            ("schema_version", CACHE_SCHEMA_VERSION),
+            ("source_fingerprint", semantic_fingerprint),
+            ("snapshot_build_id", build_id),
+            (
+                "snapshot_source_fingerprint",
+                semantic_fingerprint,
+            ),
+            ("generated_at", generated_at),
+            ("disposable", "true"),
+        ],
+    )
     cache.commit()
     cache.close()
-    (root / "manifests" / "current.json").write_text(
-        json.dumps(
+    exports = root / "domain_exports"
+    exports.mkdir()
+    projection_metrics: dict[str, dict[str, object]] = {}
+    for projection_name in DOMAIN_PROJECTIONS:
+        projection_path = exports / f"{projection_name}.sqlite"
+        content_digest = hashlib.sha256(
+            f"fixture:{projection_name}".encode()
+        ).hexdigest()
+        review_config_sha256 = hashlib.sha256(
+            b"fixture:projection-review"
+        ).hexdigest()
+        projection = sqlite3.connect(projection_path)
+        projection.executescript(PROJECTION_SCHEMA_SQL)
+        projection.executemany(
+            "INSERT INTO metadata VALUES (?, ?)",
+            [
+                ("schema_version", PROJECTION_SCHEMA_VERSION),
+                ("projection_name", projection_name),
+                ("projection_version", "v2"),
+                ("ontology_version", ontology.version),
+                ("built_at", generated_at),
+                ("truth_source", "core.sqlite"),
+                ("review_config_sha256", review_config_sha256),
+                ("content_digest", content_digest),
+            ],
+        )
+        projection.commit()
+        projection.close()
+        metrics = database_metrics(projection_path)
+        metrics.update(
             {
-                "schema": "ark-kb-vnext-snapshot/v1",
-                "buildId": "fixture-build",
-                "source": {
-                    "uri": "discovery://fixture",
-                    "sha256": "sha",
-                },
-                "cutover": {
-                    "mode": "shadow",
-                    "defaultQuerySource": "legacy",
-                },
+                "schemaVersion": PROJECTION_SCHEMA_VERSION,
+                "projectionVersion": "v2",
+                "ontologyVersion": ontology.version,
+                "contentDigest": content_digest,
+                "reviewConfigSha256": review_config_sha256,
             }
-        ),
-        encoding="utf-8",
-    )
+        )
+        projection_metrics[
+            f"domain_exports/{projection_name}.sqlite"
+        ] = metrics
+    manifest = {
+        "schema": "ark-kb-vnext-snapshot/v1",
+        "buildId": build_id,
+        "generatedAt": generated_at,
+        "source": {
+            "kind": "semantic_input_set",
+            "uri": "kb-inputs://ark/vnext",
+            "sha256": semantic_fingerprint,
+            "inputs": semantic_inputs,
+        },
+        "ontologyVersion": ontology.version,
+        "counts": {},
+        "databases": {
+            **{
+                name: database_metrics(root / name)
+                for name in (
+                    "catalog.sqlite",
+                    "core.sqlite",
+                    "search.sqlite",
+                    "cache.sqlite",
+                )
+            },
+            **projection_metrics,
+        },
+        "cutover": {
+            "mode": "shadow",
+            "defaultQuerySource": "legacy",
+        },
+    }
+    _write_snapshot_manifest(root, manifest)
     return VNextKnowledgeService(root)
 
 
@@ -159,6 +372,7 @@ def _remove_effective_candidate_capability(root: Path) -> None:
         core.commit()
     finally:
         core.close()
+    _refresh_snapshot_database_metrics(root)
 
 
 def _remove_semantic_derivation_capability(root: Path) -> None:
@@ -176,6 +390,248 @@ def _remove_semantic_derivation_capability(root: Path) -> None:
         core.commit()
     finally:
         core.close()
+    _refresh_snapshot_database_metrics(root)
+
+
+def _remove_typed_map_capability(root: Path) -> None:
+    core = sqlite3.connect(root / "core.sqlite")
+    try:
+        core.execute("DROP VIEW confirmed_map_usage_edges")
+        core.execute("DROP TABLE map_usage_edge_evidence")
+        core.execute("DROP TABLE map_usage_sources")
+        core.execute(
+            """
+            UPDATE metadata
+            SET value='ark-kb-core/v3'
+            WHERE key='schema_version'
+            """
+        )
+        core.commit()
+    finally:
+        core.close()
+    _refresh_snapshot_database_metrics(root)
+
+
+def _remove_query_provenance_capability(root: Path) -> None:
+    core = sqlite3.connect(root / "core.sqlite")
+    try:
+        core.execute("DROP TABLE knowledge_roles")
+        core.execute(
+            """
+            CREATE TABLE knowledge_roles(
+                entity_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                classifier_version TEXT NOT NULL,
+                PRIMARY KEY(entity_id, role)
+            )
+            """
+        )
+        core.commit()
+    finally:
+        core.close()
+    _refresh_snapshot_database_metrics(root)
+
+
+def _remove_table_column(
+    root: Path,
+    *,
+    table_name: str,
+    column_name: str,
+) -> None:
+    core = sqlite3.connect(root / "core.sqlite")
+    try:
+        columns = [
+            str(row[1])
+            for row in core.execute(
+                f'PRAGMA table_info("{table_name}")'
+            )
+            if str(row[1]) != column_name
+        ]
+        projection = ", ".join(f'"{name}"' for name in columns)
+        temporary = f"__{table_name}_without_{column_name}"
+        core.execute(
+            f'CREATE TABLE "{temporary}" AS '
+            f'SELECT {projection} FROM "{table_name}"'
+        )
+        core.execute(f'DROP TABLE "{table_name}"')
+        core.execute(
+            f'ALTER TABLE "{temporary}" RENAME TO "{table_name}"'
+        )
+        core.commit()
+    finally:
+        core.close()
+    _refresh_snapshot_database_metrics(root)
+
+
+def _seed_stale_active_provenance(root: Path, scenario: str) -> None:
+    core = sqlite3.connect(root / "core.sqlite")
+    try:
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES(
+                2, 'historical', 'historical://fixture', 'stale-sha',
+                'test', 'v0', '2026-07-26T00:00:00Z', 'STALE'
+            )
+            """
+        )
+        if scenario in {"native_function", "native_link"}:
+            core.execute(
+                """
+                INSERT INTO native_functions VALUES(
+                    1, 'native://fixture/function', 'UItem::Function',
+                    'ShooterGame', '0x10', 'void Function()',
+                    'binary-sha', 'pdb-sha', 'guid/1',
+                    '["recipe/v1"]', '["native-set://fixture"]',
+                    1, 1, 'AVAILABLE_VIA_EVIDENCE_STORE',
+                    'CONFIRMED', 'HIGH', ?
+                )
+                """,
+                (2 if scenario == "native_function" else 1,),
+            )
+            core.execute(
+                """
+                INSERT INTO native_blueprint_links VALUES(
+                    'native-link', 1, 'bp://fixture/item-a/function',
+                    'Function', 1, 'native-slice://fixture/function',
+                    'verified_callsite', 'CONFIRMED', 'HIGH', ?
+                )
+                """,
+                (2 if scenario == "native_link" else 1,),
+            )
+        elif scenario == "class":
+            core.execute(
+                """
+                INSERT INTO classes VALUES(
+                    11, '/Game/Test/ItemA.ItemA_C', 'ItemA_C',
+                    '/Game/Test', 'BLUEPRINT_GENERATED_CLASS', 0,
+                    2, 'CONFIRMED', 'HIGH'
+                )
+                """
+            )
+            core.execute(
+                """
+                INSERT INTO asset_class_assignments VALUES(
+                    1, 11, 'GENERATED_CLASS', 'bp://fixture/item-a/class',
+                    'CONFIRMED', 'HIGH', 1
+                )
+                """
+            )
+        elif scenario == "class_assignment":
+            core.execute(
+                """
+                INSERT INTO classes VALUES(
+                    11, '/Game/Test/ItemA.ItemA_C', 'ItemA_C',
+                    '/Game/Test', 'BLUEPRINT_GENERATED_CLASS', 0,
+                    1, 'CONFIRMED', 'HIGH'
+                )
+                """
+            )
+            core.execute(
+                """
+                INSERT INTO asset_class_assignments VALUES(
+                    1, 11, 'GENERATED_CLASS', 'bp://fixture/item-a/class',
+                    'CONFIRMED', 'HIGH', 2
+                )
+                """
+            )
+        elif scenario == "class_edge":
+            core.executemany(
+                """
+                INSERT INTO classes VALUES(
+                    ?, ?, ?, '/Game/Test',
+                    'BLUEPRINT_GENERATED_CLASS', 0,
+                    1, 'CONFIRMED', 'HIGH'
+                )
+                """,
+                [
+                    (11, "/Game/Test/ItemA.ItemA_C", "ItemA_C"),
+                    (12, "/Game/Test/Base.Base_C", "Base_C"),
+                ],
+            )
+            core.execute(
+                """
+                INSERT INTO asset_class_assignments VALUES(
+                    1, 11, 'GENERATED_CLASS', 'bp://fixture/item-a/class',
+                    'CONFIRMED', 'HIGH', 1
+                )
+                """
+            )
+            core.execute(
+                """
+                INSERT INTO class_edges VALUES(
+                    11, 12, 'blueprint_parent',
+                    'bp://fixture/item-a/parent', 2,
+                    'CONFIRMED', 'HIGH'
+                )
+                """
+            )
+        else:
+            raise AssertionError(scenario)
+        core.commit()
+    finally:
+        core.close()
+    _refresh_snapshot_database_metrics(root)
+
+
+def _seed_invalid_active_evidence(root: Path, scenario: str) -> None:
+    core = sqlite3.connect(root / "core.sqlite")
+    try:
+        if scenario == "fact":
+            core.execute(
+                "UPDATE fact_evidence SET evidence_uri='UNKNOWN'"
+            )
+        elif scenario == "relationship":
+            core.execute(
+                """
+                INSERT INTO edges(
+                    source_entity_id, target_entity_id, edge_type,
+                    edge_strength, status, confidence,
+                    source_revision_id, evidence_uri
+                ) VALUES(
+                    1, 2, 'REFERENCES', 'HARD', 'CONFIRMED', 'HIGH',
+                    1, 'UNKNOWN'
+                )
+                """
+            )
+        elif scenario == "class_assignment":
+            core.execute(
+                """
+                UPDATE asset_class_assignments
+                SET evidence_uri='UNKNOWN'
+                WHERE entity_id=1 AND assignment_kind='BASELINE_CLASS'
+                """
+            )
+        elif scenario == "class_edge":
+            core.executemany(
+                """
+                INSERT INTO classes VALUES(
+                    ?, ?, ?, '/Game/Test',
+                    'BLUEPRINT_GENERATED_CLASS', 0,
+                    1, 'CONFIRMED', 'HIGH'
+                )
+                """,
+                [
+                    (11, "/Game/Test/Child.Child_C", "Child_C"),
+                    (12, "/Game/Test/Parent.Parent_C", "Parent_C"),
+                ],
+            )
+            core.execute(
+                """
+                INSERT INTO class_edges VALUES(
+                    11, 12, 'blueprint_parent', 'UNKNOWN', 1,
+                    'CONFIRMED', 'HIGH'
+                )
+                """
+            )
+        else:
+            raise AssertionError(scenario)
+        core.commit()
+    finally:
+        core.close()
+    _refresh_snapshot_database_metrics(root)
 
 
 class KnowledgeApiTests(unittest.TestCase):
@@ -266,11 +722,719 @@ class KnowledgeApiTests(unittest.TestCase):
                 server.server_close()
                 worker.join(timeout=3)
 
+    def test_health_rejects_tampered_manifest_schema_or_build_identity(self):
+        for field, value in (
+            ("schema", "ark-kb-vnext-snapshot/tampered"),
+            ("buildId", "tampered-build"),
+        ):
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    current_path = root / "manifests" / "current.json"
+                    manifest = json.loads(
+                        current_path.read_text(encoding="utf-8")
+                    )
+                    manifest[field] = value
+                    current_path.write_text(
+                        json.dumps(manifest),
+                        encoding="utf-8",
+                    )
+
+                    health = service.health()
+
+                self.assertFalse(health["available"])
+                self.assertNotEqual(health["status"], "READY")
+                self.assertTrue(health["gap"])
+
+    def test_health_degrades_for_cache_schema_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            cache = sqlite3.connect(root / "cache.sqlite")
+            try:
+                cache.execute(
+                    """
+                    UPDATE metadata
+                    SET value='ark-kb-cache/tampered'
+                    WHERE key='schema_version'
+                    """
+                )
+                cache.commit()
+            finally:
+                cache.close()
+
+            health = service.health()
+            result = service.query(
+                {
+                    "entity": "/Game/Test/ItemA.ItemA",
+                    "answerMode": "FACT",
+                    "factTypes": ["ITEM_PROPERTY"],
+                    "factNames": ["Weight"],
+                    "budgetTokens": 500,
+                }
+            )
+
+        self.assertTrue(health["available"])
+        self.assertEqual(health["status"], "DEGRADED_CACHE")
+        self.assertEqual(
+            {gap["code"] for gap in health["gap"]},
+            {"KB_VNEXT_CACHE_DEGRADED"},
+        )
+        self.assertEqual(result["status"], "COMPLETE")
+
+    def test_domain_exports_are_strictly_bound_to_the_manifest(self):
+        scenarios = (
+            "missing_declaration",
+            "extra_declaration",
+            "missing_file",
+            "tampered_bytes",
+            "schema_metadata",
+            "projection_name_metadata",
+            "projection_version_metadata",
+            "content_digest_metadata",
+            "ontology_version_metadata",
+            "built_at_metadata",
+            "review_config_sha256_metadata",
+            "truth_source_metadata",
+        )
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    projection_name = next(iter(DOMAIN_PROJECTIONS))
+                    key = (
+                        f"domain_exports/{projection_name}.sqlite"
+                    )
+                    path = root / key
+                    manifest = json.loads(
+                        (root / "manifests" / "current.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    if scenario == "missing_declaration":
+                        manifest["databases"].pop(key)
+                        _write_snapshot_manifest(root, manifest)
+                    elif scenario == "extra_declaration":
+                        manifest["databases"][
+                            "domain_exports/unexpected.sqlite"
+                        ] = dict(manifest["databases"][key])
+                        _write_snapshot_manifest(root, manifest)
+                    elif scenario == "missing_file":
+                        path.unlink()
+                    elif scenario == "tampered_bytes":
+                        with path.open("ab") as handle:
+                            handle.write(b"tampered")
+                    else:
+                        metadata_key, value = {
+                            "schema_metadata": (
+                                "schema_version",
+                                "ark-kb-domain-projection/tampered",
+                            ),
+                            "projection_name_metadata": (
+                                "projection_name",
+                                "unexpected",
+                            ),
+                            "projection_version_metadata": (
+                                "projection_version",
+                                "v3",
+                            ),
+                            "content_digest_metadata": (
+                                "content_digest",
+                                "0" * 64,
+                            ),
+                            "ontology_version_metadata": (
+                                "ontology_version",
+                                "ark-fact-types/v999",
+                            ),
+                            "built_at_metadata": (
+                                "built_at",
+                                "2026-07-28T00:00:00+00:00",
+                            ),
+                            "review_config_sha256_metadata": (
+                                "review_config_sha256",
+                                "0" * 64,
+                            ),
+                            "truth_source_metadata": (
+                                "truth_source",
+                                "tampered.sqlite",
+                            ),
+                        }[scenario]
+                        projection = sqlite3.connect(path)
+                        try:
+                            projection.execute(
+                                "UPDATE metadata SET value=? WHERE key=?",
+                                (value, metadata_key),
+                            )
+                            projection.commit()
+                        finally:
+                            projection.close()
+                        _refresh_snapshot_database_metrics(root)
+
+                    health = service.health()
+                    with self.assertRaises(
+                        KnowledgeApiError
+                    ) as raised:
+                        service.query(
+                            {
+                                "entity": (
+                                    "/Game/Test/ItemA.ItemA"
+                                ),
+                                "answerMode": "FACT",
+                                "factTypes": ["ITEM_PROPERTY"],
+                                "factNames": ["Weight"],
+                                "budgetTokens": 500,
+                            }
+                        )
+
+                self.assertFalse(health["available"])
+                self.assertEqual(health["status"], "INVALID")
+                self.assertEqual(raised.exception.status.value, 503)
+                self.assertEqual(
+                    raised.exception.code,
+                    "KB_VNEXT_SNAPSHOT_INVALID",
+                )
+
+    def test_domain_export_declared_provenance_requires_valid_values(self):
+        scenarios = (
+            ("ontologyVersion", ""),
+            ("ontologyVersion", "forged"),
+            ("reviewConfigSha256", ""),
+            ("reviewConfigSha256", "not-a-digest"),
+        )
+        for field, value in scenarios:
+            with self.subTest(field=field, value=value):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    projection_name = next(iter(DOMAIN_PROJECTIONS))
+                    key = (
+                        f"domain_exports/{projection_name}.sqlite"
+                    )
+                    manifest = json.loads(
+                        (root / "manifests" / "current.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    manifest["databases"][key][field] = value
+                    _write_snapshot_manifest(root, manifest)
+
+                    health = service.health()
+                    with self.assertRaises(
+                        KnowledgeApiError
+                    ) as raised:
+                        service.query(
+                            {
+                                "entity": (
+                                    "/Game/Test/ItemA.ItemA"
+                                ),
+                                "answerMode": "FACT",
+                                "factTypes": ["ITEM_PROPERTY"],
+                                "factNames": ["Weight"],
+                                "budgetTokens": 500,
+                            }
+                        )
+
+                self.assertFalse(health["available"])
+                self.assertEqual(health["status"], "INVALID")
+                self.assertEqual(raised.exception.status.value, 503)
+
+    def test_cache_artifact_failures_are_explicitly_degraded(self):
+        scenarios = (
+            "missing_declaration",
+            "malformed_manifest_digest",
+            "wrong_build_metadata",
+            "missing_file",
+        )
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    manifest = json.loads(
+                        (root / "manifests" / "current.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    if scenario == "missing_declaration":
+                        manifest["databases"].pop("cache.sqlite")
+                        _write_snapshot_manifest(root, manifest)
+                    elif scenario == "malformed_manifest_digest":
+                        manifest["databases"]["cache.sqlite"][
+                            "sha256"
+                        ] = "not-a-digest"
+                        _write_snapshot_manifest(root, manifest)
+                    elif scenario == "wrong_build_metadata":
+                        cache = sqlite3.connect(root / "cache.sqlite")
+                        try:
+                            cache.execute(
+                                """
+                                UPDATE metadata
+                                SET value='wrong-build'
+                                WHERE key='snapshot_build_id'
+                                """
+                            )
+                            cache.commit()
+                        finally:
+                            cache.close()
+                    else:
+                        (root / "cache.sqlite").unlink()
+
+                    health = service.health()
+                    result = service.query(
+                        {
+                            "entity": "/Game/Test/ItemA.ItemA",
+                            "answerMode": "FACT",
+                            "factTypes": ["ITEM_PROPERTY"],
+                            "factNames": ["Weight"],
+                            "budgetTokens": 500,
+                        }
+                    )
+
+                self.assertTrue(health["available"])
+                self.assertEqual(
+                    health["status"],
+                    "DEGRADED_CACHE",
+                )
+                self.assertEqual(
+                    {gap["code"] for gap in health["gap"]},
+                    {"KB_VNEXT_CACHE_DEGRADED"},
+                )
+                self.assertEqual(result["status"], "COMPLETE")
+
+    def test_health_requires_all_declared_immutable_databases(self):
+        for scenario in (
+            "missing_databases",
+            "missing_catalog_declaration",
+            "missing_search_file",
+        ):
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    manifest_path = root / "manifests" / "current.json"
+                    manifest = json.loads(
+                        manifest_path.read_text(encoding="utf-8")
+                    )
+                    if scenario == "missing_databases":
+                        manifest.pop("databases")
+                        _write_snapshot_manifest(root, manifest)
+                    elif scenario == "missing_catalog_declaration":
+                        manifest["databases"].pop("catalog.sqlite")
+                        _write_snapshot_manifest(root, manifest)
+                    else:
+                        (root / "search.sqlite").unlink()
+
+                    health = service.health()
+
+                self.assertFalse(health["available"])
+                self.assertNotEqual(health["status"], "READY")
+                self.assertTrue(health["gap"])
+
+    def test_query_rejects_mixed_snapshot_build_ids(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            catalog = sqlite3.connect(root / "catalog.sqlite")
+            try:
+                catalog.execute(
+                    """
+                    UPDATE metadata
+                    SET value='different-build'
+                    WHERE key='snapshot_build_id'
+                    """
+                )
+                catalog.commit()
+            finally:
+                catalog.close()
+
+            health = service.health()
+            with self.assertRaises(KnowledgeApiError) as raised:
+                service.query(
+                    {
+                        "entity": "/Game/Test/ItemA.ItemA",
+                        "answerMode": "FACT",
+                        "factTypes": ["ITEM_PROPERTY"],
+                        "factNames": ["Weight"],
+                        "budgetTokens": 500,
+                    }
+                )
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "INVALID")
+        self.assertEqual(raised.exception.status.value, 503)
+        self.assertEqual(
+            raised.exception.code,
+            "KB_VNEXT_SNAPSHOT_INVALID",
+        )
+
+    def test_health_and_query_reject_same_size_immutable_database_tamper(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            request = {
+                "entity": "/Game/Test/ItemA.ItemA",
+                "answerMode": "FACT",
+                "factTypes": ["ITEM_PROPERTY"],
+                "factNames": ["Weight"],
+                "budgetTokens": 500,
+            }
+            self.assertEqual(
+                service.query(request)["route"],
+                "DB_SEMANTIC_COMPLETE",
+            )
+            core_path = root / "core.sqlite"
+            original_stat = core_path.stat()
+            core = sqlite3.connect(core_path)
+            try:
+                core.execute(
+                    """
+                    UPDATE facts
+                    SET value_number=9.5
+                    WHERE fact_type='ITEM_PROPERTY'
+                      AND fact_name='Weight'
+                    """
+                )
+                core.commit()
+            finally:
+                core.close()
+            self.assertEqual(
+                core_path.stat().st_size,
+                original_stat.st_size,
+            )
+            os.utime(
+                core_path,
+                ns=(
+                    original_stat.st_atime_ns,
+                    original_stat.st_mtime_ns,
+                ),
+            )
+
+            health = service.health()
+            with self.assertRaises(KnowledgeApiError) as raised:
+                service.query(request)
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "INVALID")
+        self.assertEqual(
+            raised.exception.code,
+            "KB_VNEXT_SNAPSHOT_INVALID",
+        )
+
+    def test_health_and_query_share_strict_manifest_source_identity(self):
+        for scenario in (
+            "wrong_kind",
+            "wrong_uri",
+            "empty_uri",
+            "missing_discovery_input",
+            "malformed_source_sha",
+            "extra_semantic_input",
+            "mismatched_aggregate",
+            "mismatched_build_id",
+            "invalid_generated_at",
+            "empty_generated_at",
+        ):
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    manifest_path = (
+                        root / "manifests" / "current.json"
+                    )
+                    manifest = json.loads(
+                        manifest_path.read_text(encoding="utf-8")
+                    )
+                    if scenario == "wrong_kind":
+                        manifest["source"]["kind"] = "bad"
+                    elif scenario == "wrong_uri":
+                        manifest["source"]["uri"] = "not-even-a-uri"
+                    elif scenario == "empty_uri":
+                        manifest["source"]["uri"] = ""
+                    elif scenario == "missing_discovery_input":
+                        manifest["source"]["inputs"].pop("discovery")
+                    elif scenario == "malformed_source_sha":
+                        manifest["source"]["sha256"] = "not-a-sha"
+                    elif scenario == "extra_semantic_input":
+                        manifest["source"]["inputs"]["unexpected"] = (
+                            "b" * 64
+                        )
+                    elif scenario == "mismatched_aggregate":
+                        manifest["source"]["inputs"]["ontology"] = (
+                            "f" * 64
+                        )
+                    elif scenario == "mismatched_build_id":
+                        manifest["buildId"] = (
+                            "forged-" + manifest["source"]["sha256"][:12]
+                        )
+                    else:
+                        manifest["generatedAt"] = (
+                            ""
+                            if scenario == "empty_generated_at"
+                            else "not-a-time"
+                        )
+                        manifest["buildId"] = (
+                            (
+                                "-"
+                                if scenario == "empty_generated_at"
+                                else "notatime-"
+                            )
+                            + manifest["source"]["sha256"][:12]
+                        )
+                        for name in (
+                            "catalog.sqlite",
+                            "core.sqlite",
+                            "search.sqlite",
+                            "cache.sqlite",
+                        ):
+                            database = sqlite3.connect(root / name)
+                            try:
+                                database.execute(
+                                    """
+                                    UPDATE metadata
+                                    SET value=?
+                                    WHERE key='generated_at'
+                                    """,
+                                    (manifest["generatedAt"],),
+                                )
+                                database.execute(
+                                    """
+                                    UPDATE metadata
+                                    SET value=?
+                                    WHERE key='snapshot_build_id'
+                                    """,
+                                    (manifest["buildId"],),
+                                )
+                                database.commit()
+                            finally:
+                                database.close()
+                            manifest["databases"][name] = database_metrics(
+                                root / name
+                            )
+                    _write_snapshot_manifest(root, manifest)
+
+                    binding_error = service._snapshot_binding_error()
+                    health = service.health()
+                    with self.assertRaises(
+                        KnowledgeApiError
+                    ) as raised:
+                        service.query(
+                            {
+                                "entity": "/Game/Test/ItemA.ItemA",
+                                "answerMode": "IDENTITY",
+                                "budgetTokens": 500,
+                            }
+                        )
+
+                self.assertIsNotNone(binding_error)
+                self.assertFalse(health["available"])
+                self.assertEqual(health["status"], "INVALID")
+                self.assertEqual(
+                    raised.exception.code,
+                    "KB_VNEXT_SNAPSHOT_INVALID",
+                )
+
+    def test_health_rejects_non_object_manifest_source_without_crashing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            manifest_path = root / "manifests" / "current.json"
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            manifest["source"] = "not-an-object"
+            _write_snapshot_manifest(root, manifest)
+
+            health = service.health()
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "INVALID")
+        self.assertTrue(health["gap"])
+
+    def test_empty_and_unrecovered_source_revision_fields_fail_closed(self):
+        expected = {
+            "healthStatus": "STALE",
+            "healthFreshness": "STALE",
+            "healthHasStaleGap": True,
+            "factComplete": False,
+            "identityComplete": False,
+        }
+        for column, value in (
+            (column, value)
+            for column in (
+                "source_kind",
+                "source_uri",
+                "source_fingerprint",
+                "producer_version",
+                "schema_version",
+                "generated_at",
+                "freshness_status",
+            )
+            for value in (
+                "",
+                "UNKNOWN",
+                "NOT_RECOVERED",
+                "SOURCE_NOT_AVAILABLE",
+            )
+        ):
+            with self.subTest(column=column, value=value):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    core = sqlite3.connect(root / "core.sqlite")
+                    try:
+                        core.execute(
+                            f"UPDATE source_revisions SET {column}=? "
+                            "WHERE revision_id=1",
+                            (value,),
+                        )
+                        core.commit()
+                    finally:
+                        core.close()
+                    _refresh_snapshot_database_metrics(root)
+
+                    health = service.health()
+                    fact = service.query(
+                        {
+                            "entity": "/Game/Test/ItemA.ItemA",
+                            "answerMode": "FACT",
+                            "factTypes": ["ITEM_PROPERTY"],
+                            "factNames": ["Weight"],
+                            "edgeTypes": [],
+                            "requiresNative": False,
+                            "requiresRuntime": False,
+                            "requiresMapEvidence": False,
+                            "evidenceLimit": 50,
+                            "budgetTokens": 500,
+                        }
+                    )
+                    identity = service.query(
+                        {
+                            "entity": "/Game/Test/ItemA.ItemA",
+                            "answerMode": "IDENTITY",
+                            "factTypes": [],
+                            "factNames": [],
+                            "edgeTypes": [],
+                            "requiresNative": False,
+                            "requiresRuntime": False,
+                            "requiresMapEvidence": False,
+                            "evidenceLimit": 50,
+                            "budgetTokens": 500,
+                        }
+                    )
+
+                actual = {
+                    "healthStatus": health["status"],
+                    "healthFreshness": health["freshness"],
+                    "healthHasStaleGap": (
+                        "KB_VNEXT_STALE_SOURCE"
+                        in {item["code"] for item in health["gap"]}
+                    ),
+                    "factComplete": fact["status"] == "COMPLETE",
+                    "identityComplete": identity["status"] == "COMPLETE",
+                }
+                self.assertEqual(actual, expected)
+
+    def test_uncontrolled_source_revision_uri_fails_health_fact_and_identity(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            core = sqlite3.connect(root / "core.sqlite")
+            try:
+                core.execute(
+                    """
+                    UPDATE source_revisions
+                    SET source_uri='ftp://fixture/source'
+                    WHERE revision_id=1
+                    """
+                )
+                core.commit()
+            finally:
+                core.close()
+            _refresh_snapshot_database_metrics(root)
+
+            health = service.health()
+            fact = service.query(
+                {
+                    "entity": "/Game/Test/ItemA.ItemA",
+                    "answerMode": "FACT",
+                    "factTypes": ["ITEM_PROPERTY"],
+                    "factNames": ["Weight"],
+                    "budgetTokens": 500,
+                }
+            )
+            identity = service.query(
+                {
+                    "entity": "/Game/Test/ItemA.ItemA",
+                    "answerMode": "IDENTITY",
+                    "budgetTokens": 500,
+                }
+            )
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "STALE")
+        self.assertIn(
+            "KB_VNEXT_STALE_SOURCE",
+            {item["code"] for item in health["gap"]},
+        )
+        self.assertEqual(fact["status"], "PARTIAL")
+        self.assertEqual(fact["route"], "DB_PARTIAL")
+        self.assertIn(
+            "FACT_STALE",
+            {item["code"] for item in fact["missingRequirements"]},
+        )
+        self.assertEqual(identity["status"], "PARTIAL")
+        self.assertEqual(identity["route"], "DB_PARTIAL")
+        self.assertIn(
+            "IDENTITY_PROVENANCE_UNKNOWN",
+            {item["code"] for item in identity["missingRequirements"]},
+        )
+
+    def test_missing_query_snapshot_cache_table_is_fail_closed_not_sql_error(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            cache = sqlite3.connect(root / "cache.sqlite")
+            try:
+                cache.execute("DROP TABLE query_snapshots")
+                cache.commit()
+            finally:
+                cache.close()
+
+            health = service.health()
+            try:
+                result = service.query(
+                    {
+                        "entity": "/Game/Test/ItemA.ItemA",
+                        "answerMode": "FACT",
+                        "factTypes": ["ITEM_PROPERTY"],
+                        "factNames": ["Weight"],
+                        "budgetTokens": 500,
+                    }
+                )
+            except sqlite3.DatabaseError as error:
+                self.fail(f"query leaked a raw cache database error: {error}")
+
+        self.assertTrue(health["available"])
+        self.assertEqual(health["status"], "DEGRADED_CACHE")
+        self.assertEqual(
+            {gap["code"] for gap in health["gap"]},
+            {"KB_VNEXT_CACHE_DEGRADED"},
+        )
+        self.assertEqual(result["status"], "COMPLETE")
+
     def test_health_and_entity_pages_do_not_expose_local_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             service = _snapshot(Path(temp_dir) / "vnext")
             health = service.health()
             self.assertTrue(health["available"])
+            self.assertEqual(health["status"], "READY")
             self.assertEqual(health["cutover"]["mode"], "shadow")
             search = service.search_entities(
                 query="Item", limit=1, cursor=0
@@ -293,6 +1457,513 @@ class KnowledgeApiTests(unittest.TestCase):
             self.assertNotIn("C:\\", payload)
             self.assertNotIn(str(Path(temp_dir)), payload)
             self.assertTrue(facts["evidence"])
+            self.assertTrue(health["capabilities"]["queryProvenance"])
+            self.assertEqual(search["freshness"], "FRESH")
+            self.assertEqual(
+                search["items"][0]["sourceRevision"]["revisionId"],
+                1,
+            )
+            self.assertEqual(entity["freshness"], "FRESH")
+            self.assertEqual(
+                entity["entity"]["sourceRevision"]["revisionId"],
+                1,
+            )
+            self.assertEqual(
+                entity["roles"][0]["sourceRevision"]["revisionId"],
+                1,
+            )
+            self.assertEqual(
+                entity["domains"][0]["sourceRevision"]["revisionId"],
+                1,
+            )
+            self.assertEqual(facts["freshness"], "FRESH")
+            self.assertEqual(
+                facts["items"][0]["sourceRevision"]["revisionId"],
+                1,
+            )
+
+    def test_query_provenance_capability_is_required_for_v4_health(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            _remove_query_provenance_capability(root)
+
+            health = service.health()
+            result = service.query(
+                {
+                    "entity": "/Game/Test/ItemA.ItemA",
+                    "answerMode": "FACT",
+                    "factTypes": ["ITEM_PROPERTY"],
+                    "factNames": ["Weight"],
+                    "budgetTokens": 500,
+                }
+            )
+            with self.assertRaises(KnowledgeApiError) as raised:
+                service.entity(1)
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "MIGRATION_REQUIRED")
+        self.assertEqual(health["schemaVersion"], "ark-kb-core/v4")
+        self.assertFalse(health["capabilities"]["queryProvenance"])
+        self.assertEqual(
+            health["gap"][0]["code"],
+            "KB_VNEXT_SCHEMA_MIGRATION_REQUIRED",
+        )
+        self.assertEqual(result["route"], "EVIDENCE_REQUIRED")
+        self.assertNotEqual(result["status"], "COMPLETE")
+        self.assertIn(
+            "SCHEMA_MIGRATION_REQUIRED",
+            {item["code"] for item in result["missingRequirements"]},
+        )
+        self.assertEqual(
+            raised.exception.code,
+            "KB_VNEXT_SCHEMA_MIGRATION_REQUIRED",
+        )
+        self.assertEqual(raised.exception.status.value, 503)
+
+    def test_native_function_and_class_edge_revision_columns_are_required(
+        self,
+    ):
+        for table_name in ("native_functions", "class_edges"):
+            with self.subTest(table_name=table_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    _remove_table_column(
+                        root,
+                        table_name=table_name,
+                        column_name="source_revision_id",
+                    )
+
+                    health = service.health()
+                    result = service.query(
+                        {
+                            "entity": "/Game/Test/ItemA.ItemA",
+                            "answerMode": "FACT",
+                            "factTypes": ["ITEM_PROPERTY"],
+                            "factNames": ["Weight"],
+                            "budgetTokens": 500,
+                        }
+                    )
+                    with self.assertRaises(
+                        KnowledgeApiError
+                    ) as raised:
+                        service.entity(1)
+
+                self.assertFalse(health["available"])
+                self.assertEqual(
+                    health["status"],
+                    "MIGRATION_REQUIRED",
+                )
+                self.assertFalse(
+                    health["capabilities"]["queryProvenance"]
+                )
+                self.assertNotEqual(result["status"], "COMPLETE")
+                self.assertNotEqual(
+                    result["route"],
+                    "DB_SEMANTIC_COMPLETE",
+                )
+                self.assertIn(
+                    "SCHEMA_MIGRATION_REQUIRED",
+                    {
+                        item["code"]
+                        for item in result["missingRequirements"]
+                    },
+                )
+                self.assertEqual(
+                    raised.exception.code,
+                    "KB_VNEXT_SCHEMA_MIGRATION_REQUIRED",
+                )
+
+    def test_health_rejects_stale_active_native_and_class_provenance(self):
+        for scenario in (
+            "native_function",
+            "native_link",
+            "class",
+            "class_assignment",
+            "class_edge",
+        ):
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    _seed_stale_active_provenance(root, scenario)
+
+                    health = service.health()
+
+                self.assertFalse(health["available"])
+                self.assertEqual(health["status"], "STALE")
+                self.assertEqual(health["freshness"], "STALE")
+                self.assertIn(
+                    "KB_VNEXT_STALE_SOURCE",
+                    {item["code"] for item in health["gap"]},
+                )
+
+    def test_health_rejects_unrecovered_active_evidence_uri(self):
+        for scenario in (
+            "fact",
+            "relationship",
+            "class_assignment",
+            "class_edge",
+        ):
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    _seed_invalid_active_evidence(root, scenario)
+
+                    health = service.health()
+
+                self.assertFalse(health["available"])
+                self.assertEqual(health["status"], "STALE")
+                self.assertEqual(health["freshness"], "STALE")
+                self.assertIn(
+                    "KB_VNEXT_STALE_SOURCE",
+                    {item["code"] for item in health["gap"]},
+                )
+                self.assertIn(
+                    "fresh, recovered provenance",
+                    health["gap"][0]["detail"],
+                )
+
+    def test_health_accepts_encoded_discovery_assignment_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            core = sqlite3.connect(root / "core.sqlite")
+            try:
+                core.execute(
+                    """
+                    UPDATE asset_class_assignments
+                    SET evidence_uri=?
+                    WHERE entity_id=1
+                    """,
+                    (
+                        "discovery://asset/"
+                        "%2FGame%2FTest%2FUnknown%2FBP%20Test.BP%20Test"
+                        "#asset-class",
+                    ),
+                )
+                core.commit()
+            finally:
+                core.close()
+            _refresh_snapshot_database_metrics(root)
+
+            health = service.health()
+
+        self.assertTrue(health["available"])
+        self.assertEqual(health["status"], "READY")
+
+    def test_fact_collection_uses_any_fresh_active_proof_like_planner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            core = sqlite3.connect(root / "core.sqlite")
+            try:
+                core.execute(
+                    """
+                    INSERT INTO source_revisions VALUES(
+                        2, 'capture', 'capture://historical',
+                        'historical-sha', 'test', 'v0',
+                        '2026-07-26T00:00:00Z', 'STALE'
+                    )
+                    """
+                )
+                fact_id = int(
+                    core.execute(
+                        """
+                        SELECT fact_id FROM facts
+                        WHERE fact_type='ITEM_PROPERTY'
+                          AND fact_name='Weight'
+                        """
+                    ).fetchone()[0]
+                )
+                core.execute(
+                    """
+                    INSERT INTO fact_evidence VALUES(
+                        ?, 2, 'bp://fixture/item-a/weight/historical',
+                        'HISTORICAL_DIRECT_FIELD'
+                    )
+                    """,
+                    (fact_id,),
+                )
+                core.commit()
+            finally:
+                core.close()
+            _refresh_snapshot_database_metrics(root)
+
+            planned = service.query(
+                {
+                    "entity": "/Game/Test/ItemA.ItemA",
+                    "answerMode": "FACT",
+                    "factTypes": ["ITEM_PROPERTY"],
+                    "factNames": ["Weight"],
+                    "budgetTokens": 500,
+                }
+            )
+            collection = service.entity_collection(1, kind="facts")
+
+        self.assertEqual(planned["status"], "COMPLETE")
+        self.assertEqual(planned["freshness"], "FRESH")
+        self.assertEqual(collection["freshness"], "FRESH")
+        self.assertEqual(collection["items"][0]["freshness"], "FRESH")
+        self.assertNotIn(
+            "STALE_SOURCE",
+            {item["code"] for item in collection["gap"]},
+        )
+
+    def test_collections_reject_unrecovered_evidence_uri(self):
+        cases = (
+            ("fact", "facts", "PROVENANCE_UNKNOWN"),
+            ("relationship", "relationships", "PROVENANCE_UNKNOWN"),
+            ("class_assignment", "effective-defaults", "COVERAGE_OPEN"),
+        )
+        for scenario, kind, gap_code in cases:
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "vnext"
+                    service = _snapshot(root)
+                    _seed_invalid_active_evidence(root, scenario)
+
+                    collection = service.entity_collection(1, kind=kind)
+
+                self.assertEqual(collection["freshness"], "UNKNOWN")
+                self.assertIn(
+                    gap_code,
+                    {item["code"] for item in collection["gap"]},
+                )
+                if kind in {"facts", "relationships"}:
+                    self.assertEqual(
+                        collection["items"][0]["freshness"],
+                        "UNKNOWN",
+                    )
+
+    def test_effective_default_collection_includes_class_path_provenance(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            core = sqlite3.connect(root / "core.sqlite")
+            try:
+                core.execute(
+                    """
+                    INSERT INTO source_revisions VALUES(
+                        2, 'class-capture', 'class://historical/parent',
+                        'historical-class-sha', 'test', 'v0',
+                        '2026-07-26T00:00:00Z', 'STALE'
+                    )
+                    """
+                )
+                core.executemany(
+                    """
+                    INSERT INTO classes VALUES(
+                        ?, ?, ?, '/Game/Test',
+                        'BLUEPRINT_GENERATED_CLASS', 0,
+                        1, 'CONFIRMED', 'HIGH'
+                    )
+                    """,
+                    [
+                        (11, "/Game/Test/ItemA.ItemA_C", "ItemA_C"),
+                        (12, "/Game/Test/Base.Base_C", "Base_C"),
+                    ],
+                )
+                core.execute(
+                    """
+                    INSERT INTO asset_class_assignments VALUES(
+                        1, 11, 'GENERATED_CLASS',
+                        'bp://fixture/item-a/class',
+                        'CONFIRMED', 'HIGH', 1
+                    )
+                    """
+                )
+                core.execute(
+                    """
+                    INSERT INTO class_edges VALUES(
+                        11, 12, 'blueprint_parent',
+                        'bp://fixture/item-a/parent', 2,
+                        'CONFIRMED', 'HIGH'
+                    )
+                    """
+                )
+                core.execute(
+                    """
+                    UPDATE effective_facts
+                    SET resolution_chain_json=?
+                    WHERE entity_id=1 AND fact_name='Weight'
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "schema": "ark-kb-effective-path/v1",
+                                "classes": [11, 12],
+                                "edges": [
+                                    {
+                                        "childClassId": 11,
+                                        "parentClassId": 12,
+                                        "edgeKind": "blueprint_parent",
+                                        "evidenceIds": [
+                                            "bp://fixture/item-a/parent"
+                                        ],
+                                        "status": "CONFIRMED",
+                                    }
+                                ],
+                            }
+                        ),
+                    ),
+                )
+                core.commit()
+            finally:
+                core.close()
+            _refresh_snapshot_database_metrics(root)
+
+            result = service.entity_collection(
+                1,
+                kind="effective-defaults",
+            )
+
+        self.assertEqual(result["freshness"], "STALE")
+        self.assertIn(
+            "STALE_SOURCE",
+            {item["code"] for item in result["gap"]},
+        )
+        self.assertEqual(
+            {
+                item["evidenceRole"]
+                for item in result["evidence"]
+                if item.get("evidenceRole")
+                in {"CLASS_ASSIGNMENT", "CLASS_EDGE_EVIDENCE"}
+            },
+            {"CLASS_ASSIGNMENT", "CLASS_EDGE_EVIDENCE"},
+        )
+
+    def test_entity_and_collection_freshness_is_lineage_derived(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            core = sqlite3.connect(root / "core.sqlite")
+            try:
+                core.execute(
+                    """
+                    INSERT INTO source_revisions VALUES (
+                        2, 'capture', 'capture://stale', 'stale-sha',
+                        'test', 'v1', '2026-07-26T00:00:00Z', 'STALE'
+                    )
+                    """
+                )
+                core.execute(
+                    "UPDATE packages SET current_revision_id=2"
+                )
+                core.execute(
+                    "UPDATE knowledge_roles SET source_revision_id=2"
+                )
+                core.execute(
+                    "UPDATE domain_memberships SET source_revision_id=2"
+                )
+                fact_id = int(
+                    core.execute(
+                        "SELECT fact_id FROM facts LIMIT 1"
+                    ).fetchone()[0]
+                )
+                core.execute(
+                    """
+                    INSERT INTO fact_evidence VALUES (
+                        ?, 2, 'bp://fixture/item-a/weight-stale',
+                        'HISTORICAL_FIELD'
+                    )
+                    """,
+                    (fact_id,),
+                )
+                core.execute(
+                    """
+                    INSERT INTO edges(
+                        source_entity_id, target_entity_id, edge_type,
+                        edge_strength, status, confidence,
+                        source_revision_id, evidence_uri
+                    ) VALUES (
+                        1, 2, 'REFERENCES', 'HARD', 'CONFIRMED', 'HIGH',
+                        2, 'bp://fixture/item-a/reference'
+                    )
+                    """
+                )
+                core.commit()
+            finally:
+                core.close()
+            _refresh_snapshot_database_metrics(root)
+
+            search = service.search_entities(query="ItemA")
+            entity = service.entity(1)
+            facts = service.entity_collection(1, kind="facts")
+            relationships = service.entity_collection(
+                1,
+                kind="relationships",
+            )
+            health = service.health()
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "STALE")
+        self.assertEqual(health["freshness"], "STALE")
+        self.assertIn(
+            "KB_VNEXT_STALE_SOURCE",
+            {gap["code"] for gap in health["gap"]},
+        )
+        self.assertEqual(search["freshness"], "STALE")
+        self.assertEqual(search["items"][0]["freshness"], "STALE")
+        self.assertEqual(entity["freshness"], "STALE")
+        self.assertEqual(entity["roles"][0]["freshness"], "STALE")
+        self.assertEqual(entity["domains"][0]["freshness"], "STALE")
+        self.assertEqual(facts["freshness"], "FRESH")
+        self.assertEqual(facts["items"][0]["freshness"], "FRESH")
+        self.assertEqual(
+            len(facts["items"][0]["sourceRevisions"]),
+            2,
+        )
+        self.assertEqual(relationships["freshness"], "STALE")
+        self.assertEqual(
+            relationships["items"][0]["sourceRevision"]["revisionId"],
+            2,
+        )
+        self.assertIn(
+            "STALE_SOURCE",
+            {gap["code"] for gap in relationships["gap"]},
+        )
+
+    def test_missing_lineage_reports_unknown_instead_of_fresh(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            core = sqlite3.connect(root / "core.sqlite")
+            try:
+                core.execute(
+                    "UPDATE packages SET current_revision_id=NULL"
+                )
+                core.execute(
+                    "UPDATE knowledge_roles SET source_revision_id=NULL"
+                )
+                core.execute(
+                    "UPDATE domain_memberships SET source_revision_id=NULL"
+                )
+                core.execute("DELETE FROM fact_evidence")
+                core.commit()
+            finally:
+                core.close()
+            _refresh_snapshot_database_metrics(root)
+
+            search = service.search_entities(query="ItemA")
+            entity = service.entity(1)
+            facts = service.entity_collection(1, kind="facts")
+
+        self.assertEqual(search["freshness"], "UNKNOWN")
+        self.assertIsNone(search["items"][0]["sourceRevision"])
+        self.assertEqual(entity["freshness"], "UNKNOWN")
+        self.assertIsNone(entity["roles"][0]["sourceRevision"])
+        self.assertIsNone(entity["domains"][0]["sourceRevision"])
+        self.assertEqual(facts["freshness"], "UNKNOWN")
+        self.assertEqual(facts["items"][0]["sourceRevisions"], [])
+        self.assertIn(
+            "PROVENANCE_UNKNOWN",
+            {gap["code"] for gap in facts["gap"]},
+        )
 
     def test_v1_shadow_snapshot_reports_migration_gap_without_sql_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -343,7 +2014,7 @@ class KnowledgeApiTests(unittest.TestCase):
             "SCHEMA_MIGRATION_REQUIRED",
         )
         self.assertIn(
-            "rebuild_core_v3_snapshot",
+            "rebuild_core_v4_snapshot",
             {
                 item["operation"]
                 for item in result["recommendedProbes"]
@@ -366,6 +2037,31 @@ class KnowledgeApiTests(unittest.TestCase):
         )
         self.assertFalse(
             health["capabilities"]["semanticAdapterDerivations"]
+        )
+        self.assertEqual(
+            health["gap"][0]["code"],
+            "KB_VNEXT_SCHEMA_MIGRATION_REQUIRED",
+        )
+
+    def test_v3_core_without_typed_map_evidence_requires_migration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            _remove_typed_map_capability(root)
+
+            health = service.health()
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "MIGRATION_REQUIRED")
+        self.assertEqual(health["schemaVersion"], "ark-kb-core/v3")
+        self.assertTrue(
+            health["capabilities"]["effectiveCandidateExplanations"]
+        )
+        self.assertTrue(
+            health["capabilities"]["semanticAdapterDerivations"]
+        )
+        self.assertFalse(
+            health["capabilities"]["typedMapUsageEvidence"]
         )
         self.assertEqual(
             health["gap"][0]["code"],
@@ -440,6 +2136,7 @@ class KnowledgeApiTests(unittest.TestCase):
                 core.commit()
             finally:
                 core.close()
+            _refresh_snapshot_database_metrics(root)
 
             result = service.entity_collection(
                 1, kind="effective-defaults"
@@ -522,6 +2219,7 @@ class KnowledgeApiTests(unittest.TestCase):
                     (fact_id,),
                 )
                 core.commit()
+                _refresh_snapshot_database_metrics(root)
 
                 mixed = service.entity_collection(
                     1, kind="effective-defaults"
@@ -544,6 +2242,7 @@ class KnowledgeApiTests(unittest.TestCase):
                     """
                 )
                 core.commit()
+                _refresh_snapshot_database_metrics(root)
                 stale = service.entity_collection(
                     1, kind="effective-defaults"
                 )
@@ -573,6 +2272,7 @@ class KnowledgeApiTests(unittest.TestCase):
                 core.commit()
             finally:
                 core.close()
+            _refresh_snapshot_database_metrics(root)
 
             result = service.entity_collection(
                 1, kind="effective-defaults"
@@ -596,6 +2296,8 @@ class KnowledgeApiTests(unittest.TestCase):
                 }
             )
             self.assertEqual(result["route"], "DB_ONLY_COMPLETE")
+            self.assertEqual(result["answerMode"], "FACT")
+            self.assertEqual(result["status"], "COMPLETE")
             self.assertLessEqual(
                 result["contextPack"]["estimatedTokens"], 500
             )
@@ -616,6 +2318,61 @@ class KnowledgeApiTests(unittest.TestCase):
                 )
             finally:
                 cache.close()
+
+    def test_query_answer_mode_contract_is_explicit_and_additive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = _snapshot(Path(temp_dir) / "vnext")
+
+            identity = service.query(
+                {
+                    "entity": "ItemA",
+                    "answerMode": "IDENTITY",
+                    "budgetTokens": 500,
+                }
+            )
+            underspecified = service.query(
+                {
+                    "entity": "ItemA",
+                    "budgetTokens": 500,
+                }
+            )
+            fact = service.query(
+                {
+                    "entity": "ItemA",
+                    "answerMode": "FACT",
+                    "factTypes": ["ITEM_PROPERTY"],
+                    "budgetTokens": 500,
+                }
+            )
+
+        self.assertEqual(identity["answerMode"], "IDENTITY")
+        self.assertEqual(identity["route"], "IDENTITY_ONLY_COMPLETE")
+        self.assertEqual(identity["status"], "COMPLETE")
+        self.assertEqual(identity["facts"], [])
+        self.assertEqual(underspecified["route"], "EVIDENCE_REQUIRED")
+        self.assertEqual(underspecified["status"], "GAP")
+        self.assertEqual(
+            underspecified["missingRequirements"][0]["code"],
+            "REQUEST_UNDERSPECIFIED",
+        )
+        self.assertEqual(fact["answerMode"], "FACT")
+        self.assertEqual(fact["route"], "DB_SEMANTIC_COMPLETE")
+        self.assertEqual(fact["status"], "COMPLETE")
+
+    def test_query_validation_rejects_unknown_answer_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = _snapshot(Path(temp_dir) / "vnext")
+
+            with self.assertRaises(KnowledgeApiError) as raised:
+                service.query(
+                    {
+                        "entity": "ItemA",
+                        "answerMode": "SEMANTIC",
+                    }
+                )
+
+        self.assertEqual(raised.exception.code, "REQUEST_INVALID")
+        self.assertIn("answerMode", raised.exception.message)
 
     def test_query_validation_rejects_unbounded_or_unknown_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:

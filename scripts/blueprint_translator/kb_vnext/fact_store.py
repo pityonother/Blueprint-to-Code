@@ -32,6 +32,7 @@ CONFIRMED_STATUSES = {
     "CONFIRMED_FINGERPRINT_ONLY",
     "CONFIRMED_EMPTY",
 }
+RevisionIdentity = tuple[str, str, str, str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,7 @@ def store_fact(
         )
     if scope_kind not in ontology.scope_kinds:
         raise ValueError(f"Unknown fact scope: {scope_kind}")
-    if not fact_name:
+    if not fact_name.strip():
         raise ValueError("fact_name is required")
     if not evidence_uri:
         raise ValueError("Every fact requires an evidence URI")
@@ -235,6 +236,7 @@ def materialize_declared_defaults(
             "declaredFacts": 0,
             "factEvidence": 0,
             "notRecoveredFacts": 0,
+            "invalidIdentityRows": 0,
         }
     discovery.row_factory = sqlite3.Row
     entity_ids = {
@@ -285,12 +287,17 @@ def materialize_declared_defaults(
     )
     imported: set[int] = set()
     not_recovered = 0
+    invalid_identity_rows = 0
     for batch in iter(lambda: cursor.fetchmany(10_000), []):
         for source in batch:
             row = dict(source)
+            property_name = str(row["property_name"])
+            if not property_name.strip():
+                invalid_identity_rows += 1
+                continue
             property_key = (
                 str(row["asset_object_path"]),
-                str(row["property_name"]),
+                property_name,
             )
             if property_key in covered:
                 continue
@@ -326,7 +333,7 @@ def materialize_declared_defaults(
                 ontology=ontology,
                 subject_entity_id=entity_id,
                 fact_type="DECLARED_DEFAULT",
-                fact_name=str(row["property_name"]),
+                fact_name=property_name,
                 scope_kind="DECLARED",
                 declared_on_entity_id=entity_id,
                 value=value,
@@ -355,6 +362,7 @@ def materialize_declared_defaults(
         "declaredFacts": len(imported),
         "factEvidence": evidence_count,
         "notRecoveredFacts": not_recovered,
+        "invalidIdentityRows": invalid_identity_rows,
     }
 
 
@@ -377,7 +385,7 @@ class _LogicalClassEdge:
     parent_class_id: int
     edge_kind: str
     evidence_ids: tuple[str, ...]
-    revision_identities: tuple[tuple[str, str, str, str], ...]
+    revision_identities: tuple[RevisionIdentity, ...]
     confirmed: bool
 
 
@@ -400,7 +408,7 @@ class _DeclaredCandidate:
     value_json: object
     status: str
     declared_on_entity_id: int | None
-    fresh_revisions: tuple[tuple[str, str, str, str], ...]
+    fresh_revisions: tuple[RevisionIdentity, ...]
     base_rejection_reason: str
     owner_assignment_verified: bool
 
@@ -419,7 +427,7 @@ class _ClassResolutionContext:
     ambiguity_reasons: tuple[str, ...]
     parent_chain_open: bool
     native_root_path: _ClassPath | None
-    native_root_revision: tuple[str, str, str, str] | None
+    native_root_revision: RevisionIdentity | None
 
 
 def _empty_revision_hash() -> str:
@@ -427,7 +435,7 @@ def _empty_revision_hash() -> str:
 
 
 def _stable_revision_hash(
-    identities: Iterable[tuple[str, str, str, str]],
+    identities: Iterable[RevisionIdentity],
 ) -> str:
     payload = sorted(set(identities))
     return hashlib.sha256(
@@ -562,12 +570,15 @@ def _assignment_is_verified(
 
 def _revision_identities(
     connection: sqlite3.Connection,
-) -> dict[int, tuple[str, str, str, str]]:
+) -> dict[int, RevisionIdentity]:
     return {
         int(revision_id): (
             str(source_kind),
             str(source_uri),
             str(source_fingerprint),
+            str(producer_version),
+            str(schema_version),
+            str(generated_at),
             str(freshness_status).upper(),
         )
         for (
@@ -575,11 +586,15 @@ def _revision_identities(
             source_kind,
             source_uri,
             source_fingerprint,
+            producer_version,
+            schema_version,
+            generated_at,
             freshness_status,
         ) in connection.execute(
             """
             SELECT revision_id, source_kind, source_uri,
-                   source_fingerprint, freshness_status
+                   source_fingerprint, producer_version,
+                   schema_version, generated_at, freshness_status
             FROM source_revisions
             """
         )
@@ -588,7 +603,7 @@ def _revision_identities(
 
 def _logical_class_graph(
     connection: sqlite3.Connection,
-    revisions: Mapping[int, tuple[str, str, str, str]],
+    revisions: Mapping[int, RevisionIdentity],
 ) -> dict[int, tuple[_LogicalClassEdge, ...]]:
     grouped: dict[
         tuple[int, int],
@@ -630,7 +645,7 @@ def _logical_class_graph(
             if row[3] in _CONFIRMED_PATH_STATUSES
             and row[4] in _CONFIRMED_PATH_CONFIDENCE
             and row[2] in revisions
-            and revisions[int(row[2])][3] == "FRESH"
+            and revisions[int(row[2])][6] == "FRESH"
         ]
         supports = confirmed_rows or rows
         revision_values = tuple(
@@ -737,7 +752,7 @@ def _class_resolution_context(
     graph: Mapping[int, Sequence[_LogicalClassEdge]],
     closure: Mapping[tuple[int, int], tuple[int, str]],
     native_class_ids: set[int],
-    native_class_revisions: Mapping[int, tuple[str, str, str, str]],
+    native_class_revisions: Mapping[int, RevisionIdentity],
     class_gaps: Mapping[int, set[str]],
 ) -> _ClassResolutionContext:
     paths, cycle = _bounded_shortest_paths(start_class_id, graph)
@@ -802,9 +817,9 @@ def _declared_candidates(
     connection: sqlite3.Connection,
     *,
     assignments: Mapping[int, Sequence[tuple[int, str, str]]],
-    revisions: Mapping[int, tuple[str, str, str, str]],
+    revisions: Mapping[int, RevisionIdentity],
 ) -> dict[int, dict[str, tuple[_DeclaredCandidate, ...]]]:
-    evidence_by_fact: dict[int, set[tuple[str, str, str, str]]] = defaultdict(
+    evidence_by_fact: dict[int, set[RevisionIdentity]] = defaultdict(
         set
     )
     for fact_id, revision_id in connection.execute(
@@ -818,7 +833,7 @@ def _declared_candidates(
         """
     ):
         identity = revisions.get(int(revision_id))
-        if identity is not None and identity[3] == "FRESH":
+        if identity is not None and identity[6] == "FRESH":
             evidence_by_fact[int(fact_id)].add(identity)
     result: dict[int, dict[str, list[_DeclaredCandidate]]] = defaultdict(
         lambda: defaultdict(list)
@@ -1009,7 +1024,15 @@ def _native_root_proof(
     revision = context.native_root_revision
     if path is None or revision is None:
         return None
-    source_kind, source_uri, source_fingerprint, freshness_status = revision
+    (
+        source_kind,
+        source_uri,
+        source_fingerprint,
+        producer_version,
+        schema_version,
+        generated_at,
+        freshness_status,
+    ) = revision
     return {
         "schema": _NATIVE_ROOT_PROOF_SCHEMA,
         "startClassId": start_class_id,
@@ -1020,6 +1043,9 @@ def _native_root_proof(
             "sourceKind": source_kind,
             "sourceUri": source_uri,
             "sourceFingerprint": source_fingerprint,
+            "producerVersion": producer_version,
+            "schemaVersion": schema_version,
+            "generatedAt": generated_at,
             "freshnessStatus": freshness_status,
         },
     }
@@ -1156,7 +1182,7 @@ def materialize_effective_defaults(
         for class_id, revision_id, status, confidence in native_class_rows
         if revision_id is not None
         and int(revision_id) in revisions
-        and revisions[int(revision_id)][3] == "FRESH"
+        and revisions[int(revision_id)][6] == "FRESH"
         and str(status).upper() in CONFIRMED_CLASS_STATUSES
         and str(confidence).upper() in CONFIRMED_CLASS_CONFIDENCE
     }

@@ -16,6 +16,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from .registrations import registration_provenance_is_confirmed
+
 
 ROLE_CLASSIFIER_VERSION = "ark-kb-roles/v1"
 KNOWLEDGE_ROLES = (
@@ -95,8 +97,10 @@ CREATE TABLE IF NOT EXISTS knowledge_roles (
     status TEXT NOT NULL,
     reasons_json TEXT NOT NULL,
     classifier_version TEXT NOT NULL,
+    source_revision_id INTEGER,
     PRIMARY KEY(entity_id, role),
-    FOREIGN KEY(entity_id) REFERENCES entities(entity_id)
+    FOREIGN KEY(entity_id) REFERENCES entities(entity_id),
+    FOREIGN KEY(source_revision_id) REFERENCES source_revisions(revision_id)
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_depth_policies (
@@ -122,6 +126,16 @@ OPEN_STATES = {
     "NOT_MEASURED",
     "SOURCE_NOT_AVAILABLE",
 }
+UNRECOVERED_REVISION_VALUES = frozenset(
+    {
+        *OPEN_STATES,
+        "UNRESOLVED",
+        "LEGACY_UNVERIFIED",
+        "CONFIRMED_FINGERPRINT_ONLY",
+        "NOT_AVAILABLE",
+        "UNAVAILABLE",
+    }
+)
 
 VISUAL_CLASS_NAMES = {
     "animationsequence",
@@ -602,6 +616,150 @@ def create_role_tables(connection: sqlite3.Connection) -> None:
     connection.executescript(ROLE_TABLES_SQL)
 
 
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    return (
+        connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type='table' AND name=?
+            """,
+            (table_name,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _is_recovered_revision_value(value: object) -> bool:
+    text = str(value or "").strip()
+    normalized = "_".join(
+        text.upper().replace("-", " ").replace("_", " ").split()
+    )
+    return bool(text) and normalized not in UNRECOVERED_REVISION_VALUES
+
+
+def _canonical_registration_entity_uris(
+    target: sqlite3.Connection,
+) -> set[str]:
+    if not _table_exists(target, "entities"):
+        return set()
+    result = {
+        str(row[0])
+        for row in target.execute(
+            "SELECT canonical_uri FROM entities"
+        )
+        if str(row[0] or "").strip()
+    }
+    if not (
+        _table_exists(target, "classes")
+        and _table_exists(target, "asset_class_assignments")
+    ):
+        return result
+    result.update(
+        str(row[0])
+        for row in target.execute(
+            """
+            SELECT DISTINCT class.class_path
+            FROM classes AS class
+            JOIN asset_class_assignments AS assignment
+              ON assignment.class_id=class.class_id
+            JOIN entities AS entity
+              ON entity.entity_id=assignment.entity_id
+            WHERE assignment.assignment_kind='GENERATED_CLASS'
+            """
+        )
+        if str(row[0] or "").strip()
+    )
+    return result
+
+
+def _prepare_canonical_registration_counts(
+    discovery: sqlite3.Connection,
+    target: sqlite3.Connection,
+) -> None:
+    discovery.execute(
+        """
+        CREATE TEMP TABLE IF NOT EXISTS kb_vnext_registration_counts(
+            owner_uri TEXT PRIMARY KEY,
+            registration_owner_count INTEGER NOT NULL,
+            distinct_registration_type_count INTEGER NOT NULL
+        ) WITHOUT ROWID
+        """
+    )
+    discovery.execute("DELETE FROM temp.kb_vnext_registration_counts")
+    if not (
+        _table_exists(target, "typed_registrations")
+        and _table_exists(target, "source_revisions")
+    ):
+        return
+
+    canonical_entity_uris = _canonical_registration_entity_uris(target)
+    registration_count_by_owner: dict[str, int] = defaultdict(int)
+    registration_types_by_owner: dict[str, set[str]] = defaultdict(set)
+    for row in target.execute(
+        """
+        SELECT
+            registration.owner_uri,
+            registration.target_uri,
+            registration.registration_type,
+            registration.evidence_uri,
+            registration.status,
+            registration.confidence,
+            revision.source_kind,
+            revision.source_uri,
+            revision.source_fingerprint,
+            revision.producer_version,
+            revision.schema_version,
+            revision.generated_at,
+            revision.freshness_status
+        FROM typed_registrations AS registration
+        LEFT JOIN source_revisions AS revision
+          ON revision.revision_id=registration.source_revision_id
+        """
+    ):
+        owner_uri = str(row[0] or "").strip()
+        target_uri = str(row[1] or "").strip()
+        registration_type = str(row[2] or "")
+        evidence_uri = str(row[3] or "")
+        status = str(row[4] or "").upper()
+        confidence = str(row[5] or "").upper()
+        revision_is_fresh = (
+            str(row[12] or "").upper() == "FRESH"
+            and all(
+                _is_recovered_revision_value(value)
+                for value in row[6:12]
+            )
+        )
+        if (
+            not registration_provenance_is_confirmed(
+                status,
+                confidence,
+                evidence_uri,
+            )
+            or not revision_is_fresh
+            or not registration_type
+            or owner_uri not in canonical_entity_uris
+            or target_uri not in canonical_entity_uris
+        ):
+            continue
+        registration_count_by_owner[owner_uri] += 1
+        registration_types_by_owner[owner_uri].add(registration_type)
+
+    discovery.executemany(
+        """
+        INSERT INTO temp.kb_vnext_registration_counts VALUES (?, ?, ?)
+        """,
+        (
+            (
+                owner_uri,
+                registration_count_by_owner[owner_uri],
+                len(types),
+            )
+            for owner_uri, types in registration_types_by_owner.items()
+        ),
+    )
+
+
 def _source_role_rows(
     discovery: sqlite3.Connection,
 ) -> sqlite3.Cursor:
@@ -610,12 +768,10 @@ def _source_role_rows(
         """
         WITH registration_counts AS (
             SELECT
-                owner_object_path,
-                COUNT(*) AS registration_owner_count,
-                COUNT(DISTINCT registration_type)
-                    AS distinct_registration_type_count
-            FROM system_registrations
-            GROUP BY owner_object_path
+                owner_uri AS owner_object_path,
+                registration_owner_count,
+                distinct_registration_type_count
+            FROM temp.kb_vnext_registration_counts
         )
         SELECT
             a.*,
@@ -685,6 +841,8 @@ def _source_role_rows(
 def materialize_discovery_roles(
     discovery: sqlite3.Connection,
     target: sqlite3.Connection,
+    *,
+    source_revision_id: int | None = None,
 ) -> dict[str, int]:
     """Materialize vNext role/depth rows from a read-only Discovery snapshot."""
 
@@ -719,6 +877,7 @@ def materialize_discovery_roles(
     asset_count = 0
     role_count = 0
     depth_counts: dict[str, int] = defaultdict(int)
+    _prepare_canonical_registration_counts(discovery, target)
     rows = _source_role_rows(discovery)
     while source_batch := rows.fetchmany(10_000):
         metric_rows: list[tuple[object, ...]] = []
@@ -806,6 +965,7 @@ def materialize_discovery_roles(
                         assignment.status,
                         _json(assignment.reasons),
                         ROLE_CLASSIFIER_VERSION,
+                        source_revision_id,
                     )
                 )
             depth_rows.append(
@@ -829,7 +989,7 @@ def materialize_discovery_roles(
             metric_rows,
         )
         target.executemany(
-            "INSERT INTO knowledge_roles VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO knowledge_roles VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     entity_id,
@@ -838,6 +998,7 @@ def materialize_discovery_roles(
                     status,
                     reasons,
                     version,
+                    revision_id,
                 )
                 for (
                     _entity_uri,
@@ -847,6 +1008,7 @@ def materialize_discovery_roles(
                     status,
                     reasons,
                     version,
+                    revision_id,
                 ) in role_rows
             ],
         )

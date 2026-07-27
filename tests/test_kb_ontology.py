@@ -36,6 +36,13 @@ class KnowledgeOntologyTests(unittest.TestCase):
             set(self.ontology.depth_policies), set(DEPTH_POLICIES)
         )
         self.assertIn("BLUEPRINT_CALLS_NATIVE", self.ontology.edge_types)
+        self.assertIn("MAP_DIRECT_REFERENCE", self.ontology.edge_types)
+        self.assertIn("MAP_PCG_DEPENDENCY", self.ontology.edge_types)
+        self.assertIn(
+            "MAP_WORLD_PARTITION_REFERENCE",
+            self.ontology.edge_types,
+        )
+        self.assertIn("ark-edge-types/v2", self.ontology.version)
         self.assertIn("EFFECTIVE_DEFAULT", self.ontology.fact_types)
         self.assertIn("RUNTIME_OBSERVED", self.ontology.scope_kinds)
 
@@ -46,6 +53,9 @@ class KnowledgeOntologyTests(unittest.TestCase):
                 "entity_uri": "bp://fixture",
                 "class_categories": ["BUFF"],
                 "registration_types": ["buff_registration"],
+                "registration_status": "CONFIRMED",
+                "registration_confidence": "HIGH",
+                "registration_evidence_uri": "bp://fixture/registration",
                 "component_categories": ["STATUS_COMPONENT"],
                 "function_names": [],
                 "property_names": [],
@@ -63,6 +73,67 @@ class KnowledgeOntologyTests(unittest.TestCase):
         self.assertIn(("buff", "CLASS_ANCESTRY"), confirmed)
         self.assertIn(("buff", "TYPED_REGISTRATION"), confirmed)
         self.assertIn(("status_component", "COMPONENT_TYPE"), confirmed)
+
+    def test_registration_domain_membership_inherits_open_provenance(self):
+        for status, confidence, expected_confidence in (
+            ("CANDIDATE", "LOW", "LOW"),
+            ("LEGACY_UNVERIFIED", "MEDIUM", "MEDIUM"),
+            ("CANDIDATE", "HIGH", "LOW"),
+            ("LEGACY_UNVERIFIED", "HIGH", "LOW"),
+        ):
+            with self.subTest(status=status, confidence=confidence):
+                memberships = infer_domain_memberships(
+                    self.ontology,
+                    {
+                        "entity_uri": "bp://fixture",
+                        "registration_types": ["buff_registration"],
+                        "registration_status": status,
+                        "registration_confidence": confidence,
+                        "registration_evidence_uri": (
+                            "registration-vnext://fixture"
+                        ),
+                    },
+                )
+                registration = next(
+                    item
+                    for item in memberships
+                    if item.domain_id == "buff"
+                    and item.membership_kind == "TYPED_REGISTRATION"
+                )
+
+                self.assertEqual(registration.status, status)
+                self.assertEqual(
+                    registration.confidence,
+                    expected_confidence,
+                )
+
+    def test_confirmed_registration_domain_requires_recovered_evidence(self):
+        for evidence_uri in (
+            "UNKNOWN",
+            "bp://fixture/NOT_AVAILABLE",
+            "evidence-without-scheme",
+            "ftp://fixture/registration",
+        ):
+            with self.subTest(evidence_uri=evidence_uri):
+                memberships = infer_domain_memberships(
+                    self.ontology,
+                    {
+                        "entity_uri": "bp://fixture",
+                        "registration_types": ["buff_registration"],
+                        "registration_status": "CONFIRMED",
+                        "registration_confidence": "HIGH",
+                        "registration_evidence_uri": evidence_uri,
+                    },
+                )
+                registration = next(
+                    item
+                    for item in memberships
+                    if item.domain_id == "buff"
+                    and item.membership_kind == "TYPED_REGISTRATION"
+                )
+
+                self.assertEqual(registration.status, "CANDIDATE")
+                self.assertEqual(registration.confidence, "LOW")
 
     def test_function_and_property_semantics_remain_candidates(self):
         memberships = infer_domain_memberships(
