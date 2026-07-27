@@ -17,7 +17,7 @@ manifest 已自动写入 `mode=shadow`、`defaultQuerySource=legacy`，不存在
 | 项目 | 值 |
 |---|---:|
 | Build ID | `20260727T035514+0000-9f106a091815` |
-| Discovery SHA-256 | `9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4eea50` |
+| Discovery SHA-256 | `9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50` |
 | Discovery bytes | 3,816,177,664 |
 | Ontology | `ark-domains/v1\|ark-roles/v1\|ark-edge-types/v1\|ark-fact-types/v1` |
 | Core schema | `ark-kb-core/v1` |

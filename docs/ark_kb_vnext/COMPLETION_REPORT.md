@@ -23,7 +23,7 @@
 ## 真实快照
 
 - Build：`20260727T035514+0000-9f106a091815`
-- Source SHA-256：`9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4eea50`
+- Source SHA-256：`9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50`
 - 577,579 entities
 - 3,441,879 catalog edges
 - 26,495 classes / 92,248 closure rows
