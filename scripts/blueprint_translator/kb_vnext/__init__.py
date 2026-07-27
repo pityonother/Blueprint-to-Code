@@ -34,6 +34,11 @@ from .invalidation import (
     plan_invalidation,
     rebuild_invalidation_dependencies,
 )
+from .query_planner import (
+    QueryRequirements,
+    plan_query,
+    resolve_entities,
+)
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -61,4 +66,7 @@ __all__ = [
     "apply_invalidation_plan",
     "plan_invalidation",
     "rebuild_invalidation_dependencies",
+    "QueryRequirements",
+    "plan_query",
+    "resolve_entities",
 ]
