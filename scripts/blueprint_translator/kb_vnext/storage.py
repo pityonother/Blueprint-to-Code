@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Mapping
 
 from .class_hierarchy import CLASS_TABLES_SQL, materialize_discovery_classes
+from .fact_store import (
+    materialize_declared_defaults,
+    materialize_effective_defaults,
+)
 from .legacy import import_legacy_lineage
 from .ontology import OntologyBundle, infer_domain_memberships
 from .registrations import (
@@ -227,6 +231,7 @@ CREATE TABLE facts(
     fact_id INTEGER PRIMARY KEY,
     subject_entity_id INTEGER NOT NULL,
     fact_type TEXT NOT NULL,
+    fact_name TEXT NOT NULL DEFAULT '',
     scope_kind TEXT NOT NULL,
     declared_on_entity_id INTEGER,
     value_kind TEXT NOT NULL,
@@ -257,12 +262,13 @@ CREATE TABLE fact_evidence(
 CREATE TABLE effective_facts(
     entity_id INTEGER NOT NULL,
     fact_type TEXT NOT NULL,
+    fact_name TEXT NOT NULL DEFAULT '',
     fact_id INTEGER NOT NULL,
     inherited_from_entity_id INTEGER,
     resolution_chain_json TEXT NOT NULL,
     resolution_status TEXT NOT NULL,
     source_revision_set_hash TEXT NOT NULL,
-    PRIMARY KEY(entity_id, fact_type),
+    PRIMARY KEY(entity_id, fact_type, fact_name),
     FOREIGN KEY(entity_id) REFERENCES entities(entity_id),
     FOREIGN KEY(fact_id) REFERENCES facts(fact_id),
     FOREIGN KEY(inherited_from_entity_id) REFERENCES entities(entity_id)
@@ -373,8 +379,10 @@ CREATE INDEX idx_entities_kind ON entities(entity_kind, entity_id);
 CREATE INDEX idx_aliases_entity ON aliases(entity_id, alias_kind);
 CREATE INDEX idx_edges_source ON edges(source_entity_id, edge_type, target_entity_id);
 CREATE INDEX idx_edges_target ON edges(target_entity_id, edge_type, source_entity_id);
-CREATE INDEX idx_facts_subject ON facts(subject_entity_id, fact_type, current);
-CREATE INDEX idx_facts_type_status ON facts(fact_type, status, confidence);
+CREATE INDEX idx_facts_subject
+    ON facts(subject_entity_id, fact_type, fact_name, current);
+CREATE INDEX idx_facts_type_status
+    ON facts(fact_type, fact_name, status, confidence);
 CREATE INDEX idx_domain_memberships_domain
     ON domain_memberships(domain_id, status, confidence, entity_id);
 CREATE INDEX idx_coverage_status ON coverage(stage, status, entity_id);
@@ -1031,6 +1039,13 @@ def build_core_database(
         registration_edge_count, registration_domain_count = (
             _materialize_registration_edges(connection, ontology)
         )
+        fact_counts = materialize_declared_defaults(
+            discovery,
+            connection,
+            ontology=ontology,
+            source_revision_id=1,
+        )
+        effective_counts = materialize_effective_defaults(connection)
         legacy_counts = import_legacy_lineage(
             core=connection,
             legacy_root=legacy_kb_root,
@@ -1053,6 +1068,8 @@ def build_core_database(
             **class_counts,
             **role_counts,
             **registration_counts,
+            **fact_counts,
+            **effective_counts,
             "legacyRows": int(legacy_counts["rows"]),
             "legacyResolvedEntities": int(
                 legacy_counts["resolvedEntities"]

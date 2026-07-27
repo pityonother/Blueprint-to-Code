@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .ontology import load_ontology
+from .projections import build_domain_projections
 from .storage import (
     CACHE_SCHEMA_SQL,
     CATALOG_SCHEMA_SQL,
@@ -101,9 +102,17 @@ def _promote_snapshot(
             source = output_dir / name
             if source.is_file():
                 os.replace(source, archive / name)
+        previous_exports = output_dir / "domain_exports"
+        if previous_exports.is_dir():
+            os.replace(previous_exports, archive / "domain_exports")
+            domain_exports.mkdir(parents=True, exist_ok=True)
         _write_json(archive / "manifest.json", previous)
     for name in DATABASE_NAMES:
         os.replace(staging / name, output_dir / name)
+    staged_exports = staging / "domain_exports"
+    if domain_exports.exists():
+        shutil.rmtree(domain_exports)
+    os.replace(staged_exports, domain_exports)
     build_id = str(manifest["buildId"])
     _write_json(manifests / f"{build_id}.json", manifest)
     _write_json(current, manifest)
@@ -164,6 +173,12 @@ def build_vnext_snapshot(
             ontology=ontology,
             legacy_kb_root=legacy_kb_root,
         )
+        projection_counts = build_domain_projections(
+            core_path=staging / "core.sqlite",
+            output_dir=staging / "domain_exports",
+            generated_at=generated_at,
+            ontology_version=ontology.version,
+        )
         search_counts = build_search_database(
             core_path=staging / "core.sqlite",
             output_path=staging / "search.sqlite",
@@ -202,6 +217,7 @@ def build_vnext_snapshot(
                 "core": core_counts,
                 "search": search_counts,
                 "cache": cache_counts,
+                "domainProjections": projection_counts,
             },
             "databases": metrics,
             "cutover": {

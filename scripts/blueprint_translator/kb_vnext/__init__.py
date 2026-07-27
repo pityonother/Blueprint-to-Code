@@ -17,6 +17,13 @@ from .ontology import infer_domain_memberships, load_ontology
 from .registrations import materialize_typed_registrations
 from .snapshot import build_vnext_snapshot
 from .legacy import import_legacy_lineage
+from .fact_store import (
+    FactValue,
+    materialize_declared_defaults,
+    materialize_effective_defaults,
+    store_fact,
+)
+from .projections import build_domain_projections
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -33,4 +40,9 @@ __all__ = [
     "materialize_typed_registrations",
     "build_vnext_snapshot",
     "import_legacy_lineage",
+    "FactValue",
+    "materialize_declared_defaults",
+    "materialize_effective_defaults",
+    "store_fact",
+    "build_domain_projections",
 ]

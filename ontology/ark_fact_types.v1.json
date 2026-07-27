@@ -12,8 +12,8 @@
   ],
   "factTypes": [
     {"id": "CLASS_IDENTITY", "valueKinds": ["ENTITY_REF"]},
-    {"id": "DECLARED_DEFAULT", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON", "ENTITY_REF", "CONFIRMED_EMPTY"]},
-    {"id": "EFFECTIVE_DEFAULT", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON", "ENTITY_REF", "CONFIRMED_EMPTY"]},
+    {"id": "DECLARED_DEFAULT", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON", "ENTITY_REF", "FINGERPRINT", "CONFIRMED_EMPTY", "UNKNOWN"]},
+    {"id": "EFFECTIVE_DEFAULT", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON", "ENTITY_REF", "FINGERPRINT", "CONFIRMED_EMPTY", "UNKNOWN"]},
     {"id": "FUNCTION_SUMMARY", "valueKinds": ["TEXT", "JSON"]},
     {"id": "FORMULA", "valueKinds": ["TEXT", "JSON"]},
     {"id": "STATUS_EFFECT", "valueKinds": ["NUMBER", "INTEGER", "JSON"]},
