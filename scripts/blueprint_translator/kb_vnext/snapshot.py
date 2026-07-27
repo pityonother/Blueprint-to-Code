@@ -126,7 +126,7 @@ def build_vnext_snapshot(
 ) -> dict[str, object]:
     """Build all four stores in staging, validate, then atomically promote."""
 
-    del legacy_kb_root, capture_root, native_root
+    del capture_root, native_root
     project_root = project_root.resolve()
     discovery_database = discovery_database.resolve()
     output_dir = output_dir.resolve()
@@ -162,6 +162,7 @@ def build_vnext_snapshot(
             source_fingerprint=discovery_sha,
             generated_at=generated_at,
             ontology=ontology,
+            legacy_kb_root=legacy_kb_root,
         )
         search_counts = build_search_database(
             core_path=staging / "core.sqlite",

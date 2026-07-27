@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .class_hierarchy import CLASS_TABLES_SQL, materialize_discovery_classes
+from .legacy import import_legacy_lineage
 from .ontology import OntologyBundle, infer_domain_memberships
 from .registrations import (
     REGISTRATION_TABLES_SQL,
@@ -317,6 +318,7 @@ CREATE TABLE legacy_lineage(
     evidence_uri TEXT NOT NULL,
     status TEXT NOT NULL,
     source_revision_id INTEGER NOT NULL,
+    UNIQUE(legacy_database, legacy_table, legacy_primary_key),
     FOREIGN KEY(source_revision_id) REFERENCES source_revisions(revision_id)
 );
 
@@ -900,6 +902,7 @@ def build_core_database(
     source_fingerprint: str,
     generated_at: str,
     ontology: OntologyBundle,
+    legacy_kb_root: Path,
 ) -> dict[str, int]:
     connection = _connect(output_path, FULL_CORE_SCHEMA_SQL)
     discovery = sqlite3.connect(
@@ -1028,6 +1031,11 @@ def build_core_database(
         registration_edge_count, registration_domain_count = (
             _materialize_registration_edges(connection, ontology)
         )
+        legacy_counts = import_legacy_lineage(
+            core=connection,
+            legacy_root=legacy_kb_root,
+            generated_at=generated_at,
+        )
         connection.execute("ANALYZE main")
         connection.commit()
         return {
@@ -1045,6 +1053,11 @@ def build_core_database(
             **class_counts,
             **role_counts,
             **registration_counts,
+            "legacyRows": int(legacy_counts["rows"]),
+            "legacyResolvedEntities": int(
+                legacy_counts["resolvedEntities"]
+            ),
+            "legacyUnverified": int(legacy_counts["legacyUnverified"]),
         }
     finally:
         discovery.close()

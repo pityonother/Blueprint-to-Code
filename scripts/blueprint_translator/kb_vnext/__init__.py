@@ -16,6 +16,7 @@ from .class_hierarchy import (
 from .ontology import infer_domain_memberships, load_ontology
 from .registrations import materialize_typed_registrations
 from .snapshot import build_vnext_snapshot
+from .legacy import import_legacy_lineage
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -31,4 +32,5 @@ __all__ = [
     "load_ontology",
     "materialize_typed_registrations",
     "build_vnext_snapshot",
+    "import_legacy_lineage",
 ]
