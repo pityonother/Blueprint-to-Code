@@ -10,6 +10,18 @@ from collections.abc import Iterable, Mapping, Sequence
 
 UNKNOWN = "UNKNOWN"
 CLASS_SCHEMA_VERSION = "ark-kb-classes/v1"
+CONFIRMED_CLASS_STATUSES = frozenset(
+    {"IDENTIFIED", "CONFIRMED", "VERIFIED", "RESOLVED"}
+)
+CONFIRMED_CLASS_CONFIDENCE = frozenset({"HIGH", "CONFIRMED"})
+CONFIRMED_ASSIGNMENT_STATUSES = frozenset(
+    {"EXTRACTED", "IDENTIFIED", "CONFIRMED", "VERIFIED", "RESOLVED"}
+)
+CONFIRMED_ASSIGNMENT_CONFIDENCE = CONFIRMED_CLASS_CONFIDENCE
+DIRECT_PARENT_EDGE_KINDS = frozenset(
+    {"blueprint_parent", "native_parent", "parent"}
+)
+NATIVE_BOUNDARY_HINT_KIND = "native_boundary_hint"
 
 ANCESTRY_ROOTS: dict[str, tuple[str, ...]] = {
     "DATA_ASSET": ("/Script/Engine.DataAsset",),
@@ -236,6 +248,26 @@ def _class_id_map(connection: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+def _native_boundary_shortcut_pairs(
+    discovery: sqlite3.Connection,
+) -> set[tuple[str, str]]:
+    """Identify legacy NativeParentClass rows that are boundary hints."""
+
+    return {
+        (str(generated), str(native_parent))
+        for generated, native_parent in discovery.execute(
+            """
+            SELECT DISTINCT
+                generated_class_path, native_parent_class_path
+            FROM assets
+            WHERE generated_class_path NOT IN ('', 'UNKNOWN')
+              AND native_parent_class_path NOT IN ('', 'UNKNOWN')
+              AND native_parent_class_path<>parent_class_path
+            """
+        )
+    }
+
+
 def materialize_discovery_classes(
     discovery: sqlite3.Connection,
     target: sqlite3.Connection,
@@ -256,6 +288,7 @@ def materialize_discovery_classes(
         """,
     )
     paths, generated_paths = _all_class_paths(discovery, edge_rows)
+    native_boundary_shortcuts = _native_boundary_shortcut_pairs(discovery)
 
     target.execute("DELETE FROM class_ancestry_categories")
     target.execute("DELETE FROM class_closure")
@@ -297,6 +330,15 @@ def materialize_discovery_classes(
         if not child_path or not parent_path:
             continue
         edge_kind = str(row.get("edge_kind") or "parent")
+        if edge_kind == NATIVE_BOUNDARY_HINT_KIND:
+            continue
+        if edge_kind not in DIRECT_PARENT_EDGE_KINDS:
+            continue
+        if (
+            edge_kind == "native_parent"
+            and (child_path, parent_path) in native_boundary_shortcuts
+        ):
+            continue
         source_kind = str(row.get("source_kind") or "discovery")
         confidence = str(row.get("confidence") or "UNKNOWN").upper()
         status = (
@@ -438,10 +480,14 @@ def _graph(
     parent_map: dict[int, dict[int, tuple[str, str]]] = defaultdict(dict)
     children: dict[int, set[int]] = defaultdict(set)
     for child, parent, status, confidence in connection.execute(
-        """
+        f"""
         SELECT child_class_id, parent_class_id, status, confidence
         FROM class_edges
-        """
+        WHERE edge_kind IN (
+            {", ".join("?" for _ in DIRECT_PARENT_EDGE_KINDS)}
+        )
+        """,
+        tuple(sorted(DIRECT_PARENT_EDGE_KINDS)),
     ):
         child_id = int(child)
         parent_id = int(parent)

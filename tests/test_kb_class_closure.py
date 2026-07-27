@@ -76,6 +76,11 @@ def _discovery_fixture() -> sqlite3.Connection:
                 "blueprint_parent",
             ),
             (
+                "/Game/Test/PDA_Child.PDA_Child_C",
+                "/Script/Engine.PrimaryDataAsset",
+                "native_parent",
+            ),
+            (
                 "/Game/Test/PDA_Base.PDA_Base_C",
                 "/Script/Engine.PrimaryDataAsset",
                 "native_parent",
@@ -104,6 +109,11 @@ def _discovery_fixture() -> sqlite3.Connection:
                 "/Game/Test/BP_Open.BP_Open_C",
                 "/Game/Test/BP_Uncaptured.BP_Uncaptured_C",
                 "blueprint_parent",
+            ),
+            (
+                "/Game/Test/BP_Open.BP_Open_C",
+                "/Script/Engine.Actor",
+                "native_boundary_hint",
             ),
             (
                 "/Game/Test/CycleA.CycleA_C",
@@ -172,6 +182,43 @@ class KnowledgeClassClosureTests(unittest.TestCase):
         self.assertEqual(
             path["path"][-1], "/Script/Engine.PrimaryDataAsset"
         )
+        native_root_id = target.execute(
+            """
+            SELECT class_id
+            FROM classes
+            WHERE class_path='/Script/Engine.PrimaryDataAsset'
+            """
+        ).fetchone()[0]
+        direct_shortcut_count = target.execute(
+            """
+            SELECT COUNT(*)
+            FROM class_edges
+            WHERE child_class_id=?
+              AND parent_class_id=?
+            """,
+            (class_id, native_root_id),
+        ).fetchone()[0]
+        self.assertEqual(direct_shortcut_count, 0)
+        native_root_depth = target.execute(
+            """
+            SELECT depth
+            FROM class_closure
+            WHERE descendant_class_id=?
+              AND ancestor_class_id=?
+            """,
+            (class_id, native_root_id),
+        ).fetchone()[0]
+        self.assertEqual(native_root_depth, 2)
+        multiple_parent_gaps = target.execute(
+            """
+            SELECT COUNT(*)
+            FROM class_gaps
+            WHERE class_id=?
+              AND gap_kind='MULTIPLE_PARENT_CANDIDATES'
+            """,
+            (class_id,),
+        ).fetchone()[0]
+        self.assertEqual(multiple_parent_gaps, 0)
         discovery.close()
         target.close()
 
@@ -184,6 +231,33 @@ class KnowledgeClassClosureTests(unittest.TestCase):
         )
         self.assertEqual(open_path["status"], "PARENT_CHAIN_OPEN")
         self.assertIn("NATIVE_ROOT_NOT_REACHED", open_path["gaps"])
+        open_id = target.execute(
+            """
+            SELECT class_id FROM classes
+            WHERE class_path='/Game/Test/BP_Open.BP_Open_C'
+            """
+        ).fetchone()[0]
+        actor_id = target.execute(
+            """
+            SELECT class_id FROM classes
+            WHERE class_path='/Script/Engine.Actor'
+            """
+        ).fetchone()[0]
+        target.execute(
+            """
+            INSERT INTO class_edges(
+                child_class_id, parent_class_id, edge_kind, evidence_id,
+                status, confidence
+            ) VALUES (?, ?, 'native_boundary_hint', 'fixture://hint',
+                      'CONFIRMED', 'HIGH')
+            """,
+            (open_id, actor_id),
+        )
+        rebuild_class_closure(target)
+        hinted_path = inheritance_path_to_native_root(
+            target, "/Game/Test/BP_Open.BP_Open_C"
+        )
+        self.assertEqual(hinted_path["status"], "PARENT_CHAIN_OPEN")
         cycle_count = target.execute(
             """
             SELECT COUNT(*)

@@ -37,7 +37,7 @@ from .uasset_graphs import (
 )
 
 
-DISCOVERY_SCHEMA = "blueprint-to-code-kb-discovery/v1"
+DISCOVERY_SCHEMA = "blueprint-to-code-kb-discovery/v2"
 STATE_SCHEMA = "blueprint-to-code-kb-discovery-state/v1"
 ARCHIVE_ROOT = "discovery_bundle"
 TOOL_VERSION = "1.1.0"
@@ -178,7 +178,7 @@ CREATE TABLE class_edges (
     child_class_path TEXT NOT NULL,
     parent_class_path TEXT NOT NULL,
     edge_kind TEXT NOT NULL,
-    inheritance_depth INTEGER NOT NULL DEFAULT 1,
+    inheritance_depth INTEGER,
     source_kind TEXT NOT NULL,
     confidence TEXT NOT NULL,
     PRIMARY KEY (child_class_path, parent_class_path, edge_kind)
@@ -4089,11 +4089,11 @@ def _build_class_and_interface_rows(
                 "confidence": confidence,
             }
         if child != UNKNOWN and native_parent != UNKNOWN and native_parent != parent:
-            class_rows[(child, native_parent, "native_parent")] = {
+            class_rows[(child, native_parent, "native_boundary_hint")] = {
                 "child_class_path": child,
                 "parent_class_path": native_parent,
-                "edge_kind": "native_parent",
-                "inheritance_depth": 1,
+                "edge_kind": "native_boundary_hint",
+                "inheritance_depth": None,
                 "source_kind": source_kind,
                 "confidence": confidence,
             }

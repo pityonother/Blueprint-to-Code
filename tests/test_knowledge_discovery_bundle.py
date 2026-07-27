@@ -946,7 +946,7 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
             manifest = json.loads(
                 (output_dir / "discovery_manifest.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(manifest["schema"], "blueprint-to-code-kb-discovery/v1")
+            self.assertEqual(manifest["schema"], "blueprint-to-code-kb-discovery/v2")
             self.assertTrue(manifest["devkitSnapshot"]["contentRootRedacted"])
             self.assertEqual(
                 manifest["devkitSnapshot"]["assetCount"],
@@ -1432,6 +1432,65 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
         self.assertEqual(interface["is_blueprint_interface"], 1)
         self.assertEqual(function_library["is_function_library"], 1)
         self.assertEqual(data_asset["is_data_asset"], 1)
+
+    def test_native_parent_metadata_is_a_boundary_hint_not_a_direct_parent(self):
+        from blueprint_translator.kb_discovery import (
+            _build_class_and_interface_rows,
+        )
+
+        class_rows, interface_rows = _build_class_and_interface_rows(
+            {
+                "/Game/Test/BP_Child.BP_Child": {
+                    "generated_class_path": "/Game/Test/BP_Child.BP_Child_C",
+                    "parent_class_path": "/Game/Test/BP_Base.BP_Base_C",
+                    "native_parent_class_path": "/Script/Engine.Actor",
+                    "identity_source_kind": "unreal_asset_registry",
+                    "identity_confidence": "HIGH",
+                },
+                "/Game/Test/BP_Direct.BP_Direct": {
+                    "generated_class_path": "/Game/Test/BP_Direct.BP_Direct_C",
+                    "parent_class_path": "/Script/Engine.Actor",
+                    "native_parent_class_path": "/Script/Engine.Actor",
+                    "identity_source_kind": "unreal_asset_registry",
+                    "identity_confidence": "HIGH",
+                },
+            }
+        )
+
+        by_child_and_parent = {
+            (
+                row["child_class_path"],
+                row["parent_class_path"],
+            ): row
+            for row in class_rows
+        }
+        inherited = by_child_and_parent[
+            (
+                "/Game/Test/BP_Child.BP_Child_C",
+                "/Game/Test/BP_Base.BP_Base_C",
+            )
+        ]
+        boundary_hint = by_child_and_parent[
+            (
+                "/Game/Test/BP_Child.BP_Child_C",
+                "/Script/Engine.Actor",
+            )
+        ]
+        direct_native = by_child_and_parent[
+            (
+                "/Game/Test/BP_Direct.BP_Direct_C",
+                "/Script/Engine.Actor",
+            )
+        ]
+
+        self.assertEqual(inherited["edge_kind"], "blueprint_parent")
+        self.assertEqual(inherited["inheritance_depth"], 1)
+        self.assertEqual(boundary_hint["edge_kind"], "native_boundary_hint")
+        self.assertIsNone(boundary_hint["inheritance_depth"])
+        self.assertEqual(direct_native["edge_kind"], "native_parent")
+        self.assertEqual(direct_native["inheritance_depth"], 1)
+        self.assertEqual(len(class_rows), 3)
+        self.assertEqual(interface_rows, [])
 
     def test_unknown_blueprint_applicability_stays_not_measured(self):
         import blueprint_translator.kb_discovery as discovery
