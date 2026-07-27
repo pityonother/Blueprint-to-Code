@@ -1,0 +1,50 @@
+{
+  "schema": "ark-kb-role-ontology/v1",
+  "version": "ark-roles/v1",
+  "roles": [
+    "catalog_asset",
+    "global_system_hub",
+    "reusable_base_class",
+    "reusable_component",
+    "function_library",
+    "blueprint_interface",
+    "domain_rule_asset",
+    "registration_owner",
+    "entity_definition",
+    "leaf_variant",
+    "map_placement_asset",
+    "visual_support_asset",
+    "configuration_asset",
+    "native_runtime_implementation",
+    "query_snapshot",
+    "unknown_role"
+  ],
+  "depthPolicies": [
+    "INDEX_ONLY",
+    "STRUCTURE",
+    "SEMANTIC",
+    "DEEP",
+    "ON_DEMAND",
+    "BLOCKED_UNKNOWN"
+  ],
+  "promotionRules": {
+    "requiresSemanticQualification": [
+      "global_system_hub",
+      "reusable_base_class",
+      "reusable_component",
+      "domain_rule_asset"
+    ],
+    "neverSufficientAlone": [
+      "file_size_total",
+      "referencer_count",
+      "core_folder",
+      "name_keyword",
+      "map_only_references",
+      "capture_exists"
+    ],
+    "visualDefault": {
+      "role": "visual_support_asset",
+      "depthPolicy": "INDEX_ONLY"
+    }
+  }
+}

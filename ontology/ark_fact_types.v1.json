@@ -1,0 +1,30 @@
+{
+  "schema": "ark-kb-fact-ontology/v1",
+  "version": "ark-fact-types/v1",
+  "scopeKinds": [
+    "DECLARED",
+    "INHERITED",
+    "EFFECTIVE",
+    "DERIVED_STATIC",
+    "RUNTIME_OBSERVED",
+    "NATIVE_REVERSED",
+    "USER_ASSERTED"
+  ],
+  "factTypes": [
+    {"id": "CLASS_IDENTITY", "valueKinds": ["ENTITY_REF"]},
+    {"id": "DECLARED_DEFAULT", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON", "ENTITY_REF", "CONFIRMED_EMPTY"]},
+    {"id": "EFFECTIVE_DEFAULT", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON", "ENTITY_REF", "CONFIRMED_EMPTY"]},
+    {"id": "FUNCTION_SUMMARY", "valueKinds": ["TEXT", "JSON"]},
+    {"id": "FORMULA", "valueKinds": ["TEXT", "JSON"]},
+    {"id": "STATUS_EFFECT", "valueKinds": ["NUMBER", "INTEGER", "JSON"]},
+    {"id": "LOOT_ENTRY", "valueKinds": ["JSON", "ENTITY_REF"]},
+    {"id": "ITEM_PROPERTY", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON", "ENTITY_REF"]},
+    {"id": "HARVEST_RULE", "valueKinds": ["JSON", "NUMBER"]},
+    {"id": "MISSION_REWARD", "valueKinds": ["JSON", "ENTITY_REF"]},
+    {"id": "SYSTEM_REGISTRATION", "valueKinds": ["ENTITY_REF", "JSON"]},
+    {"id": "NATIVE_FIELD_ACCESS", "valueKinds": ["JSON", "TEXT"]},
+    {"id": "RUNTIME_OBSERVATION", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON"]},
+    {"id": "EVIDENCE_GAP", "valueKinds": ["TEXT", "JSON"]}
+  ],
+  "missingValueRule": "UNKNOWN and NOT_RECOVERED are statuses, never zero, empty array, or empty string values."
+}

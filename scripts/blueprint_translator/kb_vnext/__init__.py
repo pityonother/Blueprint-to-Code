@@ -13,6 +13,7 @@ from .class_hierarchy import (
     materialize_discovery_classes,
     rebuild_class_closure,
 )
+from .ontology import infer_domain_memberships, load_ontology
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -24,4 +25,6 @@ __all__ = [
     "inheritance_path_to_native_root",
     "materialize_discovery_classes",
     "rebuild_class_closure",
+    "infer_domain_memberships",
+    "load_ontology",
 ]
