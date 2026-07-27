@@ -16,6 +16,7 @@ from .fact_store import (
 )
 from .legacy import import_legacy_lineage
 from .native_gold_set import materialize_native_gold_set
+from .invalidation import rebuild_invalidation_dependencies
 from .ontology import OntologyBundle, infer_domain_memberships
 from .registrations import (
     REGISTRATION_TABLES_SQL,
@@ -314,6 +315,26 @@ CREATE TABLE invalidation_dependencies(
     FOREIGN KEY(upstream_revision_id) REFERENCES source_revisions(revision_id)
 ) WITHOUT ROWID;
 
+CREATE TABLE invalidation_events(
+    event_id TEXT PRIMARY KEY,
+    event_kind TEXT NOT NULL,
+    upstream_revision_id INTEGER,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    FOREIGN KEY(upstream_revision_id) REFERENCES source_revisions(revision_id)
+) WITHOUT ROWID;
+
+CREATE TABLE invalidation_queue(
+    event_id TEXT NOT NULL,
+    downstream_kind TEXT NOT NULL,
+    downstream_id INTEGER NOT NULL,
+    dependency_reason TEXT NOT NULL,
+    status TEXT NOT NULL,
+    PRIMARY KEY(event_id, downstream_kind, downstream_id),
+    FOREIGN KEY(event_id) REFERENCES invalidation_events(event_id)
+) WITHOUT ROWID;
+
 CREATE TABLE legacy_lineage(
     lineage_id INTEGER PRIMARY KEY,
     target_kind TEXT NOT NULL,
@@ -423,6 +444,8 @@ CREATE INDEX idx_domain_memberships_domain
 CREATE INDEX idx_coverage_status ON coverage(stage, status, entity_id);
 CREATE INDEX idx_invalidation_downstream
     ON invalidation_dependencies(downstream_kind, downstream_id);
+CREATE INDEX idx_invalidation_queue_status
+    ON invalidation_queue(status, downstream_kind, downstream_id);
 CREATE INDEX idx_legacy_lineage_source
     ON legacy_lineage(legacy_database, legacy_table, legacy_primary_key);
 CREATE INDEX idx_native_qualified_symbol
@@ -1097,6 +1120,7 @@ def build_core_database(
             legacy_root=legacy_kb_root,
             generated_at=generated_at,
         )
+        invalidation_counts = rebuild_invalidation_dependencies(connection)
         connection.execute("ANALYZE main")
         connection.commit()
         return {
@@ -1117,6 +1141,9 @@ def build_core_database(
             **fact_counts,
             **effective_counts,
             **native_counts,
+            "invalidationDependencies": sum(
+                invalidation_counts.values()
+            ),
             "legacyRows": int(legacy_counts["rows"]),
             "legacyResolvedEntities": int(
                 legacy_counts["resolvedEntities"]

@@ -28,6 +28,12 @@ from .native_gold_set import (
     load_native_gold_set,
     materialize_native_gold_set,
 )
+from .invalidation import (
+    InvalidationPlan,
+    apply_invalidation_plan,
+    plan_invalidation,
+    rebuild_invalidation_dependencies,
+)
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -51,4 +57,8 @@ __all__ = [
     "build_domain_projections",
     "load_native_gold_set",
     "materialize_native_gold_set",
+    "InvalidationPlan",
+    "apply_invalidation_plan",
+    "plan_invalidation",
+    "rebuild_invalidation_dependencies",
 ]
