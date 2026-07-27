@@ -41,6 +41,10 @@ from .query_planner import (
 )
 from .kb_api import KnowledgeApiError, VNextKnowledgeService
 from .kb_context import build_bounded_context_pack
+from .shadow_compare import (
+    LegacyVNextComparator,
+    query_legacy_read_only,
+)
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -74,4 +78,6 @@ __all__ = [
     "KnowledgeApiError",
     "VNextKnowledgeService",
     "build_bounded_context_pack",
+    "LegacyVNextComparator",
+    "query_legacy_read_only",
 ]

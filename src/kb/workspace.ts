@@ -1,6 +1,7 @@
 import { readableError } from '../shared/errors';
 import { escapeHtml } from '../shared/html';
 import {
+  compareKnowledge,
   fetchKnowledgeEntity,
   fetchKnowledgeEntityPage,
   fetchKnowledgeHealth,
@@ -13,10 +14,12 @@ import type {
   KnowledgeHealth,
   KnowledgePage,
   KnowledgeQueryResult,
+  KnowledgeShadowCompareResult,
 } from './types';
 
 
 type EntitySection = KnowledgePage<Record<string, unknown>>;
+type QueryMode = 'legacy' | 'vnext' | 'compare';
 
 
 function statusClass(status: unknown): string {
@@ -66,6 +69,8 @@ export class KnowledgeWorkspace {
     'effective-defaults': null,
   };
   private queryResult: KnowledgeQueryResult | null = null;
+  private compareResult: KnowledgeShadowCompareResult | null = null;
+  private queryMode: QueryMode = 'compare';
   private loading = false;
   private error = '';
   private initialized = false;
@@ -210,13 +215,32 @@ export class KnowledgeWorkspace {
 
   private renderQuery(): string {
     const result = this.queryResult;
+    const comparison = this.compareResult;
+    const modeStatus = this.queryMode === 'vnext'
+      ? result?.route
+      : this.queryMode === 'legacy'
+        ? comparison?.legacy.freshness
+        : comparison?.consistent === true
+          ? 'CONSISTENT'
+          : comparison?.consistent === false
+            ? 'DIFFERENT'
+            : comparison
+              ? 'NOT_COMPARABLE'
+              : '';
     return `
       <section class="panel kb-query-panel">
         <div class="panel-heading">
           <div><p class="eyebrow">数据库优先查询</p><h2>检查能否直接回答</h2></div>
-          ${result ? `<span class="status-pill ${statusClass(result.route)}">${escapeHtml(result.route)}</span>` : ''}
+          ${modeStatus ? `<span class="status-pill ${statusClass(modeStatus)}">${escapeHtml(modeStatus)}</span>` : ''}
         </div>
         <form id="kb-query-form" class="kb-query-form">
+          <label>查询模式
+            <select id="kb-query-mode">
+              <option value="compare" ${this.queryMode === 'compare' ? 'selected' : ''}>compare：并排核对</option>
+              <option value="vnext" ${this.queryMode === 'vnext' ? 'selected' : ''}>vNext：只读新 Core</option>
+              <option value="legacy" ${this.queryMode === 'legacy' ? 'selected' : ''}>legacy：只读旧库</option>
+            </select>
+          </label>
           <label>目标实体<input id="kb-query-entity" required value="${escapeHtml(this.selected?.entity.canonicalUri || this.searchText)}" placeholder="/Game/... 或唯一资产名" /></label>
           <label>Fact types<input id="kb-query-facts" value="ITEM_PROPERTY" placeholder="ITEM_PROPERTY,EFFECTIVE_DEFAULT" /></label>
           <label>Fact names<input id="kb-query-names" placeholder="Weight,ItemRating（可留空）" /></label>
@@ -225,9 +249,10 @@ export class KnowledgeWorkspace {
             <label><input id="kb-query-runtime" type="checkbox" /> 需要运行时观察</label>
             <label><input id="kb-query-map" type="checkbox" /> 需要地图/PCG 使用证据</label>
           </div>
-          <button class="button primary" type="submit" ${this.loading ? 'disabled' : ''}>生成查询计划</button>
+          <button class="button primary" type="submit" ${this.loading ? 'disabled' : ''}>执行只读查询</button>
         </form>
-        ${result ? `
+        ${this.renderComparison()}
+        ${result && this.queryMode !== 'legacy' ? `
           <div class="kb-query-result" aria-live="polite">
             <div class="kb-query-metrics">
               <span>Freshness <strong>${escapeHtml(result.freshness)}</strong></span>
@@ -240,8 +265,61 @@ export class KnowledgeWorkspace {
             </div>
             <details><summary>查看有界 Context Pack</summary><pre>${escapeHtml(result.contextPack.content)}</pre></details>
           </div>
-        ` : '<p class="kb-empty">查询只读 Core；证据不足时返回明确 gap 与定向 probe，不会自动全量解析。</p>'}
+        ` : comparison ? '' : '<p class="kb-empty">查询只读 Core；证据不足时返回明确 gap 与定向 probe，不会自动全量解析。</p>'}
       </section>
+    `;
+  }
+
+  private renderComparison(): string {
+    const comparison = this.compareResult;
+    if (!comparison) return '';
+    const legacyRows = comparison.legacy.items;
+    const comparisonLabel = comparison.consistent === true
+      ? '语义一致'
+      : comparison.consistent === false
+        ? '存在差异'
+        : '证据不可直接比较';
+    const reasons = comparison.differenceReasons.length
+      ? comparison.differenceReasons.map((reason) => `<li><code>${escapeHtml(reason)}</code></li>`).join('')
+      : '<li>没有差异原因。</li>';
+    return `
+      <div class="kb-shadow-result" aria-live="polite">
+        <div class="kb-query-metrics">
+          <span>当前模式 <strong>${escapeHtml(this.queryMode)}</strong></span>
+          ${this.queryMode === 'compare' ? `<span>对比结论 <strong>${escapeHtml(comparisonLabel)}</strong></span>` : ''}
+          <span>Legacy <strong>${escapeHtml(comparison.legacy.freshness)} · ${legacyRows.length} rows</strong></span>
+          ${this.queryMode === 'compare' ? `<span>vNext <strong>${escapeHtml(comparison.vnext.freshness)} · ${comparison.vnext.facts.length} facts</strong></span>` : ''}
+          <span>优先来源 <strong>${escapeHtml(comparison.preferredSource)}</strong></span>
+        </div>
+        ${this.queryMode === 'compare' ? `
+          <div class="kb-compare-grid">
+            <div>
+              <h3>差异与可比性</h3>
+              <ul class="kb-compare-reasons">${reasons}</ul>
+            </div>
+            <div>
+              <h3>Evidence 完整度</h3>
+              <dl>
+                <div><dt>legacy</dt><dd>${comparison.evidenceCompleteness.legacy}</dd></div>
+                <div><dt>vNext</dt><dd>${comparison.evidenceCompleteness.vnext}</dd></div>
+                <div><dt>vNext complete</dt><dd>${comparison.evidenceCompleteness.vnextComplete ? 'yes' : 'no'}</dd></div>
+              </dl>
+            </div>
+          </div>
+        ` : ''}
+        <details ${this.queryMode === 'legacy' ? 'open' : ''}>
+          <summary>Legacy 只读匹配 (${legacyRows.length})</summary>
+          ${legacyRows.length ? `<div class="kb-table-wrap"><table class="kb-table">
+            <thead><tr><th>来源表</th><th>事实</th><th>值</th><th>状态</th></tr></thead>
+            <tbody>${legacyRows.map((row) => `<tr>
+              <td><strong>${escapeHtml(row.database)}</strong><small>${escapeHtml(row.table)}</small></td>
+              <td><strong>${escapeHtml(row.factName || '未命名')}</strong><small>${escapeHtml(row.factType || '')}</small></td>
+              <td><code>${escapeHtml(row.value ?? '—')}</code></td>
+              <td><span class="status-pill ${statusClass(row.status)}">${escapeHtml(row.status || 'UNKNOWN')}</span></td>
+            </tr>`).join('')}</tbody>
+          </table></div>` : '<p class="kb-empty">Legacy 稳定身份列没有匹配行。</p>'}
+        </details>
+      </div>
     `;
   }
 
@@ -319,20 +397,32 @@ export class KnowledgeWorkspace {
     if (!entity) return;
     const split = (id: string) => (document.querySelector<HTMLInputElement>(id)?.value || '')
       .split(',').map((value) => value.trim()).filter(Boolean);
+    const modeValue = document.querySelector<HTMLSelectElement>('#kb-query-mode')?.value;
+    const mode: QueryMode = modeValue === 'legacy' || modeValue === 'vnext'
+      ? modeValue
+      : 'compare';
+    const request = {
+      entity,
+      factTypes: split('#kb-query-facts'),
+      factNames: split('#kb-query-names'),
+      requiresNative: Boolean(document.querySelector<HTMLInputElement>('#kb-query-native')?.checked),
+      requiresRuntime: Boolean(document.querySelector<HTMLInputElement>('#kb-query-runtime')?.checked),
+      requiresMapEvidence: Boolean(document.querySelector<HTMLInputElement>('#kb-query-map')?.checked),
+      evidenceLimit: 50,
+      budgetTokens: 2000,
+    };
+    this.queryMode = mode;
     this.loading = true;
     this.error = '';
     this.notify();
     try {
-      this.queryResult = await queryKnowledge({
-        entity,
-        factTypes: split('#kb-query-facts'),
-        factNames: split('#kb-query-names'),
-        requiresNative: Boolean(document.querySelector<HTMLInputElement>('#kb-query-native')?.checked),
-        requiresRuntime: Boolean(document.querySelector<HTMLInputElement>('#kb-query-runtime')?.checked),
-        requiresMapEvidence: Boolean(document.querySelector<HTMLInputElement>('#kb-query-map')?.checked),
-        evidenceLimit: 50,
-        budgetTokens: 2000,
-      });
+      if (mode === 'vnext') {
+        this.compareResult = null;
+        this.queryResult = await queryKnowledge(request);
+      } else {
+        this.compareResult = await compareKnowledge(request);
+        this.queryResult = mode === 'compare' ? this.compareResult.vnext : null;
+      }
     } catch (error) {
       this.error = readableError(error);
     } finally {

@@ -5,6 +5,7 @@ import type {
   KnowledgeHealth,
   KnowledgePage,
   KnowledgeQueryResult,
+  KnowledgeShadowCompareResult,
 } from './types';
 
 
@@ -49,6 +50,16 @@ export function queryKnowledge(
   request: Record<string, unknown>,
 ): Promise<KnowledgeQueryResult> {
   return api<KnowledgeQueryResult>('/api/kb/query', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+
+export function compareKnowledge(
+  request: Record<string, unknown>,
+): Promise<KnowledgeShadowCompareResult> {
+  return api<KnowledgeShadowCompareResult>('/api/kb/compare', {
     method: 'POST',
     body: JSON.stringify(request),
   });

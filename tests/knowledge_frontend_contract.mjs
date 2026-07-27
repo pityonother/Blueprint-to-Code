@@ -17,7 +17,9 @@ try {
   assert.match(html, /id="kb-search-form"/);
   assert.match(html, /id="kb-search-input"/);
   assert.match(html, /id="kb-query-form"/);
+  assert.match(html, /id="kb-query-mode"/);
   assert.match(html, /id="kb-query-entity"/);
+  assert.match(html, /compare：并排核对/);
   assert.match(html, /aria-busy=/);
 
   const css = await readFile(
@@ -27,6 +29,8 @@ try {
   assert.match(css, /\.kb-explorer-grid/);
   assert.match(css, /@media \(max-width: 700px\)/);
   assert.match(css, /\.kb-search-form input:focus-visible/);
+  assert.match(css, /\.kb-query-form select:focus-visible/);
+  assert.match(css, /\.kb-compare-grid/);
 
   const main = await readFile(
     new URL('../src/main.ts', import.meta.url),

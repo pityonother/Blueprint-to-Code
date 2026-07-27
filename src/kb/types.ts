@@ -77,3 +77,32 @@ export interface KnowledgeQueryResult extends ApiResult {
   freshness: string;
   gap: Array<Record<string, unknown>>;
 }
+
+
+export interface KnowledgeShadowCompareResult extends ApiResult {
+  mode: 'compare';
+  consistent: boolean | null;
+  differenceReasons: string[];
+  comparableKeys: Array<{
+    factType: string;
+    factName: string;
+  }>;
+  preferredSource: 'legacy' | 'vnext' | 'none';
+  evidenceCompleteness: {
+    legacy: number;
+    vnext: number;
+    vnextComplete: boolean;
+  };
+  staleOrUnknown: {
+    legacy: string;
+    vnext: string;
+  };
+  legacy: KnowledgePage<Record<string, unknown>>;
+  vnext: KnowledgeQueryResult;
+  returned: number;
+  omitted: number;
+  nextQuery: string;
+  freshness: string;
+  evidence: Array<Record<string, unknown>>;
+  gap: Array<Record<string, unknown>>;
+}

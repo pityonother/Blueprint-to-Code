@@ -21,6 +21,7 @@ import blueprint_tool_server as tool_server  # noqa: E402
 POST_ROUTES = (
     "/api/kb/query",
     "/api/kb/plan",
+    "/api/kb/compare",
     "/api/kb/jobs/job-1/cancel",
     "/api/harvest/build",
     "/api/harvest/build/job-1/cancel",

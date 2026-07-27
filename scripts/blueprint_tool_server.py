@@ -75,6 +75,9 @@ from blueprint_translator.kb_vnext.kb_api import (
     KnowledgeApiError,
     VNextKnowledgeService,
 )
+from blueprint_translator.kb_vnext.shadow_compare import (
+    LegacyVNextComparator,
+)
 from blueprint_server.jobs import (
     JOB_TIMEOUT_SECONDS,
     cancel_job,
@@ -103,6 +106,10 @@ CAPTURE_ROOT = PROJECT_ROOT / "captures"
 DIST_ROOT = PROJECT_ROOT / "dist"
 KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge_base"
 KB_VNEXT_SERVICE = VNextKnowledgeService(KNOWLEDGE_ROOT / "vnext")
+KB_SHADOW_COMPARATOR = LegacyVNextComparator(
+    vnext=KB_VNEXT_SERVICE,
+    legacy_root=KNOWLEDGE_ROOT / "db",
+)
 EXPORT_SCRIPT = PROJECT_ROOT / "scripts" / "devkit_exporters" / "export_current_blueprint_defaults.py"
 DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
@@ -1945,6 +1952,13 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 server_port=int(self.server.server_address[1]),
             )
             body = self.read_json_body()
+            if self.path == "/api/kb/compare":
+                try:
+                    result = KB_SHADOW_COMPARATOR.compare(body)
+                except KnowledgeApiError as exc:
+                    raise _kb_api_problem(exc) from exc
+                self.send_json({"ok": True, **result})
+                return
             if self.path in {"/api/kb/query", "/api/kb/plan"}:
                 try:
                     result = KB_VNEXT_SERVICE.query(body)
