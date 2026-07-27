@@ -518,7 +518,7 @@ def _probe(
     if code == "SCHEMA_MIGRATION_REQUIRED":
         return {
             "probeType": "snapshot_rebuild",
-            "operation": "rebuild_core_v2_snapshot",
+            "operation": "rebuild_core_v3_snapshot",
             "budgetTokens": 500,
             "reason": code,
         }

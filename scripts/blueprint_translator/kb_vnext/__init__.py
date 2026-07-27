@@ -1,5 +1,6 @@
 """ARK Knowledge Base vNext semantic indexing primitives."""
 
+from .adapters import ADAPTER_SPECS, materialize_semantic_adapters
 from .roles import (
     DEPTH_POLICIES,
     KNOWLEDGE_ROLES,
@@ -60,11 +61,13 @@ from .quality_gates import (
 
 __all__ = [
     "DEPTH_POLICIES",
+    "ADAPTER_SPECS",
     "KNOWLEDGE_ROLES",
     "RoleDecision",
     "classify_asset",
     "enrich_type_percentiles",
     "materialize_discovery_roles",
+    "materialize_semantic_adapters",
     "inheritance_path_to_native_root",
     "materialize_discovery_classes",
     "rebuild_class_closure",

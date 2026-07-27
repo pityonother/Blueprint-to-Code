@@ -1,0 +1,31 @@
+{
+  "schema": "ark-kb-fact-ontology/v1",
+  "version": "ark-fact-types/v2",
+  "scopeKinds": [
+    "DECLARED",
+    "INHERITED",
+    "EFFECTIVE",
+    "DERIVED_STATIC",
+    "RUNTIME_OBSERVED",
+    "NATIVE_REVERSED",
+    "USER_ASSERTED"
+  ],
+  "factTypes": [
+    {"id": "CLASS_IDENTITY", "valueKinds": ["ENTITY_REF"]},
+    {"id": "DECLARED_DEFAULT", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "BOOLEAN", "JSON", "ENTITY_REF", "FINGERPRINT", "CONFIRMED_EMPTY", "UNKNOWN"]},
+    {"id": "EFFECTIVE_DEFAULT", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "BOOLEAN", "JSON", "ENTITY_REF", "FINGERPRINT", "CONFIRMED_EMPTY", "UNKNOWN"]},
+    {"id": "FUNCTION_SUMMARY", "valueKinds": ["TEXT", "JSON"]},
+    {"id": "FORMULA", "valueKinds": ["TEXT", "JSON"]},
+    {"id": "STATUS_EFFECT", "valueKinds": ["NUMBER", "INTEGER", "BOOLEAN", "JSON", "ENTITY_REF"]},
+    {"id": "STATUS_VALUE", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "BOOLEAN", "JSON", "ENTITY_REF"]},
+    {"id": "LOOT_ENTRY", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "BOOLEAN", "JSON", "ENTITY_REF"]},
+    {"id": "ITEM_PROPERTY", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "BOOLEAN", "JSON", "ENTITY_REF"]},
+    {"id": "HARVEST_RULE", "valueKinds": ["JSON", "NUMBER", "INTEGER", "BOOLEAN", "ENTITY_REF"]},
+    {"id": "MISSION_REWARD", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "BOOLEAN", "JSON", "ENTITY_REF"]},
+    {"id": "SYSTEM_REGISTRATION", "valueKinds": ["ENTITY_REF", "JSON"]},
+    {"id": "NATIVE_FIELD_ACCESS", "valueKinds": ["JSON", "TEXT"]},
+    {"id": "RUNTIME_OBSERVATION", "valueKinds": ["TEXT", "NUMBER", "INTEGER", "JSON"]},
+    {"id": "EVIDENCE_GAP", "valueKinds": ["TEXT", "JSON"]}
+  ],
+  "missingValueRule": "UNKNOWN and NOT_RECOVERED are statuses, never zero, empty array, or empty string values."
+}

@@ -637,7 +637,7 @@ class KnowledgeStorageTests(unittest.TestCase):
                 self.assertEqual(
                     metadata["schema_version"], CORE_SCHEMA_VERSION
                 )
-                self.assertEqual(CORE_SCHEMA_VERSION, "ark-kb-core/v2")
+                self.assertEqual(CORE_SCHEMA_VERSION, "ark-kb-core/v3")
                 child_entity_id = core.execute(
                     """
                     SELECT entity_id FROM entities

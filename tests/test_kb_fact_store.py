@@ -11,6 +11,9 @@ SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
+from blueprint_translator.kb_vnext.adapters import (  # noqa: E402
+    ADAPTER_VERSION,
+)
 from blueprint_translator.kb_vnext.fact_store import (  # noqa: E402
     FactValue,
     materialize_declared_defaults,
@@ -286,7 +289,8 @@ class KnowledgeFactStoreTests(unittest.TestCase):
             core.execute(
                 """
                 INSERT INTO source_revisions VALUES (
-                    1, 'fixture', 'fixture://capture', 'sha', 'test', 'v1',
+                    1, 'blueprint_evidence', 'fixture://capture', 'sha',
+                    'test', 'ark.blueprint.evidence.v2',
                     '2026-07-27T00:00:00Z', 'FRESH'
                 )
                 """
@@ -301,7 +305,7 @@ class KnowledgeFactStoreTests(unittest.TestCase):
                 )
                 """
             )
-            store_fact(
+            semantic_fact_id = store_fact(
                 core,
                 ontology=self.ontology,
                 subject_entity_id=1,
@@ -314,7 +318,54 @@ class KnowledgeFactStoreTests(unittest.TestCase):
                 confidence="HIGH",
                 source_revision_id=1,
                 evidence_uri="bp://fixture/item/weight",
-                evidence_role="DIRECT_FIELD",
+                evidence_role=(
+                    "SEMANTIC_ADAPTER:item.number-property.v1"
+                ),
+            )
+            source_fact_id = store_fact(
+                core,
+                ontology=self.ontology,
+                subject_entity_id=1,
+                fact_type="DECLARED_DEFAULT",
+                fact_name="Weight",
+                scope_kind="DECLARED",
+                declared_on_entity_id=1,
+                value=FactValue("NUMBER", value_number=2.5),
+                status="CONFIRMED",
+                confidence="HIGH",
+                source_revision_id=1,
+                evidence_uri="bp://fixture/item/weight",
+                evidence_role="DEFAULT_VALUE_ACTUAL",
+            )
+            core.execute(
+                """
+                INSERT INTO semantic_adapter_runs VALUES (
+                    'primal_items', ?,
+                    '2026-07-27T00:00:00Z',
+                    1, 1, 0, 'VALID'
+                )
+                """,
+                (ADAPTER_VERSION,),
+            )
+            core.execute(
+                """
+                INSERT INTO semantic_adapter_decisions(
+                    decision_key, adapter_id, adapter_version, rule_id,
+                    source_mode, object_path, property_name,
+                    decision_status, reason_code, source_fact_id,
+                    semantic_fact_id, legacy_lineage_id,
+                    source_revision_id, evidence_uri, decided_at
+                ) VALUES (
+                    'fixture-decision://item-weight',
+                    'primal_items', ?,
+                    'item.number-property.v1',
+                    'CORE_TYPED_FACT', '/Game/Test/Item.Item', 'Weight',
+                    'PROMOTED', 'VERIFIED', ?, ?, NULL, 1,
+                    'bp://fixture/item/weight',
+                    '2026-07-27T00:00:00Z'
+                )
+                """,
+                (ADAPTER_VERSION, source_fact_id, semantic_fact_id),
             )
             core.commit()
             core.close()
@@ -337,7 +388,10 @@ class KnowledgeFactStoreTests(unittest.TestCase):
                     FROM projection_rows
                     """
                 ).fetchone()
-                self.assertEqual(row[:4], (1, "Weight", 2.5, 1))
+                self.assertEqual(
+                    row[:4],
+                    (semantic_fact_id, "Weight", 2.5, 1),
+                )
                 self.assertTrue(row[4])
                 self.assertEqual(
                     projection.execute(

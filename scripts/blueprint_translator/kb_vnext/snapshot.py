@@ -186,6 +186,9 @@ def build_vnext_snapshot(
             output_dir=staging / "domain_exports",
             generated_at=generated_at,
             ontology_version=ontology.version,
+            review_path=(
+                project_root / "ontology" / "projection_review.v1.json"
+            ),
         )
         search_counts = build_search_database(
             core_path=staging / "core.sqlite",
@@ -202,9 +205,25 @@ def build_vnext_snapshot(
             name: database_metrics(staging / name)
             for name in DATABASE_NAMES
         }
+        projection_metrics = {
+            f"domain_exports/{value['path']}": {
+                "bytes": value["bytes"],
+                "sha256": value["sha256"],
+                "integrity": value["integrity"],
+                "foreignKeyViolations": value["foreignKeyViolations"],
+                "schemaVersion": value["schemaVersion"],
+                "projectionVersion": value["projectionVersion"],
+                "ontologyVersion": value["ontologyVersion"],
+                "contentDigest": value["contentDigest"],
+                "reviewConfigSha256": value["reviewConfigSha256"],
+                "tableCounts": value["tableCounts"],
+            }
+            for value in projection_counts.values()
+        }
+        published_metrics = {**metrics, **projection_metrics}
         failures = {
             name: value
-            for name, value in metrics.items()
+            for name, value in published_metrics.items()
             if value["integrity"] != "ok"
             or int(value["foreignKeyViolations"]) != 0
         }
@@ -227,7 +246,7 @@ def build_vnext_snapshot(
                 "cache": cache_counts,
                 "domainProjections": projection_counts,
             },
-            "databases": metrics,
+            "databases": published_metrics,
             "cutover": {
                 "mode": "shadow",
                 "defaultQuerySource": "legacy",
@@ -245,7 +264,7 @@ def build_vnext_snapshot(
             "output": str(output_dir),
             "sourceSha256": discovery_sha,
             "counts": manifest["counts"],
-            "databases": metrics,
+            "databases": published_metrics,
             "cutover": manifest["cutover"],
         }
     finally:

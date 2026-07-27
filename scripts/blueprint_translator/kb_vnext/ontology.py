@@ -59,6 +59,7 @@ class OntologyBundle:
     depth_policies: tuple[str, ...]
     edge_types: tuple[str, ...]
     fact_types: tuple[str, ...]
+    fact_value_kinds: dict[str, tuple[str, ...]]
     scope_kinds: tuple[str, ...]
 
 
@@ -97,7 +98,7 @@ def load_ontology(root: Path) -> OntologyBundle:
     domains_data = _load_json(root / "ark_domains.v1.json")
     roles_data = _load_json(root / "ark_roles.v1.json")
     edges_data = _load_json(root / "ark_edge_types.v1.json")
-    facts_data = _load_json(root / "ark_fact_types.v1.json")
+    facts_data = _load_json(root / "ark_fact_types.v2.json")
 
     raw_domains = domains_data.get("domains")
     if not isinstance(raw_domains, list):
@@ -159,14 +160,23 @@ def load_ontology(root: Path) -> OntologyBundle:
     raw_facts = facts_data.get("factTypes")
     if not isinstance(raw_facts, list):
         raise ValueError("factTypes must be an array")
-    fact_types = _unique(
-        tuple(
-            str(item.get("id") or "")
-            for item in raw_facts
-            if isinstance(item, dict)
-        ),
-        field="factTypes",
-    )
+    fact_value_kinds: dict[str, tuple[str, ...]] = {}
+    for item in raw_facts:
+        if not isinstance(item, dict):
+            raise ValueError("each fact type must be an object")
+        fact_type_id = str(item.get("id") or "")
+        if not fact_type_id or fact_type_id in fact_value_kinds:
+            raise ValueError(
+                f"invalid or duplicate fact type id: {fact_type_id}"
+            )
+        fact_value_kinds[fact_type_id] = _unique(
+            _string_list(
+                item.get("valueKinds"),
+                field=f"{fact_type_id}.valueKinds",
+            ),
+            field=f"{fact_type_id}.valueKinds",
+        )
+    fact_types = tuple(fact_value_kinds)
     scope_kinds = _unique(
         _string_list(facts_data.get("scopeKinds"), field="scopeKinds"),
         field="scopeKinds",
@@ -184,6 +194,7 @@ def load_ontology(root: Path) -> OntologyBundle:
         depth_policies=depth,
         edge_types=edge_types,
         fact_types=fact_types,
+        fact_value_kinds=fact_value_kinds,
         scope_kinds=scope_kinds,
     )
 

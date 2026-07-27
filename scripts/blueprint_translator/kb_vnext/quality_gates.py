@@ -5,12 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .benchmark import run_query_benchmark
 from .invalidation import validate_effective_resolution_dependencies
+from .ontology import load_ontology
+from .projections import DOMAIN_PROJECTIONS
 from .registrations import classify_registration_property
 from .semantic_quality import semantic_quality_gates
 
@@ -369,50 +373,127 @@ def _role_gold_metrics(project_root: Path) -> dict[str, object]:
 
 def _integrity_metrics(snapshot_root: Path) -> dict[str, object]:
     result: dict[str, object] = {}
-    for name in (
-        "catalog.sqlite",
-        "core.sqlite",
-        "search.sqlite",
-        "cache.sqlite",
-    ):
-        path = snapshot_root / name
+    paths = [
+        (name, snapshot_root / name, "")
+        for name in (
+            "catalog.sqlite",
+            "core.sqlite",
+            "search.sqlite",
+            "cache.sqlite",
+        )
+    ]
+    paths.extend(
+        (
+            f"domain_exports/{projection_name}.sqlite",
+            snapshot_root / "domain_exports" / f"{projection_name}.sqlite",
+            projection_name,
+        )
+        for projection_name in DOMAIN_PROJECTIONS
+    )
+    for name, path, projection_name in paths:
         if not path.is_file():
             result[name] = {
                 "exists": False,
                 "integrity": "missing",
                 "foreignKeyViolations": -1,
                 "bytes": 0,
+                "verified": False,
+                "error": "MISSING_ARTIFACT",
             }
             continue
-        connection = _read_only(path)
         try:
-            result[name] = {
-                "exists": True,
-                "integrity": str(
+            connection = _read_only(path)
+            try:
+                integrity = str(
                     connection.execute(
                         "PRAGMA integrity_check"
                     ).fetchone()[0]
-                ),
-                "foreignKeyViolations": len(
+                )
+                foreign_key_violations = len(
                     list(connection.execute("PRAGMA foreign_key_check"))
-                ),
+                )
+                metadata = (
+                    {
+                        str(key): str(value)
+                        for key, value in connection.execute(
+                            "SELECT key, value FROM metadata"
+                        )
+                    }
+                    if projection_name
+                    else {}
+                )
+                projection_verified = (
+                    not projection_name
+                    or (
+                        metadata.get("schema_version")
+                        == "ark-kb-domain-projection/v2"
+                        and metadata.get("projection_version") == "v2"
+                        and metadata.get("projection_name") == projection_name
+                    )
+                )
+                result[name] = {
+                    "exists": True,
+                    "integrity": integrity,
+                    "foreignKeyViolations": foreign_key_violations,
+                    "bytes": path.stat().st_size,
+                    "verified": (
+                        integrity == "ok"
+                        and foreign_key_violations == 0
+                        and projection_verified
+                    ),
+                    "error": "",
+                }
+            finally:
+                connection.close()
+        except (OSError, sqlite3.DatabaseError) as error:
+            result[name] = {
+                "exists": True,
+                "integrity": "error",
+                "foreignKeyViolations": -1,
                 "bytes": path.stat().st_size,
+                "verified": False,
+                "error": f"{type(error).__name__}:{error}",
             }
-        finally:
-            connection.close()
     return result
 
 
 def _privacy_scan(value: object) -> list[str]:
-    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True)
-    needles = (
-        "C:\\Users\\",
-        "C:/Users/",
-        "/home/",
-        "/Users/",
-        "Program Files",
+    patterns = (
+        (
+            "windows_absolute_path",
+            re.compile(r"(?i)(?<![A-Z0-9])[A-Z]:[\\/]"),
+        ),
+        (
+            "windows_unc_path",
+            re.compile(r"(?i)(?:^|[\s\"'])\\\\[^\\/\s]+[\\/]"),
+        ),
+        (
+            "posix_home_path",
+            re.compile(r"(?i)(?:^|[\s\"'=])/(?:home|users)/"),
+        ),
+        (
+            "windows_program_files_path",
+            re.compile(r"(?i)\bprogram files(?: \(x86\))?[\\/]"),
+        ),
     )
-    return [needle for needle in needles if needle.casefold() in serialized.casefold()]
+
+    def iter_text(candidate: object):
+        if isinstance(candidate, str):
+            yield candidate
+        elif isinstance(candidate, Mapping):
+            for key, item in candidate.items():
+                yield from iter_text(key)
+                yield from iter_text(item)
+        elif isinstance(candidate, (list, tuple, set, frozenset)):
+            for item in candidate:
+                yield from iter_text(item)
+
+    hits: set[str] = set()
+    for text in iter_text(value):
+        for label, pattern in patterns:
+            if pattern.search(text):
+                hits.add(label)
+    return sorted(hits)
 
 
 def evaluate_quality_gates(
@@ -432,6 +513,9 @@ def evaluate_quality_gates(
             encoding="utf-8"
         )
     )
+    current_ontology_version = load_ontology(
+        project_root / "ontology"
+    ).version
     benchmark = run_query_benchmark(snapshot_root / "core.sqlite")
     core = _read_only(snapshot_root / "core.sqlite")
     discovery = _read_only(discovery_database)
@@ -816,7 +900,19 @@ def evaluate_quality_gates(
                 ),
             ]
         )
-        gates.extend(semantic_quality_gates(core, manifest))
+        gates.extend(
+            semantic_quality_gates(
+                core,
+                manifest,
+                snapshot_root=snapshot_root,
+                expected_ontology_version=current_ontology_version,
+                review_path=(
+                    project_root
+                    / "ontology"
+                    / "projection_review.v1.json"
+                ),
+            )
+        )
         gates.extend(
             [
                 _gate(
@@ -929,6 +1025,7 @@ def evaluate_quality_gates(
         bool(item["exists"])
         and item["integrity"] == "ok"
         and int(item["foreignKeyViolations"]) == 0
+        and bool(item.get("verified"))
         for item in integrity.values()
         if isinstance(item, dict)
     )

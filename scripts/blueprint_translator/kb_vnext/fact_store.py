@@ -121,6 +121,11 @@ def store_fact(
     status = status.upper()
     if fact_type not in ontology.fact_types:
         raise ValueError(f"Unknown fact type: {fact_type}")
+    allowed_value_kinds = ontology.fact_value_kinds.get(fact_type, ())
+    if value.value_kind not in allowed_value_kinds:
+        raise ValueError(
+            f"{fact_type} does not allow value kind {value.value_kind}"
+        )
     if scope_kind not in ontology.scope_kinds:
         raise ValueError(f"Unknown fact scope: {scope_kind}")
     if not fact_name:

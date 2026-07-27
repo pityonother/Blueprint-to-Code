@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -14,11 +15,24 @@ SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
+from blueprint_translator.kb_vnext.adapters import (  # noqa: E402
+    ADAPTER_VERSION,
+)
 from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     QUALITY_GATE_SCHEMA,
     _class_closure_metrics,
     _effective_candidate_metrics,
+    _integrity_metrics,
+    _privacy_scan,
     publish_gate_report,
+)
+from blueprint_translator.kb_vnext.ontology import (  # noqa: E402
+    load_ontology,
+)
+from blueprint_translator.kb_vnext.projections import (  # noqa: E402
+    PROJECTION_SCHEMA_SQL,
+    PROJECTION_SCHEMA_VERSION,
+    compute_projection_artifact_content_digest,
 )
 from blueprint_translator.kb_vnext.semantic_quality import (  # noqa: E402
     _semantic_fact_metrics,
@@ -35,6 +49,35 @@ PROJECTION_NAMES = (
     "harvest_rules",
     "mission_rewards",
 )
+CURRENT_ONTOLOGY_VERSION = load_ontology(PROJECT_ROOT / "ontology").version
+CURRENT_ADAPTER_VERSION = ADAPTER_VERSION
+PROJECTION_ADAPTER_RULES = {
+    "buff_effects": ("buffs", "buff.timing.v1"),
+    "loot_entries": ("loot", "loot.numeric-config.v1"),
+    "item_properties": ("primal_items", "item.number-property.v1"),
+    "status_values": (
+        "status_components",
+        "status.numeric-value.v1",
+    ),
+    "harvest_rules": ("harvest", "harvest.resource-rules.v1"),
+    "mission_rewards": ("missions", "mission.currency-reward.v1"),
+}
+PROJECTION_FACT_TYPES = {
+    "buff_effects": "STATUS_EFFECT",
+    "loot_entries": "LOOT_ENTRY",
+    "item_properties": "ITEM_PROPERTY",
+    "status_values": "STATUS_VALUE",
+    "harvest_rules": "HARVEST_RULE",
+    "mission_rewards": "MISSION_REWARD",
+}
+PROJECTION_SOURCE_MODES = {
+    name: (
+        "LEGACY_TABLE"
+        if name in {"buff_effects", "status_values"}
+        else "CORE_TYPED_FACT"
+    )
+    for name in PROJECTION_NAMES
+}
 
 
 def _semantic_core_fixture() -> sqlite3.Connection:
@@ -54,16 +97,30 @@ def _semantic_core_fixture() -> sqlite3.Connection:
             fact_name TEXT NOT NULL DEFAULT '',
             subject_entity_id INTEGER NOT NULL DEFAULT 1,
             declared_on_entity_id INTEGER,
-            scope_kind TEXT NOT NULL DEFAULT 'DECLARED'
+            scope_kind TEXT NOT NULL DEFAULT 'DECLARED',
+            unit TEXT NOT NULL DEFAULT '',
+            confidence TEXT NOT NULL DEFAULT 'HIGH',
+            ontology_version TEXT NOT NULL DEFAULT 'fixture-placeholder'
+        );
+        CREATE TABLE metadata(
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE entities(
+            entity_id INTEGER PRIMARY KEY,
+            canonical_uri TEXT NOT NULL
         );
         CREATE TABLE source_revisions(
             revision_id INTEGER PRIMARY KEY,
+            source_kind TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
             freshness_status TEXT NOT NULL
         );
         CREATE TABLE fact_evidence(
             fact_id INTEGER NOT NULL,
             source_revision_id INTEGER NOT NULL,
-            evidence_uri TEXT NOT NULL
+            evidence_uri TEXT NOT NULL,
+            evidence_role TEXT NOT NULL
         );
         CREATE TABLE effective_facts(
             entity_id INTEGER NOT NULL,
@@ -89,12 +146,43 @@ def _semantic_core_fixture() -> sqlite3.Connection:
         CREATE TABLE projection_runs(
             projection_name TEXT NOT NULL,
             projection_version TEXT NOT NULL,
+            source_revision_set_hash TEXT NOT NULL,
+            ontology_version TEXT NOT NULL,
+            built_at TEXT NOT NULL,
             row_count INTEGER NOT NULL,
             validation_status TEXT NOT NULL
         );
+        CREATE TABLE semantic_adapter_runs(
+            adapter_id TEXT NOT NULL,
+            adapter_version TEXT NOT NULL,
+            validation_status TEXT NOT NULL
+        );
+        CREATE TABLE semantic_adapter_decisions(
+            decision_key TEXT PRIMARY KEY,
+            adapter_id TEXT NOT NULL,
+            adapter_version TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            source_mode TEXT NOT NULL,
+            property_name TEXT NOT NULL,
+            decision_status TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            source_fact_id INTEGER NOT NULL,
+            semantic_fact_id INTEGER NOT NULL,
+            legacy_lineage_id INTEGER,
+            source_revision_id INTEGER NOT NULL,
+            evidence_uri TEXT NOT NULL
+        );
 
-        INSERT INTO source_revisions VALUES (1, 'FRESH');
-        INSERT INTO source_revisions VALUES (2, 'STALE');
+        INSERT INTO entities VALUES (1, '/Game/Test/Fixture.Fixture');
+        INSERT INTO source_revisions VALUES (
+            1, 'blueprint_evidence', 'ark.blueprint.evidence.v2', 'FRESH'
+        );
+        INSERT INTO source_revisions VALUES (
+            2, 'blueprint_evidence', 'ark.blueprint.evidence.v2', 'STALE'
+        );
+        INSERT INTO metadata VALUES (
+            'ontology_version', 'fixture-placeholder'
+        );
 
         INSERT INTO facts(
             fact_id, fact_type, value_kind, value_text, value_number,
@@ -114,12 +202,12 @@ def _semantic_core_fixture() -> sqlite3.Connection:
              'VERIFIED', 1);
 
         INSERT INTO fact_evidence VALUES
-            (1, 1, 'fixture://item/weight'),
-            (2, 1, 'fixture://default/fingerprint'),
-            (3, 1, 'fixture://legacy/value'),
-            (4, 1, 'fixture://missing/value'),
-            (5, 1, 'fixture://status/empty'),
-            (6, 2, 'fixture://formula/stale');
+            (1, 1, 'fixture://item/weight', 'FIXTURE'),
+            (2, 1, 'fixture://default/fingerprint', 'FIXTURE'),
+            (3, 1, 'fixture://legacy/value', 'FIXTURE'),
+            (4, 1, 'fixture://missing/value', 'FIXTURE'),
+            (5, 1, 'fixture://status/empty', 'FIXTURE'),
+            (6, 2, 'fixture://formula/stale', 'FIXTURE');
 
         INSERT INTO effective_facts VALUES
             (1, 'EFFECTIVE_DEFAULT', 'One', 1, 'RESOLVED'),
@@ -134,33 +222,90 @@ def _semantic_core_fixture() -> sqlite3.Connection:
     return core
 
 
-def _projection_fixture() -> tuple[sqlite3.Connection, dict[str, object]]:
+def _projection_fixture(
+    snapshot_root: Path,
+) -> tuple[sqlite3.Connection, dict[str, object]]:
     core = _semantic_core_fixture()
+    core.execute(
+        """
+        UPDATE metadata SET value=?
+        WHERE key='ontology_version'
+        """,
+        (CURRENT_ONTOLOGY_VERSION,),
+    )
     core.execute("DELETE FROM effective_facts")
     core.execute("DELETE FROM fact_evidence")
     core.execute("DELETE FROM facts")
+    core.execute("DELETE FROM entities")
+    core.executemany(
+        "INSERT INTO entities VALUES (?, ?)",
+        [
+            (fact_id, f"/Game/Test/{name}.{name}")
+            for fact_id, name in enumerate(PROJECTION_NAMES, start=1)
+        ],
+    )
     core.executemany(
         """
         INSERT INTO facts(
             fact_id, fact_type, value_kind, value_text, value_number,
-            value_integer, value_json, status, current
+            value_integer, value_json, status, current, fact_name,
+            subject_entity_id, scope_kind, unit, confidence,
+            ontology_version
         ) VALUES (
-            ?, ?, 'NUMBER', NULL, 1.0, NULL, NULL, 'CONFIRMED', 1
+            ?, ?, 'NUMBER', NULL, 1.0, NULL, NULL, 'CONFIRMED', 1,
+            ?, ?, 'DERIVED_STATIC', '', 'HIGH', ?
         )
         """,
         [
-            (1, "STATUS_EFFECT"),
-            (2, "LOOT_ENTRY"),
-            (3, "ITEM_PROPERTY"),
-            (4, "HARVEST_RULE"),
-            (5, "MISSION_REWARD"),
+            (1, "STATUS_EFFECT", "Fact1", 1, CURRENT_ONTOLOGY_VERSION),
+            (2, "LOOT_ENTRY", "Fact2", 2, CURRENT_ONTOLOGY_VERSION),
+            (3, "ITEM_PROPERTY", "Fact3", 3, CURRENT_ONTOLOGY_VERSION),
+            (4, "STATUS_VALUE", "Fact4", 4, CURRENT_ONTOLOGY_VERSION),
+            (5, "HARVEST_RULE", "Fact5", 5, CURRENT_ONTOLOGY_VERSION),
+            (6, "MISSION_REWARD", "Fact6", 6, CURRENT_ONTOLOGY_VERSION),
         ],
     )
     core.executemany(
-        "INSERT INTO fact_evidence VALUES (?, 1, ?)",
+        """
+        INSERT INTO facts(
+            fact_id, fact_type, value_kind, value_text, value_number,
+            value_integer, value_json, status, current, fact_name,
+            subject_entity_id, scope_kind, unit, confidence,
+            ontology_version
+        ) VALUES (
+            ?, 'DECLARED_DEFAULT', 'NUMBER', NULL, 1.0,
+            NULL, NULL, 'CONFIRMED', 1, ?, ?, 'DECLARED', '',
+            'HIGH', ?
+        )
+        """,
         [
-            (fact_id, f"fixture://projection/{fact_id}")
-            for fact_id in range(1, 6)
+            (
+                100 + fact_id,
+                f"Fact{fact_id}",
+                fact_id,
+                CURRENT_ONTOLOGY_VERSION,
+            )
+            for fact_id in range(1, 7)
+        ],
+    )
+    core.executemany(
+        "INSERT INTO fact_evidence VALUES (?, 1, ?, ?)",
+        [
+            (
+                fact_id,
+                f"fixture://projection/{fact_id}",
+                "SEMANTIC_ADAPTER:"
+                f"{PROJECTION_ADAPTER_RULES[name][1]}",
+            )
+            for fact_id, name in enumerate(PROJECTION_NAMES, start=1)
+        ]
+        + [
+            (
+                100 + fact_id,
+                f"fixture://projection/{fact_id}",
+                "DEFAULT_VALUE_ACTUAL",
+            )
+            for fact_id in range(1, 7)
         ],
     )
     core.executemany(
@@ -169,26 +314,270 @@ def _projection_fixture() -> tuple[sqlite3.Connection, dict[str, object]]:
             1, 'EFFECTIVE_DEFAULT', ?, ?, 'RESOLVED'
         )
         """,
-        [(f"Fact{fact_id}", fact_id) for fact_id in range(1, 6)],
+        [(f"Fact{fact_id}", fact_id) for fact_id in range(1, 7)],
     )
     core.executemany(
-        "INSERT INTO projection_runs VALUES (?, 'v1', 1, 'VALID')",
-        [(name,) for name in PROJECTION_NAMES],
+        """
+        INSERT INTO semantic_adapter_runs VALUES (?, ?, 'VALID')
+        """,
+        [
+            (adapter_id, CURRENT_ADAPTER_VERSION)
+            for adapter_id, _rule_id in PROJECTION_ADAPTER_RULES.values()
+        ],
     )
-    manifest: dict[str, object] = {
-        "counts": {
-            "domainProjections": {
-                name: {
-                    "rows": 1,
-                    "reviewedRows": 1,
-                    "reviewStatus": "FIXTURE_EXACT",
-                    "validationStatus": "VALID",
+    core.executemany(
+        """
+        INSERT INTO semantic_adapter_decisions(
+            decision_key, adapter_id, adapter_version, rule_id,
+            source_mode, property_name, decision_status, reason_code,
+            source_fact_id, semantic_fact_id, legacy_lineage_id,
+            source_revision_id, evidence_uri
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, 'PROMOTED',
+            'VERIFIED', ?, ?, ?, 1, ?
+        )
+        """,
+        [
+            (
+                f"fixture-decision://{fact_id}",
+                PROJECTION_ADAPTER_RULES[name][0],
+                CURRENT_ADAPTER_VERSION,
+                PROJECTION_ADAPTER_RULES[name][1],
+                PROJECTION_SOURCE_MODES[name],
+                f"Fact{fact_id}",
+                100 + fact_id,
+                fact_id,
+                (
+                    fact_id
+                    if PROJECTION_SOURCE_MODES[name] == "LEGACY_TABLE"
+                    else None
+                ),
+                f"fixture://projection/{fact_id}",
+            )
+            for fact_id, name in enumerate(PROJECTION_NAMES, start=1)
+        ],
+    )
+    revision_hashes = {
+        name: hashlib.sha256(
+            f"fixture-revision:{name}".encode("utf-8")
+        ).hexdigest()
+        for name in PROJECTION_NAMES
+    }
+    core.executemany(
+        """
+        INSERT INTO projection_runs VALUES (
+            ?, 'v2', ?, ?,
+            '2026-07-27T00:00:00+00:00', 1, 'VALID'
+        )
+        """,
+        [
+            (name, revision_hashes[name], CURRENT_ONTOLOGY_VERSION)
+            for name in PROJECTION_NAMES
+        ],
+    )
+    exports = snapshot_root / "domain_exports"
+    exports.mkdir(parents=True)
+    review_contract = {
+        "schema": "ark-kb-projection-review/v1",
+        "version": "fixture-review/v1",
+        "projections": {
+            name: [
+                {
+                    "reviewId": f"fixture-review://{fact_id}",
+                    "canonicalUri": f"/Game/Test/{name}.{name}",
+                    "factType": PROJECTION_FACT_TYPES[name],
+                    "factName": f"Fact{fact_id}",
+                    "valueKind": "NUMBER",
+                    "valueNumber": 1.0,
+                    "evidenceUri": f"fixture://projection/{fact_id}",
                 }
-                for name in PROJECTION_NAMES
-            }
+            ]
+            for fact_id, name in enumerate(PROJECTION_NAMES, start=1)
+        },
+    }
+    review_path = snapshot_root / "projection_review.v1.json"
+    review_path.write_text(
+        json.dumps(
+            review_contract,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    review_config_sha256 = hashlib.sha256(
+        review_path.read_bytes()
+    ).hexdigest()
+    projection_entries: dict[str, object] = {}
+    for fact_id, name in enumerate(PROJECTION_NAMES, start=1):
+        path = exports / f"{name}.sqlite"
+        projection = sqlite3.connect(path)
+        try:
+            projection.executescript(PROJECTION_SCHEMA_SQL)
+            projection.executemany(
+                "INSERT INTO metadata VALUES (?, ?)",
+                (
+                    ("schema_version", PROJECTION_SCHEMA_VERSION),
+                    ("projection_name", name),
+                    ("projection_version", "v2"),
+                    ("source_revision_set_hash", revision_hashes[name]),
+                    ("ontology_version", CURRENT_ONTOLOGY_VERSION),
+                    ("built_at", "2026-07-27T00:00:00+00:00"),
+                    ("truth_source", "core.sqlite"),
+                    ("review_version", "fixture-review/v1"),
+                    ("review_status", "FIXTURE_EXACT"),
+                    ("review_config_sha256", review_config_sha256),
+                ),
+            )
+            projection.execute(
+                """
+                INSERT INTO projection_rows(
+                    fact_id, entity_id, canonical_uri, fact_type,
+                    fact_name, scope_kind, value_kind, value_number,
+                    unit, status, confidence, ontology_version,
+                    completeness_status,
+                    evidence_count, source_revision_set_hash
+                ) VALUES (
+                    ?, ?, ?, ?, ?, 'DERIVED_STATIC', 'NUMBER', 1.0,
+                    '', 'CONFIRMED', 'HIGH', ?, 'COMPLETE', 1, ?
+                )
+                """,
+                (
+                    fact_id,
+                    fact_id,
+                    f"/Game/Test/{name}.{name}",
+                    PROJECTION_FACT_TYPES[name],
+                    f"Fact{fact_id}",
+                    CURRENT_ONTOLOGY_VERSION,
+                    revision_hashes[name],
+                ),
+            )
+            projection.execute(
+                """
+                INSERT INTO projection_evidence VALUES (
+                    ?, 1, ?, ?, 'FRESH'
+                )
+                """,
+                (
+                    fact_id,
+                    f"fixture://projection/{fact_id}",
+                    "SEMANTIC_ADAPTER:"
+                    f"{PROJECTION_ADAPTER_RULES[name][1]}",
+                ),
+            )
+            projection.execute(
+                """
+                INSERT INTO projection_lineage VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, 'VERIFIED'
+                )
+                """,
+                (
+                    f"fixture-decision://{fact_id}",
+                    fact_id,
+                    100 + fact_id,
+                    (
+                        fact_id
+                        if PROJECTION_SOURCE_MODES[name] == "LEGACY_TABLE"
+                        else None
+                    ),
+                    PROJECTION_ADAPTER_RULES[name][0],
+                    CURRENT_ADAPTER_VERSION,
+                    PROJECTION_ADAPTER_RULES[name][1],
+                    PROJECTION_SOURCE_MODES[name],
+                ),
+            )
+            projection.execute(
+                """
+                INSERT INTO projection_reviews VALUES (
+                    ?, ?, 'FIXTURE_EXACT', ?, 'fixture-review/v1'
+                )
+                """,
+                (
+                    f"fixture-review://{fact_id}",
+                    fact_id,
+                    f"fixture://projection/{fact_id}",
+                ),
+            )
+            content_digest = (
+                compute_projection_artifact_content_digest(projection)
+            )
+            projection.execute(
+                "INSERT INTO metadata VALUES ('content_digest', ?)",
+                (content_digest,),
+            )
+            projection.commit()
+        finally:
+            projection.close()
+        table_counts = {
+            "metadata": 11,
+            "projection_evidence": 1,
+            "projection_lineage": 1,
+            "projection_reviews": 1,
+            "projection_rows": 1,
+        }
+        projection_entries[name] = {
+            "path": path.name,
+            "schemaVersion": PROJECTION_SCHEMA_VERSION,
+            "projectionVersion": "v2",
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "foreignKeyViolations": 0,
+            "tableCounts": table_counts,
+            "rows": 1,
+            "evidenceRows": 1,
+            "lineageRows": 1,
+            "integrity": "ok",
+            "sourceRevisionSetHash": revision_hashes[name],
+            "contentDigest": content_digest,
+            "ontologyVersion": CURRENT_ONTOLOGY_VERSION,
+            "validationStatus": "VALID",
+            "reviewVersion": "fixture-review/v1",
+            "reviewConfigSha256": review_config_sha256,
+            "reviewStatus": "FIXTURE_EXACT",
+            "reviewedRows": 1,
+            "reviewFailures": [],
+            "completeRows": 1,
+            "partialRows": 0,
+            "unspecifiedRows": 0,
+        }
+    manifest: dict[str, object] = {
+        "ontologyVersion": CURRENT_ONTOLOGY_VERSION,
+        "counts": {
+            "domainProjections": projection_entries
         }
     }
     return core, manifest
+
+
+def _set_artifact_ontology_version(
+    *,
+    snapshot_root: Path,
+    manifest: dict[str, object],
+    projection_names: tuple[str, ...],
+    ontology_version: str,
+) -> None:
+    entries = manifest["counts"]["domainProjections"]
+    for projection_name in projection_names:
+        path = (
+            snapshot_root
+            / "domain_exports"
+            / f"{projection_name}.sqlite"
+        )
+        projection = sqlite3.connect(path)
+        try:
+            projection.execute(
+                """
+                UPDATE metadata SET value=?
+                WHERE key='ontology_version'
+                """,
+                (ontology_version,),
+            )
+            projection.commit()
+        finally:
+            projection.close()
+        entry = entries[projection_name]
+        entry["bytes"] = path.stat().st_size
+        entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class KnowledgeQualityGateTests(unittest.TestCase):
@@ -327,11 +716,11 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         metrics = _semantic_fact_metrics(core)
 
         self.assertEqual(metrics["totalFacts"], 6)
-        self.assertEqual(metrics["semanticFacts"], 3)
+        self.assertEqual(metrics["semanticFacts"], 0)
         self.assertEqual(metrics["usableValueFacts"], 3)
-        self.assertEqual(metrics["freshEvidenceSemanticFacts"], 2)
+        self.assertEqual(metrics["freshEvidenceSemanticFacts"], 0)
         self.assertAlmostEqual(metrics["usableValueFactRate"], 0.5)
-        self.assertAlmostEqual(metrics["semanticFreshEvidenceRate"], 2 / 3)
+        self.assertEqual(metrics["semanticFreshEvidenceRate"], 0.0)
         self.assertEqual(metrics["totalEffectiveFacts"], 7)
         self.assertEqual(metrics["usableEffectiveFacts"], 2)
         self.assertAlmostEqual(metrics["effectiveUsableValueRate"], 2 / 7)
@@ -429,10 +818,66 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         metrics = _semantic_fact_metrics(core)
 
         self.assertEqual(metrics["totalFacts"], 14)
-        self.assertEqual(metrics["semanticFacts"], 7)
+        self.assertEqual(metrics["semanticFacts"], 0)
         self.assertEqual(metrics["usableValueFacts"], 7)
         self.assertAlmostEqual(metrics["usableValueFactRate"], 0.5)
         core.close()
+
+    def test_semantic_fact_metrics_count_only_active_adapter_owned_facts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            core, _manifest = _projection_fixture(Path(temporary))
+
+            metrics = _semantic_fact_metrics(core)
+
+            self.assertEqual(metrics["totalFacts"], 12)
+            self.assertEqual(metrics["usableValueFacts"], 12)
+            self.assertEqual(metrics["semanticFacts"], 6)
+            self.assertEqual(metrics["freshEvidenceSemanticFacts"], 6)
+            self.assertEqual(metrics["semanticFreshEvidenceRate"], 1.0)
+
+            core.execute(
+                """
+                UPDATE source_revisions
+                SET freshness_status='STALE'
+                WHERE revision_id=1
+                """
+            )
+            stale_metrics = _semantic_fact_metrics(core)
+            self.assertEqual(stale_metrics["semanticFacts"], 6)
+            self.assertEqual(
+                stale_metrics["freshEvidenceSemanticFacts"],
+                0,
+            )
+            self.assertEqual(
+                stale_metrics["semanticFreshEvidenceRate"],
+                0.0,
+            )
+            core.close()
+
+    def test_privacy_scan_detects_raw_and_json_escaped_local_paths(self):
+        payload = {
+            "nested": {
+                "path": r"C:\Users\learner\private\report.json",
+            }
+        }
+
+        self.assertEqual(
+            _privacy_scan(payload),
+            ["windows_absolute_path"],
+        )
+        self.assertEqual(
+            _privacy_scan(json.dumps(payload)),
+            ["windows_absolute_path"],
+        )
+        self.assertEqual(
+            _privacy_scan(
+                {
+                    "asset": "/Game/Test/Asset.Asset",
+                    "contract": "ontology/projection_review.v1.json",
+                }
+            ),
+            [],
+        )
 
     def test_effective_candidate_gate_matches_one_selection_only_to_resolved_row(
         self,
@@ -566,9 +1011,17 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         core.close()
 
     def test_projection_metrics_require_reviewed_nonzero_usable_fresh_rows(self):
-        core, manifest = _projection_fixture()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        snapshot_root = Path(temporary.name)
+        core, manifest = _projection_fixture(snapshot_root)
 
-        ready = _semantic_projection_metrics(core, manifest)
+        ready = _semantic_projection_metrics(
+            core,
+            manifest,
+            snapshot_root=snapshot_root,
+            expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+        )
 
         self.assertTrue(all(item["ready"] for item in ready.values()))
         self.assertEqual(ready["buff_effects"]["freshEvidenceRows"], 1)
@@ -599,7 +1052,12 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         )
         domain_manifest["harvest_rules"]["rows"] = 0
 
-        blocked = _semantic_projection_metrics(core, manifest)
+        blocked = _semantic_projection_metrics(
+            core,
+            manifest,
+            snapshot_root=snapshot_root,
+            expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+        )
 
         self.assertFalse(blocked["loot_entries"]["ready"])
         self.assertFalse(blocked["item_properties"]["ready"])
@@ -608,9 +1066,17 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         core.close()
 
     def test_semantic_quality_gates_are_critical_and_fail_closed(self):
-        core, manifest = _projection_fixture()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        snapshot_root = Path(temporary.name)
+        core, manifest = _projection_fixture(snapshot_root)
 
-        gates = semantic_quality_gates(core, manifest)
+        gates = semantic_quality_gates(
+            core,
+            manifest,
+            snapshot_root=snapshot_root,
+            expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+        )
 
         self.assertEqual(len(gates), 10)
         self.assertTrue(all(gate["critical"] for gate in gates))
@@ -619,12 +1085,315 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         manifest["counts"]["domainProjections"]["buff_effects"].pop(
             "reviewedRows"
         )
-        blocked = semantic_quality_gates(core, manifest)
+        blocked = semantic_quality_gates(
+            core,
+            manifest,
+            snapshot_root=snapshot_root,
+            expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+        )
         by_id = {gate["id"]: gate for gate in blocked}
         self.assertFalse(
             by_id["projections.buff_effects.semantic_ready"]["passed"]
         )
         core.close()
+
+    def test_projection_metrics_require_v2_active_lineage_and_current_source(self):
+        cases = (
+            (
+                "v1",
+                lambda core, manifest: (
+                    core.execute(
+                        """
+                        UPDATE projection_runs
+                        SET projection_version='v1'
+                        WHERE projection_name='buff_effects'
+                        """
+                    ),
+                    manifest["counts"]["domainProjections"][
+                        "buff_effects"
+                    ].update({"projectionVersion": "v1"}),
+                ),
+                "buff_effects",
+            ),
+            (
+                "no-lineage",
+                lambda core, _manifest: core.execute(
+                    """
+                    DELETE FROM semantic_adapter_decisions
+                    WHERE semantic_fact_id=2
+                    """
+                ),
+                "loot_entries",
+            ),
+            (
+                "source-revoked",
+                lambda core, _manifest: core.execute(
+                    "UPDATE facts SET current=0 WHERE fact_id=103"
+                ),
+                "item_properties",
+            ),
+            (
+                "fact-ontology-stale",
+                lambda core, _manifest: core.execute(
+                    """
+                    UPDATE facts
+                    SET ontology_version='ark-fact-types/v1'
+                    WHERE fact_id IN (1, 101)
+                    """
+                ),
+                "buff_effects",
+            ),
+        )
+        for label, mutate, projection_name in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    snapshot_root = Path(temp_dir)
+                    core, manifest = _projection_fixture(snapshot_root)
+                    mutate(core, manifest)
+
+                    metrics = _semantic_projection_metrics(
+                        core,
+                        manifest,
+                        snapshot_root=snapshot_root,
+                        expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+                    )
+
+                    self.assertFalse(metrics[projection_name]["ready"])
+                    core.close()
+
+    def test_projection_artifacts_missing_corrupt_or_replaced_fail_closed(self):
+        cases = ("missing", "corrupt", "replaced")
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    snapshot_root = Path(temp_dir)
+                    core, manifest = _projection_fixture(snapshot_root)
+                    exports = snapshot_root / "domain_exports"
+                    buff = exports / "buff_effects.sqlite"
+                    if mutation == "missing":
+                        buff.unlink()
+                    elif mutation == "corrupt":
+                        buff.write_bytes(b"not-a-sqlite-database")
+                    else:
+                        shutil.copyfile(
+                            exports / "loot_entries.sqlite",
+                            buff,
+                        )
+
+                    metrics = _semantic_projection_metrics(
+                        core,
+                        manifest,
+                        snapshot_root=snapshot_root,
+                        expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+                    )
+                    integrity = _integrity_metrics(snapshot_root)
+
+                    self.assertFalse(metrics["buff_effects"]["ready"])
+                    self.assertFalse(
+                        metrics["buff_effects"]["artifactVerified"]
+                    )
+                    projection_key = "domain_exports/buff_effects.sqlite"
+                    self.assertIn(projection_key, integrity)
+                    self.assertFalse(
+                        bool(integrity[projection_key]["verified"])
+                    )
+                    core.close()
+
+    def test_projection_artifact_content_tamper_fails_with_new_file_digest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_root = Path(temp_dir)
+            core, manifest = _projection_fixture(snapshot_root)
+            path = (
+                snapshot_root
+                / "domain_exports"
+                / "buff_effects.sqlite"
+            )
+            projection = sqlite3.connect(path)
+            try:
+                projection.execute(
+                    """
+                    UPDATE projection_rows
+                    SET value_number=999999.0
+                    """
+                )
+                tampered_content_digest = (
+                    compute_projection_artifact_content_digest(
+                        projection
+                    )
+                )
+                projection.execute(
+                    """
+                    UPDATE metadata
+                    SET value=?
+                    WHERE key='content_digest'
+                    """,
+                    (tampered_content_digest,),
+                )
+                projection.commit()
+            finally:
+                projection.close()
+
+            entry = manifest["counts"]["domainProjections"][
+                "buff_effects"
+            ]
+            entry["contentDigest"] = tampered_content_digest
+            entry["bytes"] = path.stat().st_size
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+            metrics = _semantic_projection_metrics(
+                core,
+                manifest,
+                snapshot_root=snapshot_root,
+                expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+            )
+
+            self.assertFalse(metrics["buff_effects"]["ready"])
+            self.assertFalse(
+                metrics["buff_effects"]["artifact"]["contentDigestMatches"]
+            )
+            self.assertEqual(
+                metrics["buff_effects"]["artifact"]["contentDigest"],
+                tampered_content_digest,
+            )
+            self.assertNotEqual(
+                metrics["buff_effects"]["artifact"][
+                    "expectedContentDigest"
+                ],
+                tampered_content_digest,
+            )
+            core.close()
+
+    def test_projection_fake_review_fails_with_recomputed_summaries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_root = Path(temp_dir)
+            core, manifest = _projection_fixture(snapshot_root)
+            path = (
+                snapshot_root
+                / "domain_exports"
+                / "buff_effects.sqlite"
+            )
+            projection = sqlite3.connect(path)
+            try:
+                projection.execute(
+                    """
+                    INSERT INTO projection_reviews VALUES (
+                        'fake-review', 1, 'FIXTURE_EXACT',
+                        'fixture://projection/1', 'fixture-review/v1'
+                    )
+                    """
+                )
+                tampered_content_digest = (
+                    compute_projection_artifact_content_digest(
+                        projection
+                    )
+                )
+                projection.execute(
+                    """
+                    UPDATE metadata
+                    SET value=?
+                    WHERE key='content_digest'
+                    """,
+                    (tampered_content_digest,),
+                )
+                projection.commit()
+            finally:
+                projection.close()
+
+            entry = manifest["counts"]["domainProjections"][
+                "buff_effects"
+            ]
+            entry["contentDigest"] = tampered_content_digest
+            entry["tableCounts"]["projection_reviews"] = 2
+            entry["bytes"] = path.stat().st_size
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+            metrics = _semantic_projection_metrics(
+                core,
+                manifest,
+                snapshot_root=snapshot_root,
+                expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+            )
+
+            artifact = metrics["buff_effects"]["artifact"]
+            self.assertFalse(metrics["buff_effects"]["ready"])
+            self.assertFalse(artifact["reviewContractMatches"])
+            self.assertFalse(artifact["contentDigestMatches"])
+            self.assertEqual(
+                artifact["contentDigest"],
+                tampered_content_digest,
+            )
+            core.close()
+
+    def test_projection_artifact_ontology_must_match_core_manifest_and_loader(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_root = Path(temp_dir)
+            core, manifest = _projection_fixture(snapshot_root)
+            _set_artifact_ontology_version(
+                snapshot_root=snapshot_root,
+                manifest=manifest,
+                projection_names=("buff_effects",),
+                ontology_version="mismatched-ontology",
+            )
+
+            metrics = _semantic_projection_metrics(
+                core,
+                manifest,
+                snapshot_root=snapshot_root,
+                expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+            )
+
+            self.assertFalse(metrics["buff_effects"]["ready"])
+            self.assertFalse(metrics["buff_effects"]["artifactVerified"])
+            core.close()
+
+    def test_old_fact_types_v1_snapshot_fails_against_current_loader(self):
+        old_ontology_version = CURRENT_ONTOLOGY_VERSION.replace(
+            "ark-fact-types/v2",
+            "ark-fact-types/v1",
+        )
+        self.assertNotEqual(old_ontology_version, CURRENT_ONTOLOGY_VERSION)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_root = Path(temp_dir)
+            core, manifest = _projection_fixture(snapshot_root)
+            core.execute(
+                """
+                UPDATE metadata SET value=?
+                WHERE key='ontology_version'
+                """,
+                (old_ontology_version,),
+            )
+            core.execute(
+                "UPDATE projection_runs SET ontology_version=?",
+                (old_ontology_version,),
+            )
+            manifest["ontologyVersion"] = old_ontology_version
+            entries = manifest["counts"]["domainProjections"]
+            for entry in entries.values():
+                entry["ontologyVersion"] = old_ontology_version
+            _set_artifact_ontology_version(
+                snapshot_root=snapshot_root,
+                manifest=manifest,
+                projection_names=PROJECTION_NAMES,
+                ontology_version=old_ontology_version,
+            )
+
+            metrics = _semantic_projection_metrics(
+                core,
+                manifest,
+                snapshot_root=snapshot_root,
+                expected_ontology_version=CURRENT_ONTOLOGY_VERSION,
+            )
+
+            self.assertTrue(
+                all(not item["ready"] for item in metrics.values())
+            )
+            self.assertTrue(
+                all(
+                    not item["ontologyVersionsMatch"]
+                    for item in metrics.values()
+                )
+            )
+            core.close()
 
 
 if __name__ == "__main__":

@@ -140,6 +140,7 @@ class VNextKnowledgeService:
                 "evidence": [],
                 "capabilities": {
                     "effectiveCandidateExplanations": False,
+                    "semanticAdapterDerivations": False,
                 },
                 "gap": [
                     {
@@ -172,7 +173,7 @@ class VNextKnowledgeService:
                 {
                     "code": "KB_VNEXT_SCHEMA_MIGRATION_REQUIRED",
                     "detail": (
-                        "Build an ark-kb-core/v2 snapshot before enabling "
+                        "Build an ark-kb-core/v3 snapshot before enabling "
                         "vNext effective-default reads."
                     ),
                 }
@@ -206,6 +207,9 @@ class VNextKnowledgeService:
             "capabilities": {
                 "effectiveCandidateExplanations": bool(
                     capabilities["effectiveCandidateExplanations"]
+                ),
+                "semanticAdapterDerivations": bool(
+                    capabilities["semanticAdapterDerivations"]
                 ),
             },
             "gap": gaps,

@@ -161,6 +161,23 @@ def _remove_effective_candidate_capability(root: Path) -> None:
         core.close()
 
 
+def _remove_semantic_derivation_capability(root: Path) -> None:
+    core = sqlite3.connect(root / "core.sqlite")
+    try:
+        core.execute("DROP TABLE semantic_adapter_decisions")
+        core.execute("DROP TABLE semantic_adapter_runs")
+        core.execute(
+            """
+            UPDATE metadata
+            SET value='ark-kb-core/v2'
+            WHERE key='schema_version'
+            """
+        )
+        core.commit()
+    finally:
+        core.close()
+
+
 class KnowledgeApiTests(unittest.TestCase):
     def test_http_routes_inherit_session_origin_and_host_security(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -326,11 +343,33 @@ class KnowledgeApiTests(unittest.TestCase):
             "SCHEMA_MIGRATION_REQUIRED",
         )
         self.assertIn(
-            "rebuild_core_v2_snapshot",
+            "rebuild_core_v3_snapshot",
             {
                 item["operation"]
                 for item in result["recommendedProbes"]
             },
+        )
+
+    def test_v2_core_without_semantic_derivations_requires_migration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            _remove_semantic_derivation_capability(root)
+
+            health = service.health()
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "MIGRATION_REQUIRED")
+        self.assertEqual(health["schemaVersion"], "ark-kb-core/v2")
+        self.assertTrue(
+            health["capabilities"]["effectiveCandidateExplanations"]
+        )
+        self.assertFalse(
+            health["capabilities"]["semanticAdapterDerivations"]
+        )
+        self.assertEqual(
+            health["gap"][0]["code"],
+            "KB_VNEXT_SCHEMA_MIGRATION_REQUIRED",
         )
 
     def test_effective_defaults_expose_unresolved_rows_without_stringifying_none(

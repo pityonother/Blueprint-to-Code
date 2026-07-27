@@ -302,7 +302,7 @@ class KnowledgeQueryPlannerTests(unittest.TestCase):
             {item["code"] for item in result["missingRequirements"]},
         )
         self.assertIn(
-            "rebuild_core_v2_snapshot",
+            "rebuild_core_v3_snapshot",
             {
                 item["operation"]
                 for item in result["recommendedProbes"]

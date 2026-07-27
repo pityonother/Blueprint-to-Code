@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Mapping
 
+from .adapters import materialize_semantic_adapters
 from .benchmark import materialize_benchmark_queries
 from .blueprint_ingest import materialize_blueprint_defaults
 from .class_hierarchy import CLASS_TABLES_SQL, materialize_discovery_classes
@@ -381,6 +382,56 @@ CREATE TABLE legacy_lineage(
     FOREIGN KEY(source_revision_id) REFERENCES source_revisions(revision_id)
 );
 
+CREATE TABLE semantic_adapter_runs(
+    adapter_id TEXT NOT NULL,
+    adapter_version TEXT NOT NULL,
+    built_at TEXT NOT NULL,
+    promoted_fact_count INTEGER NOT NULL,
+    promoted_decision_count INTEGER NOT NULL,
+    rejected_decision_count INTEGER NOT NULL,
+    validation_status TEXT NOT NULL,
+    PRIMARY KEY(adapter_id, adapter_version)
+) WITHOUT ROWID;
+
+CREATE TABLE semantic_adapter_decisions(
+    decision_key TEXT PRIMARY KEY,
+    adapter_id TEXT NOT NULL,
+    adapter_version TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    source_mode TEXT NOT NULL,
+    object_path TEXT NOT NULL,
+    property_name TEXT NOT NULL,
+    decision_status TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    source_fact_id INTEGER,
+    semantic_fact_id INTEGER,
+    legacy_lineage_id INTEGER,
+    source_revision_id INTEGER,
+    evidence_uri TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    CHECK(decision_status IN ('PROMOTED', 'LEGACY_UNVERIFIED')),
+    CHECK(source_mode IN ('CORE_TYPED_FACT', 'LEGACY_TABLE')),
+    CHECK(
+        decision_status<>'PROMOTED'
+        OR source_mode<>'LEGACY_TABLE'
+        OR legacy_lineage_id IS NOT NULL
+    ),
+    CHECK(
+        (decision_status='PROMOTED'
+         AND source_fact_id IS NOT NULL
+         AND semantic_fact_id IS NOT NULL
+         AND source_revision_id IS NOT NULL
+         AND evidence_uri<>'')
+        OR
+        (decision_status='LEGACY_UNVERIFIED'
+         AND semantic_fact_id IS NULL)
+    ),
+    FOREIGN KEY(source_fact_id) REFERENCES facts(fact_id),
+    FOREIGN KEY(semantic_fact_id) REFERENCES facts(fact_id),
+    FOREIGN KEY(legacy_lineage_id) REFERENCES legacy_lineage(lineage_id),
+    FOREIGN KEY(source_revision_id) REFERENCES source_revisions(revision_id)
+) WITHOUT ROWID;
+
 CREATE TABLE projection_runs(
     projection_name TEXT NOT NULL,
     projection_version TEXT NOT NULL,
@@ -490,6 +541,14 @@ CREATE INDEX idx_invalidation_queue_status
     ON invalidation_queue(status, downstream_kind, downstream_id);
 CREATE INDEX idx_legacy_lineage_source
     ON legacy_lineage(legacy_database, legacy_table, legacy_primary_key);
+CREATE INDEX idx_semantic_adapter_decision_fact
+    ON semantic_adapter_decisions(
+        semantic_fact_id, source_fact_id, decision_status
+    );
+CREATE INDEX idx_semantic_adapter_decision_lineage
+    ON semantic_adapter_decisions(
+        legacy_lineage_id, adapter_id, decision_status
+    );
 CREATE INDEX idx_native_qualified_symbol
     ON native_functions(qualified_symbol, rva);
 CREATE INDEX idx_native_blueprint_entity
@@ -1206,6 +1265,12 @@ def build_core_database(
             legacy_root=legacy_kb_root,
             generated_at=generated_at,
         )
+        semantic_adapter_counts = materialize_semantic_adapters(
+            core=connection,
+            legacy_root=legacy_kb_root,
+            ontology=ontology,
+            generated_at=generated_at,
+        )
         invalidation_counts = rebuild_invalidation_dependencies(connection)
         benchmark_counts = materialize_benchmark_queries(connection)
         connection.execute("ANALYZE main")
@@ -1240,7 +1305,37 @@ def build_core_database(
             "legacyResolvedEntities": int(
                 legacy_counts["resolvedEntities"]
             ),
-            "legacyUnverified": int(legacy_counts["legacyUnverified"]),
+            "legacyUnverified": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM legacy_lineage
+                    WHERE status='LEGACY_UNVERIFIED'
+                    """
+                ).fetchone()[0]
+            ),
+            "legacySemanticallyVerified": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM legacy_lineage
+                    WHERE status='SEMANTICALLY_VERIFIED'
+                    """
+                ).fetchone()[0]
+            ),
+            "semanticAdapters": int(
+                semantic_adapter_counts["adapters"]
+            ),
+            "semanticFacts": int(
+                semantic_adapter_counts["promotedFacts"]
+            ),
+            "semanticPromotedDecisions": int(
+                semantic_adapter_counts["promotedDecisions"]
+            ),
+            "semanticRejectedDecisions": int(
+                semantic_adapter_counts["rejectedDecisions"]
+            ),
+            "semanticAdaptersByDomain": semantic_adapter_counts[
+                "byAdapter"
+            ],
         }
     finally:
         discovery.close()
