@@ -13,7 +13,6 @@ import json
 import sqlite3
 from bisect import bisect_right
 from collections import defaultdict
-from itertools import groupby
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -58,7 +57,7 @@ PERCENTILE_METRICS = (
 
 ROLE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS role_metrics (
-    entity_uri TEXT PRIMARY KEY,
+    entity_id INTEGER PRIMARY KEY,
     percentile_group TEXT NOT NULL,
     descendant_count INTEGER NOT NULL,
     descendant_log1p REAL NOT NULL,
@@ -85,24 +84,27 @@ CREATE TABLE IF NOT EXISTS role_metrics (
     query_demand_log1p REAL NOT NULL,
     query_demand_percentile REAL NOT NULL,
     semantic_qualifications_json TEXT NOT NULL,
-    classifier_version TEXT NOT NULL
+    classifier_version TEXT NOT NULL,
+    FOREIGN KEY(entity_id) REFERENCES entities(entity_id)
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_roles (
-    entity_uri TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
     role TEXT NOT NULL,
     confidence TEXT NOT NULL,
     status TEXT NOT NULL,
     reasons_json TEXT NOT NULL,
     classifier_version TEXT NOT NULL,
-    PRIMARY KEY(entity_uri, role)
+    PRIMARY KEY(entity_id, role),
+    FOREIGN KEY(entity_id) REFERENCES entities(entity_id)
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_depth_policies (
-    entity_uri TEXT PRIMARY KEY,
+    entity_id INTEGER PRIMARY KEY,
     depth_policy TEXT NOT NULL,
     reasons_json TEXT NOT NULL,
-    classifier_version TEXT NOT NULL
+    classifier_version TEXT NOT NULL,
+    FOREIGN KEY(entity_id) REFERENCES entities(entity_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_role_metrics_group
@@ -632,7 +634,46 @@ def _source_role_rows(
             0 AS material_parameter_input_count,
             0 AS world_placement_evidence_count,
             0 AS is_actor_component,
-            '' AS semantic_class_category
+            '' AS semantic_class_category,
+            a.asset_class_path AS percentile_group,
+            (
+                COALESCE(r.registration_owner_count, 0)
+                + COALESCE(a.registry_usage_count, 0)
+            ) AS registration_count,
+            (
+                COALESCE(a.query_hit_count, 0)
+                + COALESCE(a.existing_report_count, 0)
+            ) AS query_demand_count,
+            CUME_DIST() OVER (
+                PARTITION BY a.asset_class_path
+                ORDER BY a.descendant_count
+            ) AS descendant_percentile,
+            CUME_DIST() OVER (
+                PARTITION BY a.asset_class_path
+                ORDER BY a.referencer_count
+            ) AS referencer_percentile,
+            CUME_DIST() OVER (
+                PARTITION BY a.asset_class_path
+                ORDER BY a.component_reuse_count
+            ) AS component_reuse_percentile,
+            CUME_DIST() OVER (
+                PARTITION BY a.asset_class_path
+                ORDER BY a.cross_domain_reference_count
+            ) AS cross_domain_percentile,
+            CUME_DIST() OVER (
+                PARTITION BY a.asset_class_path
+                ORDER BY (
+                    COALESCE(r.registration_owner_count, 0)
+                    + COALESCE(a.registry_usage_count, 0)
+                )
+            ) AS registration_percentile,
+            CUME_DIST() OVER (
+                PARTITION BY a.asset_class_path
+                ORDER BY (
+                    COALESCE(a.query_hit_count, 0)
+                    + COALESCE(a.existing_report_count, 0)
+                )
+            ) AS query_demand_percentile
         FROM assets AS a
         LEFT JOIN registration_counts AS r
           ON r.owner_object_path=a.object_path
@@ -651,27 +692,73 @@ def materialize_discovery_roles(
     target.execute("DELETE FROM role_metrics")
     target.execute("DELETE FROM knowledge_roles")
     target.execute("DELETE FROM knowledge_depth_policies")
+    entity_ids = {
+        str(uri): int(entity_id)
+        for uri, entity_id in target.execute(
+            "SELECT canonical_uri, entity_id FROM entities"
+        )
+    }
+    categories_by_entity: dict[int, set[str]] = defaultdict(set)
+    if target.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type='table' AND name='class_ancestry_categories'
+        """
+    ).fetchone():
+        for entity_id, category in target.execute(
+            """
+            SELECT DISTINCT a.entity_id, c.category
+            FROM asset_class_assignments AS a
+            JOIN class_ancestry_categories AS c
+              ON c.class_id=a.class_id
+            """
+        ):
+            categories_by_entity[int(entity_id)].add(str(category))
 
     asset_count = 0
     role_count = 0
     depth_counts: dict[str, int] = defaultdict(int)
     rows = _source_role_rows(discovery)
-    for _group, source_group in groupby(
-        rows,
-        key=lambda row: str(row["asset_class_path"] or "UNKNOWN"),
-    ):
-        enriched = enrich_type_percentiles(
-            [dict(source) for source in source_group]
-        )
+    while source_batch := rows.fetchmany(10_000):
         metric_rows: list[tuple[object, ...]] = []
         role_rows: list[tuple[object, ...]] = []
         depth_rows: list[tuple[object, ...]] = []
-        for row in enriched:
+        for source in source_batch:
+            row = dict(source)
             entity_uri = _text(row, "object_path")
+            entity_id = entity_ids.get(entity_uri)
+            if entity_id is None:
+                continue
+            categories = categories_by_entity.get(entity_id, set())
+            row["is_actor_component"] = int("ACTOR_COMPONENT" in categories)
+            row["is_data_asset"] = int(
+                _truthy(row, "is_data_asset")
+                or "DATA_ASSET" in categories
+                or "PRIMARY_DATA_ASSET" in categories
+            )
+            row["descendant_log1p"] = math.log1p(
+                max(0, _integer(row, "descendant_count"))
+            )
+            row["referencer_log1p"] = math.log1p(
+                max(0, _integer(row, "referencer_count"))
+            )
+            row["component_reuse_log1p"] = math.log1p(
+                max(0, _integer(row, "component_reuse_count"))
+            )
+            row["cross_domain_reference_log1p"] = math.log1p(
+                max(0, _integer(row, "cross_domain_reference_count"))
+            )
+            row["registration_log1p"] = math.log1p(
+                max(0, _integer(row, "registration_count"))
+            )
+            row["query_demand_log1p"] = math.log1p(
+                max(0, _integer(row, "query_demand_count"))
+            )
             decision = classify_asset(row)
             metric_rows.append(
                 (
-                    entity_uri,
+                    entity_id,
                     _text(row, "percentile_group", "UNKNOWN"),
                     _integer(row, "descendant_count"),
                     _number(row, "descendant_log1p"),
@@ -713,6 +800,7 @@ def materialize_discovery_roles(
                 role_rows.append(
                     (
                         entity_uri,
+                        entity_id,
                         assignment.role,
                         assignment.confidence,
                         assignment.status,
@@ -722,7 +810,7 @@ def materialize_discovery_roles(
                 )
             depth_rows.append(
                 (
-                    entity_uri,
+                    entity_id,
                     decision.depth_policy,
                     _json(decision.depth_reasons),
                     ROLE_CLASSIFIER_VERSION,
@@ -742,7 +830,25 @@ def materialize_discovery_roles(
         )
         target.executemany(
             "INSERT INTO knowledge_roles VALUES (?, ?, ?, ?, ?, ?)",
-            role_rows,
+            [
+                (
+                    entity_id,
+                    role,
+                    confidence,
+                    status,
+                    reasons,
+                    version,
+                )
+                for (
+                    _entity_uri,
+                    entity_id,
+                    role,
+                    confidence,
+                    status,
+                    reasons,
+                    version,
+                ) in role_rows
+            ],
         )
         target.executemany(
             "INSERT INTO knowledge_depth_policies VALUES (?, ?, ?, ?)",

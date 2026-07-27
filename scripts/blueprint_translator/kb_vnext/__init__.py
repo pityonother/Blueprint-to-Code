@@ -15,6 +15,7 @@ from .class_hierarchy import (
 )
 from .ontology import infer_domain_memberships, load_ontology
 from .registrations import materialize_typed_registrations
+from .snapshot import build_vnext_snapshot
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -29,4 +30,5 @@ __all__ = [
     "infer_domain_memberships",
     "load_ontology",
     "materialize_typed_registrations",
+    "build_vnext_snapshot",
 ]

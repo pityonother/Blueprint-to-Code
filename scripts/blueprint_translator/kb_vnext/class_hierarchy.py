@@ -97,13 +97,14 @@ CREATE TABLE IF NOT EXISTS class_gaps (
 );
 
 CREATE TABLE IF NOT EXISTS asset_class_assignments (
-    entity_uri TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
     class_id INTEGER NOT NULL,
     assignment_kind TEXT NOT NULL,
     evidence_uri TEXT NOT NULL,
     status TEXT NOT NULL,
     confidence TEXT NOT NULL,
-    PRIMARY KEY(entity_uri, assignment_kind),
+    PRIMARY KEY(entity_id, assignment_kind),
+    FOREIGN KEY(entity_id) REFERENCES entities(entity_id),
     FOREIGN KEY(class_id) REFERENCES classes(class_id)
 );
 
@@ -282,6 +283,12 @@ def materialize_discovery_classes(
         ],
     )
     class_ids = _class_id_map(target)
+    entity_ids = {
+        str(uri): int(entity_id)
+        for uri, entity_id in target.execute(
+            "SELECT canonical_uri, entity_id FROM entities"
+        )
+    }
 
     normalized_edges: dict[tuple[int, int, str, str], tuple[object, ...]] = {}
     for row in edge_rows:
@@ -355,6 +362,9 @@ def materialize_discovery_classes(
         for source_row in batch:
             row = dict(source_row)
             entity_uri = str(row["object_path"])
+            entity_id = entity_ids.get(entity_uri)
+            if entity_id is None:
+                continue
             confidence = str(
                 row.get("identity_confidence") or "UNKNOWN"
             ).upper()
@@ -362,7 +372,7 @@ def materialize_discovery_classes(
             if generated := _known_path(row.get("generated_class_path")):
                 assignments.append(
                     (
-                        entity_uri,
+                        entity_id,
                         class_ids[generated],
                         "GENERATED_CLASS",
                         f"discovery://asset/{entity_uri}#generated-class",
@@ -378,14 +388,14 @@ def materialize_discovery_classes(
                     (
                         class_ids["/Script/Engine.Blueprint"],
                         "GENERATED_CLASS_NOT_RECOVERED",
-                        entity_uri,
+                        entity_id,
                         "NOT_RECOVERED",
                     )
                 )
             if asset_class := _known_path(row.get("asset_class_path")):
                 assignments.append(
                     (
-                        entity_uri,
+                        entity_id,
                         class_ids[asset_class],
                         "ASSET_CLASS",
                         f"discovery://asset/{entity_uri}#asset-class",
@@ -396,7 +406,7 @@ def materialize_discovery_classes(
         target.executemany(
             """
             INSERT INTO asset_class_assignments(
-                entity_uri, class_id, assignment_kind, evidence_uri,
+                entity_id, class_id, assignment_kind, evidence_uri,
                 status, confidence
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,

@@ -120,11 +120,27 @@ def _discovery_fixture() -> sqlite3.Connection:
     return connection
 
 
+def _target_fixture() -> sqlite3.Connection:
+    target = sqlite3.connect(":memory:")
+    target.execute("PRAGMA foreign_keys=ON")
+    target.executescript(
+        """
+        CREATE TABLE entities(
+            entity_id INTEGER PRIMARY KEY,
+            canonical_uri TEXT UNIQUE NOT NULL
+        );
+        INSERT INTO entities VALUES (1, '/Game/Test/PDA_Child.PDA_Child');
+        INSERT INTO entities VALUES (2, '/Game/Test/BP_Actor.BP_Actor');
+        INSERT INTO entities VALUES (3, '/Game/Test/BP_Open.BP_Open');
+        """
+    )
+    return target
+
+
 class KnowledgeClassClosureTests(unittest.TestCase):
     def test_unifies_blueprint_and_native_classes_and_classifies_data_asset(self):
         discovery = _discovery_fixture()
-        target = sqlite3.connect(":memory:")
-        target.execute("PRAGMA foreign_keys=ON")
+        target = _target_fixture()
         result = materialize_discovery_classes(discovery, target)
 
         self.assertGreater(result["classes"], 0)
@@ -161,7 +177,7 @@ class KnowledgeClassClosureTests(unittest.TestCase):
 
     def test_open_chain_and_cycle_are_not_silently_ignored(self):
         discovery = _discovery_fixture()
-        target = sqlite3.connect(":memory:")
+        target = _target_fixture()
         materialize_discovery_classes(discovery, target)
         open_path = inheritance_path_to_native_root(
             target, "/Game/Test/BP_Open.BP_Open_C"

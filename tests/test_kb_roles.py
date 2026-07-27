@@ -266,6 +266,16 @@ class KnowledgeRoleTests(unittest.TestCase):
             ],
         )
         target = sqlite3.connect(":memory:")
+        target.executescript(
+            """
+            CREATE TABLE entities(
+                entity_id INTEGER PRIMARY KEY,
+                canonical_uri TEXT UNIQUE NOT NULL
+            );
+            INSERT INTO entities VALUES (1, '/Game/Test/T.T');
+            INSERT INTO entities VALUES (2, '/Game/Test/B.B');
+            """
+        )
         result = materialize_discovery_roles(discovery, target)
         self.assertEqual(result["assets"], 2)
         texture_roles = {
@@ -274,7 +284,7 @@ class KnowledgeRoleTests(unittest.TestCase):
                 """
                 SELECT role
                 FROM knowledge_roles
-                WHERE entity_uri='/Game/Test/T.T'
+                WHERE entity_id=1
                 """
             )
         }
@@ -285,7 +295,7 @@ class KnowledgeRoleTests(unittest.TestCase):
                 """
                 SELECT depth_policy
                 FROM knowledge_depth_policies
-                WHERE entity_uri='/Game/Test/T.T'
+                WHERE entity_id=1
                 """
             ).fetchone()[0],
             "INDEX_ONLY",
