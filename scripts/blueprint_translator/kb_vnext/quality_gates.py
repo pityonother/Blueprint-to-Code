@@ -15,15 +15,28 @@ from .benchmark import run_query_benchmark
 from .invalidation import validate_effective_resolution_dependencies
 from .ontology import load_ontology
 from .projections import DOMAIN_PROJECTIONS
-from .registrations import classify_registration_property
+from .quality_contract import (
+    QUALITY_GATE_SCHEMA,
+    validate_quality_gate_contract,
+)
+from .query_planner import source_revision_is_fresh
+from .registrations import (
+    is_valid_registration_evidence_uri,
+    registration_edge_type,
+)
 from .schema_capabilities import (
     CORE_SCHEMA_VERSION,
     supports_typed_map_usage_evidence,
 )
 from .semantic_quality import semantic_quality_gates
+from .snapshot import (
+    CurrentSnapshot,
+    SNAPSHOT_SCHEMA,
+    _safe_build_id,
+    resolve_current_snapshot,
+)
 
 
-QUALITY_GATE_SCHEMA = "ark-kb-quality-gates/v1"
 OPEN_CLASS_GAPS = (
     "NATIVE_ROOT_NOT_REACHED",
     "INHERITANCE_CYCLE",
@@ -72,6 +85,57 @@ CONFIRMED_MAP_VIEW_REQUIRED_COLUMNS = frozenset(
 )
 
 
+def _resolve_quality_snapshot(snapshot_root: Path) -> CurrentSnapshot:
+    """Resolve a configured root or one direct immutable build directory."""
+
+    snapshot_root = snapshot_root.resolve()
+    try:
+        return resolve_current_snapshot(snapshot_root)
+    except FileNotFoundError:
+        manifest_path = snapshot_root / "manifest.json"
+        if not manifest_path.is_file():
+            raise
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"immutable snapshot manifest is unreadable: {manifest_path}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise ValueError(
+            f"immutable snapshot manifest must be an object: {manifest_path}"
+        )
+    build_id = _safe_build_id(manifest.get("buildId"))
+    if manifest.get("schema") != SNAPSHOT_SCHEMA:
+        raise ValueError("immutable snapshot manifest schema is unknown")
+    return CurrentSnapshot(
+        root=snapshot_root,
+        snapshot_dir=snapshot_root,
+        manifest_path=manifest_path,
+        pointer_path=manifest_path,
+        build_id=build_id,
+        manifest=manifest,
+        layout="immutable-v2-direct",
+    )
+
+
+def _immutable_configured_root(location: CurrentSnapshot) -> Path:
+    """Return the non-snapshot root where mutable reports may be written."""
+
+    if location.layout == "immutable-v2":
+        return location.root
+    if (
+        location.layout == "immutable-v2-direct"
+        and location.snapshot_dir.name == location.build_id
+        and location.snapshot_dir.parent.name == "snapshots"
+    ):
+        return location.snapshot_dir.parent.parent.resolve()
+    raise ValueError(
+        "Direct immutable snapshot reporting requires a canonical "
+        "<configured-root>/snapshots/<buildId> directory"
+    )
+
+
 def _read_only(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(
         f"file:{path.resolve().as_posix()}?mode=ro",
@@ -84,6 +148,45 @@ def _read_only(path: Path) -> sqlite3.Connection:
 
 def _ratio(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator else 0.0
+
+
+def _strict_source_revision_is_fresh(
+    *,
+    revision_id: object,
+    source_kind: object,
+    source_uri: object,
+    source_fingerprint: object,
+    producer_version: object,
+    schema_version: object,
+    generated_at: object,
+    freshness_status: object,
+) -> bool:
+    fingerprint = str(source_fingerprint or "").strip()
+    generated = str(generated_at or "").strip()
+    try:
+        timestamp = datetime.fromisoformat(
+            generated[:-1] + "+00:00"
+            if generated.endswith("Z")
+            else generated
+        )
+    except ValueError:
+        return False
+    return (
+        bool(re.fullmatch(r"[0-9a-fA-F]{64}", fingerprint))
+        and timestamp.utcoffset() is not None
+        and source_revision_is_fresh(
+            {
+                "revisionId": revision_id,
+                "sourceKind": source_kind,
+                "sourceUri": source_uri,
+                "sourceFingerprint": fingerprint,
+                "producerVersion": producer_version,
+                "schemaVersion": schema_version,
+                "generatedAt": generated,
+                "freshnessStatus": freshness_status,
+            }
+        )
+    )
 
 
 def _class_closure_metrics(
@@ -334,25 +437,38 @@ def _registration_confidence_metrics(
 ) -> dict[str, int]:
     """Count open registration claims carrying complete confidence."""
 
-    incomplete_high = """
-        upper(status) NOT IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
-        AND upper(confidence) IN ('HIGH', 'CONFIRMED')
-    """
+    def incomplete_high(alias: str = "") -> str:
+        prefix = f"{alias}." if alias else ""
+        return f"""
+            upper({prefix}status)
+              NOT IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+            AND upper({prefix}confidence) IN ('HIGH', 'CONFIRMED')
+        """
+
     metrics = {
         "typedRegistrations": int(
             core.execute(
                 f"""
                 SELECT COUNT(*) FROM typed_registrations
-                WHERE {incomplete_high}
+                WHERE {incomplete_high()}
                 """
             ).fetchone()[0]
         ),
         "registrationEdges": int(
             core.execute(
                 f"""
-                SELECT COUNT(*) FROM edges
-                WHERE edge_type='REGISTERS'
-                  AND {incomplete_high}
+                SELECT COUNT(DISTINCT edge.edge_id)
+                FROM edges AS edge
+                JOIN entities AS owner
+                  ON owner.entity_id=edge.source_entity_id
+                JOIN entities AS target
+                  ON target.entity_id=edge.target_entity_id
+                JOIN typed_registrations AS registration
+                  ON registration.owner_uri=owner.canonical_uri
+                 AND registration.target_uri=target.canonical_uri
+                 AND registration.source_property=edge.source_property
+                 AND registration.evidence_uri=edge.evidence_uri
+                WHERE {incomplete_high("edge")}
                 """
             ).fetchone()[0]
         ),
@@ -361,7 +477,7 @@ def _registration_confidence_metrics(
                 f"""
                 SELECT COUNT(*) FROM domain_memberships
                 WHERE membership_kind='TYPED_REGISTRATION'
-                  AND {incomplete_high}
+                  AND {incomplete_high()}
                 """
             ).fetchone()[0]
         ),
@@ -381,78 +497,708 @@ def _registration_confidence_gate(
         actual=dict(metrics),
         passed=contradictions == 0,
         detail=(
-            "Candidate and legacy registration claims, REGISTERS edges, "
-            "and typed memberships must not carry complete confidence."
+            "Candidate and legacy registration claims, their typed Core "
+            "edges, and typed memberships must not carry complete confidence."
         ),
     )
 
 
-def _registration_gold_metrics(project_root: Path) -> dict[str, object]:
+def _registration_lineage_metrics(
+    core: sqlite3.Connection,
+) -> dict[str, int]:
+    required_registration_columns = {
+        "owner_uri",
+        "target_uri",
+        "source_property",
+        "evidence_uri",
+        "source_revision_id",
+    }
+    required_revision_columns = {
+        "revision_id",
+        "source_kind",
+        "source_uri",
+        "source_fingerprint",
+        "producer_version",
+        "schema_version",
+        "generated_at",
+        "freshness_status",
+    }
+    table_columns = {
+        table: {
+            str(row[1])
+            for row in core.execute(f"PRAGMA table_info({table})")
+        }
+        for table in ("typed_registrations", "source_revisions")
+    }
+    if (
+        not required_registration_columns.issubset(
+            table_columns["typed_registrations"]
+        )
+        or not required_revision_columns.issubset(
+            table_columns["source_revisions"]
+        )
+    ):
+        return {"total": 0, "complete": 0, "incomplete": 0}
+    rows = list(
+        core.execute(
+            """
+            SELECT
+                registration.owner_uri,
+                registration.target_uri,
+                registration.source_property,
+                registration.evidence_uri,
+                revision.revision_id,
+                revision.source_kind,
+                revision.source_uri,
+                revision.source_fingerprint,
+                revision.producer_version,
+                revision.schema_version,
+                revision.generated_at,
+                revision.freshness_status
+            FROM typed_registrations AS registration
+            LEFT JOIN source_revisions AS revision
+              ON revision.revision_id=registration.source_revision_id
+            """
+        )
+    )
+    complete = sum(
+        bool(str(row[0] or "").strip())
+        and bool(str(row[1] or "").strip())
+        and bool(str(row[2] or "").strip())
+        and is_valid_registration_evidence_uri(row[3])
+        and _strict_source_revision_is_fresh(
+            revision_id=row[4],
+            source_kind=row[5],
+            source_uri=row[6],
+            source_fingerprint=row[7],
+            producer_version=row[8],
+            schema_version=row[9],
+            generated_at=row[10],
+            freshness_status=row[11],
+        )
+        for row in rows
+    )
+    return {
+        "total": len(rows),
+        "complete": int(complete),
+        "incomplete": len(rows) - int(complete),
+    }
+
+
+def _registration_gold_metrics(
+    project_root: Path,
+    core: sqlite3.Connection,
+) -> dict[str, object]:
+    """Evaluate explicit reviewed Owner→Target rows against persisted edges."""
+
     gold_path = (
         project_root
         / "tests"
         / "fixtures"
         / "kb_registration_gold_set.json"
     )
-    gold = json.loads(gold_path.read_text(encoding="utf-8"))
-    expected = {
-        (str(property_name), str(registration_type))
-        for property_name, registration_type in gold["cases"]
+    unavailable = {
+        "available": False,
+        "relationships": 0,
+        "positiveCases": 0,
+        "negativeCases": 0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "classificationPrecision": 0.0,
+        "classificationRecall": 0.0,
+        "ownerResolutionRate": 0.0,
+        "targetResolutionRate": 0.0,
+        "edgeMaterializationRate": 0.0,
+        "evidenceCorrectnessRate": 0.0,
+        "gapCode": "INDEPENDENT_OWNER_TARGET_REVIEW_REQUIRED",
     }
-    actual: set[tuple[str, str]] = set()
-    for property_name, _ in expected:
-        actual.update(
-            (
-                property_name,
-                result.registration_type,
-            )
-            for result in classify_registration_property(property_name)
-            if result.status == "CONFIRMED"
-        )
-    negative_predictions = sum(
-        1
-        for property_name in gold["negativeCases"]
-        for result in classify_registration_property(str(property_name))
-        if result.status == "CONFIRMED"
-    )
-    true_positive = len(expected.intersection(actual))
-    false_positive = len(actual - expected) + negative_predictions
-    precision = _ratio(true_positive, true_positive + false_positive)
-    recall = _ratio(true_positive, len(expected))
-    return {
-        "relationships": len(gold["owners"]) * len(gold["cases"]),
-        "precision": precision,
-        "recall": recall,
-        "negativeFalsePositives": negative_predictions,
+    try:
+        gold = json.loads(gold_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return unavailable
+    if (
+        not isinstance(gold, Mapping)
+        or gold.get("schema") != "ark-kb-registration-gold-set/v2"
+    ):
+        return unavailable
+    raw_cases = gold.get("relationshipCases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        return unavailable
+
+    required_fields = {
+        "ownerUri",
+        "targetUri",
+        "registrationType",
+        "sourceProperty",
+        "expectedEdgeType",
+        "expectedStatus",
+        "evidenceUri",
+        "reviewStatus",
+        "reviews",
     }
-
-
-def _role_gold_metrics(project_root: Path) -> dict[str, object]:
-    path = project_root / "tests" / "fixtures" / "kb_role_gold_set.json"
-    if not path.is_file():
-        return {
-            "available": False,
-            "assets": 0,
-            "precision": None,
-            "detail": (
-                "No independently reviewed 300-asset role gold set exists; "
-                "classifier unit cases are not counted as production gold."
-            ),
+    cases: list[Mapping[str, object]] = []
+    identities: set[tuple[str, str, str, str, str]] = set()
+    for raw_case in raw_cases:
+        if not isinstance(raw_case, Mapping) or not required_fields <= set(
+            raw_case
+        ):
+            continue
+        reviews = raw_case.get("reviews")
+        if (
+            raw_case.get("reviewStatus")
+            not in {"HUMAN_REVIEWED", "EMPIRICAL"}
+            or not isinstance(reviews, list)
+            or len(reviews) < 2
+        ):
+            continue
+        confirmed_reviews = [
+            review
+            for review in reviews
+            if isinstance(review, Mapping)
+            and str(review.get("verdict") or "").upper() == "CONFIRMED"
+        ]
+        reviewer_ids = {
+            str(review.get("reviewerId") or "").strip()
+            for review in confirmed_reviews
         }
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    cases = payload.get("cases", [])
-    reviewed = [
-        case
-        for case in cases
-        if isinstance(case, dict)
-        and case.get("reviewStatus") in {"HUMAN_REVIEWED", "EMPIRICAL"}
-    ]
-    correct = sum(bool(case.get("correct")) for case in reviewed)
+        review_rounds = {
+            str(review.get("round") or "").strip()
+            for review in confirmed_reviews
+        }
+        if (
+            "" in reviewer_ids
+            or len(reviewer_ids) < 2
+            or len(review_rounds) < 2
+        ):
+            continue
+        values = {
+            key: str(raw_case.get(key) or "").strip()
+            for key in required_fields - {"reviews"}
+        }
+        if any(not value for value in values.values()):
+            continue
+        identity = (
+            values["ownerUri"],
+            values["targetUri"],
+            values["registrationType"],
+            values["sourceProperty"],
+            values["expectedEdgeType"],
+        )
+        if identity in identities:
+            continue
+        identities.add(identity)
+        cases.append(raw_case)
+    if (
+        not cases
+        or len(cases) != len(raw_cases)
+        or gold.get("relationshipGoldStatus")
+        != "INDEPENDENTLY_REVIEWED"
+    ):
+        return {
+            **unavailable,
+            "reviewedCases": len(cases),
+            "declaredCases": len(raw_cases),
+        }
+
+    required_schema = {
+        "entities": {"entity_id", "canonical_uri"},
+        "typed_registrations": {
+            "owner_uri",
+            "target_uri",
+            "registration_type",
+            "source_property",
+            "evidence_uri",
+            "status",
+            "confidence",
+            "source_revision_id",
+        },
+        "edges": {
+            "source_entity_id",
+            "target_entity_id",
+            "edge_type",
+            "status",
+            "confidence",
+            "evidence_uri",
+            "source_property",
+            "source_revision_id",
+        },
+        "source_revisions": {
+            "revision_id",
+            "source_kind",
+            "source_uri",
+            "source_fingerprint",
+            "producer_version",
+            "schema_version",
+            "generated_at",
+            "freshness_status",
+        },
+    }
+    for table_name, expected_columns in required_schema.items():
+        columns = {
+            str(row[1])
+            for row in core.execute(f"PRAGMA table_info({table_name})")
+        }
+        if not expected_columns.issubset(columns):
+            return {
+                **unavailable,
+                "reviewedCases": len(cases),
+                "declaredCases": len(raw_cases),
+                "gapCode": "REGISTRATION_GOLD_EVALUATION_SCHEMA_REQUIRED",
+            }
+
+    complete_statuses = set(CONFIRMED_RELATIONSHIP_STATUSES)
+    complete_confidence = {"HIGH", "CONFIRMED"}
+    owner_resolved = 0
+    target_resolved = 0
+    classified_true_positive = 0
+    classified_false_positive = 0
+    classified_false_negative = 0
+    materialized = 0
+    evidence_correct = 0
+    answer_true_positive = 0
+    answer_false_positive = 0
+    answer_false_negative = 0
+    positive_cases = 0
+
+    for case in cases:
+        owner_uri = str(case["ownerUri"])
+        target_uri = str(case["targetUri"])
+        registration_type = str(case["registrationType"])
+        source_property = str(case["sourceProperty"])
+        expected_edge_type = str(case["expectedEdgeType"])
+        expected_status = str(case["expectedStatus"]).upper()
+        expected_evidence = str(case["evidenceUri"])
+        owner = core.execute(
+            "SELECT entity_id FROM entities WHERE canonical_uri=?",
+            (owner_uri,),
+        ).fetchone()
+        target = core.execute(
+            "SELECT entity_id FROM entities WHERE canonical_uri=?",
+            (target_uri,),
+        ).fetchone()
+        owner_resolved += int(owner is not None)
+        target_resolved += int(target is not None)
+        rows: list[sqlite3.Row | tuple[object, ...]] = []
+        if owner is not None and target is not None:
+            rows = list(
+                core.execute(
+                    """
+                    SELECT
+                        edge.edge_type,
+                        edge.status,
+                        edge.confidence,
+                        edge.evidence_uri,
+                        edge_revision.revision_id,
+                        edge_revision.source_kind,
+                        edge_revision.source_uri,
+                        edge_revision.source_fingerprint,
+                        edge_revision.producer_version,
+                        edge_revision.schema_version,
+                        edge_revision.generated_at,
+                        edge_revision.freshness_status,
+                        registration.status,
+                        registration.confidence,
+                        registration.evidence_uri,
+                        registration_revision.revision_id,
+                        registration_revision.source_kind,
+                        registration_revision.source_uri,
+                        registration_revision.source_fingerprint,
+                        registration_revision.producer_version,
+                        registration_revision.schema_version,
+                        registration_revision.generated_at,
+                        registration_revision.freshness_status
+                    FROM typed_registrations AS registration
+                    JOIN source_revisions AS registration_revision
+                      ON registration_revision.revision_id=
+                         registration.source_revision_id
+                    JOIN edges AS edge
+                      ON edge.source_entity_id=?
+                     AND edge.target_entity_id=?
+                     AND edge.source_property=
+                         registration.source_property
+                     AND edge.evidence_uri=registration.evidence_uri
+                    JOIN source_revisions AS edge_revision
+                      ON edge_revision.revision_id=edge.source_revision_id
+                    WHERE registration.owner_uri=?
+                      AND registration.target_uri=?
+                      AND registration.registration_type=?
+                      AND registration.source_property=?
+                    ORDER BY edge.edge_type, edge.evidence_uri
+                    """,
+                    (
+                        int(owner[0]),
+                        int(target[0]),
+                        owner_uri,
+                        target_uri,
+                        registration_type,
+                        source_property,
+                    ),
+                )
+            )
+        predicted_edge_type = registration_edge_type(
+            registration_type=registration_type,
+            source_property=source_property,
+        )
+        if predicted_edge_type == expected_edge_type:
+            classified_true_positive += 1
+        else:
+            classified_false_negative += 1
+            classified_false_positive += 1
+
+        fresh_rows = [
+            row
+            for row in rows
+            if _strict_source_revision_is_fresh(
+                revision_id=row[4],
+                source_kind=row[5],
+                source_uri=row[6],
+                source_fingerprint=row[7],
+                producer_version=row[8],
+                schema_version=row[9],
+                generated_at=row[10],
+                freshness_status=row[11],
+            )
+            and _strict_source_revision_is_fresh(
+                revision_id=row[15],
+                source_kind=row[16],
+                source_uri=row[17],
+                source_fingerprint=row[18],
+                producer_version=row[19],
+                schema_version=row[20],
+                generated_at=row[21],
+                freshness_status=row[22],
+            )
+            and is_valid_registration_evidence_uri(row[3])
+            and is_valid_registration_evidence_uri(row[14])
+        ]
+        status_rows = [
+            row
+            for row in fresh_rows
+            if str(row[0]) == expected_edge_type
+            and str(row[1]).upper() == expected_status
+            and str(row[12]).upper() == expected_status
+        ]
+        materialized += int(bool(status_rows))
+        exact_rows = [
+            row
+            for row in status_rows
+            if str(row[3]) == expected_evidence
+            and str(row[14]) == expected_evidence
+        ]
+        evidence_correct += int(bool(exact_rows))
+
+        expected_complete = expected_status in complete_statuses
+        positive_cases += int(expected_complete)
+        complete_rows = [
+            row
+            for row in fresh_rows
+            if str(row[1]).upper() in complete_statuses
+            and str(row[2]).upper() in complete_confidence
+            and str(row[12]).upper() in complete_statuses
+            and str(row[13]).upper() in complete_confidence
+            and is_valid_registration_evidence_uri(row[3])
+            and is_valid_registration_evidence_uri(row[14])
+        ]
+        correct_complete = any(
+            str(row[0]) == expected_edge_type
+            and str(row[3]) == expected_evidence
+            and str(row[14]) == expected_evidence
+            for row in complete_rows
+        )
+        if expected_complete and correct_complete:
+            answer_true_positive += 1
+        elif expected_complete:
+            answer_false_negative += 1
+        if not expected_complete and complete_rows:
+            answer_false_positive += len(complete_rows)
+        elif expected_complete:
+            answer_false_positive += sum(
+                1
+                for row in complete_rows
+                if str(row[0]) != expected_edge_type
+                or str(row[3]) != expected_evidence
+                or str(row[14]) != expected_evidence
+            )
+
+    relationships = len(cases)
     return {
         "available": True,
-        "assets": len(reviewed),
-        "precision": _ratio(correct, len(reviewed)),
-        "detail": "Independent role-gold review records.",
+        "relationships": relationships,
+        "positiveCases": positive_cases,
+        "negativeCases": relationships - positive_cases,
+        "precision": _ratio(
+            answer_true_positive,
+            answer_true_positive + answer_false_positive,
+        ),
+        "recall": _ratio(
+            answer_true_positive,
+            answer_true_positive + answer_false_negative,
+        ),
+        "classificationPrecision": _ratio(
+            classified_true_positive,
+            classified_true_positive + classified_false_positive,
+        ),
+        "classificationRecall": _ratio(
+            classified_true_positive,
+            classified_true_positive + classified_false_negative,
+        ),
+        "ownerResolutionRate": _ratio(owner_resolved, relationships),
+        "targetResolutionRate": _ratio(target_resolved, relationships),
+        "edgeMaterializationRate": _ratio(materialized, relationships),
+        "evidenceCorrectnessRate": _ratio(
+            evidence_correct,
+            relationships,
+        ),
+        "gapCode": "",
+    }
+
+
+def _role_gold_metrics(
+    project_root: Path,
+    core: sqlite3.Connection,
+) -> dict[str, object]:
+    unavailable = {
+        "available": False,
+        "assets": 0,
+        "precision": None,
+        "recall": None,
+        "resolutionRate": 0.0,
+        "perRole": {},
+        "detail": (
+            "No independently reviewed 300-asset role gold set exists; "
+            "classifier unit cases are not counted as production gold."
+        ),
+    }
+    path = project_root / "tests" / "fixtures" / "kb_role_gold_set.json"
+    if not path.is_file():
+        return unavailable
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return unavailable
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema") != "ark-kb-role-gold-set/v1"
+        or payload.get("roleGoldStatus") != "INDEPENDENTLY_REVIEWED"
+        or not isinstance(payload.get("cases"), list)
+        or not payload["cases"]
+    ):
+        return unavailable
+
+    reviewed_roles = {
+        "global_system_hub",
+        "reusable_base_class",
+        "reusable_component",
+        "domain_rule_asset",
+        "registration_owner",
+        "entity_definition",
+        "leaf_variant",
+        "map_placement_asset",
+        "visual_support_asset",
+        "configuration_asset",
+        "unknown_role",
+    }
+    cases: list[tuple[str, frozenset[str]]] = []
+    entity_uris: set[str] = set()
+    for raw_case in payload["cases"]:
+        if (
+            not isinstance(raw_case, Mapping)
+            or "correct" in raw_case
+            or raw_case.get("reviewStatus")
+            not in {"HUMAN_REVIEWED", "EMPIRICAL"}
+        ):
+            return unavailable
+        entity_uri = str(raw_case.get("entityUri") or "").strip()
+        expected_roles_raw = raw_case.get("expectedRoles")
+        reviews = raw_case.get("reviews")
+        if (
+            not entity_uri
+            or entity_uri in entity_uris
+            or not isinstance(expected_roles_raw, list)
+            or not expected_roles_raw
+            or not isinstance(reviews, list)
+            or len(reviews) < 2
+        ):
+            return unavailable
+        expected_roles = frozenset(
+            str(role or "").strip() for role in expected_roles_raw
+        )
+        if (
+            "" in expected_roles
+            or not expected_roles <= reviewed_roles
+            or len(expected_roles) != len(expected_roles_raw)
+        ):
+            return unavailable
+        valid_reviews: list[tuple[str, str, frozenset[str]]] = []
+        for review in reviews:
+            if not isinstance(review, Mapping):
+                continue
+            reviewer_id = str(review.get("reviewerId") or "").strip()
+            review_round = str(review.get("round") or "").strip()
+            roles = review.get("roles")
+            if (
+                not reviewer_id
+                or not review_round
+                or not isinstance(roles, list)
+                or not roles
+            ):
+                continue
+            role_set = frozenset(str(role or "").strip() for role in roles)
+            if "" in role_set or not role_set <= reviewed_roles:
+                continue
+            valid_reviews.append((reviewer_id, review_round, role_set))
+        reviewer_ids = {review[0] for review in valid_reviews}
+        review_rounds = {review[1] for review in valid_reviews}
+        if len(reviewer_ids) < 2 or len(review_rounds) < 2:
+            return unavailable
+        proposed_roles = {review[2] for review in valid_reviews}
+        if len(proposed_roles) == 1:
+            if expected_roles not in proposed_roles:
+                return unavailable
+        else:
+            adjudication = raw_case.get("adjudication")
+            if not isinstance(adjudication, Mapping):
+                return unavailable
+            adjudicator = str(
+                adjudication.get("reviewerId") or ""
+            ).strip()
+            adjudicated_roles = adjudication.get("roles")
+            if (
+                adjudication.get("status") != "RESOLVED"
+                or not adjudicator
+                or adjudicator in reviewer_ids
+                or not isinstance(adjudicated_roles, list)
+                or frozenset(
+                    str(role or "").strip()
+                    for role in adjudicated_roles
+                )
+                != expected_roles
+            ):
+                return unavailable
+        entity_uris.add(entity_uri)
+        cases.append((entity_uri, expected_roles))
+
+    for table_name, expected_columns in {
+        "entities": {"entity_id", "canonical_uri"},
+        "knowledge_roles": {
+            "entity_id",
+            "role",
+            "confidence",
+            "status",
+            "source_revision_id",
+        },
+        "source_revisions": {
+            "revision_id",
+            "source_kind",
+            "source_uri",
+            "source_fingerprint",
+            "producer_version",
+            "schema_version",
+            "generated_at",
+            "freshness_status",
+        },
+    }.items():
+        columns = {
+            str(row[1])
+            for row in core.execute(f"PRAGMA table_info({table_name})")
+        }
+        if not expected_columns.issubset(columns):
+            return unavailable
+
+    true_positive = 0
+    false_positive = 0
+    false_negative = 0
+    resolved = 0
+    per_role_counts: dict[str, dict[str, int]] = {
+        role: {"tp": 0, "fp": 0, "fn": 0}
+        for role in sorted(reviewed_roles)
+    }
+    for entity_uri, expected_roles in cases:
+        entity = core.execute(
+            "SELECT entity_id FROM entities WHERE canonical_uri=?",
+            (entity_uri,),
+        ).fetchone()
+        actual_roles: set[str] = set()
+        if entity is not None:
+            resolved += 1
+            actual_roles = {
+                str(row[0])
+                for row in core.execute(
+                    """
+                    SELECT
+                        role.role, role.status, role.confidence,
+                        revision.revision_id, revision.source_kind,
+                        revision.source_uri, revision.source_fingerprint,
+                        revision.producer_version, revision.schema_version,
+                        revision.generated_at,
+                        revision.freshness_status
+                    FROM knowledge_roles AS role
+                    JOIN source_revisions AS revision
+                      ON revision.revision_id=role.source_revision_id
+                    WHERE role.entity_id=?
+                    """,
+                    (int(entity[0]),),
+                )
+                if str(row[0]) in reviewed_roles
+                and str(row[1] or "").upper()
+                in CONFIRMED_RELATIONSHIP_STATUSES
+                and str(row[2] or "").upper() in {"HIGH", "CONFIRMED"}
+                and _strict_source_revision_is_fresh(
+                    revision_id=row[3],
+                    source_kind=row[4],
+                    source_uri=row[5],
+                    source_fingerprint=row[6],
+                    producer_version=row[7],
+                    schema_version=row[8],
+                    generated_at=row[9],
+                    freshness_status=row[10],
+                )
+            }
+        true_roles = actual_roles & expected_roles
+        extra_roles = actual_roles - expected_roles
+        missing_roles = expected_roles - actual_roles
+        true_positive += len(true_roles)
+        false_positive += len(extra_roles)
+        false_negative += len(missing_roles)
+        for role in true_roles:
+            per_role_counts[role]["tp"] += 1
+        for role in extra_roles:
+            per_role_counts[role]["fp"] += 1
+        for role in missing_roles:
+            per_role_counts[role]["fn"] += 1
+
+    per_role = {
+        role: {
+            **counts,
+            "precision": _ratio(
+                counts["tp"],
+                counts["tp"] + counts["fp"],
+            ),
+            "recall": _ratio(
+                counts["tp"],
+                counts["tp"] + counts["fn"],
+            ),
+        }
+        for role, counts in per_role_counts.items()
+        if sum(counts.values()) > 0
+    }
+    return {
+        "available": True,
+        "assets": len(cases),
+        "precision": _ratio(
+            true_positive,
+            true_positive + false_positive,
+        ),
+        "recall": _ratio(
+            true_positive,
+            true_positive + false_negative,
+        ),
+        "resolutionRate": _ratio(resolved, len(cases)),
+        "perRole": per_role,
+        "detail": (
+            "Predictions were recomputed from Core after two independent "
+            "review rounds; disagreements require adjudication."
+        ),
     }
 
 
@@ -503,6 +1249,17 @@ def _native_gold_metrics(
 
 
 def _integrity_metrics(snapshot_root: Path) -> dict[str, object]:
+    snapshot_root = snapshot_root.resolve()
+    if (
+        (snapshot_root / "current.json").is_file()
+        or (snapshot_root / "manifest.json").is_file()
+        or (
+            snapshot_root / "manifests" / "current.json"
+        ).is_file()
+    ):
+        snapshot_root = _resolve_quality_snapshot(
+            snapshot_root
+        ).snapshot_dir
     result: dict[str, object] = {}
     paths = [
         (name, snapshot_root / name, "")
@@ -1176,18 +1933,15 @@ def evaluate_quality_gates(
     """Evaluate real snapshot metrics; absent independent evidence fails closed."""
 
     project_root = project_root.resolve()
-    snapshot_root = snapshot_root.resolve()
     discovery_database = discovery_database.resolve()
-    manifest = json.loads(
-        (snapshot_root / "manifests" / "current.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    location = _resolve_quality_snapshot(snapshot_root)
+    snapshot_dir = location.snapshot_dir
+    manifest = location.manifest
     current_ontology_version = load_ontology(
         project_root / "ontology"
     ).version
-    benchmark = run_query_benchmark(snapshot_root / "core.sqlite")
-    core = _read_only(snapshot_root / "core.sqlite")
+    benchmark = run_query_benchmark(snapshot_dir / "core.sqlite")
+    core = _read_only(snapshot_dir / "core.sqlite")
     discovery = _read_only(discovery_database)
     gates: list[dict[str, object]] = []
     map_usage = _typed_map_usage_metrics(core)
@@ -1309,7 +2063,7 @@ def evaluate_quality_gates(
                 ),
             )
         )
-        role_gold = _role_gold_metrics(project_root)
+        role_gold = _role_gold_metrics(project_root, core)
         gates.append(
             _gate(
                 "roles.independent_gold_set",
@@ -1320,6 +2074,9 @@ def evaluate_quality_gates(
                     int(role_gold["assets"]) >= 300
                     and role_gold["precision"] is not None
                     and float(role_gold["precision"]) >= 0.95
+                    and role_gold["recall"] is not None
+                    and float(role_gold["recall"]) >= 0.95
+                    and float(role_gold["resolutionRate"]) == 1.0
                 ),
                 detail=str(role_gold["detail"]),
             )
@@ -1446,28 +2203,35 @@ def evaluate_quality_gates(
         gates.append(
             _registration_confidence_gate(registration_confidence)
         )
-        registration_gold = _registration_gold_metrics(project_root)
-        typed_total, typed_incomplete = core.execute(
-            """
-            SELECT
-                COUNT(*),
-                SUM(CASE
-                      WHEN owner_uri='' OR target_uri='' OR source_property=''
-                        OR evidence_uri=''
-                      THEN 1 ELSE 0 END)
-            FROM typed_registrations
-            """
-        ).fetchone()
-        typed_total = int(typed_total or 0)
-        typed_incomplete = int(typed_incomplete or 0)
+        registration_gold = _registration_gold_metrics(project_root, core)
+        registration_lineage = _registration_lineage_metrics(core)
+        typed_total = int(registration_lineage["total"])
+        typed_incomplete = int(registration_lineage["incomplete"])
         gates.extend(
             [
+                _gate(
+                    "registrations.real_relationship_gold_count",
+                    "registrations",
+                    target=">=100 independently reviewed Owner→Target rows",
+                    actual=registration_gold["relationships"],
+                    passed=(
+                        bool(registration_gold["available"])
+                        and int(registration_gold["relationships"]) >= 100
+                    ),
+                    detail=str(
+                        registration_gold.get("gapCode")
+                        or "Independent relationship rows are available."
+                    ),
+                ),
                 _gate(
                     "registrations.gold_precision",
                     "registrations",
                     target=">=0.99",
                     actual=registration_gold["precision"],
-                    passed=float(registration_gold["precision"]) >= 0.99,
+                    passed=(
+                        int(registration_gold["relationships"]) >= 100
+                        and float(registration_gold["precision"]) >= 0.99
+                    ),
                     detail=f"{registration_gold['relationships']} explicit gold relationships",
                 ),
                 _gate(
@@ -1475,8 +2239,95 @@ def evaluate_quality_gates(
                     "registrations",
                     target=">=0.95",
                     actual=registration_gold["recall"],
-                    passed=float(registration_gold["recall"]) >= 0.95,
+                    passed=(
+                        int(registration_gold["relationships"]) >= 100
+                        and float(registration_gold["recall"]) >= 0.95
+                    ),
                     detail=f"{registration_gold['relationships']} explicit gold relationships",
+                ),
+                _gate(
+                    "registrations.classification_precision",
+                    "registrations",
+                    target=">=0.99",
+                    actual=registration_gold["classificationPrecision"],
+                    passed=(
+                        int(registration_gold["relationships"]) >= 100
+                        and float(
+                            registration_gold["classificationPrecision"]
+                        )
+                        >= 0.99
+                    ),
+                    detail="Expected typed edge versus materialized edge type.",
+                ),
+                _gate(
+                    "registrations.classification_recall",
+                    "registrations",
+                    target=">=0.95",
+                    actual=registration_gold["classificationRecall"],
+                    passed=(
+                        int(registration_gold["relationships"]) >= 100
+                        and float(
+                            registration_gold["classificationRecall"]
+                        )
+                        >= 0.95
+                    ),
+                    detail="Expected typed edge versus materialized edge type.",
+                ),
+                _gate(
+                    "registrations.owner_resolution",
+                    "registrations",
+                    target="100%",
+                    actual=registration_gold["ownerResolutionRate"],
+                    passed=(
+                        int(registration_gold["relationships"]) >= 100
+                        and float(
+                            registration_gold["ownerResolutionRate"]
+                        )
+                        == 1.0
+                    ),
+                    detail="Every reviewed Owner URI resolves canonically.",
+                ),
+                _gate(
+                    "registrations.target_resolution",
+                    "registrations",
+                    target="100%",
+                    actual=registration_gold["targetResolutionRate"],
+                    passed=(
+                        int(registration_gold["relationships"]) >= 100
+                        and float(
+                            registration_gold["targetResolutionRate"]
+                        )
+                        == 1.0
+                    ),
+                    detail="Every reviewed Target URI resolves canonically.",
+                ),
+                _gate(
+                    "registrations.edge_materialization",
+                    "registrations",
+                    target=">=0.95",
+                    actual=registration_gold["edgeMaterializationRate"],
+                    passed=(
+                        int(registration_gold["relationships"]) >= 100
+                        and float(
+                            registration_gold["edgeMaterializationRate"]
+                        )
+                        >= 0.95
+                    ),
+                    detail="Expected status and typed edge are persisted.",
+                ),
+                _gate(
+                    "registrations.evidence_correctness",
+                    "registrations",
+                    target="100%",
+                    actual=registration_gold["evidenceCorrectnessRate"],
+                    passed=(
+                        int(registration_gold["relationships"]) >= 100
+                        and float(
+                            registration_gold["evidenceCorrectnessRate"]
+                        )
+                        == 1.0
+                    ),
+                    detail="Persisted evidence URI matches reviewed evidence.",
                 ),
                 _gate(
                     "registrations.lineage_complete",
@@ -1690,7 +2541,7 @@ def evaluate_quality_gates(
             semantic_quality_gates(
                 core,
                 manifest,
-                snapshot_root=snapshot_root,
+                snapshot_root=snapshot_dir,
                 expected_ontology_version=current_ontology_version,
                 review_path=(
                     project_root
@@ -1783,7 +2634,7 @@ def evaluate_quality_gates(
     finally:
         core.close()
         discovery.close()
-    integrity = _integrity_metrics(snapshot_root)
+    integrity = _integrity_metrics(snapshot_dir)
     integrity_passed = all(
         bool(item["exists"])
         and item["integrity"] == "ok"
@@ -1821,7 +2672,7 @@ def evaluate_quality_gates(
     report: dict[str, object] = {
         "schema": QUALITY_GATE_SCHEMA,
         "generatedAt": generated_at,
-        "buildId": str(manifest.get("buildId") or ""),
+        "buildId": location.build_id,
         "summary": {
             "total": len(gates),
             "passed": sum(bool(gate["passed"]) for gate in gates),
@@ -1847,6 +2698,7 @@ def evaluate_quality_gates(
     gates.append(privacy_gate)
     if not privacy_gate["passed"]:
         failed.append(privacy_gate)
+    validate_quality_gate_contract(gates)
     report["summary"] = {
         "total": len(gates),
         "passed": sum(bool(gate["passed"]) for gate in gates),
@@ -1878,15 +2730,78 @@ def publish_gate_report(
 ) -> dict[str, object]:
     """Publish reports and update cutover atomically without deleting legacy."""
 
-    snapshot_root = snapshot_root.resolve()
-    reports = snapshot_root / "reports"
+    location = _resolve_quality_snapshot(snapshot_root)
+    report_build_id = str(report.get("buildId") or "")
+    if report_build_id != location.build_id:
+        raise ValueError(
+            "quality gate report buildId does not match the resolved snapshot"
+        )
+    eligible = bool(report["summary"]["cutoverEligible"])
     benchmark = report["benchmark"]
+    if location.layout.startswith("immutable-v2"):
+        configured_root = _immutable_configured_root(location)
+        reports = configured_root / "reports" / location.build_id
+        benchmark_bytes = _write_json_atomic(
+            reports / "query_benchmark.json",
+            benchmark,
+        )
+        gate_bytes = _write_json_atomic(
+            reports / "quality_gates.json",
+            report,
+        )
+        gate_sha = hashlib.sha256(gate_bytes).hexdigest()
+        benchmark_sha = hashlib.sha256(benchmark_bytes).hexdigest()
+        manifest_sha = hashlib.sha256(
+            location.manifest_path.read_bytes()
+        ).hexdigest()
+        failed = int(report["summary"]["failed"])
+        cutover = {
+            "mode": "shadow",
+            "defaultQuerySource": "legacy",
+            "reason": (
+                "quality gates passed, but the mutable attestation is not "
+                "sealed in the immutable manifest; publish a new immutable "
+                "snapshot before cutover"
+                if eligible
+                else f"{failed} critical quality gates remain open"
+            ),
+        }
+        attestation = {
+            "schema": "ark-kb-vnext-cutover-attestation/v1",
+            "buildId": location.build_id,
+            "snapshotLayout": "immutable-v2",
+            "immutableManifestSha256": manifest_sha,
+            "reportCutoverEligible": eligible,
+            "sealedInSnapshotManifest": False,
+            "qualityGates": {
+                "schema": QUALITY_GATE_SCHEMA,
+                "reportUri": (
+                    f"reports/{location.build_id}/quality_gates.json"
+                ),
+                "sha256": gate_sha,
+                "passed": int(report["summary"]["passed"]),
+                "failed": failed,
+            },
+            "queryBenchmark": {
+                "reportUri": (
+                    f"reports/{location.build_id}/query_benchmark.json"
+                ),
+                "sha256": benchmark_sha,
+            },
+            "cutover": cutover,
+        }
+        _write_json_atomic(
+            reports / "cutover_attestation.json",
+            attestation,
+        )
+        return cutover
+
+    reports = location.root / "reports"
     _write_json_atomic(reports / "query_benchmark.json", benchmark)
     gate_bytes = _write_json_atomic(reports / "quality_gates.json", report)
     gate_sha = hashlib.sha256(gate_bytes).hexdigest()
-    current_path = snapshot_root / "manifests" / "current.json"
-    manifest = json.loads(current_path.read_text(encoding="utf-8"))
-    eligible = bool(report["summary"]["cutoverEligible"])
+    current_path = location.manifest_path
+    manifest = dict(location.manifest)
     manifest["qualityGates"] = {
         "schema": QUALITY_GATE_SCHEMA,
         "reportUri": "reports/quality_gates.json",
@@ -1908,7 +2823,9 @@ def publish_gate_report(
     }
     _write_json_atomic(current_path, manifest)
     build_id = str(manifest.get("buildId") or "")
-    build_manifest = snapshot_root / "manifests" / f"{build_id}.json"
+    build_manifest = (
+        location.root / "manifests" / f"{build_id}.json"
+    )
     if build_manifest.is_file():
         _write_json_atomic(build_manifest, manifest)
     return manifest["cutover"]

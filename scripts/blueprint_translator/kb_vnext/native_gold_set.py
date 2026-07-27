@@ -261,6 +261,19 @@ def _blueprint_graph_revision(
         row.get("blueprint_graph_evidence_id")
         or f"blueprint-graph://unresolved/{row.get('edge_id')}"
     )
+    capture_source_uri = source_uri.split("/g/", 1)[0]
+    existing = connection.execute(
+        """
+        SELECT revision_id
+        FROM source_revisions
+        WHERE source_kind='blueprint_evidence'
+          AND source_uri=?
+        LIMIT 1
+        """,
+        (capture_source_uri,),
+    ).fetchone()
+    if existing is not None:
+        return int(existing[0])
     fingerprint = hashlib.sha256(
         json.dumps(
             {

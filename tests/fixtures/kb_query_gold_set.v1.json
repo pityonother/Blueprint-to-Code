@@ -3089,7 +3089,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3124,7 +3132,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3159,7 +3175,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3194,7 +3218,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3229,7 +3261,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3264,7 +3304,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3299,7 +3347,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3334,7 +3390,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3369,7 +3433,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -3404,7 +3476,15 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -4935,7 +5015,7 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "APPLIES_BUFF"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -4970,7 +5050,7 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "USES_DAMAGE_TYPE"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -5005,7 +5085,7 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "GRANTS_ITEM"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -5040,7 +5120,7 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "USES_PRIMAL_GAME_DATA"
         ],
         "requiresNative": false,
         "requiresRuntime": false,
@@ -5075,7 +5155,7 @@
         "factTypes": [],
         "factNames": [],
         "edgeTypes": [
-          "REGISTERS"
+          "REGISTERS_STRUCTURE"
         ],
         "requiresNative": false,
         "requiresRuntime": false,

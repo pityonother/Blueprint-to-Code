@@ -9,7 +9,7 @@ from typing import Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 
-REGISTRATION_EXTRACTOR_VERSION = "ark-kb-registrations/v1"
+REGISTRATION_EXTRACTOR_VERSION = "ark-kb-registrations/v2"
 COMPLETE_REGISTRATION_STATUSES = frozenset(
     {"CONFIRMED", "VERIFIED", "RESOLVED"}
 )
@@ -307,6 +307,144 @@ REGISTRATION_RULES = (
     ),
 )
 
+GLOBAL_REGISTRATION_EDGE_TYPES = frozenset(
+    {
+        "REGISTERS_ENGRAM",
+        "REGISTERS_CREATURE",
+        "REGISTERS_ITEM",
+        "REGISTERS_STRUCTURE",
+        "REGISTERS_GAME_MODE",
+        "REGISTERS_WORLD_EVENT",
+        "REGISTERS_SPAWNER",
+        "REMAPS_ITEM",
+        "REMAPS_ENGRAM",
+    }
+)
+MECHANISM_RELATIONSHIP_EDGE_TYPES = frozenset(
+    {
+        "APPLIES_BUFF",
+        "USES_DAMAGE_TYPE",
+        "USES_STATUS_COMPONENT",
+        "USES_INVENTORY_COMPONENT",
+        "USES_HARVEST_COMPONENT",
+        "USES_LOOT_ITEM_SET",
+        "GRANTS_ITEM",
+        "SPAWNS_CREATURE",
+    }
+)
+PLACEMENT_RELATIONSHIP_EDGE_TYPES = frozenset(
+    {
+        "MAP_DIRECT_REFERENCE",
+        "MAP_PCG_DEPENDENCY",
+        "MAP_WORLD_PARTITION_REFERENCE",
+    }
+)
+
+_RELATIONSHIP_EDGE_TYPE_BY_PROPERTY = {
+    # Global/system registration.
+    "additionalengramblueprintclasses": "REGISTERS_ENGRAM",
+    "engramclass": "REGISTERS_ENGRAM",
+    "remapengrams": "REMAPS_ENGRAM",
+    "additionaldinoentries": "REGISTERS_CREATURE",
+    "additionalitemblueprintclasses": "REGISTERS_ITEM",
+    "remapitems": "REMAPS_ITEM",
+    "additionalstructurestoplace": "REGISTERS_STRUCTURE",
+    "additionalstructureengrams": "REGISTERS_STRUCTURE",
+    "structureclass": "REGISTERS_STRUCTURE",
+    "defaultgamemode": "REGISTERS_GAME_MODE",
+    "gamemodeclass": "REGISTERS_GAME_MODE",
+    "missiontype": "REGISTERS_WORLD_EVENT",
+    "taskclass": "REGISTERS_WORLD_EVENT",
+    "worldeventclass": "REGISTERS_WORLD_EVENT",
+    "npczonemanager": "REGISTERS_SPAWNER",
+    "npcspawnentriescontainer": "REGISTERS_SPAWNER",
+    "spawnerclass": "REGISTERS_SPAWNER",
+    "bossclass": "REGISTERS_WORLD_EVENT",
+    "arenaclass": "REGISTERS_WORLD_EVENT",
+    "encounterclass": "REGISTERS_WORLD_EVENT",
+    # Mechanism relationships.
+    "npcclass": "SPAWNS_CREATURE",
+    "dinoclass": "SPAWNS_CREATURE",
+    "itemclass": "GRANTS_ITEM",
+    # Skin associations do not prove that the owner grants the target item.
+    "ghostitemskinperequipment": "REFERENCES_OBJECT",
+    "ghostitemskinstructure": "REFERENCES_OBJECT",
+    "additionalbuffclasses": "APPLIES_BUFF",
+    "buffclass": "APPLIES_BUFF",
+    "buffclassstring": "APPLIES_BUFF",
+    "carriednotifybuff": "APPLIES_BUFF",
+    "explorernotexpbuff": "APPLIES_BUFF",
+    "specialexplorernotexpbuff": "APPLIES_BUFF",
+    "hostileplayerbuff": "APPLIES_BUFF",
+    "threateningplayerbuff": "APPLIES_BUFF",
+    "damagetype": "USES_DAMAGE_TYPE",
+    "damagetypeclass": "USES_DAMAGE_TYPE",
+    "cheatdestroyfoliagedamagetype": "USES_DAMAGE_TYPE",
+    "statuscomponentclass": "USES_STATUS_COMPONENT",
+    "mycharacterstatuscomponent": "USES_STATUS_COMPONENT",
+    "inventorycomponentclass": "USES_INVENTORY_COMPONENT",
+    "myinventorycomponent": "USES_INVENTORY_COMPONENT",
+    "harvestresourcecomponent": "USES_HARVEST_COMPONENT",
+    "harvestcomponentclass": "USES_HARVEST_COMPONENT",
+    "itemsets": "USES_LOOT_ITEM_SET",
+    "lootitemsetclass": "USES_LOOT_ITEM_SET",
+    "supplycrateclass": "USES_LOOT_ITEM_SET",
+    "rewardclass": "GRANTS_ITEM",
+    # Placement/world relationships.
+    "mapclass": "MAP_DIRECT_REFERENCE",
+    "worldclass": "MAP_DIRECT_REFERENCE",
+    "persistentlevelclass": "MAP_DIRECT_REFERENCE",
+    "biomeclass": "MAP_PCG_DEPENDENCY",
+    "pcggraph": "MAP_PCG_DEPENDENCY",
+    "pcgcomponentclass": "MAP_PCG_DEPENDENCY",
+    "worldpartitionruntimecellclass": "MAP_WORLD_PARTITION_REFERENCE",
+    "worldpartitiondatalayer": "MAP_WORLD_PARTITION_REFERENCE",
+}
+
+_RELATIONSHIP_EDGE_TYPE_BY_REGISTRATION_TYPE = {
+    "primal_game_data_registration": "USES_PRIMAL_GAME_DATA",
+    "game_mode_registration": "REGISTERS_GAME_MODE",
+    "game_state_registration": "USES_GAME_STATE",
+    "player_controller_registration": "USES_PLAYER_CONTROLLER",
+    "world_settings_registration": "USES_WORLD_SETTINGS",
+    "map_world_registration": "MAP_DIRECT_REFERENCE",
+    "spawn_registration": "REGISTERS_SPAWNER",
+    "mission_world_event_registration": "REGISTERS_WORLD_EVENT",
+    "engram_registration": "REGISTERS_ENGRAM",
+    "creature_registration": "REGISTERS_CREATURE",
+    "item_registration": "REGISTERS_ITEM",
+    "buff_registration": "APPLIES_BUFF",
+    "structure_registration": "REGISTERS_STRUCTURE",
+    "loot_reward_registration": "USES_LOOT_ITEM_SET",
+    "harvest_component_registration": "USES_HARVEST_COMPONENT",
+    "damage_type_registration": "USES_DAMAGE_TYPE",
+    "status_component_registration": "USES_STATUS_COMPONENT",
+    "inventory_component_registration": "USES_INVENTORY_COMPONENT",
+    "biome_pcg_registration": "MAP_PCG_DEPENDENCY",
+    "world_partition_registration": "MAP_WORLD_PARTITION_REFERENCE",
+    "save_transfer_registration": "USES_SAVE_TRANSFER",
+    "boss_arena_encounter_registration": "REGISTERS_WORLD_EVENT",
+    "global_asset_reference": "REFERENCES_OBJECT",
+}
+
+
+def registration_edge_type(
+    *,
+    registration_type: object,
+    source_property: object,
+) -> str:
+    """Return one explicit Core relation; never collapse to ``REGISTERS``."""
+
+    property_key = str(source_property or "").strip().casefold()
+    if property_key in _RELATIONSHIP_EDGE_TYPE_BY_PROPERTY:
+        return _RELATIONSHIP_EDGE_TYPE_BY_PROPERTY[property_key]
+    registration_key = str(registration_type or "").strip().casefold()
+    return _RELATIONSHIP_EDGE_TYPE_BY_REGISTRATION_TYPE.get(
+        registration_key,
+        "REFERENCES_OBJECT",
+    )
+
+
 REGISTRATION_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS typed_registrations (
     registration_id TEXT PRIMARY KEY,
@@ -522,15 +660,6 @@ def materialize_typed_registrations(
         source_property = str(source["source_property"])
         source_kind = str(source["source_kind"] or "")
         evidence_uri = str(source["source_evidence_id"] or "")
-        if not evidence_uri:
-            evidence_uri = (
-                "discovery-reference://"
-                + hashlib.sha256(
-                    "\0".join(
-                        (owner_uri, target_uri, source_property)
-                    ).encode("utf-8")
-                ).hexdigest()
-            )
         classifications = classify_registration_property(
             source_property,
             target_categories=category_map.get(target_uri, ()),

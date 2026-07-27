@@ -700,6 +700,7 @@ def compute_core_projection_content_digest(
     ontology_version: str,
     review_version: str = "",
     reviews: Sequence[Mapping[str, object]] = (),
+    matched_review_rows: Sequence[tuple[object, ...]] | None = None,
 ) -> str:
     """Return the canonical semantic digest expected from current Core."""
 
@@ -715,15 +716,18 @@ def compute_core_projection_content_digest(
             fact_ids=fact_ids,
             lineage_by_fact=lineage_by_fact,
         )
-        _review_status, matched_reviews, _review_failures = (
-            _review_projection(
-                projection_name=projection_name,
-                rows=rows,
-                evidence_by_fact=evidence_by_fact,
-                review_version=review_version,
-                reviews=reviews,
+        if matched_review_rows is None:
+            _review_status, matched_reviews, _review_failures = (
+                _review_projection(
+                    projection_name=projection_name,
+                    rows=rows,
+                    evidence_by_fact=evidence_by_fact,
+                    review_version=review_version,
+                    reviews=reviews,
+                )
             )
-        )
+        else:
+            matched_reviews = list(matched_review_rows)
     finally:
         core.row_factory = original_row_factory
     return _projection_content_digest(
@@ -949,9 +953,15 @@ def build_domain_projections(
     generated_at: str,
     ontology_version: str,
     review_path: Path | None = None,
+    snapshot_build_id: str = "",
+    snapshot_source_fingerprint: str = "",
 ) -> dict[str, dict[str, object]]:
     """Build strict read models containing FRESH Evidence and derivation lineage."""
 
+    if bool(snapshot_build_id) != bool(snapshot_source_fingerprint):
+        raise ValueError(
+            "projection snapshot identity requires build and source"
+        )
     (
         review_version,
         review_config,
@@ -1002,24 +1012,35 @@ def build_domain_projections(
             projection = sqlite3.connect(path)
             try:
                 projection.executescript(PROJECTION_SCHEMA_SQL)
+                metadata_rows = [
+                    ("schema_version", PROJECTION_SCHEMA_VERSION),
+                    ("projection_name", projection_name),
+                    ("projection_version", "v2"),
+                    ("source_revision_set_hash", revision_set_hash),
+                    ("ontology_version", ontology_version),
+                    ("built_at", generated_at),
+                    ("truth_source", "core.sqlite"),
+                    ("review_version", review_version),
+                    ("review_status", review_status),
+                    (
+                        "review_config_sha256",
+                        review_config_sha256,
+                    ),
+                    ("content_digest", content_digest),
+                ]
+                if snapshot_build_id:
+                    metadata_rows.extend(
+                        [
+                            ("snapshot_build_id", snapshot_build_id),
+                            (
+                                "snapshot_source_fingerprint",
+                                snapshot_source_fingerprint,
+                            ),
+                        ]
+                    )
                 projection.executemany(
                     "INSERT INTO metadata VALUES (?, ?)",
-                    [
-                        ("schema_version", PROJECTION_SCHEMA_VERSION),
-                        ("projection_name", projection_name),
-                        ("projection_version", "v2"),
-                        ("source_revision_set_hash", revision_set_hash),
-                        ("ontology_version", ontology_version),
-                        ("built_at", generated_at),
-                        ("truth_source", "core.sqlite"),
-                        ("review_version", review_version),
-                        ("review_status", review_status),
-                        (
-                            "review_config_sha256",
-                            review_config_sha256,
-                        ),
-                        ("content_digest", content_digest),
-                    ],
+                    metadata_rows,
                 )
                 for row in rows:
                     fact_id = int(row["fact_id"])

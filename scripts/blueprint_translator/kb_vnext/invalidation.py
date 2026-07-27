@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Iterable, Mapping
 
@@ -14,6 +14,8 @@ from .class_hierarchy import (
     CONFIRMED_ASSIGNMENT_STATUSES,
     CONFIRMED_CLASS_CONFIDENCE,
     CONFIRMED_CLASS_STATUSES,
+    _affected_descendants,
+    _graph,
 )
 from .projections import DOMAIN_PROJECTIONS
 
@@ -59,6 +61,9 @@ class InvalidationPlan:
     upstream_revision_id: int | None
     downstream: Mapping[str, tuple[int, ...]]
     reasons: Mapping[str, str]
+    class_closure_scopes: Mapping[int, tuple[int, ...]] = field(
+        default_factory=dict
+    )
 
     @property
     def affected_count(self) -> int:
@@ -1088,6 +1093,88 @@ def _all_projection_ids() -> set[int]:
     return set(range(1, len(DOMAIN_PROJECTIONS) + 1))
 
 
+def _class_closure_scopes(
+    connection: sqlite3.Connection,
+    *,
+    changed_class_ids: set[int],
+    prechange_affected_entity_ids: set[int],
+) -> dict[int, tuple[int, ...]]:
+    """Bind each class task to both old and current descendants.
+
+    The durable closure still describes the old topology when an edge has
+    already changed, while the current graph describes newly attached
+    descendants.  Entity IDs supplied by the caller preserve an additional
+    pre-change boundary when the old closure was already partially removed.
+    """
+
+    if not changed_class_ids:
+        return {}
+    _parents, children = _graph(connection)
+    prechange_classes = _entity_classes(
+        connection, prechange_affected_entity_ids
+    )
+    result: dict[int, tuple[int, ...]] = {}
+    for changed_class_id in sorted(changed_class_ids):
+        durable_descendants = {
+            int(row[0])
+            for row in connection.execute(
+                """
+                SELECT descendant_class_id
+                FROM class_closure
+                WHERE ancestor_class_id=?
+                """,
+                (changed_class_id,),
+            )
+        }
+        affected = (
+            _affected_descendants(children, (changed_class_id,))
+            | durable_descendants
+            | prechange_classes
+            | {changed_class_id}
+        )
+        result[changed_class_id] = tuple(sorted(affected))
+    return result
+
+
+def _class_source_revision_proof(
+    connection: sqlite3.Connection,
+    class_ids: Iterable[int],
+) -> str:
+    values = tuple(sorted({int(value) for value in class_ids}))
+    if not values:
+        return ""
+    placeholders = ",".join("?" for _ in values)
+    rows = [
+        (
+            int(class_id),
+            int(revision_id) if revision_id is not None else None,
+            str(source_fingerprint or ""),
+            str(freshness_status or ""),
+        )
+        for (
+            class_id,
+            revision_id,
+            source_fingerprint,
+            freshness_status,
+        ) in connection.execute(
+            f"""
+            SELECT class.class_id, class.source_revision_id,
+                   revision.source_fingerprint,
+                   revision.freshness_status
+            FROM classes AS class
+            LEFT JOIN source_revisions AS revision
+              ON revision.revision_id=class.source_revision_id
+            WHERE class.class_id IN ({placeholders})
+            ORDER BY class.class_id
+            """,
+            values,
+        )
+    ]
+    return hashlib.sha256(
+        json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def plan_invalidation(
     connection: sqlite3.Connection,
     *,
@@ -1107,6 +1194,7 @@ def plan_invalidation(
     prechange_affected_entities = {
         int(value) for value in affected_entity_ids
     }
+    class_closure_scopes: dict[int, tuple[int, ...]] = {}
     downstream: dict[str, set[int]] = {}
     reasons: dict[str, str] = {}
 
@@ -1133,6 +1221,11 @@ def plan_invalidation(
         add("EDGE_ENTITY", entities, "DIRECT_ASSET_EDGE_EVIDENCE_CHANGED")
         add("PROJECTION", _all_projection_ids(), "FACT_PROJECTION_CHANGED")
     elif event_kind == "CLASS":
+        class_closure_scopes = _class_closure_scopes(
+            connection,
+            changed_class_ids=classes,
+            prechange_affected_entity_ids=prechange_affected_entities,
+        )
         descendants = (
             _descendant_entities(connection, classes)
             | prechange_affected_entities
@@ -1197,6 +1290,7 @@ def plan_invalidation(
             for kind, values in sorted(downstream.items())
         },
         reasons=reasons,
+        class_closure_scopes=class_closure_scopes,
     )
 
 
@@ -1206,6 +1300,7 @@ def _event_id(plan: InvalidationPlan, created_at: str) -> str:
             "kind": plan.event_kind,
             "revision": plan.upstream_revision_id,
             "downstream": plan.downstream,
+            "classClosureScopes": plan.class_closure_scopes,
             "createdAt": created_at,
         },
         sort_keys=True,
@@ -1226,6 +1321,16 @@ def apply_invalidation_plan(
 
     created_at = created_at or datetime.now(UTC).isoformat(timespec="seconds")
     event_id = _event_id(plan, created_at)
+    event_payload: dict[str, object] = dict(plan.downstream)
+    if plan.class_closure_scopes:
+        event_payload["_classClosureScopes"] = {
+            str(class_id): list(scope)
+            for class_id, scope in sorted(plan.class_closure_scopes.items())
+        }
+        event_payload["_classClosureSourceRevisionProofs"] = {
+            str(class_id): _class_source_revision_proof(connection, scope)
+            for class_id, scope in sorted(plan.class_closure_scopes.items())
+        }
     connection.execute(
         """
         INSERT INTO invalidation_events(
@@ -1237,7 +1342,7 @@ def apply_invalidation_plan(
             event_id,
             plan.event_kind,
             plan.upstream_revision_id,
-            json.dumps(plan.downstream, separators=(",", ":")),
+            json.dumps(event_payload, separators=(",", ":")),
             created_at,
         ),
     )

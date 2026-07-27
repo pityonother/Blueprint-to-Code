@@ -16,6 +16,7 @@ from blueprint_translator.kb_vnext.registrations import (  # noqa: E402
     REGISTRATION_RULES,
     classify_registration_property,
     materialize_typed_registrations,
+    registration_edge_type,
 )
 
 
@@ -151,11 +152,66 @@ class KnowledgeRegistrationTests(unittest.TestCase):
             }.issubset(rule_types)
         )
 
-    def test_gold_set_has_at_least_100_explicit_relationships(self):
-        relationship_count = len(self.gold["owners"]) * len(
+    def test_registration_relationships_are_typed_by_semantics(self):
+        expected = {
+            ("engram_registration", "AdditionalEngramBlueprintClasses"):
+                "REGISTERS_ENGRAM",
+            ("engram_registration", "RemapEngrams"): "REMAPS_ENGRAM",
+            ("creature_registration", "AdditionalDinoEntries"):
+                "REGISTERS_CREATURE",
+            ("creature_registration", "NPCClass"): "SPAWNS_CREATURE",
+            ("item_registration", "AdditionalItemBlueprintClasses"):
+                "REGISTERS_ITEM",
+            ("item_registration", "RemapItems"): "REMAPS_ITEM",
+            ("item_registration", "ItemClass"): "GRANTS_ITEM",
+            ("structure_registration", "AdditionalStructuresToPlace"):
+                "REGISTERS_STRUCTURE",
+            ("game_mode_registration", "DefaultGameMode"):
+                "REGISTERS_GAME_MODE",
+            ("mission_world_event_registration", "WorldEventClass"):
+                "REGISTERS_WORLD_EVENT",
+            ("spawn_registration", "NPCSpawnEntriesContainer"):
+                "REGISTERS_SPAWNER",
+            ("buff_registration", "BuffClass"): "APPLIES_BUFF",
+            ("damage_type_registration", "DamageTypeClass"):
+                "USES_DAMAGE_TYPE",
+            ("status_component_registration", "MyCharacterStatusComponent"):
+                "USES_STATUS_COMPONENT",
+            ("inventory_component_registration", "MyInventoryComponent"):
+                "USES_INVENTORY_COMPONENT",
+            ("harvest_component_registration", "HarvestResourceComponent"):
+                "USES_HARVEST_COMPONENT",
+            ("loot_reward_registration", "ItemSets"):
+                "USES_LOOT_ITEM_SET",
+            ("structure_registration", "GhostItemSkinStructure"):
+                "REFERENCES_OBJECT",
+            ("item_registration", "GhostItemSkinPerEquipment"):
+                "REFERENCES_OBJECT",
+            ("biome_pcg_registration", "PCGGraph"): "MAP_PCG_DEPENDENCY",
+            ("world_partition_registration", "WorldPartitionDataLayer"):
+                "MAP_WORLD_PARTITION_REFERENCE",
+            ("global_asset_reference", "Texture"): "REFERENCES_OBJECT",
+        }
+        actual = {
+            key: registration_edge_type(
+                registration_type=key[0],
+                source_property=key[1],
+            )
+            for key in expected
+        }
+        self.assertEqual(actual, expected)
+        self.assertNotIn("REGISTERS", actual.values())
+
+    def test_classifier_cross_product_is_not_relationship_gold(self):
+        classifier_case_count = len(self.gold["owners"]) * len(
             self.gold["cases"]
         )
-        self.assertGreaterEqual(relationship_count, 100)
+        self.assertGreaterEqual(classifier_case_count, 100)
+        self.assertEqual(self.gold["relationshipCases"], [])
+        self.assertEqual(
+            self.gold["relationshipGoldStatus"],
+            "NOT_AVAILABLE",
+        )
 
     def test_gold_set_precision_and_recall_meet_gate(self):
         discovery, expected = _discovery_fixture(self.gold)
@@ -222,6 +278,62 @@ class KnowledgeRegistrationTests(unittest.TestCase):
             buff[0].match_method,
             "property_semantic_and_class_ancestry",
         )
+
+    def test_exact_property_without_real_evidence_stays_candidate(self):
+        discovery = sqlite3.connect(":memory:")
+        discovery.executescript(
+            """
+            CREATE TABLE system_registrations(
+                registration_id TEXT PRIMARY KEY,
+                owner_object_path TEXT NOT NULL,
+                target_object_path TEXT NOT NULL,
+                registration_type TEXT NOT NULL,
+                source_property TEXT NOT NULL,
+                source_evidence_id TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                source_kind TEXT NOT NULL
+            );
+            CREATE TABLE asset_references(
+                reference_id TEXT PRIMARY KEY,
+                source_object_path TEXT NOT NULL,
+                target_object_path TEXT NOT NULL,
+                source_property TEXT NOT NULL,
+                source_evidence_id TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                edge_kind TEXT NOT NULL
+            );
+            INSERT INTO asset_references VALUES(
+                'missing-evidence',
+                '/Game/Test/Owner.Owner',
+                '/Game/Test/Engram.Engram_C',
+                'AdditionalEngramBlueprintClasses',
+                '',
+                'HIGH',
+                'asset_registry',
+                'object_reference'
+            );
+            """
+        )
+        target = sqlite3.connect(":memory:")
+
+        try:
+            materialize_typed_registrations(
+                discovery,
+                target,
+                source_revision_id=1,
+            )
+            row = target.execute(
+                """
+                SELECT evidence_uri, status, confidence
+                FROM typed_registrations
+                """
+            ).fetchone()
+        finally:
+            discovery.close()
+            target.close()
+
+        self.assertEqual(row, ("", "CANDIDATE", "LOW"))
 
     def test_legacy_high_confidence_requires_recovered_allowed_evidence(self):
         discovery = sqlite3.connect(":memory:")

@@ -37,8 +37,13 @@ from .snapshot import (
     SNAPSHOT_SOURCE_KIND,
     SNAPSHOT_SOURCE_URI,
     normalize_snapshot_generated_at,
+    resolve_current_snapshot,
     semantic_inputs_sha256,
     snapshot_build_id,
+    validate_snapshot_database_schemas,
+    validate_snapshot_projection_bindings,
+    validate_sealed_snapshot_quality,
+    validate_snapshot_source_identity,
 )
 from .storage import (
     CACHE_SCHEMA_VERSION,
@@ -485,17 +490,59 @@ def _provenance_gaps(
 
 class VNextKnowledgeService:
     def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
+        self.configured_root = root.resolve()
+        self._snapshot_resolution_error = ""
+        self._snapshot_layout = "unresolved"
+        try:
+            location = resolve_current_snapshot(self.configured_root)
+        except (OSError, ValueError) as exc:
+            self.root = self.configured_root
+            self.manifest_path = (
+                self.configured_root / "current.json"
+                if (self.configured_root / "current.json").exists()
+                else self.configured_root / "manifests" / "current.json"
+            )
+            self._immutable_manifest_path = self.manifest_path
+            self._snapshot_resolution_error = str(exc)
+        else:
+            self.root = location.snapshot_dir
+            self.manifest_path = location.manifest_path
+            self._snapshot_layout = location.layout
+            self._immutable_manifest_path = (
+                location.manifest_path
+                if location.layout == "immutable-v2"
+                else (
+                    location.root
+                    / "manifests"
+                    / f"{location.build_id}.json"
+                )
+            )
         self.core_path = self.root / "core.sqlite"
         self.search_path = self.root / "search.sqlite"
         self.cache_path = self.root / "cache.sqlite"
-        self.manifest_path = self.root / "manifests" / "current.json"
         self._database_digest_cache: dict[
             str,
             tuple[tuple[object, ...], str],
         ] = {}
         self._cache_hits = 0
         self._cache_misses = 0
+        self._immutable_structure_error = ""
+        if self._snapshot_layout == "immutable-v2":
+            try:
+                immutable_manifest = json.loads(
+                    self.manifest_path.read_text(encoding="utf-8")
+                )
+                if not isinstance(immutable_manifest, Mapping):
+                    raise ValueError(
+                        "immutable manifest must be an object"
+                    )
+                validate_snapshot_database_schemas(self.root)
+                validate_snapshot_projection_bindings(
+                    snapshot_dir=self.root,
+                    manifest=immutable_manifest,
+                )
+            except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+                self._immutable_structure_error = str(exc)
 
     def _declared_database_matches(
         self,
@@ -538,6 +585,16 @@ class VNextKnowledgeService:
     def _snapshot_binding_error(self) -> str | None:
         """Validate immutable runtime artifacts and their build identity."""
 
+        if self._snapshot_resolution_error:
+            return (
+                "current snapshot pointer is invalid: "
+                + self._snapshot_resolution_error
+            )
+        if self._immutable_structure_error:
+            return (
+                "immutable snapshot structure is invalid: "
+                + self._immutable_structure_error
+            )
         try:
             raw_manifest = json.loads(
                 self.manifest_path.read_text(encoding="utf-8")
@@ -548,7 +605,7 @@ class VNextKnowledgeService:
             return "current snapshot manifest must be an object"
         manifest = raw_manifest
         build_id = str(manifest.get("buildId") or "")
-        immutable_path = self.root / "manifests" / f"{build_id}.json"
+        immutable_path = self._immutable_manifest_path
         try:
             immutable_manifest = json.loads(
                 immutable_path.read_text(encoding="utf-8")
@@ -562,6 +619,15 @@ class VNextKnowledgeService:
             or immutable_manifest != manifest
         ):
             return "current and immutable snapshot manifests do not match"
+        if self._snapshot_layout == "immutable-v2":
+            try:
+                validate_snapshot_source_identity(manifest)
+                validate_sealed_snapshot_quality(
+                    snapshot_dir=self.root,
+                    manifest=manifest,
+                )
+            except ValueError as exc:
+                return f"sealed snapshot quality binding is invalid: {exc}"
 
         source = manifest.get("source")
         databases = manifest.get("databases")
@@ -702,6 +768,9 @@ class VNextKnowledgeService:
             review_config_sha256 = str(
                 declared.get("reviewConfigSha256") or ""
             )
+            source_revision_set_hash = str(
+                declared.get("sourceRevisionSetHash") or ""
+            )
             if (
                 str(declared.get("schemaVersion") or "")
                 != PROJECTION_SCHEMA_VERSION
@@ -713,6 +782,7 @@ class VNextKnowledgeService:
                 != manifest_ontology_version
                 or not _is_sha256(content_digest)
                 or not _is_sha256(review_config_sha256)
+                or not _is_sha256(source_revision_set_hash)
                 or not self._declared_database_matches(name, declared)
             ):
                 return f"{name} does not match its manifest declaration"
@@ -747,6 +817,14 @@ class VNextKnowledgeService:
                 != review_config_sha256
                 or str(metadata.get("content_digest") or "")
                 != content_digest
+                or str(metadata.get("source_revision_set_hash") or "")
+                != source_revision_set_hash
+                or str(metadata.get("snapshot_build_id") or "")
+                != build_id
+                or str(
+                    metadata.get("snapshot_source_fingerprint") or ""
+                )
+                != semantic_fingerprint
             ):
                 return f"{name} metadata does not match the snapshot"
         return None
@@ -1189,7 +1267,7 @@ class VNextKnowledgeService:
             dict(raw_manifest) if isinstance(raw_manifest, Mapping) else {}
         )
         build_id = str(manifest.get("buildId") or "")
-        immutable_manifest = self.root / "manifests" / f"{build_id}.json"
+        immutable_manifest = self._immutable_manifest_path
         try:
             raw_immutable_payload = json.loads(
                 immutable_manifest.read_text(encoding="utf-8")

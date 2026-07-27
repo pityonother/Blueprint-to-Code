@@ -10,16 +10,24 @@ from __future__ import annotations
 
 import math
 import json
+import re
 import sqlite3
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Mapping, Sequence
 
-from .registrations import registration_provenance_is_confirmed
+from .native_gold_set import is_recovered_evidence_uri
+from .query_planner import source_revision_is_fresh
+from .registrations import (
+    GLOBAL_REGISTRATION_EDGE_TYPES,
+    registration_edge_type,
+    registration_provenance_is_confirmed,
+)
 
 
-ROLE_CLASSIFIER_VERSION = "ark-kb-roles/v1"
+ROLE_CLASSIFIER_VERSION = "ark-kb-roles/v2"
 KNOWLEDGE_ROLES = (
     "catalog_asset",
     "global_system_hub",
@@ -57,6 +65,52 @@ PERCENTILE_METRICS = (
     ("query_demand_count", "query_demand_percentile"),
 )
 
+ROLE_SIGNAL_COUNT_FIELDS = (
+    "distinct_query_domain_count",
+    "repeated_fact_demand_count",
+    "confirmed_cross_domain_evidence_count",
+    "confirmed_formula_count",
+    "native_confirmed_count",
+    "animation_notify_mechanism_count",
+    "curve_mechanism_count",
+    "collision_mechanism_count",
+    "material_parameter_input_count",
+    "world_placement_evidence_count",
+    "confirmed_component_relationship_count",
+)
+
+CONFIRMED_STATUSES = frozenset(
+    {
+        "SELF",
+        "EXTRACTED",
+        "IDENTIFIED",
+        "CONFIRMED",
+        "VERIFIED",
+        "RESOLVED",
+    }
+)
+CONFIRMED_CONFIDENCE = frozenset({"HIGH", "CONFIRMED"})
+MAP_WORLD_EDGE_TYPES = frozenset(
+    {
+        "MAP_DIRECT_REFERENCE",
+        "MAP_PCG_DEPENDENCY",
+        "MAP_WORLD_PARTITION_REFERENCE",
+        "MAP_USES",
+        "PCG_PLACES",
+    }
+)
+SEMANTIC_CLASS_GROUPS = frozenset(
+    {
+        "BLUEPRINT_BASE_CLASS",
+        "ACTOR_COMPONENT",
+        "DATA_ASSET",
+        "MAP_WORLD",
+        "VISUAL",
+        "NATIVE_CLASS",
+        "UNCLASSIFIED",
+    }
+)
+
 ROLE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS role_metrics (
     entity_id INTEGER PRIMARY KEY,
@@ -90,6 +144,29 @@ CREATE TABLE IF NOT EXISTS role_metrics (
     FOREIGN KEY(entity_id) REFERENCES entities(entity_id)
 );
 
+CREATE TABLE IF NOT EXISTS role_signal_metrics (
+    entity_id INTEGER PRIMARY KEY,
+    semantic_class_category TEXT NOT NULL,
+    query_hit_count INTEGER,
+    query_hit_status TEXT NOT NULL,
+    distinct_query_domain_count INTEGER NOT NULL,
+    repeated_fact_demand_count INTEGER NOT NULL,
+    confirmed_cross_domain_evidence_count INTEGER NOT NULL,
+    confirmed_formula_count INTEGER NOT NULL,
+    native_confirmed_count INTEGER NOT NULL,
+    animation_notify_mechanism_count INTEGER NOT NULL,
+    curve_mechanism_count INTEGER NOT NULL,
+    collision_mechanism_count INTEGER NOT NULL,
+    material_parameter_input_count INTEGER NOT NULL,
+    world_placement_evidence_count INTEGER NOT NULL,
+    confirmed_component_relationship_count INTEGER NOT NULL,
+    provenance_json TEXT NOT NULL,
+    classifier_version TEXT NOT NULL,
+    source_revision_id INTEGER,
+    FOREIGN KEY(entity_id) REFERENCES entities(entity_id),
+    FOREIGN KEY(source_revision_id) REFERENCES source_revisions(revision_id)
+);
+
 CREATE TABLE IF NOT EXISTS knowledge_roles (
     entity_id INTEGER NOT NULL,
     role TEXT NOT NULL,
@@ -113,6 +190,8 @@ CREATE TABLE IF NOT EXISTS knowledge_depth_policies (
 
 CREATE INDEX IF NOT EXISTS idx_role_metrics_group
     ON role_metrics(percentile_group);
+CREATE INDEX IF NOT EXISTS idx_role_signal_semantic_group
+    ON role_signal_metrics(semantic_class_category);
 CREATE INDEX IF NOT EXISTS idx_knowledge_roles_role
     ON knowledge_roles(role, confidence, status);
 CREATE INDEX IF NOT EXISTS idx_depth_policy
@@ -179,6 +258,14 @@ class RoleDecision:
         return {assignment.role for assignment in self.roles}
 
 
+@dataclass
+class _PersistedRoleSignals:
+    counts_by_entity: dict[int, dict[str, int]]
+    query_hits_by_entity: dict[int, int]
+    provenance_by_entity: dict[int, dict[str, list[str]]]
+    source_statuses: dict[str, str]
+
+
 def _text(row: Mapping[str, object], key: str, default: str = "") -> str:
     value = row.get(key)
     return default if value is None else str(value)
@@ -211,6 +298,182 @@ def _truthy(row: Mapping[str, object], key: str) -> bool:
     return bool(value)
 
 
+def _confirmed(status: object, confidence: object) -> bool:
+    return (
+        str(status or "").strip().upper() in CONFIRMED_STATUSES
+        and str(confidence or "").strip().upper() in CONFIRMED_CONFIDENCE
+    )
+
+
+def _table_columns(
+    connection: sqlite3.Connection,
+    table_name: str,
+) -> set[str]:
+    if not _table_exists(connection, table_name):
+        return set()
+    return {
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info({table_name})")
+    }
+
+
+def _fresh_revision_ids(connection: sqlite3.Connection) -> set[int]:
+    columns = _table_columns(connection, "source_revisions")
+    required = {
+        "revision_id",
+        "source_kind",
+        "source_uri",
+        "source_fingerprint",
+        "producer_version",
+        "schema_version",
+        "generated_at",
+        "freshness_status",
+    }
+    if not required.issubset(columns):
+        return set()
+    result: set[int] = set()
+    for row in connection.execute(
+        """
+        SELECT
+            revision_id, source_kind, source_uri, source_fingerprint,
+            producer_version, schema_version, generated_at,
+            freshness_status
+        FROM source_revisions
+        """
+    ):
+        if _complete_fresh_revision(row[1:8], revision_id=row[0]):
+            result.add(int(row[0]))
+    return result
+
+
+def _complete_fresh_revision(
+    values: Sequence[object],
+    *,
+    revision_id: object,
+) -> bool:
+    if len(values) != 7:
+        return False
+    (
+        source_kind,
+        source_uri,
+        source_fingerprint,
+        producer_version,
+        schema_version,
+        generated_at,
+        freshness_status,
+    ) = values
+    fingerprint = str(source_fingerprint or "").strip()
+    generated = str(generated_at or "").strip()
+    try:
+        timestamp = datetime.fromisoformat(
+            generated[:-1] + "+00:00"
+            if generated.endswith("Z")
+            else generated
+        )
+    except ValueError:
+        return False
+    return (
+        bool(re.fullmatch(r"[0-9a-fA-F]{64}", fingerprint))
+        and timestamp.utcoffset() is not None
+        and source_revision_is_fresh(
+            {
+                "revisionId": revision_id,
+                "sourceKind": source_kind,
+                "sourceUri": source_uri,
+                "sourceFingerprint": fingerprint,
+                "producerVersion": producer_version,
+                "schemaVersion": schema_version,
+                "generatedAt": generated,
+                "freshness": freshness_status,
+            }
+        )
+    )
+
+
+def _record_provenance(
+    result: _PersistedRoleSignals,
+    entity_id: int,
+    signal_name: str,
+    record: object,
+) -> None:
+    records = result.provenance_by_entity.setdefault(entity_id, {}).setdefault(
+        signal_name,
+        [],
+    )
+    text = str(record or "").strip()
+    if text and text not in records and len(records) < 8:
+        records.append(text)
+
+
+def _increment_signal(
+    result: _PersistedRoleSignals,
+    entity_id: int,
+    signal_name: str,
+    *,
+    count: int = 1,
+    record: object = "",
+) -> None:
+    entity_counts = result.counts_by_entity.setdefault(entity_id, {})
+    entity_counts[signal_name] = entity_counts.get(signal_name, 0) + count
+    _record_provenance(result, entity_id, signal_name, record)
+
+
+def _component_relationship(edge_type: object) -> bool:
+    normalized = str(edge_type or "").strip().upper()
+    return normalized in {"OWNS_COMPONENT", "USES_COMPONENT"} or (
+        normalized.startswith("USES_") and normalized.endswith("_COMPONENT")
+    )
+
+
+def _normalized_fact_tokens(fact_type: object, fact_name: object) -> str:
+    return re.sub(
+        r"[^a-z0-9]+",
+        "",
+        f"{fact_type or ''} {fact_name or ''}".casefold(),
+    )
+
+
+def _mechanism_signal_names(
+    fact_type: object,
+    fact_name: object,
+) -> tuple[str, ...]:
+    tokens = _normalized_fact_tokens(fact_type, fact_name)
+    result: list[str] = []
+    if "animnotify" in tokens or "animationnotify" in tokens:
+        result.append("animation_notify_mechanism_count")
+    if "curve" in tokens:
+        result.append("curve_mechanism_count")
+    if "collision" in tokens:
+        result.append("collision_mechanism_count")
+    if "materialparameter" in tokens or (
+        "material" in tokens and "parameter" in tokens
+    ):
+        result.append("material_parameter_input_count")
+    return tuple(result)
+
+
+def _semantic_class_category(
+    row: Mapping[str, object],
+    ancestry_categories: set[str],
+) -> str:
+    normalized = {category.strip().upper() for category in ancestry_categories}
+    if "ACTOR_COMPONENT" in normalized:
+        return "ACTOR_COMPONENT"
+    if normalized & {"DATA_ASSET", "PRIMARY_DATA_ASSET"}:
+        return "DATA_ASSET"
+    if _truthy(row, "is_data_asset") or _truthy(row, "is_data_table"):
+        return "DATA_ASSET"
+    if _truthy(row, "is_map"):
+        return "MAP_WORLD"
+    if _is_visual_asset(row):
+        return "VISUAL"
+    if _truthy(row, "is_blueprint"):
+        return "BLUEPRINT_BASE_CLASS"
+    if _text(row, "asset_class_path").startswith("/Script/"):
+        return "NATIVE_CLASS"
+    return "UNCLASSIFIED"
+
+
 def _class_leaf(value: str) -> str:
     leaf = value.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
     return leaf.removesuffix("_C").casefold()
@@ -218,7 +481,7 @@ def _class_leaf(value: str) -> str:
 
 def _is_visual_asset(row: Mapping[str, object]) -> bool:
     explicit_category = _text(row, "semantic_class_category").casefold()
-    if explicit_category == "visual_support":
+    if explicit_category in {"visual", "visual_support"}:
         return True
     class_leaf = _class_leaf(_text(row, "asset_class_path"))
     return any(
@@ -303,9 +566,13 @@ def _semantic_qualifications(row: Mapping[str, object]) -> list[str]:
         qualifications.append("confirmed_public_rule_or_formula")
     if (
         _integer(row, "query_hit_count") > 0
-        and _integer(row, "existing_report_count") > 0
+        and (
+            _integer(row, "existing_report_count") > 0
+            or _integer(row, "repeated_fact_demand_count") > 0
+            or _integer(row, "distinct_query_domain_count") > 1
+        )
     ):
-        qualifications.append("repeated_query_and_report_demand")
+        qualifications.append("repeated_semantic_demand")
     return qualifications
 
 
@@ -443,7 +710,7 @@ def classify_asset(row: Mapping[str, object]) -> RoleDecision:
         "confirmed_public_rule_or_formula" in qualifications
         or (
             "confirmed_cross_domain_evidence" in qualifications
-            and "repeated_query_and_report_demand" in qualifications
+            and "repeated_semantic_demand" in qualifications
         )
     )
     if not visual and rule_evidence:
@@ -571,6 +838,10 @@ def _registration_count(row: Mapping[str, object]) -> int:
 
 def enrich_type_percentiles(
     rows: Sequence[Mapping[str, object]],
+    *,
+    percentile_distributions: (
+        Mapping[str, Mapping[str, Sequence[float]]] | None
+    ) = None,
 ) -> list[dict[str, object]]:
     """Add raw/log1p/type-percentile fields without collapsing to one score."""
 
@@ -593,7 +864,14 @@ def enrich_type_percentiles(
         for raw_field, percentile_field in PERCENTILE_METRICS:
             values = [_integer(enriched[index], raw_field) for index in indexes]
             logs = [math.log1p(max(0, value)) for value in values]
-            ordered = sorted(logs)
+            group = _text(enriched[indexes[0]], "percentile_group")
+            ordered = (
+                list(percentile_distributions[group][raw_field])
+                if percentile_distributions is not None
+                else sorted(logs)
+            )
+            if not ordered:
+                ordered = [0.0]
             log_field = raw_field.removesuffix("_count") + "_log1p"
             for index, log_value in zip(indexes, logs, strict=True):
                 enriched[index][log_field] = log_value
@@ -636,6 +914,505 @@ def _is_recovered_revision_value(value: object) -> bool:
         text.upper().replace("-", " ").replace("_", " ").split()
     )
     return bool(text) and normalized not in UNRECOVERED_REVISION_VALUES
+
+
+def _collect_query_signals(
+    target: sqlite3.Connection,
+    *,
+    entity_ids: Mapping[str, int],
+    result: _PersistedRoleSignals,
+) -> None:
+    columns = _table_columns(target, "benchmark_queries")
+    required = {"query_id", "primary_domain", "query_json"}
+    if not required.issubset(columns):
+        result.source_statuses["benchmarkQueries"] = "SOURCE_NOT_AVAILABLE"
+        return
+
+    domains_by_entity: dict[int, set[str]] = defaultdict(set)
+    fact_demand: dict[tuple[int, str, str], list[str]] = defaultdict(list)
+    invalid_rows = 0
+    eligible_rows = 0
+    for query_id, primary_domain, query_json in target.execute(
+        """
+        SELECT query_id, primary_domain, query_json
+        FROM benchmark_queries
+        ORDER BY query_id
+        """
+    ):
+        try:
+            payload = json.loads(str(query_json))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            invalid_rows += 1
+            continue
+        if not isinstance(payload, dict):
+            invalid_rows += 1
+            continue
+        gold = payload.get("_gold")
+        if (
+            not isinstance(gold, dict)
+            or str(gold.get("reviewStatus") or "").strip().upper()
+            not in {"HUMAN_REVIEWED", "EMPIRICAL"}
+            or gold.get("protocolBoundaryOnly") is not False
+        ):
+            continue
+        eligible_rows += 1
+        entity_uri = str(payload.get("entity") or "").strip()
+        entity_id = entity_ids.get(entity_uri)
+        if entity_id is None:
+            continue
+        result.query_hits_by_entity[entity_id] = (
+            result.query_hits_by_entity.get(entity_id, 0) + 1
+        )
+        domain = str(primary_domain or "").strip()
+        if domain:
+            domains_by_entity[entity_id].add(domain)
+        request = payload.get("requirements")
+        if not isinstance(request, dict):
+            request = payload
+        fact_types = [
+            str(value).strip()
+            for value in request.get("factTypes", [])
+            if str(value).strip()
+        ]
+        fact_names = [
+            str(value).strip()
+            for value in request.get("factNames", [])
+            if str(value).strip()
+        ]
+        query_key = str(query_id)
+        for fact_type in fact_types or [""]:
+            for fact_name in fact_names or [""]:
+                if fact_type or fact_name:
+                    fact_demand[(entity_id, fact_type, fact_name)].append(
+                        query_key
+                    )
+        _record_provenance(
+            result,
+            entity_id,
+            "distinct_query_domain_count",
+            query_key,
+        )
+
+    for entity_id, domains in domains_by_entity.items():
+        result.counts_by_entity.setdefault(entity_id, {})[
+            "distinct_query_domain_count"
+        ] = len(domains)
+    repeated_by_entity: dict[int, int] = defaultdict(int)
+    for (entity_id, fact_type, fact_name), query_ids in fact_demand.items():
+        if len(query_ids) < 2:
+            continue
+        repeated_by_entity[entity_id] += 1
+        for query_id in query_ids:
+            _record_provenance(
+                result,
+                entity_id,
+                "repeated_fact_demand_count",
+                f"{query_id}:{fact_type}:{fact_name}",
+            )
+    for entity_id, count in repeated_by_entity.items():
+        result.counts_by_entity.setdefault(entity_id, {})[
+            "repeated_fact_demand_count"
+        ] = count
+    if eligible_rows == 0:
+        result.source_statuses["benchmarkQueries"] = "UNVERIFIED"
+    elif invalid_rows:
+        result.source_statuses["benchmarkQueries"] = "PARTIAL_INVALID"
+    else:
+        result.source_statuses["benchmarkQueries"] = "MEASURED"
+
+
+def _collect_fact_signals(
+    target: sqlite3.Connection,
+    *,
+    fresh_revision_ids: set[int],
+    result: _PersistedRoleSignals,
+) -> None:
+    fact_columns = _table_columns(target, "facts")
+    evidence_columns = _table_columns(target, "fact_evidence")
+    required_facts = {
+        "fact_id",
+        "subject_entity_id",
+        "fact_type",
+        "fact_name",
+        "current",
+        "status",
+        "confidence",
+    }
+    required_evidence = {
+        "fact_id",
+        "source_revision_id",
+        "evidence_uri",
+    }
+    if not (
+        required_facts.issubset(fact_columns)
+        and required_evidence.issubset(evidence_columns)
+        and _table_exists(target, "source_revisions")
+    ):
+        result.source_statuses["factEvidence"] = "SOURCE_NOT_AVAILABLE"
+        return
+
+    result.source_statuses["factEvidence"] = "MEASURED"
+    accepted_fact_ids: set[int] = set()
+    for row in target.execute(
+        """
+        SELECT
+            fact.fact_id,
+            fact.subject_entity_id,
+            fact.fact_type,
+            fact.fact_name,
+            fact.current,
+            fact.status,
+            fact.confidence,
+            evidence.source_revision_id,
+            evidence.evidence_uri
+        FROM facts AS fact
+        JOIN fact_evidence AS evidence ON evidence.fact_id=fact.fact_id
+        ORDER BY fact.fact_id, evidence.source_revision_id,
+                 evidence.evidence_uri
+        """
+    ):
+        fact_id = int(row[0])
+        if fact_id in accepted_fact_ids:
+            continue
+        if (
+            int(row[4] or 0) != 1
+            or not _confirmed(row[5], row[6])
+            or row[7] is None
+            or int(row[7]) not in fresh_revision_ids
+            or not is_recovered_evidence_uri(row[8])
+        ):
+            continue
+        accepted_fact_ids.add(fact_id)
+        entity_id = int(row[1])
+        evidence_record = f"fact:{fact_id}@{row[8]}"
+        if str(row[2] or "").strip().upper() == "FORMULA":
+            _increment_signal(
+                result,
+                entity_id,
+                "confirmed_formula_count",
+                record=evidence_record,
+            )
+        for signal_name in _mechanism_signal_names(row[2], row[3]):
+            _increment_signal(
+                result,
+                entity_id,
+                signal_name,
+                record=evidence_record,
+            )
+
+
+def _confirmed_domain_memberships(
+    target: sqlite3.Connection,
+    *,
+    fresh_revision_ids: set[int],
+    result: _PersistedRoleSignals,
+) -> dict[int, set[str]]:
+    columns = _table_columns(target, "domain_memberships")
+    required = {"entity_id", "domain_id", "status", "confidence"}
+    if not required.issubset(columns):
+        result.source_statuses["domainMemberships"] = "SOURCE_NOT_AVAILABLE"
+        return {}
+    if "source_revision_id" not in columns:
+        result.source_statuses["domainMemberships"] = "UNVERIFIED"
+        return {}
+
+    result.source_statuses["domainMemberships"] = "MEASURED"
+    memberships: dict[int, set[str]] = defaultdict(set)
+    for entity_id, domain_id, status, confidence, revision_id in target.execute(
+        """
+        SELECT
+            entity_id, domain_id, status, confidence,
+            source_revision_id
+        FROM domain_memberships
+        """
+    ):
+        if not _confirmed(status, confidence):
+            continue
+        if revision_id is None or int(revision_id) not in fresh_revision_ids:
+            continue
+        domain = str(domain_id or "").strip()
+        if domain:
+            memberships[int(entity_id)].add(domain)
+    return memberships
+
+
+def _collect_edge_signals(
+    target: sqlite3.Connection,
+    *,
+    fresh_revision_ids: set[int],
+    result: _PersistedRoleSignals,
+) -> None:
+    columns = _table_columns(target, "edges")
+    required = {
+        "edge_id",
+        "source_entity_id",
+        "target_entity_id",
+        "edge_type",
+        "status",
+        "confidence",
+        "evidence_uri",
+    }
+    if not required.issubset(columns):
+        result.source_statuses["confirmedEdges"] = "SOURCE_NOT_AVAILABLE"
+        result.source_statuses["domainMemberships"] = "SOURCE_NOT_AVAILABLE"
+        return
+
+    memberships = _confirmed_domain_memberships(
+        target,
+        fresh_revision_ids=fresh_revision_ids,
+        result=result,
+    )
+    if "source_revision_id" not in columns:
+        result.source_statuses["confirmedEdges"] = "UNVERIFIED"
+        return
+
+    result.source_statuses["confirmedEdges"] = "MEASURED"
+    component_pairs: dict[tuple[int, int], str] = {}
+    for row in target.execute(
+        """
+        SELECT
+            edge_id, source_entity_id, target_entity_id, edge_type,
+            status, confidence, evidence_uri, source_revision_id
+        FROM edges
+        ORDER BY edge_id
+        """
+    ):
+        if (
+            not _confirmed(row[4], row[5])
+            or not is_recovered_evidence_uri(row[6])
+        ):
+            continue
+        if row[7] is None or int(row[7]) not in fresh_revision_ids:
+            continue
+        edge_id = str(row[0])
+        source_id = int(row[1])
+        target_id = int(row[2])
+        edge_type = str(row[3] or "").strip().upper()
+        record = f"edge:{edge_id}@{row[6]}"
+        if edge_type in MAP_WORLD_EDGE_TYPES:
+            _increment_signal(
+                result,
+                source_id,
+                "world_placement_evidence_count",
+                record=record,
+            )
+        if _component_relationship(edge_type):
+            component_pairs.setdefault((target_id, source_id), record)
+        source_domains = memberships.get(source_id, set())
+        target_domains = memberships.get(target_id, set())
+        if source_domains and target_domains and source_domains != target_domains:
+            _increment_signal(
+                result,
+                source_id,
+                "confirmed_cross_domain_evidence_count",
+                record=record,
+            )
+    for (target_id, _source_id), record in component_pairs.items():
+        _increment_signal(
+            result,
+            target_id,
+            "confirmed_component_relationship_count",
+            record=record,
+        )
+
+
+def _collect_native_signals(
+    target: sqlite3.Connection,
+    *,
+    fresh_revision_ids: set[int],
+    entity_ids: Mapping[str, int],
+    result: _PersistedRoleSignals,
+) -> None:
+    function_columns = _table_columns(target, "native_functions")
+    required_functions = {
+        "native_function_id",
+        "status",
+        "confidence",
+        "source_revision_id",
+    }
+    if not required_functions.issubset(function_columns):
+        result.source_statuses["nativeFunctions"] = "SOURCE_NOT_AVAILABLE"
+        result.source_statuses["nativeBlueprintLinks"] = "SOURCE_NOT_AVAILABLE"
+        result.source_statuses["nativeFieldAccesses"] = "SOURCE_NOT_AVAILABLE"
+        return
+
+    result.source_statuses["nativeFunctions"] = "MEASURED"
+    canonical_expression = (
+        "canonical_uri"
+        if "canonical_uri" in function_columns
+        else "'' AS canonical_uri"
+    )
+    valid_functions: dict[int, str] = {}
+    native_entity_ids: dict[int, int] = {}
+    for function_id, canonical_uri, status, confidence, revision_id in (
+        target.execute(
+            f"""
+            SELECT
+                native_function_id, {canonical_expression},
+                status, confidence, source_revision_id
+            FROM native_functions
+            """
+        )
+    ):
+        if (
+            not _confirmed(status, confidence)
+            or revision_id is None
+            or int(revision_id) not in fresh_revision_ids
+        ):
+            continue
+        function_key = int(function_id)
+        valid_functions[function_key] = str(canonical_uri or "")
+        entity_id = entity_ids.get(str(canonical_uri or "").strip())
+        if entity_id is not None:
+            native_entity_ids[function_key] = entity_id
+            _increment_signal(
+                result,
+                entity_id,
+                "native_confirmed_count",
+                record=f"native-function:{function_key}",
+            )
+
+    link_columns = _table_columns(target, "native_blueprint_links")
+    required_links = {
+        "link_id",
+        "blueprint_entity_id",
+        "blueprint_graph_evidence_uri",
+        "native_function_id",
+        "native_evidence_uri",
+        "status",
+        "confidence",
+        "blueprint_graph_source_revision_id",
+    }
+    linked_entities_by_function: dict[int, set[int]] = defaultdict(set)
+    if not required_links.issubset(link_columns):
+        result.source_statuses["nativeBlueprintLinks"] = "SOURCE_NOT_AVAILABLE"
+    else:
+        result.source_statuses["nativeBlueprintLinks"] = "MEASURED"
+        for row in target.execute(
+            """
+            SELECT
+                link_id, blueprint_entity_id,
+                blueprint_graph_evidence_uri, native_function_id,
+                native_evidence_uri, status, confidence,
+                blueprint_graph_source_revision_id
+            FROM native_blueprint_links
+            ORDER BY link_id
+            """
+        ):
+            function_id = None if row[3] is None else int(row[3])
+            if (
+                function_id not in valid_functions
+                or not _confirmed(row[5], row[6])
+                or row[7] is None
+                or int(row[7]) not in fresh_revision_ids
+                or not is_recovered_evidence_uri(row[2])
+                or not is_recovered_evidence_uri(row[4])
+            ):
+                continue
+            entity_id = int(row[1])
+            linked_entities_by_function[function_id].add(entity_id)
+            _increment_signal(
+                result,
+                entity_id,
+                "native_confirmed_count",
+                record=f"native-link:{row[0]}@{row[2]}",
+            )
+
+    access_columns = _table_columns(target, "native_field_accesses")
+    required_accesses = {
+        "field_access_id",
+        "native_function_id",
+        "instruction_or_slice_uri",
+        "status",
+        "confidence",
+    }
+    if not required_accesses.issubset(access_columns):
+        result.source_statuses["nativeFieldAccesses"] = "SOURCE_NOT_AVAILABLE"
+        return
+    result.source_statuses["nativeFieldAccesses"] = "MEASURED"
+    for row in target.execute(
+        """
+        SELECT
+            field_access_id, native_function_id,
+            instruction_or_slice_uri, status, confidence
+        FROM native_field_accesses
+        ORDER BY field_access_id
+        """
+    ):
+        function_id = int(row[1])
+        if (
+            function_id not in valid_functions
+            or not _confirmed(row[3], row[4])
+            or not is_recovered_evidence_uri(row[2])
+        ):
+            continue
+        record = f"native-field:{row[0]}@{row[2]}"
+        for entity_id in linked_entities_by_function.get(function_id, set()):
+            _increment_signal(
+                result,
+                entity_id,
+                "native_confirmed_count",
+                record=record,
+            )
+        native_entity_id = native_entity_ids.get(function_id)
+        if native_entity_id is not None:
+            _increment_signal(
+                result,
+                native_entity_id,
+                "native_confirmed_count",
+                record=record,
+            )
+
+
+def _collect_persisted_role_signals(
+    target: sqlite3.Connection,
+    *,
+    entity_ids: Mapping[str, int],
+) -> _PersistedRoleSignals:
+    result = _PersistedRoleSignals(
+        counts_by_entity={},
+        query_hits_by_entity={},
+        provenance_by_entity={},
+        source_statuses={},
+    )
+    fresh_revision_ids = _fresh_revision_ids(target)
+    revision_columns = _table_columns(target, "source_revisions")
+    result.source_statuses["sourceRevisions"] = (
+        "MEASURED"
+        if {
+            "revision_id",
+            "source_kind",
+            "source_uri",
+            "source_fingerprint",
+            "producer_version",
+            "schema_version",
+            "generated_at",
+            "freshness_status",
+        }.issubset(revision_columns)
+        else "SOURCE_NOT_AVAILABLE"
+    )
+    _collect_query_signals(
+        target,
+        entity_ids=entity_ids,
+        result=result,
+    )
+    _collect_fact_signals(
+        target,
+        fresh_revision_ids=fresh_revision_ids,
+        result=result,
+    )
+    _collect_edge_signals(
+        target,
+        fresh_revision_ids=fresh_revision_ids,
+        result=result,
+    )
+    _collect_native_signals(
+        target,
+        fresh_revision_ids=fresh_revision_ids,
+        entity_ids=entity_ids,
+        result=result,
+    )
+    return result
 
 
 def _canonical_registration_entity_uris(
@@ -702,9 +1479,11 @@ def _prepare_canonical_registration_counts(
             registration.owner_uri,
             registration.target_uri,
             registration.registration_type,
+            registration.source_property,
             registration.evidence_uri,
             registration.status,
             registration.confidence,
+            revision.revision_id,
             revision.source_kind,
             revision.source_uri,
             revision.source_fingerprint,
@@ -720,15 +1499,17 @@ def _prepare_canonical_registration_counts(
         owner_uri = str(row[0] or "").strip()
         target_uri = str(row[1] or "").strip()
         registration_type = str(row[2] or "")
-        evidence_uri = str(row[3] or "")
-        status = str(row[4] or "").upper()
-        confidence = str(row[5] or "").upper()
-        revision_is_fresh = (
-            str(row[12] or "").upper() == "FRESH"
-            and all(
-                _is_recovered_revision_value(value)
-                for value in row[6:12]
-            )
+        source_property = str(row[3] or "")
+        evidence_uri = str(row[4] or "")
+        status = str(row[5] or "").upper()
+        confidence = str(row[6] or "").upper()
+        revision_is_fresh = _complete_fresh_revision(
+            row[8:15],
+            revision_id=row[7],
+        )
+        relationship_type = registration_edge_type(
+            registration_type=registration_type,
+            source_property=source_property,
         )
         if (
             not registration_provenance_is_confirmed(
@@ -737,6 +1518,7 @@ def _prepare_canonical_registration_counts(
                 evidence_uri,
             )
             or not revision_is_fresh
+            or relationship_type not in GLOBAL_REGISTRATION_EDGE_TYPES
             or not registration_type
             or owner_uri not in canonical_entity_uris
             or target_uri not in canonical_entity_uris
@@ -778,63 +1560,204 @@ def _source_role_rows(
             COALESCE(r.registration_owner_count, 0)
                 AS registration_owner_count,
             COALESCE(r.distinct_registration_type_count, 0)
-                AS distinct_registration_type_count,
-            0 AS distinct_query_domain_count,
-            0 AS repeated_fact_demand_count,
-            0 AS confirmed_cross_domain_evidence_count,
-            0 AS confirmed_formula_count,
-            0 AS native_confirmed_count,
-            0 AS animation_notify_mechanism_count,
-            0 AS curve_mechanism_count,
-            0 AS collision_mechanism_count,
-            0 AS material_parameter_input_count,
-            0 AS world_placement_evidence_count,
-            0 AS is_actor_component,
-            '' AS semantic_class_category,
-            a.asset_class_path AS percentile_group,
-            (
-                COALESCE(r.registration_owner_count, 0)
-                + COALESCE(a.registry_usage_count, 0)
-            ) AS registration_count,
-            (
-                COALESCE(a.query_hit_count, 0)
-                + COALESCE(a.existing_report_count, 0)
-            ) AS query_demand_count,
-            CUME_DIST() OVER (
-                PARTITION BY a.asset_class_path
-                ORDER BY a.descendant_count
-            ) AS descendant_percentile,
-            CUME_DIST() OVER (
-                PARTITION BY a.asset_class_path
-                ORDER BY a.referencer_count
-            ) AS referencer_percentile,
-            CUME_DIST() OVER (
-                PARTITION BY a.asset_class_path
-                ORDER BY a.component_reuse_count
-            ) AS component_reuse_percentile,
-            CUME_DIST() OVER (
-                PARTITION BY a.asset_class_path
-                ORDER BY a.cross_domain_reference_count
-            ) AS cross_domain_percentile,
-            CUME_DIST() OVER (
-                PARTITION BY a.asset_class_path
-                ORDER BY (
-                    COALESCE(r.registration_owner_count, 0)
-                    + COALESCE(a.registry_usage_count, 0)
-                )
-            ) AS registration_percentile,
-            CUME_DIST() OVER (
-                PARTITION BY a.asset_class_path
-                ORDER BY (
-                    COALESCE(a.query_hit_count, 0)
-                    + COALESCE(a.existing_report_count, 0)
-                )
-            ) AS query_demand_percentile
+                AS distinct_registration_type_count
         FROM assets AS a
         LEFT JOIN registration_counts AS r
           ON r.owner_object_path=a.object_path
-        ORDER BY a.asset_class_path, a.object_path
+        ORDER BY a.object_path
         """
+    )
+
+
+def _confirmed_ancestry_categories(
+    target: sqlite3.Connection,
+    *,
+    fresh_revision_ids: set[int],
+) -> tuple[dict[int, set[str]], str]:
+    assignment_columns = _table_columns(target, "asset_class_assignments")
+    category_columns = _table_columns(target, "class_ancestry_categories")
+    required_assignments = {
+        "entity_id",
+        "class_id",
+        "status",
+        "confidence",
+    }
+    required_categories = {
+        "class_id",
+        "category",
+        "status",
+        "confidence",
+    }
+    if not (
+        required_assignments.issubset(assignment_columns)
+        and required_categories.issubset(category_columns)
+    ):
+        return {}, "SOURCE_NOT_AVAILABLE"
+
+    revision_expression = (
+        "assignment.source_revision_id"
+        if "source_revision_id" in assignment_columns
+        else "NULL AS source_revision_id"
+    )
+    result: dict[int, set[str]] = defaultdict(set)
+    for row in target.execute(
+        f"""
+        SELECT DISTINCT
+            assignment.entity_id,
+            category.category,
+            assignment.status,
+            assignment.confidence,
+            category.status,
+            category.confidence,
+            {revision_expression}
+        FROM asset_class_assignments AS assignment
+        JOIN class_ancestry_categories AS category
+          ON category.class_id=assignment.class_id
+        """
+    ):
+        if not (_confirmed(row[2], row[3]) and _confirmed(row[4], row[5])):
+            continue
+        if (
+            "source_revision_id" in assignment_columns
+            and (row[6] is None or int(row[6]) not in fresh_revision_ids)
+        ):
+            continue
+        category = str(row[1] or "").strip().upper()
+        if category:
+            result[int(row[0])].add(category)
+    return (
+        result,
+        (
+            "MEASURED"
+            if "source_revision_id" in assignment_columns
+            else "MEASURED_WITHOUT_ROW_REVISION"
+        ),
+    )
+
+
+def _decorate_role_row(
+    source: Mapping[str, object],
+    *,
+    entity_id: int,
+    categories_by_entity: Mapping[int, set[str]],
+    signals: _PersistedRoleSignals,
+) -> dict[str, object]:
+    row = dict(source)
+    ancestry_categories = categories_by_entity.get(entity_id, set())
+    semantic_category = _semantic_class_category(row, ancestry_categories)
+    if semantic_category not in SEMANTIC_CLASS_GROUPS:
+        semantic_category = "UNCLASSIFIED"
+    row["semantic_class_category"] = semantic_category
+    row["is_actor_component"] = int(
+        semantic_category == "ACTOR_COMPONENT"
+    )
+    row["is_data_asset"] = int(
+        _truthy(row, "is_data_asset")
+        or semantic_category == "DATA_ASSET"
+    )
+
+    signal_counts = signals.counts_by_entity.get(entity_id, {})
+    for field in ROLE_SIGNAL_COUNT_FIELDS:
+        row[field] = int(signal_counts.get(field, 0))
+    row["component_reuse_count"] = int(
+        signal_counts.get("confirmed_component_relationship_count", 0)
+    )
+    row["cross_domain_reference_count"] = int(
+        signal_counts.get("confirmed_cross_domain_evidence_count", 0)
+    )
+    benchmark_status = signals.source_statuses.get(
+        "benchmarkQueries",
+        "SOURCE_NOT_AVAILABLE",
+    )
+    if benchmark_status in {"SOURCE_NOT_AVAILABLE", "UNVERIFIED"}:
+        row["query_hit_count"] = None
+        row["query_hit_status"] = (
+            "UNVERIFIED"
+            if benchmark_status == "UNVERIFIED"
+            else "NOT_MEASURED"
+        )
+    else:
+        row["query_hit_count"] = int(
+            signals.query_hits_by_entity.get(entity_id, 0)
+        )
+        row["query_hit_status"] = benchmark_status
+    row["confirmed_fact_count"] = sum(
+        _integer(row, field)
+        for field in (
+            "confirmed_formula_count",
+            "animation_notify_mechanism_count",
+            "curve_mechanism_count",
+            "collision_mechanism_count",
+            "material_parameter_input_count",
+        )
+    )
+    return row
+
+
+def _percentile_distributions(
+    discovery: sqlite3.Connection,
+    *,
+    entity_ids: Mapping[str, int],
+    categories_by_entity: Mapping[int, set[str]],
+    signals: _PersistedRoleSignals,
+) -> dict[str, dict[str, list[float]]]:
+    distributions: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    rows = _source_role_rows(discovery)
+    while source_batch := rows.fetchmany(10_000):
+        for source in source_batch:
+            source_row = dict(source)
+            entity_id = entity_ids.get(_text(source_row, "object_path"))
+            if entity_id is None:
+                continue
+            row = _decorate_role_row(
+                source_row,
+                entity_id=entity_id,
+                categories_by_entity=categories_by_entity,
+                signals=signals,
+            )
+            row["registration_count"] = _registration_count(row)
+            row["query_demand_count"] = _query_demand_count(row)
+            group = _text(
+                row,
+                "semantic_class_category",
+                "UNCLASSIFIED",
+            )
+            for raw_field, _percentile_field in PERCENTILE_METRICS:
+                distributions[group][raw_field].append(
+                    math.log1p(max(0, _integer(row, raw_field)))
+                )
+    return {
+        group: {
+            raw_field: sorted(values)
+            for raw_field, values in metrics.items()
+        }
+        for group, metrics in distributions.items()
+    }
+
+
+def _role_signal_provenance(
+    *,
+    entity_id: int,
+    semantic_category: str,
+    ancestry_categories: set[str],
+    signals: _PersistedRoleSignals,
+) -> str:
+    return _json(
+        {
+            "semanticClass": {
+                "category": semantic_category,
+                "confirmedAncestryCategories": sorted(ancestry_categories),
+            },
+            "sourceStatus": dict(sorted(signals.source_statuses.items())),
+            "records": {
+                key: value
+                for key, value in sorted(
+                    signals.provenance_by_entity.get(entity_id, {}).items()
+                )
+            },
+        }
     )
 
 
@@ -848,6 +1771,7 @@ def materialize_discovery_roles(
 
     create_role_tables(target)
     target.execute("DELETE FROM role_metrics")
+    target.execute("DELETE FROM role_signal_metrics")
     target.execute("DELETE FROM knowledge_roles")
     target.execute("DELETE FROM knowledge_depth_policies")
     entity_ids = {
@@ -856,64 +1780,62 @@ def materialize_discovery_roles(
             "SELECT canonical_uri, entity_id FROM entities"
         )
     }
-    categories_by_entity: dict[int, set[str]] = defaultdict(set)
-    if target.execute(
-        """
-        SELECT 1
-        FROM sqlite_master
-        WHERE type='table' AND name='class_ancestry_categories'
-        """
-    ).fetchone():
-        for entity_id, category in target.execute(
-            """
-            SELECT DISTINCT a.entity_id, c.category
-            FROM asset_class_assignments AS a
-            JOIN class_ancestry_categories AS c
-              ON c.class_id=a.class_id
-            """
-        ):
-            categories_by_entity[int(entity_id)].add(str(category))
-
     asset_count = 0
     role_count = 0
     depth_counts: dict[str, int] = defaultdict(int)
     _prepare_canonical_registration_counts(discovery, target)
+    fresh_revision_ids = _fresh_revision_ids(target)
+    categories_by_entity, category_source_status = (
+        _confirmed_ancestry_categories(
+            target,
+            fresh_revision_ids=fresh_revision_ids,
+        )
+    )
+    signals = _collect_persisted_role_signals(
+        target,
+        entity_ids=entity_ids,
+    )
+    signals.source_statuses["semanticClassAncestry"] = category_source_status
+    distributions = _percentile_distributions(
+        discovery,
+        entity_ids=entity_ids,
+        categories_by_entity=categories_by_entity,
+        signals=signals,
+    )
     rows = _source_role_rows(discovery)
     while source_batch := rows.fetchmany(10_000):
         metric_rows: list[tuple[object, ...]] = []
+        signal_rows: list[tuple[object, ...]] = []
         role_rows: list[tuple[object, ...]] = []
         depth_rows: list[tuple[object, ...]] = []
+        decorated_rows: list[tuple[int, dict[str, object]]] = []
         for source in source_batch:
-            row = dict(source)
-            entity_uri = _text(row, "object_path")
+            source_row = dict(source)
+            entity_uri = _text(source_row, "object_path")
             entity_id = entity_ids.get(entity_uri)
             if entity_id is None:
                 continue
-            categories = categories_by_entity.get(entity_id, set())
-            row["is_actor_component"] = int("ACTOR_COMPONENT" in categories)
-            row["is_data_asset"] = int(
-                _truthy(row, "is_data_asset")
-                or "DATA_ASSET" in categories
-                or "PRIMARY_DATA_ASSET" in categories
+            decorated_rows.append(
+                (
+                    entity_id,
+                    _decorate_role_row(
+                        source_row,
+                        entity_id=entity_id,
+                        categories_by_entity=categories_by_entity,
+                        signals=signals,
+                    ),
+                )
             )
-            row["descendant_log1p"] = math.log1p(
-                max(0, _integer(row, "descendant_count"))
-            )
-            row["referencer_log1p"] = math.log1p(
-                max(0, _integer(row, "referencer_count"))
-            )
-            row["component_reuse_log1p"] = math.log1p(
-                max(0, _integer(row, "component_reuse_count"))
-            )
-            row["cross_domain_reference_log1p"] = math.log1p(
-                max(0, _integer(row, "cross_domain_reference_count"))
-            )
-            row["registration_log1p"] = math.log1p(
-                max(0, _integer(row, "registration_count"))
-            )
-            row["query_demand_log1p"] = math.log1p(
-                max(0, _integer(row, "query_demand_count"))
-            )
+        enriched_rows = enrich_type_percentiles(
+            [row for _entity_id, row in decorated_rows],
+            percentile_distributions=distributions,
+        )
+        for (entity_id, _source_row), row in zip(
+            decorated_rows,
+            enriched_rows,
+            strict=True,
+        ):
+            entity_uri = _text(row, "object_path")
             decision = classify_asset(row)
             metric_rows.append(
                 (
@@ -955,6 +1877,41 @@ def materialize_discovery_roles(
                     ROLE_CLASSIFIER_VERSION,
                 )
             )
+            signal_rows.append(
+                (
+                    entity_id,
+                    _text(
+                        row,
+                        "semantic_class_category",
+                        "UNCLASSIFIED",
+                    ),
+                    (
+                        None
+                        if row.get("query_hit_count") is None
+                        else _integer(row, "query_hit_count")
+                    ),
+                    _text(row, "query_hit_status", "NOT_MEASURED"),
+                    *(
+                        _integer(row, field)
+                        for field in ROLE_SIGNAL_COUNT_FIELDS
+                    ),
+                    _role_signal_provenance(
+                        entity_id=entity_id,
+                        semantic_category=_text(
+                            row,
+                            "semantic_class_category",
+                            "UNCLASSIFIED",
+                        ),
+                        ancestry_categories=categories_by_entity.get(
+                            entity_id,
+                            set(),
+                        ),
+                        signals=signals,
+                    ),
+                    ROLE_CLASSIFIER_VERSION,
+                    source_revision_id,
+                )
+            )
             for assignment in decision.roles:
                 role_rows.append(
                     (
@@ -989,6 +1946,14 @@ def materialize_discovery_roles(
             metric_rows,
         )
         target.executemany(
+            """
+            INSERT INTO role_signal_metrics VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            signal_rows,
+        )
+        target.executemany(
             "INSERT INTO knowledge_roles VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
                 (
@@ -1019,6 +1984,7 @@ def materialize_discovery_roles(
     target.commit()
     return {
         "assets": asset_count,
+        "roleSignals": asset_count,
         "roles": role_count,
         **{
             f"depth_{policy.casefold()}": int(depth_counts.get(policy, 0))

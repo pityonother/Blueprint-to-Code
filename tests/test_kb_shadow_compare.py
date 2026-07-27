@@ -22,9 +22,7 @@ from blueprint_translator.kb_vnext.kb_api import (  # noqa: E402
 )
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
-    DOMAIN_PROJECTIONS,
-    PROJECTION_SCHEMA_SQL,
-    PROJECTION_SCHEMA_VERSION,
+    build_domain_projections,
 )
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     semantic_inputs_sha256,
@@ -193,42 +191,34 @@ def _fixture(
     cache.commit()
     cache.close()
     exports = vnext_root / "domain_exports"
-    exports.mkdir()
+    projection_counts = build_domain_projections(
+        core_path=vnext_root / "core.sqlite",
+        output_dir=exports,
+        generated_at=generated_at,
+        ontology_version=ontology.version,
+        review_path=PROJECT_ROOT / "ontology" / "projection_review.v1.json",
+        snapshot_build_id=build_id,
+        snapshot_source_fingerprint=semantic_fingerprint,
+    )
     projection_metrics: dict[str, dict[str, object]] = {}
-    for projection_name in DOMAIN_PROJECTIONS:
-        projection_path = exports / f"{projection_name}.sqlite"
-        content_digest = "a" * 64
-        review_config_sha256 = "b" * 64
-        projection = sqlite3.connect(projection_path)
-        projection.executescript(PROJECTION_SCHEMA_SQL)
-        projection.executemany(
-            "INSERT INTO metadata VALUES (?, ?)",
-            [
-                ("schema_version", PROJECTION_SCHEMA_VERSION),
-                ("projection_name", projection_name),
-                ("projection_version", "v2"),
-                ("ontology_version", ontology.version),
-                ("built_at", generated_at),
-                ("truth_source", "core.sqlite"),
-                ("review_config_sha256", review_config_sha256),
-                ("content_digest", content_digest),
-            ],
-        )
-        projection.commit()
-        projection.close()
-        metrics = database_metrics(projection_path)
-        metrics.update(
-            {
-                "schemaVersion": PROJECTION_SCHEMA_VERSION,
-                "projectionVersion": "v2",
-                "ontologyVersion": ontology.version,
-                "contentDigest": content_digest,
-                "reviewConfigSha256": review_config_sha256,
-            }
-        )
-        projection_metrics[
-            f"domain_exports/{projection_name}.sqlite"
-        ] = metrics
+    for value in projection_counts.values():
+        projection_metrics[f"domain_exports/{value['path']}"] = {
+            key: value[key]
+            for key in (
+                "bytes",
+                "sha256",
+                "integrity",
+                "foreignKeyViolations",
+                "schemaVersion",
+                "projectionVersion",
+                "ontologyVersion",
+                "contentDigest",
+                "reviewConfigSha256",
+                "sourceRevisionSetHash",
+                "validationStatus",
+                "tableCounts",
+            )
+        }
     manifest = {
         "schema": "ark-kb-vnext-snapshot/v1",
         "buildId": build_id,

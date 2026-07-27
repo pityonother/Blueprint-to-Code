@@ -38,6 +38,18 @@ def _absolute(path: Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+def _report_uris(snapshot_root: Path, build_id: str) -> tuple[str, str]:
+    immutable = (
+        (snapshot_root / "current.json").is_file()
+        or (snapshot_root / "manifest.json").is_file()
+    )
+    report_root = f"reports/{build_id}" if immutable else "reports"
+    return (
+        f"{report_root}/quality_gates.json",
+        f"{report_root}/query_benchmark.json",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     snapshot_root = _absolute(args.snapshot_root)
@@ -50,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_root=snapshot_root,
         report=report,
     )
+    report_uri, benchmark_uri = _report_uris(
+        snapshot_root,
+        str(report["buildId"]),
+    )
     print(
         json.dumps(
             {
@@ -57,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
                 "buildId": report["buildId"],
                 "summary": report["summary"],
                 "cutover": cutover,
-                "reportUri": "reports/quality_gates.json",
-                "benchmarkUri": "reports/query_benchmark.json",
+                "reportUri": report_uri,
+                "benchmarkUri": benchmark_uri,
             },
             ensure_ascii=False,
             indent=2,

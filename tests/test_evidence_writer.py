@@ -157,6 +157,7 @@ def _make_legacy_capture(root: Path) -> tuple[Path, Path, Path]:
                 "name": "FunctionReference",
                 "type": "StructProperty",
                 "member_name": "DoWork",
+                "member_parent_object_path": "/Script/ShooterGame.WorkerComponent",
                 "source": "uasset_property_tag",
                 "confidence": "medium",
                 "raw_offsets": {"start": 9, "end": 30},
@@ -332,6 +333,31 @@ def _open_rows(database_path: Path) -> Iterator[sqlite3.Connection]:
 
 
 class EvidenceWriterTests(unittest.TestCase):
+    def test_function_reference_preserves_exact_member_parent_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asset_dir, _manifest_path, _graph_7_path = (
+                _make_legacy_capture(root)
+            )
+            database_path = root / "evidence.sqlite"
+
+            write_evidence_store_from_capture(asset_dir, database_path)
+
+            with _open_rows(database_path) as connection:
+                row = connection.execute(
+                    """
+                    SELECT name, target_ref
+                    FROM "references"
+                    WHERE kind='function' AND name='DoWork'
+                    """
+                ).fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            row["target_ref"],
+            "/Script/ShooterGame.WorkerComponent.DoWork",
+        )
+
     def test_writer_materializes_only_compact_bounded_search_entities(self):
         huge_marker = "RAW_DEFAULT_MARKER_" + ("X" * 20000)
         with tempfile.TemporaryDirectory() as tmp:

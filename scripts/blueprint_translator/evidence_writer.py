@@ -855,11 +855,36 @@ def _insert_references(connection: sqlite3.Connection, graph: dict[str, Any], lo
         for kind, name in candidates:
             if not name:
                 continue
+            target_ref = ""
+            reference_confidence = _first_text(raw.get("confidence"))
+            if kind == "function":
+                for prop in _property_rows(raw.get("properties")):
+                    if _first_text(prop.get("name")) != "FunctionReference":
+                        continue
+                    owner = _first_text(
+                        prop.get("member_parent_object_path")
+                    )
+                    if owner:
+                        target_ref = f"{owner}.{name}"
+                        reference_confidence = _first_text(
+                            prop.get("confidence"),
+                            reference_confidence,
+                        )
+                    break
             reference_ref = f"{node['node_ref']}/reference/{kind}/{_short_hash(name)}"
             connection.execute(
                 "INSERT INTO \"references\"(reference_ref, graph_ref, node_ref, kind, name, target_ref, classification, confidence) "
-                "VALUES (?, ?, ?, ?, ?, '', ?, ?)",
-                (reference_ref, graph["graph_ref"], node["node_ref"], kind, name, kind, _first_text(raw.get("confidence"))),
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    reference_ref,
+                    graph["graph_ref"],
+                    node["node_ref"],
+                    kind,
+                    name,
+                    target_ref,
+                    kind,
+                    reference_confidence,
+                ),
             )
 
 
@@ -1623,7 +1648,6 @@ def _agent_index(result: dict[str, Any]) -> str:
     asset_heading = _safe_heading_text(result.get("asset_name", ""), 180)
     object_path = _safe_index_text(result.get("object_path", ""), 260)
     asset_dir_argument = _powershell_single_quote(f"captures\\{result.get('asset_name', '')}")
-    selected_graph = graph_rows[0] if graph_rows else {}
     selected_node_name = _powershell_single_quote(selected_node.get("name", result.get("asset_name", "")))
     selected_node_ref = _powershell_single_quote(selected_node.get("ref", ""))
     command_lines = [

@@ -20,6 +20,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     build_vnext_snapshot,
+    resolve_current_snapshot,
 )
 import blueprint_translator.kb_vnext.snapshot as snapshot_module  # noqa: E402
 from blueprint_translator.kb_vnext import (  # noqa: E402
@@ -30,7 +31,10 @@ from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CORE_SCHEMA_VERSION,
+    FULL_CORE_SCHEMA_SQL,
+    _materialize_registration_edges,
 )
+from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
 from blueprint_translator.kb_vnext.class_hierarchy import (  # noqa: E402
     class_hierarchy_source_fingerprint,
 )
@@ -41,6 +45,7 @@ from blueprint_translator.evidence_schema import (  # noqa: E402
 from blueprint_translator.asset_ledger import (  # noqa: E402
     metadata_fingerprint,
 )
+import update_ark_kb_vnext as update_module  # noqa: E402
 
 
 def _blueprint_capture_fixture(
@@ -559,6 +564,11 @@ def _snapshot_identity_for_inputs(
             "database_metrics",
             return_value=metrics,
         ),
+        patch.object(
+            snapshot_module,
+            "_evaluate_staged_quality_gates",
+            side_effect=_fixture_staged_quality_report,
+        ),
         patch.object(snapshot_module, "_promote_snapshot"),
     ):
         return build_vnext_snapshot(
@@ -574,7 +584,213 @@ def _snapshot_identity_for_inputs(
         )
 
 
+def _fixture_staged_quality_report(
+    *,
+    staging: Path,
+    **_kwargs: object,
+) -> dict[str, object]:
+    manifest = json.loads(
+        (staging / "manifest.json").read_text(encoding="utf-8")
+    )
+    return {
+        "schema": "ark-kb-quality-gates/v1",
+        "buildId": manifest["buildId"],
+        "summary": {
+            "passed": 0,
+            "failed": 1,
+            "cutoverEligible": False,
+        },
+        "benchmark": {},
+    }
+
+
 class KnowledgeStorageTests(unittest.TestCase):
+    def test_registration_edges_deduplicate_collapsed_semantic_relations(
+        self,
+    ) -> None:
+        core = sqlite3.connect(":memory:")
+        core.executescript(FULL_CORE_SCHEMA_SQL)
+        core.executemany(
+            """
+            INSERT INTO source_revisions VALUES (
+                ?, 'fixture', ?, ?, 'test', 'v1',
+                '2026-07-28T00:00:00Z', 'FRESH'
+            )
+            """,
+            [
+                (1, "fixture://edge", "a" * 64),
+                (2, "fixture://domain", "b" * 64),
+            ],
+        )
+        core.executemany(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, package_id,
+                display_name, internal_name, status, confidence
+            ) VALUES (?, ?, 'BLUEPRINT_ASSET', NULL, ?, ?, 'CONFIRMED', 'HIGH')
+            """,
+            [
+                (1, "/Game/Test/Owner.Owner", "Owner", "Owner"),
+                (2, "/Game/Test/Damage.Damage", "Damage", "Damage"),
+            ],
+        )
+        core.executemany(
+            """
+            INSERT INTO typed_registrations VALUES (
+                ?, '/Game/Test/Owner.Owner',
+                '/Game/Test/Damage.Damage', ?,
+                'CheatDestroyFoliageDamageType',
+                'bp://fixture/damage', 'GLOBAL', 'LOW', 'CANDIDATE',
+                1, 'test', 'fixture'
+            )
+            """,
+            [
+                ("registration-a", "global_asset_reference"),
+                ("registration-b", "damage_type_registration"),
+            ],
+        )
+        try:
+            edge_count, domain_count = _materialize_registration_edges(
+                core,
+                load_ontology(PROJECT_ROOT / "ontology"),
+                edge_source_revision_id=1,
+                domain_source_revision_id=2,
+            )
+            rows = core.execute(
+                """
+                SELECT edge_type, source_property, evidence_uri
+                FROM edges
+                """
+            ).fetchall()
+        finally:
+            core.close()
+
+        self.assertEqual(edge_count, 1)
+        self.assertEqual(domain_count, 2)
+        self.assertEqual(
+            rows,
+            [
+                (
+                    "USES_DAMAGE_TYPE",
+                    "CheatDestroyFoliageDamageType",
+                    "bp://fixture/damage",
+                )
+            ],
+        )
+
+    def test_full_build_binds_manifest_for_cache_hit_and_runtime_change(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            output = root / "vnext"
+            runtime_root = root / "runtime_observations"
+            runtime_root.mkdir()
+            runtime_observation = runtime_root / "fixture.json"
+            runtime_observation.write_text(
+                '{"status":"observed"}',
+                encoding="utf-8",
+            )
+            (
+                revision,
+                evidence_ref,
+                package_fingerprint,
+                package_size,
+                package_modified,
+            ) = _blueprint_capture_fixture(root / "captures")
+            _discovery_fixture(
+                discovery,
+                evidence_revision=revision,
+                evidence_ref=evidence_ref,
+                package_fingerprint=package_fingerprint,
+                package_size=package_size,
+                package_modified=package_modified,
+            )
+            result = build_vnext_snapshot(
+                project_root=PROJECT_ROOT,
+                discovery_database=discovery,
+                legacy_kb_root=root / "legacy",
+                capture_root=root / "captures",
+                native_root=root / "native",
+                runtime_root=runtime_root,
+                output_dir=output,
+                full_snapshot=True,
+                generated_at="2026-07-27T00:00:00+00:00",
+            )
+            published = resolve_current_snapshot(output)
+            update_paths = update_module.UpdatePaths(
+                discovery_database=discovery,
+                capture_root=root / "captures",
+                native_root=root / "native",
+                runtime_root=runtime_root,
+                legacy_kb_root=root / "legacy",
+                map_evidence_catalog=root / "map.json",
+                output=output,
+            )
+            bound_manifest = update_module.load_current_source_manifest(
+                update_paths
+            )
+            self.assertIsNotNone(bound_manifest)
+            incremental = published.manifest["incrementalUpdate"]
+            self.assertEqual(
+                incremental["sourceManifestFingerprint"],
+                bound_manifest.fingerprint,
+            )
+            self.assertEqual(
+                result["sourceManifestFingerprint"],
+                bound_manifest.fingerprint,
+            )
+            semantic_uris = {
+                entry.source_uri
+                for entry in bound_manifest.entries
+                if entry.source_kind == "SEMANTIC_INPUT"
+            }
+            self.assertEqual(
+                semantic_uris,
+                {
+                    *(
+                        f"semantic-input://{key}"
+                        for key in snapshot_module.SNAPSHOT_SEMANTIC_INPUT_KEYS
+                    ),
+                    "semantic-input://runtimeObservations",
+                },
+            )
+            self.assertEqual(
+                sum(
+                    entry.source_kind == "BLUEPRINT_EVIDENCE"
+                    for entry in bound_manifest.entries
+                ),
+                1,
+            )
+            encoded_incremental = json.dumps(
+                incremental,
+                sort_keys=True,
+            )
+            self.assertNotIn(str(root), encoded_incremental)
+            self.assertNotIn("C:\\", encoded_incremental)
+            with patch.object(
+                update_module,
+                "_unavailable_stage",
+                side_effect=AssertionError(
+                    "unchanged update must not stage"
+                ),
+            ):
+                unchanged = update_module.run_incremental_update(
+                    update_paths
+                )
+                self.assertEqual(unchanged["status"], "cache_hit")
+                self.assertTrue(unchanged["cacheHit"])
+                runtime_observation.write_text(
+                    '{"status":"changed"}',
+                    encoding="utf-8",
+                )
+                changed = update_module.run_incremental_update(update_paths)
+            self.assertEqual(
+                changed["gapCodes"],
+                ["NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED"],
+            )
+            self.assertTrue(changed["fullRebuildRequired"])
+            self.assertFalse(changed["published"])
+
     def test_builds_four_normalized_stores_and_keeps_legacy_default(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -614,6 +830,8 @@ class KnowledgeStorageTests(unittest.TestCase):
                 full_snapshot=True,
                 generated_at="2026-07-27T00:00:00+00:00",
             )
+            published = resolve_current_snapshot(output)
+            snapshot_root = published.snapshot_dir
             self.assertEqual(result["status"], "complete")
             self.assertEqual(
                 result["cutover"]["defaultQuerySource"], "legacy"
@@ -628,7 +846,8 @@ class KnowledgeStorageTests(unittest.TestCase):
                 "search.sqlite",
                 "cache.sqlite",
             ):
-                self.assertTrue((output / name).is_file())
+                self.assertTrue((snapshot_root / name).is_file())
+                self.assertFalse((output / name).exists())
                 self.assertEqual(
                     result["databases"][name]["integrity"], "ok"
                 )
@@ -637,9 +856,11 @@ class KnowledgeStorageTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     result["databases"][name]["sha256"],
-                    hashlib.sha256((output / name).read_bytes()).hexdigest(),
+                    hashlib.sha256(
+                        (snapshot_root / name).read_bytes()
+                    ).hexdigest(),
                 )
-                database = sqlite3.connect(output / name)
+                database = sqlite3.connect(snapshot_root / name)
                 try:
                     database_metadata = dict(
                         database.execute(
@@ -656,8 +877,8 @@ class KnowledgeStorageTests(unittest.TestCase):
                     database_metadata["snapshot_source_fingerprint"],
                     result["sourceSha256"],
                 )
-            catalog = sqlite3.connect(output / "catalog.sqlite")
-            core = sqlite3.connect(output / "core.sqlite")
+            catalog = sqlite3.connect(snapshot_root / "catalog.sqlite")
+            core = sqlite3.connect(snapshot_root / "core.sqlite")
             try:
                 self.assertEqual(
                     catalog.execute(
@@ -736,14 +957,20 @@ class KnowledgeStorageTests(unittest.TestCase):
                 self.assertEqual(
                     core.execute(
                         """
-                        SELECT status, confidence
+                        SELECT edge_type, status, confidence
                         FROM edges
                         WHERE source_entity_id=?
-                          AND edge_type='REGISTERS'
+                          AND source_property='Texture'
                         """,
                         (base_registration_owner_id,),
                     ).fetchall(),
-                    [("LEGACY_UNVERIFIED", "LOW")],
+                    [
+                        (
+                            "REFERENCES_OBJECT",
+                            "LEGACY_UNVERIFIED",
+                            "LOW",
+                        )
+                    ],
                 )
                 self.assertEqual(
                     core.execute(
@@ -1263,14 +1490,23 @@ class KnowledgeStorageTests(unittest.TestCase):
                 catalog.close()
                 core.close()
             manifest = json.loads(
-                (output / "manifests" / "current.json").read_text(
-                    encoding="utf-8"
-                )
+                published.manifest_path.read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["schema"], "ark-kb-vnext-snapshot/v1")
             self.assertEqual(
                 manifest["cutover"]["mode"], "shadow"
             )
+            quality = manifest["qualityGates"]
+            quality_report = (
+                snapshot_root / str(quality["reportUri"])
+            )
+            self.assertTrue(quality_report.is_file())
+            self.assertEqual(
+                quality["sha256"],
+                hashlib.sha256(quality_report.read_bytes()).hexdigest(),
+            )
+            self.assertGreater(int(quality["failed"]), 0)
+            self.assertFalse(bool(quality["cutoverEligible"]))
             for database_name in (
                 "catalog",
                 "core",
@@ -1278,7 +1514,7 @@ class KnowledgeStorageTests(unittest.TestCase):
                 "cache",
             ):
                 source = sqlite3.connect(
-                    output / f"{database_name}.sqlite"
+                    snapshot_root / f"{database_name}.sqlite"
                 )
                 replay = sqlite3.connect(":memory:")
                 try:
@@ -1722,6 +1958,11 @@ class KnowledgeStorageTests(unittest.TestCase):
                         snapshot_module,
                         "database_metrics",
                         return_value=metrics,
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "_evaluate_staged_quality_gates",
+                        side_effect=_fixture_staged_quality_report,
                     ),
                     patch.object(snapshot_module, "_promote_snapshot"),
                     self.assertRaisesRegex(RuntimeError, changed_key),

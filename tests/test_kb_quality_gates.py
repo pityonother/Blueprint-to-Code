@@ -28,6 +28,9 @@ from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     _query_benchmark_gates,
     _registration_confidence_gate,
     _registration_confidence_metrics,
+    _registration_gold_metrics,
+    _registration_lineage_metrics,
+    _role_gold_metrics,
     _typed_map_usage_gates,
     _typed_map_usage_metrics,
     publish_gate_report,
@@ -699,12 +702,25 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         core = sqlite3.connect(":memory:")
         core.executescript(
             """
+            CREATE TABLE entities(
+                entity_id INTEGER PRIMARY KEY,
+                canonical_uri TEXT UNIQUE NOT NULL
+            );
             CREATE TABLE typed_registrations(
+                owner_uri TEXT NOT NULL,
+                target_uri TEXT NOT NULL,
+                source_property TEXT NOT NULL,
+                evidence_uri TEXT NOT NULL,
                 status TEXT NOT NULL,
                 confidence TEXT NOT NULL
             );
             CREATE TABLE edges(
+                edge_id INTEGER PRIMARY KEY,
+                source_entity_id INTEGER NOT NULL,
+                target_entity_id INTEGER NOT NULL,
                 edge_type TEXT NOT NULL,
+                source_property TEXT NOT NULL,
+                evidence_uri TEXT NOT NULL,
                 status TEXT NOT NULL,
                 confidence TEXT NOT NULL
             );
@@ -713,12 +729,35 @@ class KnowledgeQualityGateTests(unittest.TestCase):
                 status TEXT NOT NULL,
                 confidence TEXT NOT NULL
             );
+            INSERT INTO entities VALUES(1, '/Game/Test/Owner.Owner');
+            INSERT INTO entities VALUES(2, '/Game/Test/Target.Target');
             INSERT INTO typed_registrations VALUES
-                ('LEGACY_UNVERIFIED', 'HIGH'),
-                ('CONFIRMED', 'HIGH');
+                (
+                    '/Game/Test/Owner.Owner',
+                    '/Game/Test/Target.Target',
+                    'AdditionalItemBlueprintClasses',
+                    'bp://fixture/registration',
+                    'LEGACY_UNVERIFIED', 'HIGH'
+                ),
+                (
+                    '/Game/Test/Owner.Owner',
+                    '/Game/Test/Target.Target',
+                    'Other',
+                    'bp://fixture/confirmed',
+                    'CONFIRMED', 'HIGH'
+                );
             INSERT INTO edges VALUES
-                ('REGISTERS', 'CANDIDATE', 'CONFIRMED'),
-                ('REFERENCES', 'CANDIDATE', 'HIGH');
+                (
+                    1, 1, 2, 'REGISTERS_ITEM',
+                    'AdditionalItemBlueprintClasses',
+                    'bp://fixture/registration',
+                    'CANDIDATE', 'CONFIRMED'
+                ),
+                (
+                    2, 1, 2, 'REFERENCES_OBJECT',
+                    'Unrelated', 'bp://fixture/unrelated',
+                    'CANDIDATE', 'HIGH'
+                );
             INSERT INTO domain_memberships VALUES
                 ('TYPED_REGISTRATION', 'LEGACY_UNVERIFIED', 'HIGH'),
                 ('CLASS_ANCESTRY', 'CANDIDATE', 'HIGH');
@@ -738,7 +777,7 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             """
             UPDATE edges
             SET confidence='LOW'
-            WHERE edge_type='REGISTERS' AND status='CANDIDATE'
+            WHERE edge_type='REGISTERS_ITEM' AND status='CANDIDATE'
             """
         )
         core.execute(
@@ -769,6 +808,521 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         )
         self.assertFalse(failed["passed"])
         self.assertTrue(passed["passed"])
+
+    def test_classifier_fixture_is_not_counted_as_relationship_gold(self):
+        core = sqlite3.connect(":memory:")
+        core.executescript(
+            """
+            CREATE TABLE entities(
+                entity_id INTEGER PRIMARY KEY,
+                canonical_uri TEXT UNIQUE NOT NULL
+            );
+            CREATE TABLE edges(
+                source_entity_id INTEGER NOT NULL,
+                target_entity_id INTEGER NOT NULL,
+                edge_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                evidence_uri TEXT NOT NULL,
+                source_property TEXT NOT NULL
+            );
+            """
+        )
+        try:
+            metrics = _registration_gold_metrics(PROJECT_ROOT, core)
+        finally:
+            core.close()
+
+        self.assertFalse(metrics["available"])
+        self.assertEqual(metrics["relationships"], 0)
+        self.assertEqual(metrics["precision"], 0.0)
+        self.assertEqual(metrics["recall"], 0.0)
+        self.assertEqual(
+            metrics["gapCode"],
+            "INDEPENDENT_OWNER_TARGET_REVIEW_REQUIRED",
+        )
+
+    def test_relationship_gold_checks_resolution_edge_and_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            fixtures = project_root / "tests" / "fixtures"
+            fixtures.mkdir(parents=True)
+            reviews = [
+                {
+                    "reviewerId": "reviewer-a",
+                    "round": 1,
+                    "verdict": "CONFIRMED",
+                },
+                {
+                    "reviewerId": "reviewer-b",
+                    "round": 2,
+                    "verdict": "CONFIRMED",
+                },
+            ]
+            payload = {
+                "schema": "ark-kb-registration-gold-set/v2",
+                "relationshipGoldStatus": "INDEPENDENTLY_REVIEWED",
+                "relationshipCases": [
+                    {
+                        "ownerUri": "/Game/Test/Owner.Owner",
+                        "targetUri": "/Game/Test/Target.Target",
+                        "registrationType": "item_registration",
+                        "sourceProperty": "AdditionalItemBlueprintClasses",
+                        "expectedEdgeType": "REGISTERS_ITEM",
+                        "expectedStatus": "CONFIRMED",
+                        "evidenceUri": "bp://fixture/positive",
+                        "reviewStatus": "HUMAN_REVIEWED",
+                        "reviews": reviews,
+                    },
+                    {
+                        "ownerUri": "/Game/Test/Owner.Owner",
+                        "targetUri": "/Game/Test/Open.Open",
+                        "registrationType": "item_registration",
+                        "sourceProperty": "SomeItemCandidate",
+                        "expectedEdgeType": "REGISTERS_ITEM",
+                        "expectedStatus": "CANDIDATE",
+                        "evidenceUri": "bp://fixture/open",
+                        "reviewStatus": "HUMAN_REVIEWED",
+                        "reviews": reviews,
+                    },
+                ],
+            }
+            (
+                fixtures / "kb_registration_gold_set.json"
+            ).write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            core = sqlite3.connect(":memory:")
+            core.executescript(
+                """
+                CREATE TABLE entities(
+                    entity_id INTEGER PRIMARY KEY,
+                    canonical_uri TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE source_revisions(
+                    revision_id INTEGER PRIMARY KEY,
+                    source_kind TEXT NOT NULL,
+                    source_uri TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    producer_version TEXT NOT NULL,
+                    schema_version TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    freshness_status TEXT NOT NULL
+                );
+                CREATE TABLE typed_registrations(
+                    owner_uri TEXT NOT NULL,
+                    target_uri TEXT NOT NULL,
+                    registration_type TEXT NOT NULL,
+                    source_property TEXT NOT NULL,
+                    evidence_uri TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    source_revision_id INTEGER NOT NULL
+                );
+                CREATE TABLE edges(
+                    source_entity_id INTEGER NOT NULL,
+                    target_entity_id INTEGER NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    evidence_uri TEXT NOT NULL,
+                    source_property TEXT NOT NULL,
+                    source_revision_id INTEGER NOT NULL
+                );
+                INSERT INTO source_revisions VALUES(
+                    1, 'fixture', 'fixture://registration',
+                    'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                    'test', 'v1', '2026-07-28T00:00:00Z', 'FRESH'
+                );
+                INSERT INTO entities VALUES(
+                    1, '/Game/Test/Owner.Owner'
+                );
+                INSERT INTO entities VALUES(
+                    2, '/Game/Test/Target.Target'
+                );
+                INSERT INTO entities VALUES(
+                    3, '/Game/Test/Open.Open'
+                );
+                INSERT INTO typed_registrations VALUES(
+                    '/Game/Test/Owner.Owner',
+                    '/Game/Test/Target.Target',
+                    'item_registration',
+                    'AdditionalItemBlueprintClasses',
+                    'bp://fixture/positive',
+                    'CONFIRMED', 'HIGH', 1
+                );
+                INSERT INTO typed_registrations VALUES(
+                    '/Game/Test/Owner.Owner',
+                    '/Game/Test/Open.Open',
+                    'item_registration',
+                    'SomeItemCandidate',
+                    'bp://fixture/open',
+                    'CANDIDATE', 'LOW', 1
+                );
+                INSERT INTO edges VALUES(
+                    1, 2, 'REGISTERS_ITEM', 'CONFIRMED', 'HIGH',
+                    'bp://fixture/positive',
+                    'AdditionalItemBlueprintClasses', 1
+                );
+                INSERT INTO edges VALUES(
+                    1, 3, 'REGISTERS_ITEM', 'CANDIDATE', 'LOW',
+                    'bp://fixture/open', 'SomeItemCandidate', 1
+                );
+                """
+            )
+            try:
+                metrics = _registration_gold_metrics(
+                    project_root,
+                    core,
+                )
+            finally:
+                core.close()
+
+        self.assertTrue(metrics["available"])
+        self.assertEqual(metrics["relationships"], 2)
+        self.assertEqual(metrics["positiveCases"], 1)
+        self.assertEqual(metrics["negativeCases"], 1)
+        for key in (
+            "precision",
+            "recall",
+            "classificationPrecision",
+            "classificationRecall",
+            "ownerResolutionRate",
+            "targetResolutionRate",
+            "edgeMaterializationRate",
+            "evidenceCorrectnessRate",
+        ):
+            self.assertEqual(metrics[key], 1.0, key)
+
+    def test_relationship_gold_rejects_stale_self_attested_edges(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            fixtures = project_root / "tests" / "fixtures"
+            fixtures.mkdir(parents=True)
+            (
+                fixtures / "kb_registration_gold_set.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "schema": "ark-kb-registration-gold-set/v2",
+                        "relationshipGoldStatus": "INDEPENDENTLY_REVIEWED",
+                        "relationshipCases": [
+                            {
+                                "ownerUri": "/Game/Test/Owner.Owner",
+                                "targetUri": "/Game/Test/Target.Target",
+                                "registrationType": "item_registration",
+                                "sourceProperty":
+                                    "AdditionalItemBlueprintClasses",
+                                "expectedEdgeType": "REGISTERS_ITEM",
+                                "expectedStatus": "CONFIRMED",
+                                "evidenceUri": "bp://fixture/stale",
+                                "reviewStatus": "EMPIRICAL",
+                                "reviews": [
+                                    {
+                                        "reviewerId": "reviewer-a",
+                                        "round": 1,
+                                        "verdict": "CONFIRMED",
+                                    },
+                                    {
+                                        "reviewerId": "reviewer-b",
+                                        "round": 2,
+                                        "verdict": "CONFIRMED",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            core = sqlite3.connect(":memory:")
+            core.executescript(
+                """
+                CREATE TABLE entities(
+                    entity_id INTEGER PRIMARY KEY,
+                    canonical_uri TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE source_revisions(
+                    revision_id INTEGER PRIMARY KEY,
+                    source_kind TEXT NOT NULL,
+                    source_uri TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    producer_version TEXT NOT NULL,
+                    schema_version TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    freshness_status TEXT NOT NULL
+                );
+                CREATE TABLE typed_registrations(
+                    owner_uri TEXT NOT NULL,
+                    target_uri TEXT NOT NULL,
+                    registration_type TEXT NOT NULL,
+                    source_property TEXT NOT NULL,
+                    evidence_uri TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    source_revision_id INTEGER NOT NULL
+                );
+                CREATE TABLE edges(
+                    source_entity_id INTEGER NOT NULL,
+                    target_entity_id INTEGER NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    evidence_uri TEXT NOT NULL,
+                    source_property TEXT NOT NULL,
+                    source_revision_id INTEGER NOT NULL
+                );
+                INSERT INTO entities VALUES(
+                    1, '/Game/Test/Owner.Owner'
+                );
+                INSERT INTO entities VALUES(
+                    2, '/Game/Test/Target.Target'
+                );
+                INSERT INTO source_revisions VALUES(
+                    1, 'fixture', 'fixture://registration-stale',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                    || 'aaaaaaaaaaaaaaaa',
+                    'test', 'v1', '2026-07-28T00:00:00Z', 'STALE'
+                );
+                INSERT INTO typed_registrations VALUES(
+                    '/Game/Test/Owner.Owner',
+                    '/Game/Test/Target.Target',
+                    'item_registration',
+                    'AdditionalItemBlueprintClasses',
+                    'bp://fixture/stale',
+                    'CONFIRMED', 'HIGH', 1
+                );
+                INSERT INTO edges VALUES(
+                    1, 2, 'REGISTERS_ITEM', 'CONFIRMED', 'HIGH',
+                    'bp://fixture/stale',
+                    'AdditionalItemBlueprintClasses', 1
+                );
+                """
+            )
+            try:
+                metrics = _registration_gold_metrics(project_root, core)
+            finally:
+                core.close()
+
+        self.assertTrue(metrics["available"])
+        self.assertEqual(metrics["classificationPrecision"], 1.0)
+        self.assertEqual(metrics["edgeMaterializationRate"], 0.0)
+        self.assertEqual(metrics["evidenceCorrectnessRate"], 0.0)
+        self.assertEqual(metrics["recall"], 0.0)
+
+    def test_registration_lineage_requires_fresh_complete_revision(self):
+        core = sqlite3.connect(":memory:")
+        core.executescript(
+            """
+            CREATE TABLE source_revisions(
+                revision_id INTEGER PRIMARY KEY,
+                source_kind TEXT NOT NULL,
+                source_uri TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                producer_version TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                freshness_status TEXT NOT NULL
+            );
+            CREATE TABLE typed_registrations(
+                registration_id TEXT PRIMARY KEY,
+                owner_uri TEXT NOT NULL,
+                target_uri TEXT NOT NULL,
+                registration_type TEXT NOT NULL,
+                source_property TEXT NOT NULL,
+                evidence_uri TEXT NOT NULL,
+                source_revision_id INTEGER
+            );
+            INSERT INTO source_revisions VALUES(
+                1, 'fixture', 'fixture://registration/valid',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                'fixture', 'fixture/v1',
+                '2026-07-28T00:00:00Z', 'FRESH'
+            );
+            INSERT INTO source_revisions VALUES(
+                2, 'fixture', 'C:/Users/ac/private',
+                'x', 'fixture', 'fixture/v1',
+                'not-a-time', 'FRESH'
+            );
+            INSERT INTO typed_registrations VALUES(
+                'valid', '/Game/Test/Owner.Owner',
+                '/Game/Test/Target.Target', 'engram_registration',
+                'AdditionalEngramBlueprintClasses',
+                'bp://fixture/registration', 1
+            );
+            INSERT INTO typed_registrations VALUES(
+                'invalid', '/Game/Test/Owner.Owner',
+                '/Game/Test/Target.Target', 'engram_registration',
+                'AdditionalEngramBlueprintClasses',
+                'bp://fixture/registration', 2
+            );
+            """
+        )
+        try:
+            metrics = _registration_lineage_metrics(core)
+        finally:
+            core.close()
+
+        self.assertEqual(
+            metrics,
+            {"total": 2, "complete": 1, "incomplete": 1},
+        )
+
+    def test_role_gold_rejects_correct_boolean_self_attestation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            fixtures = project_root / "tests" / "fixtures"
+            fixtures.mkdir(parents=True)
+            (
+                fixtures / "kb_role_gold_set.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "cases": [
+                            {
+                                "reviewStatus": "HUMAN_REVIEWED",
+                                "correct": True,
+                            }
+                            for _ in range(300)
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            core = sqlite3.connect(":memory:")
+            core.executescript(
+                """
+                CREATE TABLE entities(
+                    entity_id INTEGER PRIMARY KEY,
+                    canonical_uri TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE knowledge_roles(
+                    entity_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    status TEXT NOT NULL
+                );
+                """
+            )
+            try:
+                metrics = _role_gold_metrics(project_root, core)
+            finally:
+                core.close()
+
+        self.assertFalse(metrics["available"])
+        self.assertEqual(metrics["assets"], 0)
+        self.assertIsNone(metrics["precision"])
+
+    def test_role_gold_recomputes_predictions_after_two_reviews(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            fixtures = project_root / "tests" / "fixtures"
+            fixtures.mkdir(parents=True)
+
+            def reviewed_case(
+                entity_uri: str,
+                expected_roles: list[str],
+            ) -> dict[str, object]:
+                return {
+                    "entityUri": entity_uri,
+                    "expectedRoles": expected_roles,
+                    "reviewStatus": "HUMAN_REVIEWED",
+                    "reviews": [
+                        {
+                            "reviewerId": "reviewer-a",
+                            "round": 1,
+                            "roles": expected_roles,
+                        },
+                        {
+                            "reviewerId": "reviewer-b",
+                            "round": 2,
+                            "roles": expected_roles,
+                        },
+                    ],
+                }
+
+            (
+                fixtures / "kb_role_gold_set.json"
+            ).write_text(
+                json.dumps(
+                    {
+                        "schema": "ark-kb-role-gold-set/v1",
+                        "roleGoldStatus": "INDEPENDENTLY_REVIEWED",
+                        "cases": [
+                            reviewed_case(
+                                "/Game/Test/A.A",
+                                ["entity_definition"],
+                            ),
+                            reviewed_case(
+                                "/Game/Test/B.B",
+                                ["map_placement_asset"],
+                            ),
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            core = sqlite3.connect(":memory:")
+            core.executescript(
+                """
+                CREATE TABLE entities(
+                    entity_id INTEGER PRIMARY KEY,
+                    canonical_uri TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE knowledge_roles(
+                    entity_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source_revision_id INTEGER NOT NULL
+                );
+                CREATE TABLE source_revisions(
+                    revision_id INTEGER PRIMARY KEY,
+                    source_kind TEXT NOT NULL,
+                    source_uri TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    producer_version TEXT NOT NULL,
+                    schema_version TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    freshness_status TEXT NOT NULL
+                );
+                INSERT INTO entities VALUES(1, '/Game/Test/A.A');
+                INSERT INTO entities VALUES(2, '/Game/Test/B.B');
+                INSERT INTO source_revisions VALUES(
+                    1, 'classifier', 'classifier://ark-kb-roles/v2',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'ark-kb-roles/v2', 'ark-kb-role-source/v1',
+                    '2026-07-28T00:00:00Z', 'FRESH'
+                );
+                INSERT INTO knowledge_roles VALUES(
+                    1, 'entity_definition', 'HIGH', 'CONFIRMED', 1
+                );
+                INSERT INTO knowledge_roles VALUES(
+                    2, 'visual_support_asset', 'HIGH', 'CONFIRMED', 1
+                );
+                """
+            )
+            try:
+                metrics = _role_gold_metrics(project_root, core)
+                core.execute(
+                    """
+                    UPDATE source_revisions
+                    SET freshness_status='STALE'
+                    WHERE revision_id=1
+                    """
+                )
+                stale_metrics = _role_gold_metrics(project_root, core)
+            finally:
+                core.close()
+
+        self.assertTrue(metrics["available"])
+        self.assertEqual(metrics["assets"], 2)
+        self.assertEqual(metrics["precision"], 0.5)
+        self.assertEqual(metrics["recall"], 0.5)
+        self.assertEqual(metrics["resolutionRate"], 1.0)
+        self.assertEqual(stale_metrics["precision"], 0.0)
+        self.assertEqual(stale_metrics["recall"], 0.0)
 
     def test_benchmark_v2_gates_fail_closed_for_current_corpus_gaps(self):
         gates = _query_benchmark_gates(
@@ -1119,6 +1673,160 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             )
         self.assertEqual(cutover["mode"], "ready")
         self.assertEqual(cutover["defaultQuerySource"], "vnext")
+
+    def test_immutable_failed_gate_report_never_mutates_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_id = "fixture-build"
+            snapshot = root / "snapshots" / build_id
+            snapshot.mkdir(parents=True)
+            manifest = {
+                "schema": "ark-kb-vnext-snapshot/v1",
+                "buildId": build_id,
+                "databases": {},
+                "cutover": {
+                    "mode": "shadow",
+                    "defaultQuerySource": "legacy",
+                },
+            }
+            manifest_path = snapshot / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            pointer_path = root / "current.json"
+            pointer_path.write_text(
+                json.dumps(
+                    {
+                        "buildId": build_id,
+                        "snapshotRelativePath": (
+                            f"snapshots/{build_id}"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest_before = manifest_path.read_bytes()
+            pointer_before = pointer_path.read_bytes()
+
+            cutover = publish_gate_report(
+                snapshot_root=root,
+                report=self._report(eligible=False),
+            )
+
+            report_root = root / "reports" / build_id
+            attestation = json.loads(
+                (report_root / "cutover_attestation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            self.assertEqual(pointer_path.read_bytes(), pointer_before)
+            self.assertFalse((snapshot / "reports").exists())
+            self.assertTrue((report_root / "quality_gates.json").is_file())
+            self.assertTrue((report_root / "query_benchmark.json").is_file())
+            self.assertEqual(cutover["mode"], "shadow")
+            self.assertEqual(cutover["defaultQuerySource"], "legacy")
+            self.assertFalse(attestation["reportCutoverEligible"])
+            self.assertFalse(attestation["sealedInSnapshotManifest"])
+            self.assertEqual(attestation["cutover"], cutover)
+
+    def test_integrity_resolves_configured_and_direct_immutable_roots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_id = "fixture-build"
+            snapshot = root / "snapshots" / build_id
+            snapshot.mkdir(parents=True)
+            core = sqlite3.connect(snapshot / "core.sqlite")
+            core.execute("CREATE TABLE fixture(value TEXT)")
+            core.commit()
+            core.close()
+            manifest = {
+                "schema": "ark-kb-vnext-snapshot/v1",
+                "buildId": build_id,
+                "databases": {"core.sqlite": {}},
+            }
+            (snapshot / "manifest.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            (root / "current.json").write_text(
+                json.dumps(
+                    {
+                        "buildId": build_id,
+                        "snapshotRelativePath": (
+                            f"snapshots/{build_id}"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            for source in (root, snapshot):
+                with self.subTest(source=source):
+                    metrics = _integrity_metrics(source)
+                    self.assertTrue(metrics["core.sqlite"]["exists"])
+                    self.assertEqual(
+                        metrics["core.sqlite"]["integrity"],
+                        "ok",
+                    )
+                    self.assertTrue(metrics["core.sqlite"]["verified"])
+
+    def test_immutable_eligible_report_requires_a_new_sealed_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_id = "fixture-build"
+            snapshot = root / "snapshots" / build_id
+            snapshot.mkdir(parents=True)
+            manifest = {
+                "schema": "ark-kb-vnext-snapshot/v1",
+                "buildId": build_id,
+                "databases": {},
+                "cutover": {
+                    "mode": "shadow",
+                    "defaultQuerySource": "legacy",
+                },
+            }
+            manifest_path = snapshot / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            pointer_path = root / "current.json"
+            pointer_path.write_text(
+                json.dumps(
+                    {
+                        "buildId": build_id,
+                        "snapshotRelativePath": (
+                            f"snapshots/{build_id}"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest_before = manifest_path.read_bytes()
+            pointer_before = pointer_path.read_bytes()
+
+            cutover = publish_gate_report(
+                snapshot_root=snapshot,
+                report=self._report(eligible=True),
+            )
+
+            attestation = json.loads(
+                (
+                    root
+                    / "reports"
+                    / build_id
+                    / "cutover_attestation.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            self.assertEqual(pointer_path.read_bytes(), pointer_before)
+            self.assertEqual(cutover["mode"], "shadow")
+            self.assertEqual(cutover["defaultQuerySource"], "legacy")
+            self.assertIn("new immutable snapshot", cutover["reason"])
+            self.assertTrue(attestation["reportCutoverEligible"])
+            self.assertFalse(attestation["sealedInSnapshotManifest"])
 
     def test_class_closure_gate_prefers_generated_then_asset_assignment(self):
         core = sqlite3.connect(":memory:")

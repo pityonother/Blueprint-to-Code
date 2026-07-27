@@ -1341,7 +1341,7 @@ def object_ref_path(
         if not isinstance(row, dict):
             break
         name = str(row.get("object_name") or row.get("display_name") or "")
-        if name.startswith("/Game/"):
+        if name.startswith(("/Game/", "/Script/", "/Engine/")):
             package_path = name.split(".", 1)[0]
             return f"{package_path}.{leaf}" if leaf and leaf != package_path.rsplit("/", 1)[-1] else package_path
         outer = row.get("outer_index")
@@ -1429,6 +1429,47 @@ def extract_member_reference_name(data: bytes, names: list[str]) -> str:
         if is_member_reference_name_candidate(value):
             return value
     return ""
+
+
+def extract_member_parent_reference(
+    data: bytes,
+    names: list[str],
+    imports: list[dict[str, object]],
+    exports: list[dict[str, object]],
+) -> dict[str, object]:
+    """Decode the tagged FPackageIndex stored in FMemberReference.MemberParent."""
+
+    for pos, _name in fname_positions(data, names, {"MemberParent"}):
+        type_tag = _fname_at(data, pos + 8, names)
+        if not type_tag or type_tag[0] not in {
+            "ObjectProperty",
+            "ClassProperty",
+            "SoftObjectProperty",
+        }:
+            continue
+        for value_pos in (pos + 25, pos + 24, pos + 28, pos + 32):
+            if not 0 <= value_pos <= len(data) - 4:
+                continue
+            package_index = _read_i32(data, value_pos)
+            if (
+                package_index
+                and _valid_package_index(package_index, imports, exports)
+            ):
+                return {
+                    "package_index": package_index,
+                    "object": object_ref_name(
+                        package_index,
+                        imports,
+                        exports,
+                    ),
+                    "object_path": object_ref_path(
+                        package_index,
+                        imports,
+                        exports,
+                    ),
+                    "raw_offset": value_pos,
+                }
+    return {}
 
 
 def guid_to_text(raw: bytes) -> str:
@@ -1528,6 +1569,11 @@ def property_parse_confidence(type_name: str, parsed: dict[str, object]) -> str:
         value = parsed.get("value")
         return "medium" if isinstance(value, list) and value else "low"
     if type_name == "StructProperty":
+        if (
+            parsed.get("member_name")
+            and parsed.get("member_parent_object_path")
+        ):
+            return "high"
         return "medium" if parsed.get("member_name") or parsed.get("guid") else "low"
     return "low"
 
@@ -1598,6 +1644,23 @@ def parse_property_block_value(
             member_name = extract_member_reference_name(struct_region, names)
             if member_name:
                 item["member_name"] = member_name
+            member_parent = extract_member_parent_reference(
+                struct_region,
+                names,
+                imports,
+                exports,
+            )
+            if member_parent:
+                item["member_parent_package_index"] = member_parent[
+                    "package_index"
+                ]
+                item["member_parent_object"] = member_parent["object"]
+                item["member_parent_object_path"] = member_parent[
+                    "object_path"
+                ]
+                item["member_parent_raw_offset"] = (
+                    pos + int(member_parent["raw_offset"])
+                )
             guid = extract_guid_value(chunk, names, "MemberGuid")
             if guid:
                 item["guid"] = guid
@@ -2999,6 +3062,48 @@ def infer_pin_container_type(region: bytes, names: list[str]) -> str:
     return "None"
 
 
+def extract_pin_type_object_reference(
+    region: bytes,
+    names: list[str],
+    imports: list[dict[str, object]],
+    exports: list[dict[str, object]],
+) -> dict[str, object]:
+    """Decode FEdGraphPinType.PinSubCategoryObject after its two FNames."""
+
+    for category_pos, category in _all_fname_candidates(
+        region,
+        names,
+        0,
+        len(region),
+    ):
+        if category.casefold() not in PIN_CATEGORY_NAMES:
+            continue
+        value_pos = category_pos + 16
+        if value_pos > len(region) - 4:
+            continue
+        package_index = _read_i32(region, value_pos)
+        if (
+            not package_index
+            or not _valid_package_index(
+                package_index,
+                imports,
+                exports,
+            )
+        ):
+            continue
+        return {
+            "package_index": package_index,
+            "object": object_ref_name(package_index, imports, exports),
+            "object_path": object_ref_path(
+                package_index,
+                imports,
+                exports,
+            ),
+            "raw_offset": value_pos,
+        }
+    return {}
+
+
 def extract_pin_default_value(region: bytes) -> str:
     for pos in range(0, max(0, min(len(region) - 4, 160))):
         try:
@@ -3202,6 +3307,12 @@ def parse_exported_pin_object(
     properties, property_warnings = parse_export_properties(pin_data, names, imports, exports)
     pin_name = parse_exported_pin_name(properties, pin_export)
     category, subcategory, container_type, pin_type_region = parse_exported_pin_category(properties, pin_data, names)
+    pin_type_object = extract_pin_type_object_reference(
+        pin_type_region,
+        names,
+        imports,
+        exports,
+    )
     direction = parse_exported_pin_direction(
         properties,
         pin_data,
@@ -3223,7 +3334,15 @@ def parse_exported_pin_object(
     pin_type = {
         "PinCategory": category,
         "PinSubCategory": subcategory,
-        "PinSubCategoryObject": default_object,
+        "PinSubCategoryObject": str(
+            pin_type_object.get("object") or default_object
+        ),
+        "PinSubCategoryObjectPath": str(
+            pin_type_object.get("object_path") or ""
+        ),
+        "PinSubCategoryObjectPackageIndex": (
+            pin_type_object.get("package_index")
+        ),
         "ContainerType": container_type,
         "bIsReference": False,
         "bIsConst": False,
@@ -3443,10 +3562,24 @@ def parse_custom_pins(
         pin_id = pin_guid or f"{node_export.get('display_name') or node_export.get('object_name')}_pin_{index + 1}"
         subcategory = infer_pin_subcategory(region, names, category_pos, name_pos)
         container_type = infer_pin_container_type(region, names)
+        pin_type_object = extract_pin_type_object_reference(
+            region,
+            names,
+            imports,
+            exports,
+        )
         pin_type = {
             "PinCategory": category,
             "PinSubCategory": subcategory,
-            "PinSubCategoryObject": default_object,
+            "PinSubCategoryObject": str(
+                pin_type_object.get("object") or default_object
+            ),
+            "PinSubCategoryObjectPath": str(
+                pin_type_object.get("object_path") or ""
+            ),
+            "PinSubCategoryObjectPackageIndex": (
+                pin_type_object.get("package_index")
+            ),
             "ContainerType": container_type,
             "bIsReference": False,
             "bIsConst": False,

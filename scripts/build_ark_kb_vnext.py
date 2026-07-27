@@ -41,6 +41,11 @@ def _parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT / "native_evidence",
     )
     parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=PROJECT_ROOT / "runtime_observations",
+    )
+    parser.add_argument(
         "--map-evidence-catalog",
         type=Path,
         default=(
@@ -75,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         legacy_kb_root=_absolute(args.legacy_kb_root),
         capture_root=_absolute(args.capture_root),
         native_root=_absolute(args.native_root),
+        runtime_root=_absolute(args.runtime_root),
         map_evidence_path=_absolute(args.map_evidence_catalog),
         output_dir=_absolute(args.output),
         full_snapshot=args.full_snapshot,

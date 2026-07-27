@@ -19,6 +19,7 @@ from typing import Mapping, Sequence
 
 from .kb_context import build_bounded_context_pack
 from .map_usage import MAP_USAGE_EDGE_TYPES
+from .registrations import GLOBAL_REGISTRATION_EDGE_TYPES
 from .query_planner import (
     COMPLETE_CONFIDENCE,
     GAP_CODES,
@@ -27,9 +28,9 @@ from .query_planner import (
     fact_value_is_usable,
     plan_query,
 )
+from .quality_contract import BENCHMARK_SCHEMA
 
 
-BENCHMARK_SCHEMA = "ark-kb-query-benchmark/v2"
 GOLD_SET_SCHEMA = "ark-kb-query-gold-set/v1"
 DEFAULT_GOLD_SET_PATH = (
     Path(__file__).resolve().parents[3]
@@ -693,10 +694,14 @@ def _validate_case(case: BenchmarkCase) -> None:
         )
     if case.category == "REGISTRATION" and (
         answer_mode != "RELATIONSHIP"
-        or case.request["edgeTypes"] != ["REGISTERS"]
+        or set(case.request["edgeTypes"])
+        != GLOBAL_REGISTRATION_EDGE_TYPES
+        or len(case.request["edgeTypes"])
+        != len(GLOBAL_REGISTRATION_EDGE_TYPES)
     ):
         raise ValueError(
-            f"{case.query_id}: REGISTRATION must request REGISTERS"
+            f"{case.query_id}: REGISTRATION must request the explicit "
+            "global/system registration edge set"
         )
     if case.category == "MAP" and not case.request["requiresMapEvidence"]:
         raise ValueError(f"{case.query_id}: MAP requires map evidence")
@@ -1924,22 +1929,74 @@ def _copy_snapshot_for_benchmark(
 ) -> None:
     snapshot_root = snapshot_root.resolve()
     isolated_root = isolated_root.resolve()
-    manifest_path = snapshot_root / "manifests" / "current.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, Mapping):
-        raise ValueError("Snapshot manifest must be an object")
-    build_id = str(manifest.get("buildId") or "")
+    # Local imports avoid snapshot -> storage -> benchmark import cycles.
+    from .snapshot import (
+        SNAPSHOT_SCHEMA,
+        _safe_build_id,
+        resolve_current_snapshot,
+    )
+
+    try:
+        location = resolve_current_snapshot(snapshot_root)
+        source_root = location.snapshot_dir
+        manifest_path = location.manifest_path
+        manifest = location.manifest
+        build_id = location.build_id
+        source_layout = location.layout
+    except FileNotFoundError:
+        manifest_path = snapshot_root / "manifest.json"
+        if not manifest_path.is_file():
+            raise
+        try:
+            raw_manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "Immutable snapshot manifest is unreadable"
+            ) from exc
+        if not isinstance(raw_manifest, dict):
+            raise ValueError("Snapshot manifest must be an object")
+        manifest = raw_manifest
+        build_id = _safe_build_id(manifest.get("buildId"))
+        if manifest.get("schema") != SNAPSHOT_SCHEMA:
+            raise ValueError("Snapshot manifest schema is unknown")
+        source_root = snapshot_root
+        source_layout = "immutable-v2-direct"
     databases = manifest.get("databases")
-    if not build_id or not isinstance(databases, Mapping):
+    if not isinstance(databases, Mapping):
         raise ValueError("Snapshot manifest is missing build databases")
 
-    manifests = isolated_root / "manifests"
-    manifests.mkdir(parents=True)
-    shutil.copy2(manifest_path, manifests / "current.json")
-    shutil.copy2(
-        snapshot_root / "manifests" / f"{build_id}.json",
-        manifests / f"{build_id}.json",
-    )
+    if source_layout == "legacy-v1":
+        destination_root = isolated_root
+        manifests = isolated_root / "manifests"
+        manifests.mkdir(parents=True)
+        shutil.copy2(manifest_path, manifests / "current.json")
+        shutil.copy2(
+            manifest_path,
+            manifests / f"{build_id}.json",
+        )
+    else:
+        destination_root = isolated_root / "snapshots" / build_id
+        destination_root.mkdir(parents=True)
+        shutil.copy2(
+            manifest_path,
+            destination_root / "manifest.json",
+        )
+        (isolated_root / "current.json").write_text(
+            json.dumps(
+                {
+                    "buildId": build_id,
+                    "snapshotRelativePath": f"snapshots/{build_id}",
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
     for raw_name in databases:
         name = str(raw_name)
         relative = Path(name)
@@ -1964,11 +2021,11 @@ def _copy_snapshot_for_benchmark(
             raise ValueError(
                 f"Unsafe snapshot database path: {name!r}"
             )
-        source = (snapshot_root / relative).resolve()
-        destination = (isolated_root / relative).resolve()
+        source = (source_root / relative).resolve()
+        destination = (destination_root / relative).resolve()
         if (
-            not source.is_relative_to(snapshot_root)
-            or not destination.is_relative_to(isolated_root)
+            not source.is_relative_to(source_root)
+            or not destination.is_relative_to(destination_root)
         ):
             raise ValueError(
                 f"Snapshot database escapes its root: {name!r}"
@@ -1989,6 +2046,36 @@ def _copy_snapshot_for_benchmark(
         try:
             os.link(source, destination)
         except OSError:
+            shutil.copy2(source, destination)
+    if source_layout != "legacy-v1":
+        quality = manifest.get("qualityGates")
+        if not isinstance(quality, Mapping):
+            raise ValueError(
+                "Immutable benchmark snapshot has no sealed quality report"
+            )
+        for key in ("reportUri", "benchmarkUri"):
+            raw_name = str(quality.get(key) or "")
+            relative = Path(raw_name)
+            if (
+                not raw_name
+                or relative.is_absolute()
+                or ".." in relative.parts
+                or "\\" in raw_name
+            ):
+                raise ValueError(
+                    f"Unsafe snapshot report path: {raw_name!r}"
+                )
+            source = (source_root / relative).resolve()
+            destination = (destination_root / relative).resolve()
+            if (
+                not source.is_relative_to(source_root)
+                or not destination.is_relative_to(destination_root)
+                or not source.is_file()
+            ):
+                raise ValueError(
+                    f"Snapshot report escapes its root: {raw_name!r}"
+                )
+            destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
 
 
@@ -2251,12 +2338,13 @@ def run_storage_path_benchmark(
                 isolated_root,
             )
             service = VNextKnowledgeService(isolated_root)
-            search_path = isolated_root / "search.sqlite"
-            cache_path = isolated_root / "cache.sqlite"
+            active_root = service.root
+            search_path = service.search_path
+            cache_path = service.cache_path
 
             connections = {
                 name: _connection_latency(
-                    isolated_root / name,
+                    active_root / name,
                     sample_count=sample_count,
                 )
                 for name in (

@@ -15,7 +15,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import unquote, urlsplit
 
 from .context_pack import estimate_tokens
@@ -520,9 +520,49 @@ def _stable_id(prefix: str, *parts: object) -> str:
     return f"{prefix}://{digest}"
 
 
+def _hex_address(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None
+
+
+def _raw_call_sites_by_edge(
+    functions: list[dict[str, Any]],
+    *,
+    image_base: object,
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    base = _hex_address(image_base)
+    if base is None:
+        return {}
+    result: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for callee in functions:
+        callee_id = str(callee.get("evidenceId") or "")
+        if not callee_id:
+            continue
+        for raw_site in _objects(callee.get("callSites"), "callSites"):
+            caller_id = str(raw_site.get("callerEvidenceId") or "")
+            address = _hex_address(raw_site.get("fromAddress"))
+            if not caller_id or address is None or address < base:
+                continue
+            item = dict(raw_site)
+            item["callsiteRva"] = f"0x{address - base:X}"
+            result.setdefault((caller_id, callee_id), []).append(item)
+    for sites in result.values():
+        sites.sort(
+            key=lambda row: int(str(row["callsiteRva"])[2:], 16)
+        )
+    return result
+
+
 def _insert_function_children(
     connection: sqlite3.Connection,
     function: dict[str, Any],
+    *,
+    raw_call_sites: Mapping[tuple[str, str], list[dict[str, Any]]],
 ) -> None:
     function_id = str(function["evidenceId"])
     for ordinal, row in enumerate(_objects(function.get("parameters"), "parameters")):
@@ -555,23 +595,40 @@ def _insert_function_children(
                 _compact_json(row),
             ),
         )
-        callsite_rva = str(row.get("callsiteRva") or "")
-        call_site_id = str(
-            row.get("callSiteId")
-            or _stable_id("native-call-site", edge_id, callsite_rva, ordinal)
+        explicit_rva = str(row.get("callsiteRva") or "")
+        sites = (
+            [{"callsiteRva": explicit_rva}]
+            if explicit_rva
+            else raw_call_sites.get((function_id, target_id), [{}])
         )
-        connection.execute(
-            "INSERT INTO native_call_sites(call_site_id, call_edge_id, caller_evidence_id, "
-            "callee_evidence_id, callsite_rva, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                call_site_id,
-                edge_id,
-                function_id,
-                target_id,
-                callsite_rva,
-                _compact_json(row),
-            ),
-        )
+        for site_ordinal, raw_site in enumerate(sites):
+            callsite_rva = str(raw_site.get("callsiteRva") or "")
+            call_site_id = str(
+                row.get("callSiteId")
+                or _stable_id(
+                    "native-call-site",
+                    edge_id,
+                    callsite_rva,
+                    ordinal,
+                    site_ordinal,
+                )
+            )
+            payload = dict(row)
+            if raw_site:
+                payload["callsiteRva"] = callsite_rva
+                payload["rawCallSite"] = dict(raw_site)
+            connection.execute(
+                "INSERT INTO native_call_sites(call_site_id, call_edge_id, caller_evidence_id, "
+                "callee_evidence_id, callsite_rva, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    call_site_id,
+                    edge_id,
+                    function_id,
+                    target_id,
+                    callsite_rva,
+                    _compact_json(payload),
+                ),
+            )
     for ordinal, row in enumerate(
         _objects(function.get("fieldAccesses"), "fieldAccesses")
     ):
@@ -696,6 +753,10 @@ def build_native_evidence_store(
     generator_id, generator_sha = _generator_identity(provenance)
     evidence_set_id = str(payload["evidenceSetId"])
     functions = _native_functions(payload)
+    raw_call_sites = _raw_call_sites_by_edge(
+        functions,
+        image_base=binary.get("imageBase"),
+    )
     symbol_sets = _symbol_sets(payload, provenance)
     implicit_symbol_set_id = str(symbol_sets[0]["symbolSetId"])
 
@@ -812,7 +873,11 @@ def build_native_evidence_store(
                         ),
                     ),
                 )
-                _insert_function_children(connection, row)
+                _insert_function_children(
+                    connection,
+                    row,
+                    raw_call_sites=raw_call_sites,
+                )
             for ordinal, row in enumerate(_objects(payload.get("gaps"), "gaps")):
                 gap_id = str(
                     row.get("gapId")

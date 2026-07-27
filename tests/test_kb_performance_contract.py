@@ -88,7 +88,7 @@ def _fixture(path: Path) -> sqlite3.Connection:
             source_entity_id, target_entity_id, edge_type,
             edge_strength, status, confidence, source_revision_id,
             evidence_uri, source_property, source_graph
-        ) VALUES (?, ?, 'REGISTERS', 'HARD', 'CONFIRMED', 'HIGH', 1,
+        ) VALUES (?, ?, 'REFERENCES_OBJECT', 'HARD', 'CONFIRMED', 'HIGH', 1,
                   'fixture://edge', 'FixtureProperty', '')
         """,
         [
@@ -244,6 +244,7 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
             isolated_root = base / "target" / "snapshot"
             isolated_root.mkdir(parents=True)
             payload = {
+                "schema": "ark-kb-vnext-snapshot/v1",
                 "buildId": "unsafe-build",
                 "databases": {"../escape.sqlite": {}},
             }
@@ -274,6 +275,99 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
                 escaped_target.read_text(encoding="utf-8"),
                 "do-not-overwrite",
             )
+
+    def test_benchmark_copy_resolves_one_immutable_snapshot_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            configured_root = base / "configured"
+            build_id = "fixture-build"
+            snapshot = (
+                configured_root / "snapshots" / build_id
+            )
+            snapshot.mkdir(parents=True)
+            database_names = (
+                "catalog.sqlite",
+                "core.sqlite",
+                "search.sqlite",
+                "cache.sqlite",
+            )
+            for name in database_names:
+                connection = sqlite3.connect(snapshot / name)
+                connection.execute(
+                    "CREATE TABLE metadata(key TEXT, value TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO metadata VALUES('snapshot_build_id', ?)",
+                    (build_id,),
+                )
+                connection.commit()
+                connection.close()
+            manifest = {
+                "schema": "ark-kb-vnext-snapshot/v1",
+                "buildId": build_id,
+                "databases": {name: {} for name in database_names},
+                "qualityGates": {
+                    "reportUri": "reports/quality_gates.json",
+                    "benchmarkUri": "reports/query_benchmark.json",
+                },
+            }
+            reports = snapshot / "reports"
+            reports.mkdir()
+            (reports / "quality_gates.json").write_text(
+                '{"fixture": true}',
+                encoding="utf-8",
+            )
+            (reports / "query_benchmark.json").write_text(
+                '{"fixture": true}',
+                encoding="utf-8",
+            )
+            (snapshot / "manifest.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            (configured_root / "current.json").write_text(
+                json.dumps(
+                    {
+                        "buildId": build_id,
+                        "snapshotRelativePath": (
+                            f"snapshots/{build_id}"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            for source in (configured_root, snapshot):
+                isolated = base / f"isolated-{source.name}"
+                isolated.mkdir()
+
+                _copy_snapshot_for_benchmark(source, isolated)
+
+                pointer = json.loads(
+                    (isolated / "current.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                copied = (
+                    isolated
+                    / "snapshots"
+                    / build_id
+                )
+                self.assertEqual(
+                    pointer["snapshotRelativePath"],
+                    f"snapshots/{build_id}",
+                )
+                self.assertEqual(
+                    json.loads(
+                        (copied / "manifest.json").read_text(
+                            encoding="utf-8"
+                        )
+                    ),
+                    manifest,
+                )
+                self.assertTrue(
+                    all((copied / name).is_file() for name in database_names)
+                )
 
     def test_runtime_performance_gates_are_fail_closed_and_sample_bound(self):
         functional_check_names = {

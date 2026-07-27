@@ -1,132 +1,245 @@
 # ARK Knowledge Base vNext 架构
 
-## 目标与边界
+## 目标与证据边界
 
-vNext 把 Blueprint-to-Code 的默认调查顺序改为“先查持久知识，再做最小补证”。它不把 Discovery Bundle 改名冒充生产知识库，也不删除旧数据库。所有结论必须保留 source revision、Evidence、状态与明确缺口。
+vNext 的默认调查顺序是“先查持久知识，再做最小补证”。Discovery
+Bundle 只提供目录与结构基础；Blueprint Evidence、Native Evidence、
+legacy lineage、地图证据和 runtime observations 才能为具体语义声明提供
+来源。系统不会把 fingerprint、候选边、过期 revision 或 legacy 行自动提升为
+可回答事实。
 
-系统只保存派生索引和证据指针，不把 ARK 原始资产、DLL/PDB、Ghidra 工程、完整反编译 C 或本机绝对路径写入可提交内容。
+可提交内容只保存派生索引和证据 URI，不包含 ARK 原始资产、DLL/PDB、
+Ghidra 工程、完整反编译 C 或本机绝对路径。
+
+## 不可变快照与原子 current pointer
+
+v2 发布布局是：
+
+```text
+knowledge_base/vnext/
+├── current.json
+├── snapshots/
+│   └── <buildId>/
+│       ├── catalog.sqlite
+│       ├── core.sqlite
+│       ├── search.sqlite
+│       ├── cache.sqlite
+│       ├── domain_exports/
+│       ├── reports/
+│       │   ├── quality_gates.json
+│       │   └── query_benchmark.json
+│       └── manifest.json
+└── reports/
+    └── <buildId>/
+        ├── quality_gates.json
+        ├── query_benchmark.json
+        └── cutover_attestation.json
+```
+
+根目录的 `current.json` 只能包含：
+
+```json
+{
+  "buildId": "...",
+  "snapshotRelativePath": "snapshots/<buildId>"
+}
+```
+
+发布顺序是：
+
+1. 在同卷 staging 目录完整构建四库、领域投影与候选 manifest；
+2. 对 staging 快照运行质量门禁；
+3. 将门禁报告及其 SHA-256 密封进 staging 的 `manifest.json`；
+4. 以目录级 `os.replace` 把完整 staging 放到
+   `snapshots/<buildId>/`，已经存在的 build 不允许覆盖；
+5. 最后原子替换小型 `current.json`。
+
+因此，指针切换前崩溃会保留旧 current；已经打开旧 SQLite 的服务继续读取
+旧 immutable snapshot；新服务只会从同一个新 snapshot 目录打开四库，不会
+出现 Core 新、Search 旧的混合状态。
+
+`VNextKnowledgeService` 在构造时只解析一次 current pointer，并把
+Core、Search、Cache 和 manifest 绑定到该次解析的 snapshot。历史
+`manifests/current.json` 布局仍可只读解析，供现有本机快照迁移；下一次完整
+发布才会生成 v2 根指针。
+
+## 发布前门禁是 manifest 的一部分
+
+门禁不是发布后的可变开关。构建器在 current pointer 可见前运行门禁，并将：
+
+- `reports/quality_gates.json`；
+- `reports/query_benchmark.json`；
+- 两份报告的 SHA-256；
+- `cutoverEligible`；
+- `sealedInSnapshotManifest=true`；
+- `mode` 与 `defaultQuerySource`；
+
+写入同一个 immutable snapshot。
+
+对已经发布的 immutable snapshot 再运行门禁，只能写
+`reports/<buildId>/` 下的外部报告与 attestation。即使该外部报告显示全部
+通过，也不能修改 snapshot manifest、`current.json` 或默认查询来源；必须
+用同一输入重新构建并发布一个密封了门禁结果的新 snapshot。这个约束防止
+事后报告把未经门禁封存的快照提升为 ready。
 
 ## 数据流
 
 ```mermaid
 flowchart LR
-    D["Discovery Bundle<br/>范围与结构调查"] --> S["隔离 staging build"]
-    L["Legacy SQLite<br/>只读迁移与 lineage"] --> S
-    B["Blueprint Evidence<br/>bp://"] --> S
-    N["Native Evidence<br/>native:// + exact gold set"] --> S
-    S --> V["完整性 / FK / schema 验证"]
-    V --> C["catalog.sqlite<br/>范围图"]
-    V --> K["core.sqlite<br/>语义真值"]
-    V --> X["search.sqlite<br/>搜索投影"]
-    V --> Q["cache.sqlite<br/>可丢弃查询缓存"]
-    K --> P["DB-first Query Planner"]
-    P --> A["HTTP API"]
-    A --> U["知识库工作台<br/>legacy / vNext / compare"]
-    P --> G["明确 Gap + 定向 Probe"]
-    R["source / ontology / native 变化"] --> I["选择性失效图"]
-    I --> K
-    T["120 条平衡基准 + 质量门禁"] --> O{"允许切换?"}
-    O -->|全部通过| NV["vNext default"]
-    O -->|任一关键失败| SH["legacy default + shadow"]
+    D["Discovery / Blueprint / Native / Legacy / Map / Runtime"] --> S["同卷 staging"]
+    S --> V["完整性、FK、schema 与质量门禁"]
+    V --> M["门禁报告密封进 manifest"]
+    M --> I["snapshots/buildId immutable directory"]
+    I --> P["原子替换 current.json"]
+    P --> A["服务一次解析并绑定四库"]
+    A --> Q["DB-first planner / API / shadow compare"]
+    Q --> G["明确 Gap + 最小 Probe"]
+    E["发布后的外部门禁报告"] --> R["reports/buildId attestation"]
+    R -. "不能改变 current" .-> P
 ```
 
 ## 四个存储
 
 | 存储 | 职责 | 关键约束 |
 |---|---|---|
-| `catalog.sqlite` | 全资产 canonical identity、包、范围边和 Coverage | 边表用整数 ID，不重复长 Object Path |
-| `core.sqlite` | 类闭包、角色、领域、注册、事实、生效默认值、native 边、lineage、基准 | 唯一 canonical fact key；事实必须有 Evidence |
-| `search.sqlite` | entity 与 alias 的 FTS/搜索投影 | 可由 Core 重建，不承担语义真值 |
-| `cache.sqlite` | query snapshot、context pack、answer plan | 可丢弃；不能成为唯一事实来源 |
+| `catalog.sqlite` | canonical identity、包、范围边和 Coverage | 边表使用整数 ID，不重复长 Object Path |
+| `core.sqlite` | 类闭包、角色、领域、typed edge、事实、生效默认值、native 边和 lineage | 语义真值必须绑定 revision 与 Evidence |
+| `search.sqlite` | exact alias、FTS phrase/prefix 和有界 fuzzy 候选 | 可由 Core 重建，不承担语义真值 |
+| `cache.sqlite` | query snapshot、Context Pack、answer plan | 命中前验证 TTL、build/revision/token；可丢弃 |
 
-第一次构建必须显式传入 `--full-snapshot`。构建发生在 `knowledge_base/vnext/.build/`，四库验证通过后才原子提升；已有发布快照会归档到 `snapshots/<build-id>/`。
-
-## 身份、类链与角色
-
-- canonical entity 以 Unreal Object Path 为主身份。
-- Blueprint asset class、generated class、parent 与 native parent 分开保存。
-- `class_closure` 保留自环、断链、歧义与循环状态，不用名称猜测替代类证据。
-- DataAsset、PrimaryDataAsset、ActorComponent、DamageType、Inventory、Status 与 Buff 由祖先链分类。
-- 一个实体可以同时拥有多个角色；深度策略是 `INDEX_ONLY`、`STRUCTURE`、`SEMANTIC`、`DEEP`、`ON_DEMAND` 或 `BLOCKED_UNKNOWN`。
-- 文件大小、referencer 数、目录和关键词都不能单独把资产提升成机制枢纽。
-
-## 事实模型
+## 事实、关系与角色
 
 声明事实和生效事实严格分开：
 
 ```text
-facts(scope=DECLARED, fact_type=DECLARED_DEFAULT)
+facts(scope=DECLARED, typed value + evidence)
     + class closure
     + source revision set
-    -> effective_facts(resolution status + inherited_from + chain)
+    -> effective_facts(selected candidate + actual resolution path)
 ```
 
-`UNKNOWN`、`NOT_RECOVERED`、`STALE`、`AMBIGUOUS` 不会被转成零或无提示 `CONFIRMED`。`canonical_fact_key` 去重相同语义事实，`fact_evidence` 绑定每条事实的 revision 和 Evidence URI。
+`FINGERPRINT`、`UNKNOWN`、`NOT_RECOVERED`、`STALE`、
+`LEGACY_UNVERIFIED` 和 `AMBIGUOUS` 不能满足可用值门禁。
 
-领域投影只包含经本体允许的高频事实类型。空投影是“当前没有符合条件的已验证事实”，不是该领域不存在。
+Registration 不再统一物化为 `REGISTERS`。Core edge 保存具体语义，例如：
 
-## Native 边界
+- 全局/系统：`REGISTERS_ENGRAM`、`REGISTERS_ITEM`、
+  `REGISTERS_CREATURE`、`REMAPS_ITEM`；
+- 机制：`APPLIES_BUFF`、`USES_DAMAGE_TYPE`、
+  `USES_STATUS_COMPONENT`、`USES_HARVEST_COMPONENT`、
+  `USES_LOOT_ITEM_SET`；
+- 放置/地图：`MAP_DIRECT_REFERENCE`、`MAP_PCG_DEPENDENCY`、
+  `MAP_WORLD_PARTITION_REFERENCE`。
 
-Native gold set 用 qualified symbol、RVA 与 recipe 身份 fail closed。函数解析成功不等于 Blueprint-native 调用边已确认：
+只有有新鲜 source revision、可恢复 Evidence URI、完整 Owner/Target 和允许
+状态的关系才能满足完整查询。候选或 legacy edge 只能说明调查方向。
 
-- exact native target 可标为 `CONFIRMED`；
-- 同名/重载只有名称命中时保持 `CANDIDATE`；
-- Blueprint-native 边还必须同时绑定 Blueprint graph Evidence 和 native Evidence；
-- DLL/PDB/recipe 不匹配时拒绝提升；
-- 未确认 field access 不生成虚构程序切片。
+角色分类器 v2 从真实表计算 query demand、跨领域证据、formula、native、
+组件、动画/曲线/碰撞/材质和地图放置信号，并按语义 class category 计算
+percentile。缺失、不新鲜或自生成 benchmark 信号不会按零伪装成已测量确认。
 
-## 查询路由
+## Gold set 一律 fail closed
 
-查询先做 canonical URI 精确索引查找，再退回有界名称/alias 搜索。Planner 只读 Core，输出：
+生产门禁只接受独立、可重算的 gold：
 
-- `DB_ONLY_COMPLETE`，或
-- `EVIDENCE_REQUIRED`；
-- `missingRequirements` 中的稳定 gap code；
-- `recommendedProbes` 中的最小定向补证；
-- 最多 2,000 estimated tokens 的 Context Pack。
+| 门禁 | 当前独立证据 | 切换最低要求 |
+|---|---:|---:|
+| Query human gold | 5 / 130 固定 cases | 至少 120 |
+| Owner→Target registration gold | 0 / 100 | 至少 100 |
+| Role gold | 0 / 300 | 至少 300，且两轮独立复核 |
+| Blueprint→native confirmed link | 已发布基线 0；工作树验证快照 1 | 至少 1 条双侧 Evidence 的确认边 |
 
-默认不会因为缺事实而启动全量解析器。
+`correct=true`、classifier 自己生成的标签、property-name unit fixture、exact
+native function identity 和 gap-only protocol case 都不能代替上述独立
+gold。工作树验证快照 `20260727T205302-3e842d2336d2` 已用
+`verified_callsite` 生成 1 条 `CONFIRMED/HIGH` link，并通过双方 Evidence、
+signature、freshness、recipe 与 identity 校验；旧 name-only 行仍是
+`CANDIDATE/LOW`。该快照尚未成为规范 current，且自身门禁仍密封为
+`shadow / legacy`，所以已发布状态不得据此改写。
 
-## Legacy 对账
+## 增量失效与当前能力边界
 
-`POST /api/kb/compare` 对 legacy SQLite 使用 `mode=ro`，只搜索稳定身份列。对账按 fact type、fact name、value 与 status 比较，并分别报告：
+`RebuildQueueWorker` 定义并验证 11 种任务：
 
-- 是否可比；
-- value/status 差异；
-- legacy/vNext freshness；
-- Evidence 数量；
-- 推荐来源。
+```text
+FACT
+EFFECTIVE_ENTITY
+ROLE_ENTITY
+DOMAIN_ENTITY
+EDGE_ENTITY
+CLASS_CLOSURE
+REGISTRATION_ENTITY
+NATIVE_FUNCTION
+BLUEPRINT_NATIVE_ENTITY
+PROJECTION
+QUERY_SNAPSHOT
+```
 
-返回值会脱敏本机路径。legacy 路径只有门禁全部通过后才允许退出默认查询位置。
+状态为 `PENDING_REBUILD`、`RUNNING`、`SUCCEEDED`、`FAILED` 或
+`BLOCKED_GAP`。Worker 负责 claim、恢复孤立 RUNNING、验证目标变化并写入
+content-addressed receipt；无真实 backend 的操作只能
+`BLOCKED_GAP`，不能自证 `SUCCEEDED`。
 
-## 增量失效
+当前生产默认 backend 只接通 `CLASS_CLOSURE` 和
+`EFFECTIVE_ENTITY` 两个选择性 materializer。其余 source ingest、role、
+domain、edge、registration、native、projection 与 cache 重建仍缺完整生产
+backend。
 
-`invalidation_dependencies` 从 fact evidence、effective fact、registration、role、domain 与 native binding 建立 revision 到派生记录的映射。变化事件按 `ASSET`、`CLASS`、`REGISTRY`、`NATIVE`、`ONTOLOGY`、`PARSER` 路由：
+完整构建器与 `scripts/update_ark_kb_vnext.py` 复用
+`kb_vnext/source_manifest.py` 的同一个数据模型和 scanner。新 full snapshot
+会在 immutable manifest 的 `incrementalUpdate` 中原子绑定 source manifest
+及 fingerprint，内容包括：
 
-- 叶子资产只影响自身派生记录；
-- 父类变化沿 class closure 影响后代 effective facts；
-- Registry 变化只重算相关 registration/domain；
-- native revision 变化只失效对应 native function 和 Blueprint binding；
-- ontology 变化重算角色/领域/投影，但不删除原始 lineage。
+- 10 项 snapshot semantic input 汇总 identity；
+- runtime observations 汇总 identity；
+- 每个 Blueprint capture revision；
+- 由现有 Native loader 验证并选择的每个 Native evidence set。
+
+顶层 `generatedAt` 不参与 fingerprint，因此构建后的第一次 update 在所有
+输入未变时会返回 cache hit，且不会进入 staging。当前没有 runtime
+observation-set loader，所以 runtime 只承诺汇总 hash；文档不虚构 per-set
+粒度。旧 legacy-v1 基线没有该 binding，必须先 full rebuild。
+
+只要发现首次运行、runtime/非选择性输入变化、删除或尚无生产能力的选择性
+变更，默认路径都会在 lock、staging、queue mutation 和 publication 之前
+fail fast，并返回 `fullRebuildRequired=true`。它目前不是“单资产变化已可
+生产发布”的完成声明；安全路径仍是显式完整构建。
 
 ## 运行与验证
+
+完整构建：
 
 ```powershell
 .\runtime\python\python.exe scripts\build_ark_kb_vnext.py `
   --discovery-database knowledge_base\discovery_bundle\kb_discovery.sqlite `
+  --capture-root captures `
+  --native-root native_evidence `
+  --runtime-root runtime_observations `
   --legacy-kb-root knowledge_base\db `
   --output knowledge_base\vnext `
   --full-snapshot
+```
 
+门禁复核：
+
+```powershell
 .\runtime\python\python.exe scripts\run_ark_kb_vnext_gates.py `
   --discovery-database knowledge_base\discovery_bundle\kb_discovery.sqlite `
   --snapshot-root knowledge_base\vnext
-
-npm run build
-.\runtime\python\python.exe scripts\blueprint_tool_server.py --port 0
 ```
 
-门禁未全部通过时，第二条命令以非零状态结束并把 manifest 保持为：
+第二条命令对 immutable snapshot 只生成外部复核报告，不能改变 current。
+只有发布前密封在新 snapshot manifest 中的
+`qualityGates.cutoverEligible=true` 才允许：
+
+```json
+{
+  "mode": "ready",
+  "defaultQuerySource": "vnext"
+}
+```
+
+当前独立证据不足，必须保持：
 
 ```json
 {

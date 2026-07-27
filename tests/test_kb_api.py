@@ -32,12 +32,20 @@ from blueprint_translator.kb_vnext.kb_context import (  # noqa: E402
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
     DOMAIN_PROJECTIONS,
-    PROJECTION_SCHEMA_SQL,
-    PROJECTION_SCHEMA_VERSION,
+    build_domain_projections,
+)
+from blueprint_translator.kb_vnext.quality_contract import (  # noqa: E402
+    QUALITY_GATE_CONTRACT,
 )
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     semantic_inputs_sha256,
     snapshot_build_id,
+)
+from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
+    SourceManifest,
+    SourceRevision,
+    source_id,
+    source_manifest_binding,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CACHE_SCHEMA_SQL,
@@ -83,6 +91,133 @@ def _refresh_snapshot_database_metrics(root: Path) -> None:
             path.read_bytes()
         ).hexdigest()
     _write_snapshot_manifest(root, manifest)
+
+
+def _publish_immutable_fixture(
+    root: Path,
+) -> tuple[VNextKnowledgeService, Path, dict[str, object]]:
+    _snapshot(root)
+    manifest = json.loads(
+        (root / "manifests" / "current.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    build_id = str(manifest["buildId"])
+    immutable = root / "snapshots" / build_id
+    immutable.mkdir(parents=True)
+    for name in (
+        "catalog.sqlite",
+        "core.sqlite",
+        "search.sqlite",
+        "cache.sqlite",
+    ):
+        os.replace(root / name, immutable / name)
+    os.replace(
+        root / "domain_exports",
+        immutable / "domain_exports",
+    )
+    benchmark = {"schema": "ark-kb-query-benchmark/v2", "queries": []}
+    gates = [
+        {
+            "id": gate_id,
+            "category": category,
+            "critical": critical,
+            "passed": False,
+            "target": True,
+            "actual": False,
+            "detail": "API fixture intentionally remains shadow.",
+        }
+        for gate_id, category, critical in sorted(QUALITY_GATE_CONTRACT)
+    ]
+    failed_count = len(gates)
+    report = {
+        "schema": "ark-kb-quality-gates/v1",
+        "buildId": build_id,
+        "summary": {
+            "total": len(gates),
+            "passed": 0,
+            "failed": failed_count,
+            "cutoverEligible": False,
+            "recommendation": "keep_legacy_shadow",
+        },
+        "gates": gates,
+        "benchmark": benchmark,
+    }
+    reports = immutable / "reports"
+    reports.mkdir()
+    report_path = reports / "quality_gates.json"
+    benchmark_path = reports / "query_benchmark.json"
+    report_path.write_text(
+        json.dumps(report),
+        encoding="utf-8",
+    )
+    benchmark_path.write_text(
+        json.dumps(benchmark),
+        encoding="utf-8",
+    )
+    manifest["qualityGates"] = {
+        "schema": report["schema"],
+        "reportUri": "reports/quality_gates.json",
+        "sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+        "benchmarkUri": "reports/query_benchmark.json",
+        "benchmarkSha256": hashlib.sha256(
+            benchmark_path.read_bytes()
+        ).hexdigest(),
+        "passed": 0,
+        "failed": failed_count,
+        "cutoverEligible": False,
+        "sealedInSnapshotManifest": True,
+    }
+    manifest["cutover"] = {
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
+    }
+    source_inputs = manifest["source"]["inputs"]
+    generated_at = str(manifest["generatedAt"])
+    manifest["incrementalUpdate"] = source_manifest_binding(
+        SourceManifest(
+            entries=tuple(
+                SourceRevision(
+                    source_id=source_id(
+                        "SEMANTIC_INPUT",
+                        f"semantic-input://{key}",
+                    ),
+                    source_kind="SEMANTIC_INPUT",
+                    source_uri=f"semantic-input://{key}",
+                    fingerprint=str(fingerprint),
+                )
+                for key, fingerprint in source_inputs.items()
+            )
+            + (
+                SourceRevision(
+                    source_id=source_id(
+                        "SEMANTIC_INPUT",
+                        "semantic-input://runtimeObservations",
+                    ),
+                    source_kind="SEMANTIC_INPUT",
+                    source_uri=(
+                        "semantic-input://runtimeObservations"
+                    ),
+                    fingerprint="9" * 64,
+                ),
+            ),
+            generated_at=generated_at,
+        )
+    )
+    (immutable / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    (root / "current.json").write_text(
+        json.dumps(
+            {
+                "buildId": build_id,
+                "snapshotRelativePath": f"snapshots/{build_id}",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return VNextKnowledgeService(root), immutable, manifest
 
 
 def _snapshot(root: Path) -> VNextKnowledgeService:
@@ -287,46 +422,34 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
     cache.commit()
     cache.close()
     exports = root / "domain_exports"
-    exports.mkdir()
+    projection_counts = build_domain_projections(
+        core_path=root / "core.sqlite",
+        output_dir=exports,
+        generated_at=generated_at,
+        ontology_version=ontology.version,
+        review_path=PROJECT_ROOT / "ontology" / "projection_review.v1.json",
+        snapshot_build_id=build_id,
+        snapshot_source_fingerprint=semantic_fingerprint,
+    )
     projection_metrics: dict[str, dict[str, object]] = {}
-    for projection_name in DOMAIN_PROJECTIONS:
-        projection_path = exports / f"{projection_name}.sqlite"
-        content_digest = hashlib.sha256(
-            f"fixture:{projection_name}".encode()
-        ).hexdigest()
-        review_config_sha256 = hashlib.sha256(
-            b"fixture:projection-review"
-        ).hexdigest()
-        projection = sqlite3.connect(projection_path)
-        projection.executescript(PROJECTION_SCHEMA_SQL)
-        projection.executemany(
-            "INSERT INTO metadata VALUES (?, ?)",
-            [
-                ("schema_version", PROJECTION_SCHEMA_VERSION),
-                ("projection_name", projection_name),
-                ("projection_version", "v2"),
-                ("ontology_version", ontology.version),
-                ("built_at", generated_at),
-                ("truth_source", "core.sqlite"),
-                ("review_config_sha256", review_config_sha256),
-                ("content_digest", content_digest),
-            ],
-        )
-        projection.commit()
-        projection.close()
-        metrics = database_metrics(projection_path)
-        metrics.update(
-            {
-                "schemaVersion": PROJECTION_SCHEMA_VERSION,
-                "projectionVersion": "v2",
-                "ontologyVersion": ontology.version,
-                "contentDigest": content_digest,
-                "reviewConfigSha256": review_config_sha256,
-            }
-        )
-        projection_metrics[
-            f"domain_exports/{projection_name}.sqlite"
-        ] = metrics
+    for value in projection_counts.values():
+        projection_metrics[f"domain_exports/{value['path']}"] = {
+            key: value[key]
+            for key in (
+                "bytes",
+                "sha256",
+                "integrity",
+                "foreignKeyViolations",
+                "schemaVersion",
+                "projectionVersion",
+                "ontologyVersion",
+                "contentDigest",
+                "reviewConfigSha256",
+                "sourceRevisionSetHash",
+                "validationStatus",
+                "tableCounts",
+            )
+        }
     manifest = {
         "schema": "ark-kb-vnext-snapshot/v1",
         "buildId": build_id,
@@ -637,6 +760,51 @@ def _seed_invalid_active_evidence(root: Path, scenario: str) -> None:
 
 
 class KnowledgeApiTests(unittest.TestCase):
+    def test_service_binds_all_reads_to_one_pointer_resolved_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service, immutable, manifest = _publish_immutable_fixture(
+                root
+            )
+            build_id = str(manifest["buildId"])
+            result = service.search_entities(query="PrimaryItem")
+            health = service.health()
+
+        self.assertEqual(service.root, immutable.resolve())
+        self.assertEqual(
+            result["items"][0]["canonicalUri"],
+            "/Game/Test/ItemA.ItemA",
+        )
+        self.assertTrue(health["available"])
+        self.assertEqual(health["buildId"], build_id)
+
+    def test_immutable_service_rejects_tampered_sealed_quality_report(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service, immutable, _manifest = _publish_immutable_fixture(
+                root
+            )
+            report_path = immutable / "reports" / "quality_gates.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["summary"]["cutoverEligible"] = True
+            report_path.write_text(
+                json.dumps(report),
+                encoding="utf-8",
+            )
+
+            health = service.health()
+            with self.assertRaises(KnowledgeApiError) as raised:
+                service.search_entities(query="PrimaryItem")
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "INVALID")
+        self.assertEqual(
+            raised.exception.code,
+            "KB_VNEXT_SNAPSHOT_INVALID",
+        )
+
     def test_search_uses_ranked_search_database_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "vnext"

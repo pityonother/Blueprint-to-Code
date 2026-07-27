@@ -1365,9 +1365,51 @@ def _extract_blueprint_store(
                 str(row[0]): str(row[1])
                 for row in connection.execute("SELECT graph_ref, name FROM graphs")
             }
+            pin_signatures: dict[str, list[dict[str, object]]] = defaultdict(
+                list
+            )
+            pin_columns = _table_columns(connection, "pins")
+            if {
+                "node_ref",
+                "name",
+                "direction",
+                "category",
+                "pin_type_json",
+                "ordinal",
+            }.issubset(pin_columns):
+                for pin_row in connection.execute(
+                    """
+                    SELECT node_ref, name, direction, category, pin_type_json
+                    FROM pins
+                    ORDER BY node_ref, ordinal
+                    """
+                ):
+                    try:
+                        pin_type = json.loads(
+                            str(pin_row["pin_type_json"] or "{}")
+                        )
+                    except json.JSONDecodeError:
+                        pin_type = {}
+                    if not isinstance(pin_type, Mapping):
+                        pin_type = {}
+                    pin_signatures[str(pin_row["node_ref"])].append(
+                        {
+                            "name": str(pin_row["name"] or ""),
+                            "direction": str(
+                                pin_row["direction"] or ""
+                            ),
+                            "category": str(pin_row["category"] or ""),
+                            "object_path": str(
+                                pin_type.get(
+                                    "PinSubCategoryObjectPath"
+                                )
+                                or ""
+                            ),
+                        }
+                    )
             for row in connection.execute(
                 """
-                SELECT reference_ref, graph_ref, kind, name, target_ref,
+                SELECT reference_ref, graph_ref, node_ref, kind, name, target_ref,
                        classification, confidence
                 FROM "references"
                 ORDER BY reference_ref
@@ -1398,6 +1440,10 @@ def _extract_blueprint_store(
                         "source_evidence_id": str(row["reference_ref"]),
                         "confidence": str(row["confidence"] or UNKNOWN).upper(),
                         "source_kind": "blueprint_evidence_store",
+                        "pin_signature": pin_signatures.get(
+                            str(row["node_ref"]),
+                            [],
+                        ),
                     }
                 )
 
@@ -1837,12 +1883,99 @@ def _extract_native_store(candidate: NativeStoreCandidate) -> dict[str, object]:
                     }
                 )
 
+        parameters_by_function: dict[str, list[dict[str, object]]] = (
+            defaultdict(list)
+        )
+        if _table_exists(connection, "native_parameters"):
+            for parameter in connection.execute(
+                """
+                SELECT function_evidence_id, ordinal, name, type_name
+                FROM native_parameters
+                ORDER BY function_evidence_id, ordinal
+                """
+            ):
+                parameters_by_function[
+                    str(parameter["function_evidence_id"])
+                ].append(
+                    {
+                        "ordinal": int(parameter["ordinal"]),
+                        "name": str(parameter["name"] or ""),
+                        "type": str(parameter["type_name"] or ""),
+                    }
+                )
+        calls_by_function: dict[str, list[dict[str, object]]] = defaultdict(
+            list
+        )
+        if _table_exists(connection, "native_call_edges"):
+            for call in connection.execute(
+                """
+                SELECT caller_evidence_id, callee_evidence_id,
+                       status, confidence
+                FROM native_call_edges
+                ORDER BY caller_evidence_id, call_edge_id
+                """
+            ):
+                calls_by_function[
+                    str(call["caller_evidence_id"])
+                ].append(
+                    {
+                        "targetEvidenceId": str(
+                            call["callee_evidence_id"]
+                        ),
+                        "status": str(call["status"] or "").upper(),
+                        "confidence": str(
+                            call["confidence"] or ""
+                        ).upper(),
+                    }
+                )
+        call_sites_by_function: dict[
+            str,
+            list[dict[str, object]],
+        ] = defaultdict(list)
+        if _table_exists(connection, "native_call_sites"):
+            for site in connection.execute(
+                """
+                SELECT caller_evidence_id, callee_evidence_id,
+                       callsite_rva, payload_json
+                FROM native_call_sites
+                WHERE LENGTH(callsite_rva) > 0
+                ORDER BY callee_evidence_id, callsite_rva
+                """
+            ):
+                try:
+                    payload = json.loads(str(site["payload_json"] or "{}"))
+                except json.JSONDecodeError:
+                    payload = {}
+                raw_site = (
+                    payload.get("rawCallSite")
+                    if isinstance(payload, Mapping)
+                    else {}
+                )
+                if not isinstance(raw_site, Mapping):
+                    raw_site = {}
+                call_sites_by_function[
+                    str(site["callee_evidence_id"])
+                ].append(
+                    {
+                        "callerEvidenceId": str(
+                            site["caller_evidence_id"]
+                        ),
+                        "fromAddress": str(
+                            raw_site.get("fromAddress") or ""
+                        ),
+                        "referenceType": str(
+                            raw_site.get("referenceType") or ""
+                        ),
+                        "callsiteRva": str(site["callsite_rva"]),
+                    }
+                )
+
         functions: list[dict[str, object]] = []
         for row in connection.execute(
             """
             SELECT evidence_id, module, binary_sha256, rva, name,
                    qualified_name, owner, signature, status, confidence,
-                   source,
+                   source, payload_json,
                    CASE WHEN LENGTH(decompiled_c) > 0 THEN 1 ELSE 0 END
                        AS has_decompile
             FROM native_functions
@@ -1850,6 +1983,17 @@ def _extract_native_store(candidate: NativeStoreCandidate) -> dict[str, object]:
             """
         ):
             evidence_id = str(row["evidence_id"])
+            try:
+                function_payload = json.loads(
+                    str(row["payload_json"] or "{}")
+                )
+            except json.JSONDecodeError:
+                function_payload = {}
+            returns = (
+                function_payload.get("returns")
+                if isinstance(function_payload, Mapping)
+                else {}
+            )
             functions.append(
                 {
                     "native_evidence_id": evidence_id,
@@ -1876,6 +2020,10 @@ def _extract_native_store(candidate: NativeStoreCandidate) -> dict[str, object]:
                     "confidence": str(row["confidence"] or UNKNOWN).upper(),
                     "recipe_ids_json": [candidate.recipe_id],
                     "evidence_set_ids_json": [candidate.evidence_set_id],
+                    "parameters": parameters_by_function[evidence_id],
+                    "returns": returns if isinstance(returns, Mapping) else {},
+                    "calls": calls_by_function[evidence_id],
+                    "callSites": call_sites_by_function[evidence_id],
                 }
             )
 
@@ -4163,12 +4311,185 @@ def _dedupe_native_payloads(
     return list(symbols.values()), list(accesses.values()), list(gaps.values())
 
 
+def _native_functions_from_payload(
+    payload: Mapping[str, object],
+) -> list[Mapping[str, object]]:
+    rows = payload.get("functions") or payload.get("targets") or []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
+def _normalized_native_type(value: object) -> str:
+    text = re.sub(
+        r"\b(const|class|struct|volatile)\b",
+        "",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    text = text.replace("*", "").replace("&", "").strip()
+    if re.match(r"^[AU][A-Z]", text):
+        text = text[1:]
+    return re.sub(r"\s+", "", text.casefold())
+
+
+def _blueprint_pin_contract(
+    reference: Mapping[str, object],
+) -> tuple[list[str], str, str]:
+    result: list[str] = []
+    self_type = ""
+    return_type = ""
+    for pin in reference.get("pin_signature") or []:
+        if not isinstance(pin, Mapping):
+            continue
+        name = str(pin.get("name") or "").casefold()
+        category = str(pin.get("category") or "").casefold()
+        direction = str(pin.get("direction") or "").casefold()
+        if category == "exec":
+            continue
+        object_path = str(pin.get("object_path") or "")
+        type_name = _normalized_native_type(
+            object_path.rsplit(".", 1)[-1]
+            if object_path
+            and category in {"object", "class", "interface"}
+            else category
+        )
+        if name == "self":
+            self_type = type_name
+        elif name == "returnvalue" or "output" in direction:
+            return_type = type_name
+        else:
+            result.append(type_name)
+    return result, self_type, return_type
+
+
+def _exact_verified_native_target(
+    reference: Mapping[str, object],
+    candidates: Sequence[Mapping[str, object]],
+    function_by_id: Mapping[str, Mapping[str, object]],
+) -> Mapping[str, object] | None:
+    target_ref = str(reference.get("target_object_path") or "")
+    member = str(reference.get("source_property") or "")
+    suffix = f".{member}"
+    if (
+        not target_ref.startswith("/Script/")
+        or not target_ref.endswith(suffix)
+        or str(reference.get("confidence") or "").upper() != "HIGH"
+    ):
+        return None
+    owner = target_ref[: -len(suffix)].rsplit(".", 1)[-1]
+    blueprint_types, blueprint_self, blueprint_return = (
+        _blueprint_pin_contract(reference)
+    )
+    matches: list[Mapping[str, object]] = []
+    for symbol in candidates:
+        function = function_by_id.get(
+            str(symbol.get("native_evidence_id") or "")
+        )
+        if function is None or _normalized_native_type(
+            function.get("owner") or function.get("owner_class")
+        ) != _normalized_native_type(owner):
+            continue
+        parameters = [
+            row
+            for row in function.get("parameters") or []
+            if isinstance(row, Mapping)
+            and str(row.get("name") or "").casefold() != "this"
+            and "(auto)"
+            not in str(row.get("storage") or "").casefold()
+        ]
+        native_types = [
+            _normalized_native_type(
+                row.get("type") or row.get("dataType")
+            )
+            for row in parameters
+        ]
+        returns = function.get("returns")
+        native_return = (
+            _normalized_native_type(
+                returns.get("type") or returns.get("dataType")
+            )
+            if isinstance(returns, Mapping)
+            else ""
+        )
+        if (
+            not blueprint_types
+            or native_types != blueprint_types
+            or blueprint_self != _normalized_native_type(owner)
+            or not native_return
+            or blueprint_return != native_return
+        ):
+            continue
+        function_id = str(
+            function.get("evidenceId")
+            or function.get("native_evidence_id")
+            or ""
+        )
+        verified_wrapper = False
+        for site in function.get("callSites") or []:
+            if not isinstance(site, Mapping):
+                continue
+            caller_id = str(site.get("callerEvidenceId") or "")
+            wrapper = function_by_id.get(caller_id)
+            if (
+                wrapper is None
+                or str(
+                    wrapper.get("name")
+                    or wrapper.get("simple_name")
+                    or ""
+                )
+                != f"exec{member}"
+                or _normalized_native_type(
+                    wrapper.get("owner")
+                    or wrapper.get("owner_class")
+                )
+                != _normalized_native_type(owner)
+                or not str(site.get("fromAddress") or "").strip()
+                or str(site.get("referenceType") or "")
+                not in {
+                    "UNCONDITIONAL_CALL",
+                    "CONDITIONAL_CALL",
+                }
+            ):
+                continue
+            if any(
+                isinstance(call, Mapping)
+                and str(
+                    call.get("targetEvidenceId")
+                    or call.get("calleeEvidenceId")
+                    or ""
+                )
+                == function_id
+                and str(call.get("status") or "").upper()
+                == "CONFIRMED"
+                and str(call.get("confidence") or "").upper() == "HIGH"
+                for call in wrapper.get("calls") or []
+            ):
+                verified_wrapper = True
+                break
+        if verified_wrapper:
+            matches.append(symbol)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _build_blueprint_native_edges(
     blueprints: Sequence[Mapping[str, object]],
     native_payloads: Sequence[Mapping[str, object]],
     symbols: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
+    function_by_id = {
+        str(
+            function.get("evidenceId")
+            or function.get("native_evidence_id")
+            or ""
+        ): function
+        for payload in native_payloads
+        for function in _native_functions_from_payload(payload)
+        if str(
+            function.get("evidenceId")
+            or function.get("native_evidence_id")
+            or ""
+        )
+    }
     symbol_by_name: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for symbol in symbols:
         symbol_by_name[str(symbol.get("simple_name") or "").casefold()].append(symbol)
@@ -4206,6 +4527,35 @@ def _build_blueprint_native_edges(
                 continue
             name = str(reference.get("source_property") or "")
             candidates = symbol_by_name.get(name.casefold(), [])
+            verified = _exact_verified_native_target(
+                reference,
+                candidates,
+                function_by_id,
+            )
+            if verified is not None:
+                native_id = str(
+                    verified.get("native_evidence_id") or ""
+                )
+                edge_id = stable_id(
+                    "bp-native-verified://",
+                    reference.get("source_object_path"),
+                    reference.get("source_evidence_id"),
+                    native_id,
+                )
+                result[edge_id] = {
+                    "edge_id": edge_id,
+                    "blueprint_asset_path": str(
+                        reference.get("source_object_path") or ""
+                    ),
+                    "blueprint_graph_evidence_id": str(
+                        reference.get("source_evidence_id") or ""
+                    ),
+                    "blueprint_function_name": name,
+                    "native_evidence_id": native_id,
+                    "resolution_method": "verified_callsite",
+                    "confidence": "HIGH",
+                    "status": "CONFIRMED",
+                }
             if len(candidates) == 1:
                 symbol = candidates[0]
                 edge_id = stable_id(

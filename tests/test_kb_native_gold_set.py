@@ -14,6 +14,7 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from blueprint_translator.kb_vnext.native_gold_set import (  # noqa: E402
+    _blueprint_graph_revision,
     load_native_gold_set,
     materialize_native_gold_set,
 )
@@ -165,6 +166,82 @@ def _discovery(*, mismatched_binary: bool = False) -> sqlite3.Connection:
 
 
 class KnowledgeNativeGoldSetTests(unittest.TestCase):
+    def test_exact_reference_uri_reuses_real_capture_source_revision(self):
+        core = _core()
+        source_uri = "bp://asset@revision"
+        core.execute(
+            """
+            INSERT INTO source_revisions(
+                revision_id, source_kind, source_uri, source_fingerprint,
+                producer_version, schema_version, generated_at,
+                freshness_status
+            ) VALUES (
+                576398, 'blueprint_evidence', ?, 'capture-sha', 'capture-reader',
+                'ark.blueprint.evidence.v2',
+                '2026-07-27T00:00:00Z', 'FRESH'
+            )
+            """,
+            (source_uri,),
+        )
+        expected = core.execute(
+            """
+            SELECT revision_id FROM source_revisions
+            WHERE source_uri=?
+            """,
+            (source_uri,),
+        ).fetchone()[0]
+
+        actual = _blueprint_graph_revision(
+            core,
+            row={
+                "edge_id": "verified",
+                "blueprint_graph_evidence_id": (
+                    f"{source_uri}/g/1/n/2/reference/function/exact"
+                ),
+            },
+            gold_version="fixture",
+            generated_at="2026-07-27T00:00:00Z",
+        )
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual, 576398)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT COUNT(*) FROM source_revisions
+                WHERE source_kind='blueprint_evidence'
+                """
+            ).fetchone()[0],
+            1,
+        )
+        discovery = _discovery()
+        discovery.execute(
+            """
+            UPDATE blueprint_native_edges
+            SET blueprint_graph_evidence_id=?
+            WHERE edge_id='verified'
+            """,
+            (f"{source_uri}/g/1/n/2/reference/function/exact",),
+        )
+        materialize_native_gold_set(
+            discovery,
+            core,
+            config_path=CONFIG,
+            generated_at="2026-07-27T00:00:00Z",
+        )
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT blueprint_graph_source_revision_id
+                FROM native_blueprint_links
+                WHERE link_id='verified' AND status='CONFIRMED'
+                """
+            ).fetchone()[0],
+            576398,
+        )
+        discovery.close()
+        core.close()
+
     def test_manifest_has_bounded_exact_targets(self):
         payload = load_native_gold_set(CONFIG)
         self.assertEqual(len(payload["targets"]), 20)

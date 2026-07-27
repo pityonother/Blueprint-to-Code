@@ -8,13 +8,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOC_ROOT = PROJECT_ROOT / "docs" / "ark_kb_vnext"
-CURRENT_MANIFEST = (
-    PROJECT_ROOT
-    / "knowledge_base"
-    / "vnext"
-    / "manifests"
-    / "current.json"
-)
+SNAPSHOT_ROOT = PROJECT_ROOT / "knowledge_base" / "vnext"
 
 REPORT_PATHS = (
     DOC_ROOT / "COMPLETION_REPORT.md",
@@ -24,7 +18,7 @@ SHA256_PATTERN = re.compile(
     r"(?:Source|Discovery) SHA-256\s*(?:：|\|)\s*`([0-9a-f]+)`"
 )
 BUILD_ID_PATTERN = re.compile(
-    r"`(\d{8}T\d{6}\+0000)-([0-9a-f]{12})`"
+    r"`(\d{8}T\d{6}(?:\+0000)?)-([0-9a-f]{12})`"
 )
 
 
@@ -39,12 +33,41 @@ def _report_identity(path: Path) -> tuple[str, str]:
     return build_match.group(0).strip("`"), sha_match.group(1)
 
 
+def _current_manifest() -> dict[str, object] | None:
+    pointer_path = SNAPSHOT_ROOT / "current.json"
+    if pointer_path.is_file():
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        build_id = str(pointer["buildId"])
+        expected_relative = f"snapshots/{build_id}"
+        if pointer.get("snapshotRelativePath") != expected_relative:
+            raise AssertionError(
+                "current pointer does not use snapshots/<buildId>"
+            )
+        manifest_path = (
+            SNAPSHOT_ROOT / "snapshots" / build_id / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("buildId") != build_id:
+            raise AssertionError(
+                "current pointer and immutable manifest build IDs differ"
+            )
+        return manifest
+
+    legacy_path = SNAPSHOT_ROOT / "manifests" / "current.json"
+    if legacy_path.is_file():
+        return json.loads(legacy_path.read_text(encoding="utf-8"))
+    return None
+
+
 class KnowledgeDocumentIdentityTests(unittest.TestCase):
     def test_report_sha256_values_are_exactly_64_lowercase_hex_digits(self):
         for path in REPORT_PATHS:
             with self.subTest(path=path.name):
-                _, sha256 = _report_identity(path)
-                self.assertRegex(sha256, r"^[0-9a-f]{64}$")
+                text = path.read_text(encoding="utf-8")
+                values = SHA256_PATTERN.findall(text)
+                self.assertTrue(values)
+                for sha256 in values:
+                    self.assertRegex(sha256, r"^[0-9a-f]{64}$")
 
     def test_report_build_ids_use_the_documented_source_hash_prefix(self):
         for path in REPORT_PATHS:
@@ -56,12 +79,35 @@ class KnowledgeDocumentIdentityTests(unittest.TestCase):
         identities = [_report_identity(path) for path in REPORT_PATHS]
         self.assertEqual(len(set(identities)), 1)
 
-        if not CURRENT_MANIFEST.is_file():
+        manifest = _current_manifest()
+        if manifest is None:
             return
 
-        manifest = json.loads(CURRENT_MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(identities[0][0], manifest["buildId"])
-        self.assertEqual(identities[0][1], manifest["source"]["sha256"])
+        source = manifest.get("source")
+        self.assertIsInstance(source, dict)
+        self.assertEqual(identities[0][1], source["sha256"])
+
+    def test_reports_preserve_fail_closed_gold_and_cutover_state(self):
+        for path in REPORT_PATHS:
+            with self.subTest(path=path.name):
+                normalized = re.sub(
+                    r"\s+",
+                    "",
+                    path.read_text(encoding="utf-8"),
+                )
+                self.assertIn("5/130", normalized)
+                self.assertIn("0/100", normalized)
+                self.assertIn("0/300", normalized)
+                self.assertIn("shadow", normalized)
+                self.assertIn("legacy", normalized)
+
+    def test_architecture_documents_the_immutable_pointer_contract(self):
+        text = (DOC_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        self.assertIn("current.json", text)
+        self.assertIn("snapshots/<buildId>", text)
+        self.assertIn("sealedInSnapshotManifest=true", text)
+        self.assertIn("不能修改 snapshot manifest", text)
 
 
 if __name__ == "__main__":

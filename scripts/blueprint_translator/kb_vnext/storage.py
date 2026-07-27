@@ -36,6 +36,7 @@ from .registrations import (
     REGISTRATION_TABLES_SQL,
     effective_registration_provenance,
     materialize_typed_registrations,
+    registration_edge_type,
 )
 from .roles import (
     ROLE_CLASSIFIER_VERSION,
@@ -1064,6 +1065,50 @@ def _ontology_semantic_fingerprint(
     ).hexdigest()
 
 
+def _role_semantic_fingerprint(
+    connection: sqlite3.Connection,
+    *,
+    discovery_fingerprint: str,
+) -> str:
+    payload = {
+        "discoveryFingerprint": discovery_fingerprint,
+        "classifierVersion": ROLE_CLASSIFIER_VERSION,
+        "sourceRevisions": [
+            tuple(str(value or "") for value in row)
+            for row in connection.execute(
+                """
+                SELECT
+                    source_kind, source_uri, source_fingerprint,
+                    producer_version, schema_version, freshness_status
+                FROM source_revisions
+                WHERE source_kind<>'role_classifier'
+                ORDER BY
+                    source_kind, source_uri, source_fingerprint,
+                    producer_version, schema_version, freshness_status
+                """
+            )
+        ],
+        "benchmarkQueries": [
+            tuple(str(value or "") for value in row)
+            for row in connection.execute(
+                """
+                SELECT query_id, primary_domain, query_json
+                FROM benchmark_queries
+                ORDER BY query_id
+                """
+            )
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _materialize_package_revisions(
     discovery: sqlite3.Connection,
     target: sqlite3.Connection,
@@ -1195,14 +1240,21 @@ def _materialize_registration_edges(
     edge_source_revision_id: int,
     domain_source_revision_id: int,
 ) -> tuple[int, int]:
-    edge_rows: list[tuple[object, ...]] = []
-    domain_rows: list[tuple[object, ...]] = []
+    edge_rows_by_identity: dict[
+        tuple[object, ...],
+        tuple[object, ...],
+    ] = {}
+    domain_rows_by_identity: dict[
+        tuple[object, ...],
+        tuple[object, ...],
+    ] = {}
     for row in connection.execute(
         """
         SELECT
             owner_uri, target_uri, registration_type, source_property,
             evidence_uri, confidence, status
         FROM typed_registrations
+        ORDER BY registration_id
         """
     ):
         owner_uri, target_uri = str(row[0]), str(row[1])
@@ -1219,20 +1271,22 @@ def _materialize_registration_edges(
                 evidence_uri,
             )
         )
-        edge_rows.append(
-            (
-                owner_id,
-                target_id,
-                "REGISTERS",
-                "HARD",
-                registration_status,
-                registration_confidence,
-                edge_source_revision_id,
-                evidence_uri,
-                str(row[3]),
-                "",
-            )
+        edge_row = (
+            owner_id,
+            target_id,
+            registration_edge_type(
+                registration_type=registration_type,
+                source_property=row[3],
+            ),
+            "HARD",
+            registration_status,
+            registration_confidence,
+            edge_source_revision_id,
+            evidence_uri,
+            str(row[3]),
+            "",
         )
+        edge_rows_by_identity.setdefault(edge_row, edge_row)
         for entity_id, membership_context in (
             (
                 owner_id,
@@ -1258,18 +1312,18 @@ def _materialize_registration_edges(
             for membership in infer_domain_memberships(
                 ontology, membership_context
             ):
-                domain_rows.append(
-                    (
-                        entity_id,
-                        membership.domain_id,
-                        membership.membership_kind,
-                        membership.confidence,
-                        membership.status,
-                        membership.evidence_id,
-                        ontology.version,
-                        domain_source_revision_id,
-                    )
+                domain_row = (
+                    entity_id,
+                    membership.domain_id,
+                    membership.membership_kind,
+                    membership.confidence,
+                    membership.status,
+                    membership.evidence_id,
+                    ontology.version,
+                    domain_source_revision_id,
                 )
+                domain_rows_by_identity.setdefault(domain_row, domain_row)
+    edge_rows = list(edge_rows_by_identity.values())
     if edge_rows:
         connection.executemany(
             """
@@ -1281,6 +1335,12 @@ def _materialize_registration_edges(
             """,
             edge_rows,
         )
+    domain_rows = list(domain_rows_by_identity.values())
+    domain_count_before = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM domain_memberships"
+        ).fetchone()[0]
+    )
     if domain_rows:
         connection.executemany(
             """
@@ -1290,7 +1350,12 @@ def _materialize_registration_edges(
             """,
             domain_rows,
         )
-    return len(edge_rows), len(domain_rows)
+    domain_count_after = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM domain_memberships"
+        ).fetchone()[0]
+    )
+    return len(edge_rows), domain_count_after - domain_count_before
 
 
 def build_core_database(
@@ -1425,19 +1490,6 @@ def build_core_database(
             schema_version=CLASS_SCHEMA_VERSION,
             generated_at=generated_at,
         )
-        role_revision_id = _semantic_revision(
-            connection,
-            source_kind="role_classifier",
-            source_uri=f"classifier://{ROLE_CLASSIFIER_VERSION}",
-            source_fingerprint=hashlib.sha256(
-                json.dumps(
-                    [source_fingerprint, ROLE_CLASSIFIER_VERSION],
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest(),
-            producer_version=ROLE_CLASSIFIER_VERSION,
-            generated_at=generated_at,
-        )
         ontology_revision_fingerprint = _ontology_semantic_fingerprint(
             ontology,
             discovery_fingerprint=source_fingerprint,
@@ -1496,11 +1548,6 @@ def build_core_database(
             connection,
             source_revision_id=registration_revision_id,
             target_categories_by_uri=category_map,
-        )
-        role_counts = materialize_discovery_roles(
-            discovery,
-            connection,
-            source_revision_id=role_revision_id,
         )
         domain_count = _materialize_domains(
             connection,
@@ -1593,12 +1640,28 @@ def build_core_database(
             ontology=ontology,
             generated_at=generated_at,
         )
-        invalidation_counts = rebuild_invalidation_dependencies(connection)
         benchmark_counts = materialize_benchmark_queries(
             connection,
             gold_set_path=benchmark_gold_set_path,
             projection_review_path=projection_review_path,
         )
+        role_revision_id = _semantic_revision(
+            connection,
+            source_kind="role_classifier",
+            source_uri=f"classifier://{ROLE_CLASSIFIER_VERSION}",
+            source_fingerprint=_role_semantic_fingerprint(
+                connection,
+                discovery_fingerprint=source_fingerprint,
+            ),
+            producer_version=ROLE_CLASSIFIER_VERSION,
+            generated_at=generated_at,
+        )
+        role_counts = materialize_discovery_roles(
+            discovery,
+            connection,
+            source_revision_id=role_revision_id,
+        )
+        invalidation_counts = rebuild_invalidation_dependencies(connection)
         connection.execute("ANALYZE main")
         connection.commit()
         return {

@@ -10,20 +10,46 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import time
 from collections.abc import Mapping
-from dataclasses import fields, is_dataclass
+from contextlib import closing
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .class_hierarchy import class_hierarchy_contract_fingerprint
 from .native_ingest import native_evidence_input_sha256
 from .ontology import load_ontology
-from .projections import build_domain_projections
+from .projections import (
+    DOMAIN_PROJECTIONS,
+    PROJECTION_SCHEMA_SQL,
+    PROJECTION_SCHEMA_VERSION,
+    build_domain_projections,
+    compute_core_projection_content_digest,
+    compute_projection_artifact_content_digest,
+)
+from .quality_contract import (
+    BENCHMARK_SCHEMA,
+    QUALITY_GATE_SCHEMA,
+    validate_quality_gate_contract,
+)
+from .schema_capabilities import CORE_SCHEMA_VERSION
+from .source_manifest import (
+    SNAPSHOT_SEMANTIC_INPUT_KEYS,
+    compare_source_manifests,
+    scan_source_manifest,
+    source_manifest_binding,
+    source_manifest_from_binding,
+)
 from .storage import (
     CACHE_SCHEMA_SQL,
+    CACHE_SCHEMA_VERSION,
+    CATALOG_SCHEMA_VERSION,
     FULL_CATALOG_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
     SEARCH_SCHEMA_SQL,
+    SEARCH_SCHEMA_VERSION,
     build_cache_database,
     build_catalog_database,
     build_core_database,
@@ -39,24 +65,12 @@ DATABASE_NAMES = (
     "cache.sqlite",
 )
 SNAPSHOT_SCHEMA = "ark-kb-vnext-snapshot/v1"
+CURRENT_POINTER_NAME = "current.json"
+CURRENT_POINTER_KEYS = frozenset({"buildId", "snapshotRelativePath"})
 SNAPSHOT_SOURCE_KIND = "semantic_input_set"
 SNAPSHOT_SOURCE_URI = "kb-inputs://ark/vnext"
 SEMANTIC_PRODUCER_CONTRACT_SCHEMA = (
     "ark-kb-semantic-producer-contract/v1"
-)
-SNAPSHOT_SEMANTIC_INPUT_KEYS = frozenset(
-    {
-        "discovery",
-        "captures",
-        "classHierarchyContract",
-        "semanticProducerContract",
-        "legacy",
-        "ontology",
-        "benchmarkGold",
-        "qualityGold",
-        "mapEvidence",
-        "nativeEvidence",
-    }
 )
 _RFC3339_TIMESTAMP = re.compile(
     r"^\d{4}-\d{2}-\d{2}T"
@@ -64,6 +78,149 @@ _RFC3339_TIMESTAMP = re.compile(
     r"(?:\.\d{1,6})?"
     r"(?:Z|[+-]\d{2}:\d{2})$"
 )
+_SAFE_BUILD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+
+@dataclass(frozen=True)
+class CurrentSnapshot:
+    """One pointer-resolved snapshot location bound to a single build."""
+
+    root: Path
+    snapshot_dir: Path
+    manifest_path: Path
+    pointer_path: Path
+    build_id: str
+    manifest: dict[str, object]
+    layout: str
+
+
+def _read_json_object(
+    path: Path,
+    *,
+    label: str,
+    transient_retries: int = 0,
+) -> dict[str, object]:
+    payload: object = None
+    last_error: OSError | json.JSONDecodeError | None = None
+    for attempt in range(transient_retries + 1):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            last_error = None
+            break
+        except (OSError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt < transient_retries:
+                time.sleep(0.002)
+    if last_error is not None:
+        raise ValueError(f"{label} is unreadable: {path}") from last_error
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be a JSON object: {path}")
+    return payload
+
+
+def _safe_build_id(value: object) -> str:
+    build_id = str(value or "").strip()
+    if (
+        not build_id
+        or not _SAFE_BUILD_ID.fullmatch(build_id)
+        or build_id in {".", ".."}
+    ):
+        raise ValueError("snapshot buildId is missing or unsafe")
+    return build_id
+
+
+def resolve_current_snapshot(
+    root: Path,
+    *,
+    allow_legacy: bool = True,
+) -> CurrentSnapshot:
+    """Resolve one current pointer without ever combining snapshot roots."""
+
+    root = root.resolve()
+    pointer_path = root / CURRENT_POINTER_NAME
+    if pointer_path.is_file():
+        pointer = _read_json_object(
+            pointer_path,
+            label="current snapshot pointer",
+            transient_retries=8,
+        )
+        if set(pointer) != CURRENT_POINTER_KEYS:
+            raise ValueError(
+                "current snapshot pointer must contain only buildId and "
+                "snapshotRelativePath"
+            )
+        build_id = _safe_build_id(pointer.get("buildId"))
+        relative_text = str(
+            pointer.get("snapshotRelativePath") or ""
+        ).strip()
+        if (
+            not relative_text
+            or "\\" in relative_text
+            or PureWindowsPath(relative_text).is_absolute()
+        ):
+            raise ValueError("snapshotRelativePath must be a POSIX path")
+        relative = PurePosixPath(relative_text)
+        expected = PurePosixPath("snapshots") / build_id
+        if (
+            relative.is_absolute()
+            or relative != expected
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise ValueError(
+                "snapshotRelativePath must equal snapshots/<buildId>"
+            )
+        snapshot_dir = (
+            root.joinpath(*relative.parts).resolve()
+        )
+        snapshots_root = (root / "snapshots").resolve()
+        if (
+            not snapshot_dir.is_relative_to(snapshots_root)
+            or snapshot_dir.parent != snapshots_root
+        ):
+            raise ValueError("snapshot pointer escapes the snapshots root")
+        manifest_path = snapshot_dir / "manifest.json"
+        manifest = _read_json_object(
+            manifest_path,
+            label="immutable snapshot manifest",
+        )
+        if (
+            manifest.get("schema") != SNAPSHOT_SCHEMA
+            or str(manifest.get("buildId") or "") != build_id
+        ):
+            raise ValueError(
+                "current pointer and immutable manifest do not match"
+            )
+        return CurrentSnapshot(
+            root=root,
+            snapshot_dir=snapshot_dir,
+            manifest_path=manifest_path,
+            pointer_path=pointer_path,
+            build_id=build_id,
+            manifest=manifest,
+            layout="immutable-v2",
+        )
+
+    legacy_path = root / "manifests" / CURRENT_POINTER_NAME
+    if allow_legacy and legacy_path.is_file():
+        manifest = _read_json_object(
+            legacy_path,
+            label="legacy current snapshot manifest",
+        )
+        build_id = _safe_build_id(manifest.get("buildId"))
+        if manifest.get("schema") != SNAPSHOT_SCHEMA:
+            raise ValueError("legacy snapshot manifest schema is unknown")
+        return CurrentSnapshot(
+            root=root,
+            snapshot_dir=root,
+            manifest_path=legacy_path,
+            pointer_path=legacy_path,
+            build_id=build_id,
+            manifest=manifest,
+            layout="legacy-v1",
+        )
+    raise FileNotFoundError(
+        f"current snapshot pointer is not available under {root}"
+    )
 
 
 def normalize_snapshot_generated_at(generated_at: str) -> str:
@@ -635,25 +792,108 @@ def _snapshot_semantic_input_hashes(
 
 
 def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
+    contents = (
         json.dumps(
             value,
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
         )
-        + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+        + "\n"
+    ).encode("utf-8")
+    with temporary.open("wb") as handle:
+        handle.write(contents)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temporary, path)
 
 
 def _write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(value, encoding="utf-8", newline="\n")
     os.replace(temporary, path)
+
+
+def _write_current_pointer(output_dir: Path, build_id: str) -> None:
+    _write_json(
+        output_dir / CURRENT_POINTER_NAME,
+        {
+            "buildId": build_id,
+            "snapshotRelativePath": f"snapshots/{build_id}",
+        },
+    )
+
+
+def _evaluate_staged_quality_gates(
+    *,
+    project_root: Path,
+    staging: Path,
+    discovery_database: Path,
+    generated_at: str,
+) -> dict[str, object]:
+    """Run gates against the complete candidate before it becomes current."""
+
+    from .quality_gates import evaluate_quality_gates
+
+    return evaluate_quality_gates(
+        project_root=project_root,
+        snapshot_root=staging,
+        discovery_database=discovery_database,
+        generated_at=generated_at,
+    )
+
+
+def _seal_staged_quality_report(
+    *,
+    staging: Path,
+    manifest: dict[str, object],
+    report: Mapping[str, object],
+) -> dict[str, object]:
+    if str(report.get("buildId") or "") != str(
+        manifest.get("buildId") or ""
+    ):
+        raise ValueError("quality report buildId does not match the snapshot")
+    summary = report.get("summary")
+    benchmark = report.get("benchmark")
+    if not isinstance(summary, Mapping) or not isinstance(
+        benchmark, Mapping
+    ):
+        raise ValueError("quality report summary or benchmark is missing")
+    reports = staging / "reports"
+    gate_path = reports / "quality_gates.json"
+    benchmark_path = reports / "query_benchmark.json"
+    _write_json(gate_path, report)
+    _write_json(benchmark_path, benchmark)
+    gate_sha = _sha256_file(gate_path)
+    benchmark_sha = _sha256_file(benchmark_path)
+    eligible = bool(summary.get("cutoverEligible"))
+    failed = int(summary.get("failed") or 0)
+    sealed = dict(manifest)
+    sealed["qualityGates"] = {
+        "schema": str(report.get("schema") or ""),
+        "reportUri": "reports/quality_gates.json",
+        "sha256": gate_sha,
+        "benchmarkUri": "reports/query_benchmark.json",
+        "benchmarkSha256": benchmark_sha,
+        "passed": int(summary.get("passed") or 0),
+        "failed": failed,
+        "cutoverEligible": eligible,
+        "sealedInSnapshotManifest": True,
+    }
+    sealed["cutover"] = {
+        "mode": "ready" if eligible else "shadow",
+        "defaultQuerySource": "vnext" if eligible else "legacy",
+        "reason": (
+            "all critical quality gates passed before publication"
+            if eligible
+            else f"{failed} critical quality gates remain open"
+        ),
+    }
+    _write_json(staging / "manifest.json", sealed)
+    return sealed
 
 
 def _validate_output_root(output_dir: Path) -> None:
@@ -662,14 +902,745 @@ def _validate_output_root(output_dir: Path) -> None:
     existing = [item for item in output_dir.iterdir() if item.name != ".build"]
     if not existing:
         return
-    marker = output_dir / "manifests" / "current.json"
-    if not marker.is_file():
+    pointer = output_dir / CURRENT_POINTER_NAME
+    legacy_marker = output_dir / "manifests" / CURRENT_POINTER_NAME
+    if not pointer.is_file() and not legacy_marker.is_file():
         raise ValueError(
-            f"Refusing to modify non-vNext directory without manifest: {output_dir}"
+            "Refusing to modify non-vNext directory without a current "
+            f"pointer or legacy manifest: {output_dir}"
         )
-    payload = json.loads(marker.read_text(encoding="utf-8"))
-    if payload.get("schema") != SNAPSHOT_SCHEMA:
-        raise ValueError(f"Unknown vNext manifest schema in {output_dir}")
+    resolve_current_snapshot(output_dir)
+
+
+def _staged_relative_path(
+    staging: Path,
+    value: object,
+    *,
+    label: str,
+) -> Path:
+    text = str(value or "").strip()
+    if (
+        not text
+        or "\\" in text
+        or PureWindowsPath(text).is_absolute()
+    ):
+        raise ValueError(f"{label} must be a relative POSIX path")
+    relative = PurePosixPath(text)
+    if (
+        relative.is_absolute()
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError(f"{label} is unsafe")
+    path = staging.joinpath(*relative.parts).resolve()
+    root = staging.resolve()
+    if not path.is_relative_to(root) or path == root:
+        raise ValueError(f"{label} escapes the staged snapshot")
+    return path
+
+
+def _validate_staged_database(
+    *,
+    staging: Path,
+    relative_name: str,
+    declared: Mapping[str, object],
+    build_id: str,
+    source_sha256: str,
+    require_snapshot_identity: bool,
+    expected_metadata: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    path = _staged_relative_path(
+        staging,
+        relative_name,
+        label="database artifact",
+    )
+    if not path.is_file():
+        raise ValueError(f"staged database is missing: {relative_name}")
+    declared_sha = str(declared.get("sha256") or "").lower()
+    declared_bytes = declared.get("bytes")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", declared_sha)
+        or isinstance(declared_bytes, bool)
+        or not isinstance(declared_bytes, int)
+        or declared_bytes < 0
+        or declared_sha != _sha256_file(path)
+        or declared_bytes != path.stat().st_size
+        or str(declared.get("integrity") or "") != "ok"
+        or int(declared.get("foreignKeyViolations") or 0) != 0
+    ):
+        raise ValueError(
+            f"staged database manifest mismatch: {relative_name}"
+        )
+    try:
+        connection = sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro",
+            uri=True,
+        )
+        try:
+            integrity = str(
+                connection.execute("PRAGMA integrity_check").fetchone()[0]
+            )
+            foreign_keys = list(
+                connection.execute("PRAGMA foreign_key_check")
+            )
+            if integrity != "ok" or foreign_keys:
+                raise ValueError(
+                    f"staged database validation failed: {relative_name}"
+                )
+            if require_snapshot_identity:
+                metadata = dict(
+                    connection.execute("SELECT key, value FROM metadata")
+                )
+                if (
+                    metadata.get("snapshot_build_id") != build_id
+                    or metadata.get("snapshot_source_fingerprint")
+                    != source_sha256
+                ):
+                    raise ValueError(
+                        "staged database snapshot identity mismatch: "
+                        + relative_name
+                    )
+            else:
+                metadata = dict(
+                    connection.execute("SELECT key, value FROM metadata")
+                )
+            normalized_metadata = {
+                str(key): str(value)
+                for key, value in metadata.items()
+            }
+            if expected_metadata is not None and any(
+                normalized_metadata.get(key) != value
+                for key, value in expected_metadata.items()
+            ):
+                raise ValueError(
+                    "staged database metadata mismatch: "
+                    + relative_name
+                )
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(
+            f"staged artifact is not a valid SQLite database: {relative_name}"
+        ) from exc
+    return normalized_metadata
+
+
+def _is_sha256(value: object) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{64}", str(value or "").lower()))
+
+
+def _is_ontology_version(value: object) -> bool:
+    normalized = str(value or "")
+    parts = normalized.split("|")
+    return (
+        bool(normalized)
+        and "ark-fact-types/v2" in parts
+        and all(
+            part.startswith("ark-")
+            and "/v" in part
+            and part.rsplit("/v", 1)[1].isdigit()
+            for part in parts
+        )
+    )
+
+
+def validate_snapshot_source_identity(
+    manifest: Mapping[str, object],
+) -> dict[str, str]:
+    """Validate the path-free semantic identity shared by build and read."""
+
+    if manifest.get("schema") != SNAPSHOT_SCHEMA:
+        raise ValueError("snapshot manifest schema is unknown")
+    build_id = _safe_build_id(manifest.get("buildId"))
+    generated_at = str(manifest.get("generatedAt") or "")
+    try:
+        normalized_generated_at = normalize_snapshot_generated_at(
+            generated_at
+        )
+    except ValueError as exc:
+        raise ValueError("snapshot generatedAt is invalid") from exc
+    if generated_at != normalized_generated_at:
+        raise ValueError("snapshot generatedAt is not canonical UTC")
+    source = manifest.get("source")
+    if not isinstance(source, Mapping):
+        raise ValueError("snapshot source identity is missing")
+    inputs = source.get("inputs")
+    if (
+        set(source) != {"kind", "uri", "sha256", "inputs"}
+        or str(source.get("kind") or "") != SNAPSHOT_SOURCE_KIND
+        or str(source.get("uri") or "") != SNAPSHOT_SOURCE_URI
+        or not isinstance(inputs, Mapping)
+        or set(inputs) != SNAPSHOT_SEMANTIC_INPUT_KEYS
+        or any(not _is_sha256(value) for value in inputs.values())
+    ):
+        raise ValueError("snapshot semantic input identity is incomplete")
+    source_sha256 = str(source.get("sha256") or "").lower()
+    normalized_inputs = {
+        str(key): str(value).lower()
+        for key, value in inputs.items()
+    }
+    if (
+        not _is_sha256(source_sha256)
+        or semantic_inputs_sha256(normalized_inputs) != source_sha256
+        or snapshot_build_id(generated_at, source_sha256) != build_id
+    ):
+        raise ValueError("snapshot source fingerprint does not match buildId")
+    ontology_version = str(manifest.get("ontologyVersion") or "")
+    if not _is_ontology_version(ontology_version):
+        raise ValueError("snapshot ontology version is invalid")
+    try:
+        bound_manifest = source_manifest_from_binding(
+            manifest.get("incrementalUpdate")
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "snapshot source manifest binding is invalid"
+        ) from exc
+    if (
+        not bound_manifest.entries
+        or bound_manifest.generated_at != generated_at
+    ):
+        raise ValueError(
+            "snapshot source manifest binding is empty or has wrong time"
+        )
+    semantic_entries = {
+        entry.source_uri.removeprefix("semantic-input://"): entry.fingerprint
+        for entry in bound_manifest.entries
+        if entry.source_kind == "SEMANTIC_INPUT"
+        and entry.source_uri.startswith("semantic-input://")
+    }
+    expected_semantic_entries = (
+        set(SNAPSHOT_SEMANTIC_INPUT_KEYS) | {"runtimeObservations"}
+    )
+    if (
+        set(semantic_entries) != expected_semantic_entries
+        or any(
+            semantic_entries.get(key) != fingerprint
+            for key, fingerprint in normalized_inputs.items()
+        )
+        or not _is_sha256(
+            semantic_entries.get("runtimeObservations")
+        )
+    ):
+        raise ValueError(
+            "snapshot source manifest does not bind semantic inputs"
+        )
+    return {
+        "buildId": build_id,
+        "generatedAt": generated_at,
+        "sourceSha256": source_sha256,
+        "discoverySha256": normalized_inputs["discovery"],
+        "ontologyVersion": ontology_version,
+    }
+
+
+def _normalized_schema_sql(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+@lru_cache(maxsize=None)
+def _schema_contract(
+    schema_sql: str,
+) -> frozenset[tuple[str, str, str, str]]:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.executescript(schema_sql)
+        return frozenset(
+            (
+                str(row[0]),
+                str(row[1]),
+                str(row[2]),
+                _normalized_schema_sql(row[3]),
+            )
+            for row in connection.execute(
+                """
+                SELECT type, name, tbl_name, sql
+                FROM sqlite_master
+                WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
+                """
+            )
+        )
+    finally:
+        connection.close()
+
+
+def _validate_database_schema_contract(
+    path: Path,
+    *,
+    schema_sql: str,
+    label: str,
+) -> None:
+    expected = _schema_contract(schema_sql)
+    try:
+        with closing(
+            sqlite3.connect(
+                f"file:{path.resolve().as_posix()}?mode=ro",
+                uri=True,
+            )
+        ) as connection:
+            actual = frozenset(
+                (
+                    str(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                    _normalized_schema_sql(row[3]),
+                )
+                for row in connection.execute(
+                    """
+                    SELECT type, name, tbl_name, sql
+                    FROM sqlite_master
+                    WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
+                    """
+                )
+            )
+    except (OSError, sqlite3.DatabaseError) as exc:
+        raise ValueError(f"{label} schema is unreadable") from exc
+    if not expected <= actual:
+        missing = sorted(
+            f"{kind}:{name}"
+            for kind, name, _table, _sql in expected - actual
+        )
+        raise ValueError(
+            f"{label} schema contract is incomplete: {missing}"
+        )
+
+
+def validate_snapshot_database_schemas(snapshot_dir: Path) -> None:
+    """Require every published store to implement its full schema contract."""
+
+    main_contracts = {
+        "catalog.sqlite": FULL_CATALOG_SCHEMA_SQL,
+        "core.sqlite": FULL_CORE_SCHEMA_SQL,
+        "search.sqlite": SEARCH_SCHEMA_SQL,
+        "cache.sqlite": CACHE_SCHEMA_SQL,
+    }
+    for name, schema_sql in main_contracts.items():
+        _validate_database_schema_contract(
+            snapshot_dir / name,
+            schema_sql=schema_sql,
+            label=name,
+        )
+    for projection_name in DOMAIN_PROJECTIONS:
+        relative_name = (
+            f"domain_exports/{projection_name}.sqlite"
+        )
+        _validate_database_schema_contract(
+            snapshot_dir / relative_name,
+            schema_sql=PROJECTION_SCHEMA_SQL,
+            label=relative_name,
+        )
+
+
+def validate_snapshot_projection_bindings(
+    *,
+    snapshot_dir: Path,
+    manifest: Mapping[str, object],
+) -> None:
+    """Bind every disposable projection to this build and its Core truth."""
+
+    identity = validate_snapshot_source_identity(manifest)
+    databases = manifest.get("databases")
+    if not isinstance(databases, Mapping):
+        raise ValueError("snapshot database manifest is missing")
+    core_path = snapshot_dir / "core.sqlite"
+    try:
+        core = sqlite3.connect(
+            f"file:{core_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        )
+        projection_runs = {
+            str(row[0]): {
+                "projectionVersion": str(row[1]),
+                "sourceRevisionSetHash": str(row[2]),
+                "ontologyVersion": str(row[3]),
+                "builtAt": str(row[4]),
+                "rowCount": int(row[5]),
+                "validationStatus": str(row[6]),
+            }
+            for row in core.execute(
+                """
+                SELECT
+                    projection_name,
+                    projection_version,
+                    source_revision_set_hash,
+                    ontology_version,
+                    built_at,
+                    row_count,
+                    validation_status
+                FROM projection_runs
+                """
+            )
+        }
+    except (OSError, sqlite3.DatabaseError) as exc:
+        raise ValueError("core projection runs are unreadable") from exc
+    try:
+        if set(projection_runs) != set(DOMAIN_PROJECTIONS):
+            raise ValueError(
+                "core projection run contract is incomplete"
+            )
+        for projection_name, fact_types in DOMAIN_PROJECTIONS.items():
+            relative_name = (
+                f"domain_exports/{projection_name}.sqlite"
+            )
+            declared = databases.get(relative_name)
+            if not isinstance(declared, Mapping):
+                raise ValueError(
+                    f"{relative_name} is not declared"
+                )
+            path = snapshot_dir / relative_name
+            with closing(
+                sqlite3.connect(
+                    f"file:{path.resolve().as_posix()}?mode=ro",
+                    uri=True,
+                )
+            ) as projection:
+                metadata = {
+                    str(key): str(value)
+                    for key, value in projection.execute(
+                        "SELECT key, value FROM metadata"
+                    )
+                }
+                row_count = int(
+                    projection.execute(
+                        "SELECT COUNT(*) FROM projection_rows"
+                    ).fetchone()[0]
+                )
+                review_rows = [
+                    tuple(row)
+                    for row in projection.execute(
+                        """
+                        SELECT
+                            review_id,
+                            fact_id,
+                            review_status,
+                            evidence_uri,
+                            review_version
+                        FROM projection_reviews
+                        ORDER BY review_id
+                        """
+                    )
+                ]
+                artifact_digest = (
+                    compute_projection_artifact_content_digest(
+                        projection
+                    )
+                )
+            run = projection_runs[projection_name]
+            declared_source_hash = str(
+                declared.get("sourceRevisionSetHash") or ""
+            )
+            declared_digest = str(
+                declared.get("contentDigest") or ""
+            )
+            if (
+                metadata.get("snapshot_build_id")
+                != identity["buildId"]
+                or metadata.get("snapshot_source_fingerprint")
+                != identity["sourceSha256"]
+                or metadata.get("source_revision_set_hash")
+                != declared_source_hash
+                or metadata.get("content_digest") != declared_digest
+                or artifact_digest != declared_digest
+                or run["projectionVersion"] != "v2"
+                or run["sourceRevisionSetHash"]
+                != declared_source_hash
+                or run["ontologyVersion"]
+                != identity["ontologyVersion"]
+                or run["builtAt"] != identity["generatedAt"]
+                or run["rowCount"] != row_count
+                or run["validationStatus"] != "VALID"
+            ):
+                raise ValueError(
+                    "domain projection is not bound to Core snapshot: "
+                    + relative_name
+                )
+            core_digest = compute_core_projection_content_digest(
+                core,
+                projection_name=projection_name,
+                fact_types=fact_types,
+                ontology_version=identity["ontologyVersion"],
+                matched_review_rows=review_rows,
+            )
+            if core_digest != declared_digest:
+                raise ValueError(
+                    "domain projection content differs from Core: "
+                    + relative_name
+                )
+    finally:
+        core.close()
+
+
+def validate_sealed_snapshot_quality(
+    *,
+    snapshot_dir: Path,
+    manifest: Mapping[str, object],
+) -> None:
+    """Validate the reports and cutover decision sealed into a snapshot."""
+
+    build_id = _safe_build_id(manifest.get("buildId"))
+    quality = manifest.get("qualityGates")
+    cutover = manifest.get("cutover")
+    if (
+        not isinstance(quality, Mapping)
+        or quality.get("sealedInSnapshotManifest") is not True
+        or not isinstance(cutover, Mapping)
+    ):
+        raise ValueError("snapshot quality gates are not sealed")
+    report_path = _staged_relative_path(
+        snapshot_dir,
+        quality.get("reportUri"),
+        label="quality report",
+    )
+    benchmark_path = _staged_relative_path(
+        snapshot_dir,
+        quality.get("benchmarkUri"),
+        label="benchmark report",
+    )
+    if (
+        not report_path.is_file()
+        or not benchmark_path.is_file()
+        or str(quality.get("sha256") or "").lower()
+        != _sha256_file(report_path)
+        or str(quality.get("benchmarkSha256") or "").lower()
+        != _sha256_file(benchmark_path)
+    ):
+        raise ValueError("sealed quality report hash is invalid")
+    report = _read_json_object(
+        report_path,
+        label="sealed quality report",
+    )
+    benchmark = _read_json_object(
+        benchmark_path,
+        label="sealed benchmark report",
+    )
+    summary = report.get("summary")
+    gates = report.get("gates")
+    if not isinstance(gates, list) or not gates:
+        raise ValueError("sealed quality report has no gate results")
+    gate_ids: set[str] = set()
+    normalized_gates: list[Mapping[str, object]] = []
+    for gate in gates:
+        if not isinstance(gate, Mapping):
+            raise ValueError("sealed quality report gate is invalid")
+        gate_id = str(gate.get("id") or "")
+        category = str(gate.get("category") or "")
+        if (
+            not gate_id
+            or gate_id in gate_ids
+            or not category
+            or type(gate.get("critical")) is not bool
+            or type(gate.get("passed")) is not bool
+            or "target" not in gate
+            or "actual" not in gate
+            or not str(gate.get("detail") or "")
+        ):
+            raise ValueError("sealed quality report gate is invalid")
+        gate_ids.add(gate_id)
+        normalized_gates.append(gate)
+    validate_quality_gate_contract(normalized_gates)
+    passed_count = sum(bool(gate["passed"]) for gate in normalized_gates)
+    failed_count = sum(
+        bool(gate["critical"]) and not bool(gate["passed"])
+        for gate in normalized_gates
+    )
+    eligible = failed_count == 0
+    expected_recommendation = (
+        "ready_for_default" if eligible else "keep_legacy_shadow"
+    )
+    if (
+        str(report.get("buildId") or "") != build_id
+        or str(report.get("schema") or "") != QUALITY_GATE_SCHEMA
+        or str(quality.get("schema") or "") != QUALITY_GATE_SCHEMA
+        or str(benchmark.get("schema") or "") != BENCHMARK_SCHEMA
+        or not isinstance(summary, Mapping)
+        or not isinstance(report.get("benchmark"), Mapping)
+        or benchmark != report.get("benchmark")
+        or int(summary.get("total") or 0) != len(normalized_gates)
+        or int(summary.get("passed") or 0) != passed_count
+        or int(summary.get("failed") or 0) != failed_count
+        or bool(summary.get("cutoverEligible")) != eligible
+        or str(summary.get("recommendation") or "")
+        != expected_recommendation
+        or int(summary.get("passed") or 0)
+        != int(quality.get("passed") or 0)
+        or int(summary.get("failed") or 0)
+        != int(quality.get("failed") or 0)
+        or bool(summary.get("cutoverEligible"))
+        != bool(quality.get("cutoverEligible"))
+    ):
+        raise ValueError("sealed quality report identity is invalid")
+    if (
+        str(cutover.get("mode") or "")
+        != ("ready" if eligible else "shadow")
+        or str(cutover.get("defaultQuerySource") or "")
+        != ("vnext" if eligible else "legacy")
+    ):
+        raise ValueError("snapshot cutover state contradicts quality gates")
+
+
+def _validate_staged_snapshot_for_promotion(
+    *,
+    staging: Path,
+    manifest: Mapping[str, object],
+) -> None:
+    """Re-verify the immutable publication boundary before pointer swap."""
+
+    identity = validate_snapshot_source_identity(manifest)
+    build_id = identity["buildId"]
+    generated_at = identity["generatedAt"]
+    source_sha256 = identity["sourceSha256"]
+    discovery_sha256 = identity["discoverySha256"]
+    ontology_version = identity["ontologyVersion"]
+
+    databases = manifest.get("databases")
+    if not isinstance(databases, Mapping):
+        raise ValueError("snapshot database manifest is missing")
+    exports_root = staging / "domain_exports"
+    if not exports_root.is_dir():
+        raise ValueError("staged snapshot is missing domain_exports")
+    export_names = {
+        path.relative_to(staging).as_posix()
+        for path in exports_root.rglob("*.sqlite")
+        if path.is_file()
+    }
+    expected_exports = {
+        f"domain_exports/{name}.sqlite"
+        for name in DOMAIN_PROJECTIONS
+    }
+    expected_names = {*DATABASE_NAMES, *expected_exports}
+    if (
+        set(databases) != expected_names
+        or export_names != expected_exports
+    ):
+        raise ValueError(
+            "snapshot database manifest does not exactly cover artifacts"
+        )
+    main_metadata = {
+        "catalog.sqlite": {
+            "schema_version": CATALOG_SCHEMA_VERSION,
+            "source_fingerprint": discovery_sha256,
+            "generated_at": generated_at,
+            "snapshot_build_id": build_id,
+            "snapshot_source_fingerprint": source_sha256,
+        },
+        "core.sqlite": {
+            "schema_version": CORE_SCHEMA_VERSION,
+            "source_fingerprint": discovery_sha256,
+            "generated_at": generated_at,
+            "snapshot_build_id": build_id,
+            "snapshot_source_fingerprint": source_sha256,
+        },
+        "search.sqlite": {
+            "schema_version": SEARCH_SCHEMA_VERSION,
+            "source_fingerprint": source_sha256,
+            "generated_at": generated_at,
+            "snapshot_build_id": build_id,
+            "snapshot_source_fingerprint": source_sha256,
+        },
+        "cache.sqlite": {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "source_fingerprint": source_sha256,
+            "generated_at": generated_at,
+            "snapshot_build_id": build_id,
+            "snapshot_source_fingerprint": source_sha256,
+        },
+    }
+    for relative_name in DATABASE_NAMES:
+        declared = databases.get(relative_name)
+        if not isinstance(declared, Mapping):
+            raise ValueError(
+                f"database metrics are missing: {relative_name}"
+            )
+        _validate_staged_database(
+            staging=staging,
+            relative_name=relative_name,
+            declared=declared,
+            build_id=build_id,
+            source_sha256=source_sha256,
+            require_snapshot_identity=True,
+            expected_metadata=main_metadata[relative_name],
+        )
+    for relative_name in sorted(expected_exports):
+        declared = databases.get(relative_name)
+        if not isinstance(declared, Mapping):
+            raise ValueError(
+                f"database metrics are missing: {relative_name}"
+            )
+        projection_name = Path(relative_name).stem
+        content_digest = str(declared.get("contentDigest") or "").lower()
+        review_config_sha256 = str(
+            declared.get("reviewConfigSha256") or ""
+        ).lower()
+        source_revision_set_hash = str(
+            declared.get("sourceRevisionSetHash") or ""
+        ).lower()
+        if (
+            str(declared.get("schemaVersion") or "")
+            != PROJECTION_SCHEMA_VERSION
+            or str(declared.get("projectionVersion") or "") != "v2"
+            or str(declared.get("ontologyVersion") or "")
+            != ontology_version
+            or str(declared.get("validationStatus") or "") != "VALID"
+            or not _is_sha256(content_digest)
+            or not _is_sha256(review_config_sha256)
+            or not _is_sha256(source_revision_set_hash)
+        ):
+            raise ValueError(
+                "domain projection declaration is invalid: "
+                + relative_name
+            )
+        metadata = _validate_staged_database(
+            staging=staging,
+            relative_name=relative_name,
+            declared=declared,
+            build_id=build_id,
+            source_sha256=source_sha256,
+            require_snapshot_identity=False,
+            expected_metadata={
+                "schema_version": PROJECTION_SCHEMA_VERSION,
+                "projection_name": projection_name,
+                "projection_version": "v2",
+                "source_revision_set_hash": source_revision_set_hash,
+                "ontology_version": ontology_version,
+                "built_at": generated_at,
+                "truth_source": "core.sqlite",
+                "review_config_sha256": review_config_sha256,
+                "content_digest": content_digest,
+                "snapshot_build_id": build_id,
+                "snapshot_source_fingerprint": source_sha256,
+            },
+        )
+        artifact_path = _staged_relative_path(
+            staging,
+            relative_name,
+            label="domain projection",
+        )
+        with closing(
+            sqlite3.connect(
+                f"file:{artifact_path.as_posix()}?mode=ro",
+                uri=True,
+            )
+        ) as projection:
+            computed_content_digest = (
+                compute_projection_artifact_content_digest(projection)
+            )
+        if (
+            metadata.get("content_digest")
+            != computed_content_digest
+        ):
+            raise ValueError(
+                "domain projection content digest is invalid: "
+                + relative_name
+            )
+
+    validate_snapshot_database_schemas(staging)
+    validate_snapshot_projection_bindings(
+        snapshot_dir=staging,
+        manifest=manifest,
+    )
+    validate_sealed_snapshot_quality(
+        snapshot_dir=staging,
+        manifest=manifest,
+    )
 
 
 def _promote_snapshot(
@@ -678,36 +1649,30 @@ def _promote_snapshot(
     output_dir: Path,
     manifest: dict[str, object],
 ) -> None:
-    manifests = output_dir / "manifests"
+    build_id = _safe_build_id(manifest.get("buildId"))
+    if manifest.get("schema") != SNAPSHOT_SCHEMA:
+        raise ValueError("snapshot manifest schema is unknown")
+    if not staging.is_dir():
+        raise FileNotFoundError(staging)
+
     snapshots = output_dir / "snapshots"
-    domain_exports = output_dir / "domain_exports"
-    manifests.mkdir(parents=True, exist_ok=True)
     snapshots.mkdir(parents=True, exist_ok=True)
-    domain_exports.mkdir(parents=True, exist_ok=True)
-    current = manifests / "current.json"
-    if current.is_file():
-        previous = json.loads(current.read_text(encoding="utf-8"))
-        previous_id = str(previous.get("buildId") or "unknown")
-        archive = snapshots / previous_id
-        archive.mkdir(parents=True, exist_ok=True)
-        for name in DATABASE_NAMES:
-            source = output_dir / name
-            if source.is_file():
-                os.replace(source, archive / name)
-        previous_exports = output_dir / "domain_exports"
-        if previous_exports.is_dir():
-            os.replace(previous_exports, archive / "domain_exports")
-            domain_exports.mkdir(parents=True, exist_ok=True)
-        _write_json(archive / "manifest.json", previous)
-    for name in DATABASE_NAMES:
-        os.replace(staging / name, output_dir / name)
-    staged_exports = staging / "domain_exports"
-    if domain_exports.exists():
-        shutil.rmtree(domain_exports)
-    os.replace(staged_exports, domain_exports)
-    build_id = str(manifest["buildId"])
-    _write_json(manifests / f"{build_id}.json", manifest)
-    _write_json(current, manifest)
+    destination = snapshots / build_id
+    if destination.exists():
+        raise FileExistsError(
+            f"immutable snapshot already exists: {destination}"
+        )
+    _validate_staged_snapshot_for_promotion(
+        staging=staging,
+        manifest=manifest,
+    )
+    _write_json(staging / "manifest.json", manifest)
+
+    # A same-volume directory rename publishes every immutable artifact before
+    # the only reader-visible mutation: replacing the small current pointer.
+    os.replace(staging, destination)
+
+    manifests = output_dir / "manifests"
     _write_text(
         manifests / "catalog_schema.sql",
         FULL_CATALOG_SCHEMA_SQL,
@@ -715,6 +1680,7 @@ def _promote_snapshot(
     _write_text(manifests / "core_schema.sql", FULL_CORE_SCHEMA_SQL)
     _write_text(manifests / "search_schema.sql", SEARCH_SCHEMA_SQL)
     _write_text(manifests / "cache_schema.sql", CACHE_SCHEMA_SQL)
+    _write_current_pointer(output_dir, build_id)
 
 
 def build_vnext_snapshot(
@@ -728,6 +1694,7 @@ def build_vnext_snapshot(
     full_snapshot: bool = False,
     generated_at: str | None = None,
     map_evidence_path: Path | None = None,
+    runtime_root: Path | None = None,
 ) -> dict[str, object]:
     """Build all four stores in staging, validate, then atomically promote."""
 
@@ -736,6 +1703,11 @@ def build_vnext_snapshot(
     legacy_kb_root = legacy_kb_root.resolve()
     capture_root = capture_root.resolve()
     native_root = native_root.resolve()
+    runtime_root = (
+        runtime_root.resolve()
+        if runtime_root is not None
+        else (project_root / "runtime_observations").resolve()
+    )
     map_evidence_path = (
         map_evidence_path.resolve()
         if map_evidence_path is not None
@@ -763,6 +1735,13 @@ def build_vnext_snapshot(
         capture_root=capture_root,
         native_root=native_root,
         map_evidence_path=map_evidence_path,
+    )
+    source_manifest = scan_source_manifest(
+        semantic_input_hashes=semantic_input_hashes,
+        capture_root=capture_root,
+        native_root=native_root,
+        runtime_root=runtime_root,
+        generated_at=generated_at,
     )
     discovery_sha = semantic_input_hashes["discovery"]
     semantic_inputs_sha = semantic_inputs_sha256(
@@ -813,6 +1792,8 @@ def build_vnext_snapshot(
             review_path=(
                 project_root / "ontology" / "projection_review.v1.json"
             ),
+            snapshot_build_id=build_id,
+            snapshot_source_fingerprint=semantic_inputs_sha,
         )
         search_counts = build_search_database(
             core_path=staging / "core.sqlite",
@@ -844,6 +1825,10 @@ def build_vnext_snapshot(
                 "ontologyVersion": value["ontologyVersion"],
                 "contentDigest": value["contentDigest"],
                 "reviewConfigSha256": value["reviewConfigSha256"],
+                "sourceRevisionSetHash": value[
+                    "sourceRevisionSetHash"
+                ],
+                "validationStatus": value["validationStatus"],
                 "tableCounts": value["tableCounts"],
             }
             for value in projection_counts.values()
@@ -881,7 +1866,20 @@ def build_vnext_snapshot(
                 "defaultQuerySource": "legacy",
                 "reason": "quality gates have not run yet",
             },
+            "incrementalUpdate": source_manifest_binding(source_manifest),
         }
+        _write_json(staging / "manifest.json", manifest)
+        quality_report = _evaluate_staged_quality_gates(
+            project_root=project_root,
+            staging=staging,
+            discovery_database=discovery_database,
+            generated_at=generated_at,
+        )
+        manifest = _seal_staged_quality_report(
+            staging=staging,
+            manifest=manifest,
+            report=quality_report,
+        )
         final_input_hashes = _snapshot_semantic_input_hashes(
             project_root=project_root,
             discovery_database=discovery_database,
@@ -901,6 +1899,34 @@ def build_vnext_snapshot(
                 "Snapshot semantic inputs changed during build: "
                 + ", ".join(changed_inputs)
             )
+        final_source_manifest = scan_source_manifest(
+            semantic_input_hashes=final_input_hashes,
+            capture_root=capture_root,
+            native_root=native_root,
+            runtime_root=runtime_root,
+            generated_at=generated_at,
+        )
+        if final_source_manifest.fingerprint != source_manifest.fingerprint:
+            changed_sources = compare_source_manifests(
+                source_manifest,
+                final_source_manifest,
+            )
+            changed_uris = sorted(
+                {
+                    (
+                        change.current.source_uri
+                        if change.current is not None
+                        else change.previous.source_uri
+                    )
+                    for change in changed_sources.all_changes
+                    if change.current is not None
+                    or change.previous is not None
+                }
+            )
+            raise RuntimeError(
+                "Snapshot source manifest changed during build: "
+                + ", ".join(changed_uris)
+            )
         _promote_snapshot(
             staging=staging,
             output_dir=output_dir,
@@ -912,6 +1938,7 @@ def build_vnext_snapshot(
             "output": str(output_dir),
             "sourceSha256": semantic_inputs_sha,
             "discoverySha256": discovery_sha,
+            "sourceManifestFingerprint": source_manifest.fingerprint,
             "counts": manifest["counts"],
             "databases": published_metrics,
             "cutover": manifest["cutover"],

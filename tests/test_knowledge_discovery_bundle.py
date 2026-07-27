@@ -811,6 +811,172 @@ def _create_existing_knowledge_db(db_dir: Path) -> None:
 
 
 class KnowledgeDiscoveryBundleTests(unittest.TestCase):
+    def test_exact_owner_signature_and_exec_callsite_add_confirmed_edge(self):
+        from blueprint_translator.kb_discovery import (
+            _build_blueprint_native_edges,
+        )
+
+        asset_path = "/Game/Test/BP_Exact.BP_Exact"
+        function_id = "native://fixture/module/0x2000"
+        wrapper_id = "native://fixture/module/0x1000"
+        reference_id = "bp://asset@revision/g/1/n/2/reference/function/exact"
+        blueprints = [
+            {
+                "references": [
+                    {
+                        "source_object_path": asset_path,
+                        "source_evidence_id": reference_id,
+                        "source_graph": "EventGraph",
+                        "source_property": "AddItemObjectEx",
+                        "target_object_path": (
+                            "/Script/ShooterGame."
+                            "PrimalInventoryComponent.AddItemObjectEx"
+                        ),
+                        "edge_kind": "function_call_native",
+                        "confidence": "HIGH",
+                        "pin_signature": [
+                            {
+                                "name": "self",
+                                "direction": "EGPD_Input",
+                                "category": "object",
+                                "object_path": (
+                                    "/Script/ShooterGame."
+                                    "PrimalInventoryComponent"
+                                ),
+                            },
+                            {
+                                "name": "anItem",
+                                "direction": "EGPD_Input",
+                                "category": "object",
+                                "object_path": (
+                                    "/Script/ShooterGame.PrimalItem"
+                                ),
+                            },
+                            {
+                                "name": "bEquipItem",
+                                "direction": "EGPD_Input",
+                                "category": "bool",
+                                "object_path": "",
+                            },
+                            {
+                                "name": "ReturnValue",
+                                "direction": "EGPD_Output",
+                                "category": "object",
+                                "object_path": (
+                                    "/Script/ShooterGame.PrimalItem"
+                                ),
+                            },
+                        ],
+                    }
+                ]
+            }
+        ]
+        native_payloads = [
+            {
+                "targets": [
+                    {
+                        "evidenceId": function_id,
+                        "name": "AddItemObjectEx",
+                        "owner": "UPrimalInventoryComponent",
+                        "parameters": [
+                            {
+                                "name": "this",
+                                "type": "UPrimalInventoryComponent *",
+                                "storage": "RCX:8 (auto)",
+                            },
+                            {"name": "param_1", "type": "UPrimalItem *"},
+                            {"name": "param_2", "type": "bool"},
+                        ],
+                        "returns": {"dataType": "UPrimalItem *"},
+                        "callSites": [
+                            {
+                                "callerEvidenceId": wrapper_id,
+                                "fromAddress": "180001234",
+                                "referenceType": "UNCONDITIONAL_CALL",
+                            }
+                        ],
+                    },
+                    {
+                        "evidenceId": wrapper_id,
+                        "name": "execAddItemObjectEx",
+                        "owner": "UPrimalInventoryComponent",
+                        "calls": [
+                            {
+                                "targetEvidenceId": function_id,
+                                "status": "CONFIRMED",
+                                "confidence": "HIGH",
+                            }
+                        ],
+                    },
+                ]
+            }
+        ]
+        symbols = [
+            {
+                "native_evidence_id": function_id,
+                "simple_name": "AddItemObjectEx",
+            }
+        ]
+
+        rows = _build_blueprint_native_edges(
+            blueprints,
+            native_payloads,
+            symbols,
+        )
+
+        confirmed = [
+            row for row in rows if row["status"] == "CONFIRMED"
+        ]
+        candidates = [
+            row
+            for row in rows
+            if row["resolution_method"] == "exact_simple_name_candidate"
+        ]
+        self.assertEqual(len(confirmed), 1)
+        self.assertEqual(
+            confirmed[0]["blueprint_graph_evidence_id"],
+            reference_id,
+        )
+        self.assertEqual(
+            confirmed[0]["resolution_method"],
+            "verified_callsite",
+        )
+        self.assertEqual(candidates[0]["status"], "NAME_ONLY_CANDIDATE")
+        self.assertEqual(candidates[0]["confidence"], "LOW")
+
+        reference = blueprints[0]["references"][0]
+        mismatched_blueprints = [
+            {
+                "references": [
+                    {
+                        **reference,
+                        "pin_signature": [
+                            pin
+                            for pin in reference["pin_signature"]
+                            if pin["name"] != "bEquipItem"
+                        ],
+                    }
+                ]
+            }
+        ]
+        mismatched_rows = _build_blueprint_native_edges(
+            mismatched_blueprints,
+            native_payloads,
+            symbols,
+        )
+        self.assertFalse(
+            any(row["status"] == "CONFIRMED" for row in mismatched_rows)
+        )
+        self.assertEqual(
+            [
+                row["status"]
+                for row in mismatched_rows
+                if row["resolution_method"]
+                == "exact_simple_name_candidate"
+            ],
+            ["NAME_ONLY_CANDIDATE"],
+        )
+
     def test_inventory_scan_resumes_and_reports_incremental_changes(self):
         from blueprint_translator.kb_discovery import scan_devkit_inventory
 

@@ -19,6 +19,8 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
     mine_graph_candidates,
     normalize_blueprint_object_path,
     object_ref_path,
+    extract_member_parent_reference,
+    extract_pin_type_object_reference,
     object_path_to_uasset_path,
     parse_custom_pins,
     read_uasset_class_defaults,
@@ -34,6 +36,74 @@ from blueprint_translator import uasset_graphs as uasset_graphs_module  # noqa: 
 
 
 class UAssetGraphCandidateTests(unittest.TestCase):
+    def test_script_import_path_and_member_parent_are_preserved(self):
+        imports = [
+            {
+                "object_name": "/Script/ShooterGame",
+                "class_name": "Package",
+                "outer_index": 0,
+            },
+            {
+                "object_name": "PrimalInventoryComponent",
+                "class_name": "Class",
+                "outer_index": -1,
+            },
+        ]
+        names = ["MemberParent", "ObjectProperty"]
+        block = (
+            struct.pack("<ii", 0, 0)
+            + struct.pack("<ii", 1, 0)
+            + struct.pack("<q", 4)
+            + b"\x00"
+            + struct.pack("<i", -2)
+        )
+
+        parent = extract_member_parent_reference(block, names, imports, [])
+
+        self.assertEqual(
+            object_ref_path(-2, imports, []),
+            "/Script/ShooterGame.PrimalInventoryComponent",
+        )
+        self.assertEqual(parent["package_index"], -2)
+        self.assertEqual(
+            parent["object_path"],
+            "/Script/ShooterGame.PrimalInventoryComponent",
+        )
+
+    def test_pin_type_object_reference_uses_structural_category_offset(self):
+        imports = [
+            {
+                "object_name": "/Script/ShooterGame",
+                "class_name": "Package",
+                "outer_index": 0,
+            },
+            {
+                "object_name": "PrimalItem",
+                "class_name": "Class",
+                "outer_index": -1,
+            },
+        ]
+        names = ["object", "None"]
+        region = (
+            struct.pack("<ii", 0, 0)
+            + struct.pack("<ii", 1, 0)
+            + struct.pack("<i", -2)
+            + b"\x00" * 12
+        )
+
+        reference = extract_pin_type_object_reference(
+            region,
+            names,
+            imports,
+            [],
+        )
+
+        self.assertEqual(reference["package_index"], -2)
+        self.assertEqual(
+            reference["object_path"],
+            "/Script/ShooterGame.PrimalItem",
+        )
+
     def test_object_property_reference_preserves_full_import_object_path(self):
         imports = [
             {
