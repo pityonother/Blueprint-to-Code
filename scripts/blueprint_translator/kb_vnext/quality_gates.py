@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Mapping
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from .snapshot import (
     SNAPSHOT_SCHEMA,
     _safe_build_id,
     resolve_current_snapshot,
+    validate_snapshot_runtime_health_summary,
 )
 
 
@@ -1250,6 +1252,7 @@ def _native_gold_metrics(
 
 def _integrity_metrics(snapshot_root: Path) -> dict[str, object]:
     snapshot_root = snapshot_root.resolve()
+    manifest: Mapping[str, object] | None = None
     if (
         (snapshot_root / "current.json").is_file()
         or (snapshot_root / "manifest.json").is_file()
@@ -1257,9 +1260,9 @@ def _integrity_metrics(snapshot_root: Path) -> dict[str, object]:
             snapshot_root / "manifests" / "current.json"
         ).is_file()
     ):
-        snapshot_root = _resolve_quality_snapshot(
-            snapshot_root
-        ).snapshot_dir
+        location = _resolve_quality_snapshot(snapshot_root)
+        snapshot_root = location.snapshot_dir
+        manifest = location.manifest
     result: dict[str, object] = {}
     paths = [
         (name, snapshot_root / name, "")
@@ -1342,7 +1345,74 @@ def _integrity_metrics(snapshot_root: Path) -> dict[str, object]:
                 "verified": False,
                 "error": f"{type(error).__name__}:{error}",
             }
+    if manifest is not None:
+        runtime_health_exists = isinstance(
+            manifest.get("runtimeHealth"),
+            Mapping,
+        )
+        try:
+            with closing(_read_only(snapshot_root / "core.sqlite")) as core:
+                core_metadata = {
+                    str(key): str(value)
+                    for key, value in core.execute(
+                        "SELECT key, value FROM metadata"
+                    )
+                }
+            active_stale_sources = (
+                validate_snapshot_runtime_health_summary(
+                    manifest=manifest,
+                    core_metadata=core_metadata,
+                )
+            )
+            runtime_health_valid = True
+            runtime_health_error = (
+                ""
+                if active_stale_sources == 0
+                else "ACTIVE_STALE_SOURCES"
+            )
+        except (OSError, sqlite3.DatabaseError, ValueError):
+            active_stale_sources = -1
+            runtime_health_valid = False
+            runtime_health_error = "INVALID_RUNTIME_HEALTH_SUMMARY"
+        result["runtimeHealth"] = {
+            "exists": runtime_health_exists,
+            "integrity": "ok" if runtime_health_valid else "error",
+            "foreignKeyViolations": 0,
+            "bytes": 0,
+            "verified": (
+                runtime_health_valid and active_stale_sources == 0
+            ),
+            "activeStaleSources": active_stale_sources,
+            "error": runtime_health_error,
+        }
     return result
+
+
+def _storage_integrity_gate(
+    integrity: Mapping[str, object],
+) -> dict[str, object]:
+    passed = all(
+        isinstance(item, Mapping)
+        and bool(item.get("exists"))
+        and item.get("integrity") == "ok"
+        and int(item.get("foreignKeyViolations") or 0) == 0
+        and bool(item.get("verified"))
+        for item in integrity.values()
+    )
+    return _gate(
+        "storage.integrity",
+        "storage",
+        target=(
+            "all databases ok; zero FK violations; "
+            "zero active stale sources"
+        ),
+        actual=integrity,
+        passed=passed,
+        detail=(
+            "Published read-only snapshot stores and its sealed runtime "
+            "health summary."
+        ),
+    )
 
 
 def _privacy_scan(value: object) -> list[str]:
@@ -2342,20 +2412,32 @@ def evaluate_quality_gates(
         native_gold = _native_gold_metrics(core)
         native_targets = native_gold["targets"]
         native_confirmed = native_gold["confirmed"]
-        confirmed_links, valid_links = core.execute(
+        link_rows = list(
+            core.execute(
             """
             SELECT
-              SUM(CASE WHEN link.status='CONFIRMED' THEN 1 ELSE 0 END),
-              SUM(CASE
-                    WHEN link.status='CONFIRMED'
-                     AND link.native_function_id IS NOT NULL
-                     AND link.blueprint_graph_evidence_uri<>''
-                     AND link.native_evidence_uri<>''
-                     AND graph_revision.revision_id IS NOT NULL
-                     AND graph_revision.freshness_status='FRESH'
-                     AND native_revision.revision_id IS NOT NULL
-                     AND native_revision.freshness_status='FRESH'
-                    THEN 1 ELSE 0 END)
+                link.status AS link_status,
+                link.native_function_id,
+                link.blueprint_graph_evidence_uri,
+                link.native_evidence_uri,
+                function.status AS native_function_status,
+                function.confidence AS native_function_confidence,
+                graph_revision.revision_id AS graph_revision_id,
+                graph_revision.source_kind AS graph_source_kind,
+                graph_revision.source_uri AS graph_source_uri,
+                graph_revision.source_fingerprint AS graph_source_fingerprint,
+                graph_revision.producer_version AS graph_producer_version,
+                graph_revision.schema_version AS graph_schema_version,
+                graph_revision.generated_at AS graph_generated_at,
+                graph_revision.freshness_status AS graph_freshness_status,
+                native_revision.revision_id AS native_revision_id,
+                native_revision.source_kind AS native_source_kind,
+                native_revision.source_uri AS native_source_uri,
+                native_revision.source_fingerprint AS native_source_fingerprint,
+                native_revision.producer_version AS native_producer_version,
+                native_revision.schema_version AS native_schema_version,
+                native_revision.generated_at AS native_generated_at,
+                native_revision.freshness_status AS native_freshness_status
             FROM native_blueprint_links AS link
             LEFT JOIN source_revisions AS graph_revision
               ON graph_revision.revision_id=
@@ -2365,9 +2447,53 @@ def evaluate_quality_gates(
             LEFT JOIN source_revisions AS native_revision
               ON native_revision.revision_id=function.source_revision_id
             """
-        ).fetchone()
-        confirmed_links = int(confirmed_links or 0)
-        valid_links = int(valid_links or 0)
+            )
+        )
+        confirmed_links = sum(
+            str(row["link_status"] or "").upper() == "CONFIRMED"
+            for row in link_rows
+        )
+        valid_links = sum(
+            (
+                str(row["link_status"] or "").upper() == "CONFIRMED"
+                and row["native_function_id"] is not None
+                and bool(str(row["blueprint_graph_evidence_uri"] or ""))
+                and bool(str(row["native_evidence_uri"] or ""))
+                and str(
+                    row["native_function_status"] or ""
+                ).upper()
+                in CONFIRMED_RELATIONSHIP_STATUSES
+                and str(
+                    row["native_function_confidence"] or ""
+                ).upper()
+                in {"HIGH", "CONFIRMED"}
+                and _strict_source_revision_is_fresh(
+                    revision_id=row["graph_revision_id"],
+                    source_kind=row["graph_source_kind"],
+                    source_uri=row["graph_source_uri"],
+                    source_fingerprint=row[
+                        "graph_source_fingerprint"
+                    ],
+                    producer_version=row["graph_producer_version"],
+                    schema_version=row["graph_schema_version"],
+                    generated_at=row["graph_generated_at"],
+                    freshness_status=row["graph_freshness_status"],
+                )
+                and _strict_source_revision_is_fresh(
+                    revision_id=row["native_revision_id"],
+                    source_kind=row["native_source_kind"],
+                    source_uri=row["native_source_uri"],
+                    source_fingerprint=row[
+                        "native_source_fingerprint"
+                    ],
+                    producer_version=row["native_producer_version"],
+                    schema_version=row["native_schema_version"],
+                    generated_at=row["native_generated_at"],
+                    freshness_status=row["native_freshness_status"],
+                )
+            )
+            for row in link_rows
+        )
         gates.extend(
             [
                 _gate(
@@ -2635,24 +2761,7 @@ def evaluate_quality_gates(
         core.close()
         discovery.close()
     integrity = _integrity_metrics(snapshot_dir)
-    integrity_passed = all(
-        bool(item["exists"])
-        and item["integrity"] == "ok"
-        and int(item["foreignKeyViolations"]) == 0
-        and bool(item.get("verified"))
-        for item in integrity.values()
-        if isinstance(item, dict)
-    )
-    gates.append(
-        _gate(
-            "storage.integrity",
-            "storage",
-            target="all databases ok; zero FK violations",
-            actual=integrity,
-            passed=integrity_passed,
-            detail="Published read-only snapshot stores.",
-        )
-    )
+    gates.append(_storage_integrity_gate(integrity))
     core_bytes = int(integrity["core.sqlite"]["bytes"])
     discovery_bytes = discovery_database.stat().st_size
     gates.append(

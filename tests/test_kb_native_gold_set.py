@@ -176,12 +176,12 @@ class KnowledgeNativeGoldSetTests(unittest.TestCase):
                 producer_version, schema_version, generated_at,
                 freshness_status
             ) VALUES (
-                576398, 'blueprint_evidence', ?, 'capture-sha', 'capture-reader',
+                576398, 'blueprint_evidence', ?, ?, 'capture-reader',
                 'ark.blueprint.evidence.v2',
                 '2026-07-27T00:00:00Z', 'FRESH'
             )
             """,
-            (source_uri,),
+            (source_uri, "a" * 64),
         )
         expected = core.execute(
             """
@@ -858,6 +858,104 @@ class KnowledgeNativeGoldSetTests(unittest.TestCase):
                 """
             ).fetchone(),
             ("CANDIDATE", "LOW"),
+        )
+        source.close()
+        core.close()
+
+    def test_verified_callsite_with_unbound_capture_revision_stays_candidate(
+        self,
+    ):
+        source = _discovery()
+        source.execute(
+            """
+            UPDATE blueprint_native_edges
+            SET blueprint_graph_evidence_id=?
+            WHERE edge_id='verified'
+            """,
+            (
+                "bp://asset@stale-revision/g/1/n/2/"
+                "reference/function/exact",
+            ),
+        )
+        core = _core()
+
+        result = materialize_native_gold_set(
+            source,
+            core,
+            config_path=CONFIG,
+            generated_at="2026-07-27T00:00:00Z",
+        )
+
+        self.assertEqual(result["blueprintNativeConfirmedLinks"], 0)
+        self.assertEqual(result["blueprintNativeCandidateLinks"], 2)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT link.status, revision.freshness_status
+                FROM native_blueprint_links AS link
+                JOIN source_revisions AS revision
+                  ON revision.revision_id =
+                     link.blueprint_graph_source_revision_id
+                WHERE link.link_id='verified'
+                """
+            ).fetchone(),
+            ("CANDIDATE", "STALE"),
+        )
+        source.close()
+        core.close()
+
+    def test_verified_callsite_with_incomplete_fresh_revision_stays_candidate(
+        self,
+    ):
+        source_uri = "bp://asset@incomplete-revision"
+        graph_evidence_uri = (
+            f"{source_uri}/g/1/n/2/reference/function/exact"
+        )
+        source = _discovery()
+        source.execute(
+            """
+            UPDATE blueprint_native_edges
+            SET blueprint_graph_evidence_id=?
+            WHERE edge_id='verified'
+            """,
+            (graph_evidence_uri,),
+        )
+        core = _core()
+        core.execute(
+            """
+            INSERT INTO source_revisions(
+                source_kind, source_uri, source_fingerprint,
+                producer_version, schema_version, generated_at,
+                freshness_status
+            ) VALUES (
+                'blueprint_evidence', ?, 'UNKNOWN', 'UNKNOWN', 'UNKNOWN',
+                '2026-07-27T00:00:00Z', 'FRESH'
+            )
+            """,
+            (source_uri,),
+        )
+
+        result = materialize_native_gold_set(
+            source,
+            core,
+            config_path=CONFIG,
+            generated_at="2026-07-27T00:00:00Z",
+        )
+
+        self.assertEqual(result["blueprintNativeConfirmedLinks"], 0)
+        self.assertEqual(result["blueprintNativeCandidateLinks"], 2)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT link.status, revision.freshness_status
+                FROM native_blueprint_links AS link
+                JOIN source_revisions AS revision
+                  ON revision.revision_id =
+                     link.blueprint_graph_source_revision_id
+                WHERE link.link_id='verified'
+                """
+            ).fetchone(),
+            ("CANDIDATE", "FRESH"),
         )
         source.close()
         core.close()

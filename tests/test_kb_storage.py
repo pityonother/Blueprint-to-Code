@@ -518,6 +518,21 @@ def _discovery_fixture(
     connection.close()
 
 
+def _fixture_runtime_health_summary(
+    *,
+    build_id: str,
+    source_sha256: str,
+    **_kwargs: object,
+) -> dict[str, object]:
+    return {
+        "schema": "ark-kb-runtime-health/v1",
+        "buildId": build_id,
+        "sourceSha256": source_sha256,
+        "activeStaleSources": 0,
+        "sealedInSnapshotManifest": True,
+    }
+
+
 def _snapshot_identity_for_inputs(
     *,
     project_root: Path,
@@ -543,6 +558,15 @@ def _snapshot_identity_for_inputs(
             snapshot_module,
             "build_core_database",
             return_value={},
+        ),
+        patch.object(
+            snapshot_module,
+            "_seal_runtime_health_summary",
+            side_effect=_fixture_runtime_health_summary,
+        ),
+        patch.object(
+            snapshot_module,
+            "_finalize_staged_database_journals",
         ),
         patch.object(
             snapshot_module,
@@ -832,7 +856,29 @@ class KnowledgeStorageTests(unittest.TestCase):
             )
             published = resolve_current_snapshot(output)
             snapshot_root = published.snapshot_dir
+            runtime_health = published.manifest["runtimeHealth"]
             self.assertEqual(result["status"], "complete")
+            self.assertEqual(
+                runtime_health,
+                {
+                    "schema": "ark-kb-runtime-health/v1",
+                    "buildId": result["buildId"],
+                    "sourceSha256": result["sourceSha256"],
+                    "activeStaleSources": 0,
+                    "sealedInSnapshotManifest": True,
+                },
+            )
+            quality = published.manifest["qualityGates"]
+            quality_report = json.loads(
+                (
+                    snapshot_root / str(quality["reportUri"])
+                ).read_text(encoding="utf-8")
+            )
+            storage_performance = quality_report["benchmark"][
+                "storagePathPerformance"
+            ]
+            self.assertEqual(storage_performance["error"], "")
+            self.assertTrue(storage_performance["connections"])
             self.assertEqual(
                 result["cutover"]["defaultQuerySource"], "legacy"
             )
@@ -862,6 +908,11 @@ class KnowledgeStorageTests(unittest.TestCase):
                 )
                 database = sqlite3.connect(snapshot_root / name)
                 try:
+                    journal_mode = str(
+                        database.execute(
+                            "PRAGMA journal_mode"
+                        ).fetchone()[0]
+                    )
                     database_metadata = dict(
                         database.execute(
                             "SELECT key, value FROM metadata"
@@ -877,9 +928,35 @@ class KnowledgeStorageTests(unittest.TestCase):
                     database_metadata["snapshot_source_fingerprint"],
                     result["sourceSha256"],
                 )
+                self.assertEqual(journal_mode, "delete")
+                self.assertFalse(
+                    Path(f"{snapshot_root / name}-wal").exists()
+                )
+                self.assertFalse(
+                    Path(f"{snapshot_root / name}-shm").exists()
+                )
             catalog = sqlite3.connect(snapshot_root / "catalog.sqlite")
             core = sqlite3.connect(snapshot_root / "core.sqlite")
             try:
+                core_metadata = dict(
+                    core.execute("SELECT key, value FROM metadata")
+                )
+                self.assertEqual(
+                    core_metadata["runtime_health_schema"],
+                    runtime_health["schema"],
+                )
+                self.assertEqual(
+                    core_metadata["runtime_health_active_stale_sources"],
+                    str(runtime_health["activeStaleSources"]),
+                )
+                self.assertEqual(
+                    core_metadata["runtime_health_build_id"],
+                    runtime_health["buildId"],
+                )
+                self.assertEqual(
+                    core_metadata["runtime_health_source_sha256"],
+                    runtime_health["sourceSha256"],
+                )
                 self.assertEqual(
                     catalog.execute(
                         "SELECT COUNT(*) FROM catalog_edges"
@@ -1938,6 +2015,15 @@ class KnowledgeStorageTests(unittest.TestCase):
                         snapshot_module,
                         "build_core_database",
                         return_value={},
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "_seal_runtime_health_summary",
+                        side_effect=_fixture_runtime_health_summary,
+                    ),
+                    patch.object(
+                        snapshot_module,
+                        "_finalize_staged_database_journals",
                     ),
                     patch.object(
                         snapshot_module,

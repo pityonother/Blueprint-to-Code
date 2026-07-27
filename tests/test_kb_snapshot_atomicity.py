@@ -116,15 +116,31 @@ def _staging(
         connection = sqlite3.connect(path)
         try:
             connection.executescript(main_schemas[name])
+            metadata_rows = [
+                ("schema_version", main_metadata[name][0]),
+                ("source_fingerprint", main_metadata[name][1]),
+                ("generated_at", generated_at),
+                ("snapshot_build_id", build_id),
+                ("snapshot_source_fingerprint", source_sha256),
+            ]
+            if name == "core.sqlite":
+                metadata_rows.extend(
+                    [
+                        (
+                            "runtime_health_schema",
+                            snapshot_module.RUNTIME_HEALTH_SCHEMA,
+                        ),
+                        ("runtime_health_active_stale_sources", "0"),
+                        ("runtime_health_build_id", build_id),
+                        (
+                            "runtime_health_source_sha256",
+                            source_sha256,
+                        ),
+                    ]
+                )
             connection.executemany(
                 "INSERT INTO metadata VALUES(?, ?)",
-                [
-                    ("schema_version", main_metadata[name][0]),
-                    ("source_fingerprint", main_metadata[name][1]),
-                    ("generated_at", generated_at),
-                    ("snapshot_build_id", build_id),
-                    ("snapshot_source_fingerprint", source_sha256),
-                ],
+                metadata_rows,
             )
             connection.commit()
         finally:
@@ -289,6 +305,13 @@ def _staging(
         "ontologyVersion": ONTOLOGY_VERSION,
         "incrementalUpdate": source_manifest_binding(source_manifest),
         "databases": databases,
+        "runtimeHealth": {
+            "schema": snapshot_module.RUNTIME_HEALTH_SCHEMA,
+            "buildId": build_id,
+            "sourceSha256": source_sha256,
+            "activeStaleSources": 0,
+            "sealedInSnapshotManifest": True,
+        },
         "qualityGates": {
             "schema": report["schema"],
             "reportUri": "reports/quality_gates.json",
@@ -594,6 +617,72 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             )
             self.assertFalse((root / "snapshots" / new_id).exists())
 
+    def test_active_stale_sources_cannot_be_promoted_as_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            build_id = _fixture_build_id("01:02:03")
+            staging, manifest = _staging(root, build_id)
+            core_path = staging / "core.sqlite"
+            core = sqlite3.connect(core_path)
+            try:
+                core.execute(
+                    """
+                    UPDATE metadata SET value='1'
+                    WHERE key='runtime_health_active_stale_sources'
+                    """
+                )
+                core.commit()
+            finally:
+                core.close()
+            manifest["databases"]["core.sqlite"] = (
+                snapshot_module.database_metrics(core_path)
+            )
+            runtime_health = dict(manifest["runtimeHealth"])
+            runtime_health["activeStaleSources"] = 1
+            manifest["runtimeHealth"] = runtime_health
+
+            report_path = staging / "reports" / "quality_gates.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            for gate in report["gates"]:
+                gate["passed"] = True
+                gate["actual"] = gate["target"]
+            report["summary"] = {
+                "total": len(report["gates"]),
+                "passed": len(report["gates"]),
+                "failed": 0,
+                "cutoverEligible": True,
+                "recommendation": "ready_for_default",
+            }
+            snapshot_module._write_json(report_path, report)
+            quality = dict(manifest["qualityGates"])
+            quality.update(
+                {
+                    "sha256": snapshot_module._sha256_file(report_path),
+                    "passed": len(report["gates"]),
+                    "failed": 0,
+                    "cutoverEligible": True,
+                }
+            )
+            manifest["qualityGates"] = quality
+            manifest["cutover"] = {
+                "mode": "ready",
+                "defaultQuerySource": "vnext",
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "active stale sources",
+            ):
+                snapshot_module._promote_snapshot(
+                    staging=staging,
+                    output_dir=root,
+                    manifest=manifest,
+                )
+
+            self.assertFalse((root / "current.json").exists())
+            self.assertFalse((root / "snapshots" / build_id).exists())
+
     def test_unknown_benchmark_schema_cannot_be_sealed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "vnext"
@@ -655,6 +744,29 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError,
                 "schema contract is incomplete",
+            ):
+                snapshot_module._promote_snapshot(
+                    staging=staging,
+                    output_dir=root,
+                    manifest=manifest,
+                )
+
+            self.assertFalse((root / "current.json").exists())
+            self.assertFalse((root / "snapshots" / build_id).exists())
+
+    def test_nonempty_wal_sidecar_cannot_be_published(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            build_id = _fixture_build_id("01:02:03")
+            staging, manifest = _staging(root, build_id)
+            (staging / "core.sqlite-wal").write_bytes(
+                b"unsealed-logical-content"
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "WAL sidecar",
             ):
                 snapshot_module._promote_snapshot(
                     staging=staging,

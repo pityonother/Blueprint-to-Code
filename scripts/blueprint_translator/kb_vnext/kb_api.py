@@ -36,12 +36,15 @@ from .snapshot import (
     SNAPSHOT_SEMANTIC_INPUT_KEYS,
     SNAPSHOT_SOURCE_KIND,
     SNAPSHOT_SOURCE_URI,
+    active_stale_source_count,
     normalize_snapshot_generated_at,
     resolve_current_snapshot,
     semantic_inputs_sha256,
     snapshot_build_id,
+    validate_snapshot_journal_safety,
     validate_snapshot_database_schemas,
     validate_snapshot_projection_bindings,
+    validate_snapshot_runtime_health_summary,
     validate_sealed_snapshot_quality,
     validate_snapshot_source_identity,
 )
@@ -307,8 +310,11 @@ def _database_runtime_state(
                 uri=True,
             )
         ) as connection:
-            integrity = str(
-                connection.execute("PRAGMA quick_check(1)").fetchone()[0]
+            opened = (
+                connection.execute(
+                    "PRAGMA schema_version"
+                ).fetchone()
+                is not None
             )
             metadata = dict(
                 connection.execute("SELECT key, value FROM metadata")
@@ -331,7 +337,7 @@ def _database_runtime_state(
         }
     return {
         "healthy": (
-            integrity == "ok"
+            opened
             and required_tables <= tables
             and (
                 not require_schema
@@ -339,7 +345,7 @@ def _database_runtime_state(
                 == expected_schema
             )
         ),
-        "integrity": integrity,
+        "integrity": "deferred_to_query_digest",
         "metadata": metadata,
         "tables": tables,
     }
@@ -462,6 +468,17 @@ def _file_change_token(path: Path) -> int:
         return stat.st_ctime_ns
 
 
+def _file_stat_identity(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return (
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_dev,
+        stat.st_ino,
+        _file_change_token(path),
+    )
+
+
 def _provenance_gaps(
     items: list[dict[str, object]],
     *,
@@ -524,6 +541,20 @@ class VNextKnowledgeService:
             str,
             tuple[tuple[object, ...], str],
         ] = {}
+        self._immutable_file_baselines: dict[
+            str,
+            tuple[int, int, int, int, int],
+        ] = {}
+        for name in (
+            *IMMUTABLE_SNAPSHOT_DATABASE_SCHEMAS,
+            *DOMAIN_EXPORT_DATABASES,
+        ):
+            try:
+                self._immutable_file_baselines[name] = (
+                    _file_stat_identity(self.root / name)
+                )
+            except OSError:
+                pass
         self._cache_hits = 0
         self._cache_misses = 0
         self._immutable_structure_error = ""
@@ -548,6 +579,8 @@ class VNextKnowledgeService:
         self,
         name: str,
         declared: Mapping[str, object],
+        *,
+        verify_digest: bool = True,
     ) -> bool:
         """Bind immutable stores to manifest bytes without rehashing reads."""
 
@@ -559,18 +592,24 @@ class VNextKnowledgeService:
             return False
         if mutable:
             return True
+        if (
+            not verify_digest
+            and self._snapshot_layout != "immutable-v2"
+        ):
+            verify_digest = True
         expected = str(declared["sha256"]).lower()
         try:
-            stat = path.stat()
+            stat_identity = _file_stat_identity(path)
         except OSError:
             return False
+        if not verify_digest:
+            return (
+                self._immutable_file_baselines.get(name)
+                == stat_identity
+            )
         cache_key = (
             expected,
-            stat.st_size,
-            stat.st_mtime_ns,
-            stat.st_dev,
-            stat.st_ino,
-            _file_change_token(path),
+            *stat_identity,
         )
         cached = self._database_digest_cache.get(name)
         if cached is not None and cached[0] == cache_key:
@@ -582,7 +621,11 @@ class VNextKnowledgeService:
         self._database_digest_cache[name] = (cache_key, actual)
         return actual == expected
 
-    def _snapshot_binding_error(self) -> str | None:
+    def _snapshot_binding_error(
+        self,
+        *,
+        verify_database_hashes: bool = True,
+    ) -> str | None:
         """Validate immutable runtime artifacts and their build identity."""
 
         if self._snapshot_resolution_error:
@@ -595,6 +638,14 @@ class VNextKnowledgeService:
                 "immutable snapshot structure is invalid: "
                 + self._immutable_structure_error
             )
+        try:
+            validate_snapshot_journal_safety(
+                self.root,
+                require_delete=False,
+                include_cache=False,
+            )
+        except ValueError as exc:
+            return f"immutable snapshot journal is unsafe: {exc}"
         try:
             raw_manifest = json.loads(
                 self.manifest_path.read_text(encoding="utf-8")
@@ -699,6 +750,7 @@ class VNextKnowledgeService:
         ):
             return "snapshot database declarations are incomplete"
 
+        core_metadata_for_health: Mapping[str, object] | None = None
         for (
             name,
             expected_schema,
@@ -707,7 +759,11 @@ class VNextKnowledgeService:
             declared = databases.get(name)
             if (
                 not isinstance(declared, Mapping)
-                or not self._declared_database_matches(name, declared)
+                or not self._declared_database_matches(
+                    name,
+                    declared,
+                    verify_digest=verify_database_hashes,
+                )
             ):
                 return f"{name} does not match its manifest declaration"
             try:
@@ -724,6 +780,8 @@ class VNextKnowledgeService:
                     )
             except (OSError, sqlite3.DatabaseError):
                 return f"{name} is unreadable"
+            if name == "core.sqlite":
+                core_metadata_for_health = metadata
             if (
                 name != "core.sqlite"
                 and str(metadata.get("schema_version") or "")
@@ -748,6 +806,17 @@ class VNextKnowledgeService:
                 != generated_at
             ):
                 return f"{name} build identity does not match the snapshot"
+        if (
+            self._snapshot_layout == "immutable-v2"
+            and "runtimeHealth" in manifest
+        ):
+            try:
+                validate_snapshot_runtime_health_summary(
+                    manifest=manifest,
+                    core_metadata=core_metadata_for_health or {},
+                )
+            except ValueError as exc:
+                return f"sealed runtime health binding is invalid: {exc}"
         for name, projection_name in DOMAIN_EXPORT_DATABASES.items():
             path = self.root / name
             declared = databases.get(name)
@@ -783,7 +852,11 @@ class VNextKnowledgeService:
                 or not _is_sha256(content_digest)
                 or not _is_sha256(review_config_sha256)
                 or not _is_sha256(source_revision_set_hash)
-                or not self._declared_database_matches(name, declared)
+                or not self._declared_database_matches(
+                    name,
+                    declared,
+                    verify_digest=verify_database_hashes,
+                )
             ):
                 return f"{name} does not match its manifest declaration"
             try:
@@ -1292,7 +1365,9 @@ class VNextKnowledgeService:
             and isinstance(source, Mapping)
             and isinstance(source_inputs, Mapping)
         )
-        binding_error = self._snapshot_binding_error()
+        binding_error = self._snapshot_binding_error(
+            verify_database_hashes=False,
+        )
 
         core_state = _database_runtime_state(
             self.core_path,
@@ -1372,7 +1447,11 @@ class VNextKnowledgeService:
                 declared = manifest_databases.get(name)
                 if not isinstance(declared, Mapping):
                     databases_consistent = False
-                elif not self._declared_database_matches(name, declared):
+                elif not self._declared_database_matches(
+                    name,
+                    declared,
+                    verify_digest=False,
+                ):
                     databases_consistent = False
 
         cache_metadata = cache_state["metadata"]
@@ -1416,261 +1495,30 @@ class VNextKnowledgeService:
             "queryProvenance": False,
             "compatible": False,
         }
+        sealed_active_stale_sources: int | None = None
+        if (
+            self._snapshot_layout == "immutable-v2"
+            and "runtimeHealth" in manifest
+        ):
+            try:
+                sealed_active_stale_sources = (
+                    validate_snapshot_runtime_health_summary(
+                        manifest=manifest,
+                        core_metadata=metadata,
+                    )
+                )
+            except ValueError:
+                # The binding error above already makes the snapshot INVALID.
+                sealed_active_stale_sources = 0
         active_stale_sources = 0
         if bool(core_state["healthy"]):
             with closing(self._core(validate_snapshot=False)) as core:
                 capabilities = core_schema_capabilities(core)
                 if capabilities["compatible"]:
-                    active_stale_sources = sum(
-                        int(core.execute(sql).fetchone()[0] or 0)
-                        for sql in (
-                            """
-                            SELECT COUNT(*)
-                            FROM packages AS package
-                            LEFT JOIN source_revisions AS revision
-                              ON revision.revision_id=
-                                 package.current_revision_id
-                             WHERE source_revision_is_fresh(
-                                     revision.source_kind,
-                                     revision.source_uri,
-                                     revision.source_fingerprint,
-                                     revision.producer_version,
-                                     revision.schema_version,
-                                     revision.generated_at,
-                                     revision.freshness_status
-                                   )=0
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM knowledge_roles AS role
-                            LEFT JOIN source_revisions AS revision
-                              ON revision.revision_id=
-                                 role.source_revision_id
-                            WHERE role.status IN (
-                                    'CONFIRMED', 'VERIFIED', 'RESOLVED'
-                                  )
-                              AND (
-                                source_revision_is_fresh(
-                                  revision.source_kind,
-                                  revision.source_uri,
-                                  revision.source_fingerprint,
-                                  revision.producer_version,
-                                  revision.schema_version,
-                                  revision.generated_at,
-                                  revision.freshness_status
-                                )=0
-                              )
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM domain_memberships AS membership
-                            LEFT JOIN source_revisions AS revision
-                              ON revision.revision_id=
-                                 membership.source_revision_id
-                            WHERE membership.status IN (
-                                    'CONFIRMED', 'VERIFIED', 'RESOLVED'
-                                  )
-                              AND (
-                                source_revision_is_fresh(
-                                  revision.source_kind,
-                                  revision.source_uri,
-                                  revision.source_fingerprint,
-                                  revision.producer_version,
-                                  revision.schema_version,
-                                  revision.generated_at,
-                                  revision.freshness_status
-                                )=0
-                              )
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM edges AS edge
-                            LEFT JOIN source_revisions AS revision
-                              ON revision.revision_id=
-                                 edge.source_revision_id
-                            WHERE edge.status IN (
-                                    'CONFIRMED', 'VERIFIED', 'RESOLVED'
-                                  )
-                              AND (
-                                source_revision_is_fresh(
-                                  revision.source_kind,
-                                  revision.source_uri,
-                                  revision.source_fingerprint,
-                                  revision.producer_version,
-                                  revision.schema_version,
-                                  revision.generated_at,
-                                  revision.freshness_status
-                                )=0
-                                OR evidence_uri_is_recovered(
-                                  edge.evidence_uri
-                                )=0
-                              )
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM facts AS fact
-                            WHERE fact.current=1
-                              AND fact.status IN (
-                                'CONFIRMED', 'VERIFIED', 'RESOLVED',
-                                'CONFIRMED_EMPTY'
-                              )
-                              AND NOT EXISTS (
-                                SELECT 1
-                                FROM fact_evidence AS evidence
-                                JOIN source_revisions AS revision
-                                  ON revision.revision_id=
-                                     evidence.source_revision_id
-                                WHERE evidence.fact_id=fact.fact_id
-                                   AND evidence_uri_is_recovered(
-                                     evidence.evidence_uri
-                                   )=1
-                                   AND source_revision_is_fresh(
-                                     revision.source_kind,
-                                     revision.source_uri,
-                                     revision.source_fingerprint,
-                                     revision.producer_version,
-                                     revision.schema_version,
-                                     revision.generated_at,
-                                     revision.freshness_status
-                                   )=1
-                              )
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM native_functions AS function
-                            LEFT JOIN source_revisions AS revision
-                              ON revision.revision_id=
-                                 function.source_revision_id
-                            WHERE function.status IN (
-                                    'CONFIRMED', 'VERIFIED', 'RESOLVED'
-                                  )
-                              AND (
-                                source_revision_is_fresh(
-                                  revision.source_kind,
-                                  revision.source_uri,
-                                  revision.source_fingerprint,
-                                  revision.producer_version,
-                                  revision.schema_version,
-                                  revision.generated_at,
-                                  revision.freshness_status
-                                )=0
-                              )
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM native_blueprint_links AS link
-                            LEFT JOIN source_revisions AS graph_revision
-                              ON graph_revision.revision_id=
-                                 link.blueprint_graph_source_revision_id
-                            LEFT JOIN native_functions AS function
-                              ON function.native_function_id=
-                                 link.native_function_id
-                            LEFT JOIN source_revisions AS native_revision
-                              ON native_revision.revision_id=
-                                 function.source_revision_id
-                            WHERE link.status IN (
-                                    'CONFIRMED', 'VERIFIED', 'RESOLVED'
-                                  )
-                              AND (
-                                source_revision_is_fresh(
-                                  graph_revision.source_kind,
-                                  graph_revision.source_uri,
-                                  graph_revision.source_fingerprint,
-                                  graph_revision.producer_version,
-                                  graph_revision.schema_version,
-                                  graph_revision.generated_at,
-                                  graph_revision.freshness_status
-                                )=0
-                                OR function.native_function_id IS NULL
-                                OR function.status NOT IN (
-                                  'CONFIRMED', 'VERIFIED', 'RESOLVED'
-                                )
-                                OR function.confidence NOT IN (
-                                  'HIGH', 'CONFIRMED'
-                                )
-                                OR source_revision_is_fresh(
-                                  native_revision.source_kind,
-                                  native_revision.source_uri,
-                                  native_revision.source_fingerprint,
-                                  native_revision.producer_version,
-                                  native_revision.schema_version,
-                                  native_revision.generated_at,
-                                  native_revision.freshness_status
-                                )=0
-                              )
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM asset_class_assignments AS assignment
-                            LEFT JOIN source_revisions AS revision
-                              ON revision.revision_id=
-                                 assignment.source_revision_id
-                            WHERE assignment.status IN (
-                                'EXTRACTED', 'CONFIRMED',
-                                'VERIFIED', 'RESOLVED'
-                              )
-                              AND (
-                                source_revision_is_fresh(
-                                  revision.source_kind,
-                                  revision.source_uri,
-                                  revision.source_fingerprint,
-                                  revision.producer_version,
-                                  revision.schema_version,
-                                  revision.generated_at,
-                                  revision.freshness_status
-                                )=0
-                                OR evidence_uri_is_recovered(
-                                  assignment.evidence_uri
-                                )=0
-                              )
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM class_edges AS edge
-                            LEFT JOIN source_revisions AS revision
-                              ON revision.revision_id=
-                                 edge.source_revision_id
-                            WHERE edge.status IN (
-                                    'CONFIRMED', 'VERIFIED', 'RESOLVED'
-                                  )
-                              AND (
-                                source_revision_is_fresh(
-                                  revision.source_kind,
-                                  revision.source_uri,
-                                  revision.source_fingerprint,
-                                  revision.producer_version,
-                                  revision.schema_version,
-                                  revision.generated_at,
-                                  revision.freshness_status
-                                )=0
-                                OR evidence_uri_is_recovered(
-                                  edge.evidence_id
-                                )=0
-                              )
-                            """,
-                            """
-                            SELECT COUNT(*)
-                            FROM classes AS class
-                            LEFT JOIN source_revisions AS revision
-                              ON revision.revision_id=
-                                 class.source_revision_id
-                            WHERE class.status IN (
-                                'IDENTIFIED', 'EXTRACTED', 'CONFIRMED',
-                                'VERIFIED', 'RESOLVED'
-                              )
-                              AND (
-                                source_revision_is_fresh(
-                                  revision.source_kind,
-                                  revision.source_uri,
-                                  revision.source_fingerprint,
-                                  revision.producer_version,
-                                  revision.schema_version,
-                                  revision.generated_at,
-                                  revision.freshness_status
-                                )=0
-                              )
-                            """,
-                        )
+                    active_stale_sources = (
+                        sealed_active_stale_sources
+                        if sealed_active_stale_sources is not None
+                        else active_stale_source_count(core)
                     )
         compatible = bool(capabilities["compatible"])
         sources_fresh = active_stale_sources == 0

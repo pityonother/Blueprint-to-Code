@@ -31,12 +31,16 @@ from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     _registration_gold_metrics,
     _registration_lineage_metrics,
     _role_gold_metrics,
+    _storage_integrity_gate,
     _typed_map_usage_gates,
     _typed_map_usage_metrics,
     publish_gate_report,
 )
 from blueprint_translator.kb_vnext.ontology import (  # noqa: E402
     load_ontology,
+)
+from blueprint_translator.kb_vnext.quality_contract import (  # noqa: E402
+    QUALITY_GATE_CONTRACT,
 )
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
     PROJECTION_SCHEMA_SQL,
@@ -1735,16 +1739,48 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             build_id = "fixture-build"
+            source_sha256 = "a" * 64
             snapshot = root / "snapshots" / build_id
             snapshot.mkdir(parents=True)
             core = sqlite3.connect(snapshot / "core.sqlite")
-            core.execute("CREATE TABLE fixture(value TEXT)")
+            core.executescript(
+                """
+                CREATE TABLE fixture(value TEXT);
+                CREATE TABLE metadata(
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                """
+            )
+            core.executemany(
+                "INSERT INTO metadata VALUES (?, ?)",
+                (
+                    (
+                        "runtime_health_schema",
+                        "ark-kb-runtime-health/v1",
+                    ),
+                    ("runtime_health_active_stale_sources", "0"),
+                    ("runtime_health_build_id", build_id),
+                    (
+                        "runtime_health_source_sha256",
+                        source_sha256,
+                    ),
+                ),
+            )
             core.commit()
             core.close()
             manifest = {
                 "schema": "ark-kb-vnext-snapshot/v1",
                 "buildId": build_id,
+                "source": {"sha256": source_sha256},
                 "databases": {"core.sqlite": {}},
+                "runtimeHealth": {
+                    "schema": "ark-kb-runtime-health/v1",
+                    "buildId": build_id,
+                    "sourceSha256": source_sha256,
+                    "activeStaleSources": 0,
+                    "sealedInSnapshotManifest": True,
+                },
             }
             (snapshot / "manifest.json").write_text(
                 json.dumps(manifest),
@@ -1771,6 +1807,71 @@ class KnowledgeQualityGateTests(unittest.TestCase):
                         "ok",
                     )
                     self.assertTrue(metrics["core.sqlite"]["verified"])
+                    self.assertTrue(metrics["runtimeHealth"]["verified"])
+                    self.assertEqual(
+                        metrics["runtimeHealth"]["activeStaleSources"],
+                        0,
+                    )
+
+            core = sqlite3.connect(snapshot / "core.sqlite")
+            core.execute(
+                """
+                UPDATE metadata SET value='1'
+                WHERE key='runtime_health_active_stale_sources'
+                """
+            )
+            core.commit()
+            core.close()
+            manifest["runtimeHealth"]["activeStaleSources"] = 1
+            (snapshot / "manifest.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+
+            metrics = _integrity_metrics(root)
+
+            self.assertFalse(metrics["runtimeHealth"]["verified"])
+            self.assertEqual(
+                metrics["runtimeHealth"]["error"],
+                "ACTIVE_STALE_SOURCES",
+            )
+
+    def test_storage_integrity_rejects_stale_without_expanding_contract(self):
+        integrity = {
+            "core.sqlite": {
+                "exists": True,
+                "integrity": "ok",
+                "foreignKeyViolations": 0,
+                "verified": True,
+            },
+            "runtimeHealth": {
+                "exists": True,
+                "integrity": "ok",
+                "foreignKeyViolations": 0,
+                "verified": False,
+                "activeStaleSources": 1,
+                "error": "ACTIVE_STALE_SOURCES",
+            },
+        }
+
+        gate = _storage_integrity_gate(integrity)
+
+        self.assertEqual(gate["id"], "storage.integrity")
+        self.assertTrue(gate["critical"])
+        self.assertFalse(gate["passed"])
+        self.assertEqual(
+            gate["actual"]["runtimeHealth"]["activeStaleSources"],
+            1,
+        )
+        self.assertEqual(len(QUALITY_GATE_CONTRACT), 75)
+        self.assertEqual(
+            sum(
+                gate_id == "storage.integrity"
+                for gate_id, _category, _critical
+                in QUALITY_GATE_CONTRACT
+            ),
+            1,
+        )
 
     def test_immutable_eligible_report_requires_a_new_sealed_snapshot(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -26,6 +26,7 @@ from blueprint_translator.kb_vnext.kb_api import (  # noqa: E402
     KnowledgeApiError,
     VNextKnowledgeService,
 )
+from blueprint_translator.kb_vnext import kb_api as kb_api_module  # noqa: E402
 from blueprint_translator.kb_vnext.kb_context import (  # noqa: E402
     build_bounded_context_pack,
 )
@@ -172,6 +173,13 @@ def _publish_immutable_fixture(
         "mode": "shadow",
         "defaultQuerySource": "legacy",
     }
+    manifest["runtimeHealth"] = {
+        "schema": "ark-kb-runtime-health/v1",
+        "buildId": build_id,
+        "sourceSha256": str(manifest["source"]["sha256"]),
+        "activeStaleSources": 0,
+        "sealedInSnapshotManifest": True,
+    }
     source_inputs = manifest["source"]["inputs"]
     generated_at = str(manifest["generatedAt"])
     manifest["incrementalUpdate"] = source_manifest_binding(
@@ -255,6 +263,13 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
                 semantic_fingerprint,
             ),
             ("generated_at", generated_at),
+            ("runtime_health_schema", "ark-kb-runtime-health/v1"),
+            ("runtime_health_active_stale_sources", "0"),
+            ("runtime_health_build_id", build_id),
+            (
+                "runtime_health_source_sha256",
+                semantic_fingerprint,
+            ),
         ],
     )
     core.execute(
@@ -1510,6 +1525,144 @@ class KnowledgeApiTests(unittest.TestCase):
             health = service.health()
             with self.assertRaises(KnowledgeApiError) as raised:
                 service.query(request)
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "INVALID")
+        self.assertEqual(
+            raised.exception.code,
+            "KB_VNEXT_SNAPSHOT_INVALID",
+        )
+
+    def test_health_is_lightweight_but_query_keeps_full_digest_binding(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service, _immutable, _manifest = _publish_immutable_fixture(root)
+            digest_calls: list[Path] = []
+
+            def file_digest(path: Path) -> str:
+                digest_calls.append(path)
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+
+            with patch(
+                "blueprint_translator.kb_vnext.kb_api._file_sha256",
+                side_effect=file_digest,
+            ):
+                health = service.health()
+                health_digest_calls = len(digest_calls)
+                result = service.query(
+                    {
+                        "entity": "/Game/Test/ItemA.ItemA",
+                        "answerMode": "FACT",
+                        "factTypes": ["ITEM_PROPERTY"],
+                        "factNames": ["Weight"],
+                        "budgetTokens": 500,
+                    }
+                )
+
+        self.assertTrue(health["available"])
+        self.assertEqual(health_digest_calls, 0)
+        self.assertGreater(len(digest_calls), 0)
+        self.assertEqual(result["route"], "DB_SEMANTIC_COMPLETE")
+
+    def test_health_runtime_state_does_not_run_full_quick_check(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service, _immutable, _manifest = _publish_immutable_fixture(root)
+            statements: list[str] = []
+            original_connect = sqlite3.connect
+
+            def traced_connect(*args, **kwargs):
+                connection = original_connect(*args, **kwargs)
+                connection.set_trace_callback(statements.append)
+                return connection
+
+            with patch.object(
+                kb_api_module.sqlite3,
+                "connect",
+                side_effect=traced_connect,
+            ):
+                health = service.health()
+
+        self.assertTrue(health["available"])
+        self.assertFalse(
+            any(
+                "quick_check" in statement.casefold()
+                for statement in statements
+            )
+        )
+        provenance_tables = (
+            " from packages",
+            " from knowledge_roles",
+            " from domain_memberships",
+            " from edges",
+            " from facts",
+            " from native_functions",
+            " from native_blueprint_links",
+            " from asset_class_assignments",
+            " from class_edges",
+            " from classes",
+        )
+        normalized_statements = [
+            " ".join(statement.casefold().split())
+            for statement in statements
+        ]
+        self.assertFalse(
+            any(
+                table in statement
+                for statement in normalized_statements
+                for table in provenance_tables
+            )
+        )
+
+    def test_health_rejects_runtime_summary_forged_only_in_core(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            _service, immutable, _manifest = _publish_immutable_fixture(root)
+            core = sqlite3.connect(immutable / "core.sqlite")
+            try:
+                core.execute(
+                    """
+                    UPDATE metadata
+                    SET value='1'
+                    WHERE key='runtime_health_active_stale_sources'
+                    """
+                )
+                core.commit()
+            finally:
+                core.close()
+
+            health = VNextKnowledgeService(root).health()
+
+        self.assertFalse(health["available"])
+        self.assertEqual(health["status"], "INVALID")
+        self.assertTrue(
+            any(
+                gap["code"] == "KB_VNEXT_SNAPSHOT_INVALID"
+                for gap in health["gap"]
+            )
+        )
+
+    def test_health_and_query_reject_nonempty_immutable_wal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            (root / "core.sqlite-wal").write_bytes(b"unsealed-change")
+
+            health = service.health()
+            with self.assertRaises(KnowledgeApiError) as raised:
+                service.query(
+                    {
+                        "entity": "/Game/Test/ItemA.ItemA",
+                        "answerMode": "FACT",
+                        "factTypes": ["ITEM_PROPERTY"],
+                        "factNames": ["Weight"],
+                        "budgetTokens": 500,
+                    }
+                )
 
         self.assertFalse(health["available"])
         self.assertEqual(health["status"], "INVALID")

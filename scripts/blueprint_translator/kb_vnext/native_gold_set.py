@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import unquote, urlsplit
@@ -188,6 +189,42 @@ def is_valid_blueprint_graph_evidence_uri(value: object) -> bool:
     )
 
 
+def _strict_blueprint_revision_is_fresh(
+    row: sqlite3.Row | tuple[object, ...] | None,
+) -> bool:
+    if row is None:
+        return False
+    (
+        revision_id,
+        source_kind,
+        source_uri,
+        source_fingerprint,
+        producer_version,
+        schema_version,
+        generated_at_value,
+        freshness_status,
+    ) = row
+    generated_at = str(generated_at_value or "").strip()
+    try:
+        timestamp = datetime.fromisoformat(
+            generated_at[:-1] + "+00:00"
+            if generated_at.endswith("Z")
+            else generated_at
+        )
+    except ValueError:
+        return False
+    return (
+        revision_id is not None
+        and str(source_kind or "") == "blueprint_evidence"
+        and is_valid_blueprint_graph_evidence_uri(source_uri)
+        and _is_canonical_sha256(source_fingerprint)
+        and is_recovered_identifier(producer_version)
+        and is_recovered_identifier(schema_version)
+        and timestamp.utcoffset() is not None
+        and str(freshness_status or "").upper() == "FRESH"
+    )
+
+
 def _native_revision(
     connection: sqlite3.Connection,
     *,
@@ -261,7 +298,9 @@ def _blueprint_graph_revision(
         row.get("blueprint_graph_evidence_id")
         or f"blueprint-graph://unresolved/{row.get('edge_id')}"
     )
-    capture_source_uri = source_uri.split("/g/", 1)[0]
+    capture_source_uri, graph_separator, _graph_suffix = source_uri.partition(
+        "/g/"
+    )
     existing = connection.execute(
         """
         SELECT revision_id
@@ -299,7 +338,10 @@ def _blueprint_graph_revision(
     ).hexdigest()
     freshness = (
         "STALE"
-        if str(row.get("status") or "").upper() == "STALE"
+        if (
+            str(row.get("status") or "").upper() == "STALE"
+            or bool(graph_separator)
+        )
         else "FRESH"
     )
     connection.execute(
@@ -540,6 +582,26 @@ def _materialize_blueprint_links(
             gold_version=gold_version,
             generated_at=generated_at,
         )
+        graph_revision_row = core.execute(
+            """
+            SELECT
+                revision_id,
+                source_kind,
+                source_uri,
+                source_fingerprint,
+                producer_version,
+                schema_version,
+                generated_at,
+                freshness_status
+            FROM source_revisions
+            WHERE revision_id=?
+              AND source_kind='blueprint_evidence'
+            """,
+            (graph_revision_id,),
+        ).fetchone()
+        graph_revision_fresh = _strict_blueprint_revision_is_fresh(
+            graph_revision_row
+        )
         method = str(row["resolution_method"] or "")
         input_confidence = str(
             row["confidence"] or ""
@@ -558,6 +620,7 @@ def _materialize_blueprint_links(
             and method in CONFIRMED_EDGE_METHODS
             and str(row["status"] or "").upper() == "CONFIRMED"
             and input_confidence in CONFIRMED_INPUT_CONFIDENCE
+            and graph_revision_fresh
             and is_valid_blueprint_graph_evidence_uri(
                 graph_evidence_uri
             )

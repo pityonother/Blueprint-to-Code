@@ -29,6 +29,10 @@ from .projections import (
     compute_core_projection_content_digest,
     compute_projection_artifact_content_digest,
 )
+from .query_planner import (
+    is_valid_generic_evidence_uri,
+    source_revision_is_fresh,
+)
 from .quality_contract import (
     BENCHMARK_SCHEMA,
     QUALITY_GATE_SCHEMA,
@@ -69,6 +73,7 @@ CURRENT_POINTER_NAME = "current.json"
 CURRENT_POINTER_KEYS = frozenset({"buildId", "snapshotRelativePath"})
 SNAPSHOT_SOURCE_KIND = "semantic_input_set"
 SNAPSHOT_SOURCE_URI = "kb-inputs://ark/vnext"
+RUNTIME_HEALTH_SCHEMA = "ark-kb-runtime-health/v1"
 SEMANTIC_PRODUCER_CONTRACT_SCHEMA = (
     "ark-kb-semantic-producer-contract/v1"
 )
@@ -79,6 +84,208 @@ _RFC3339_TIMESTAMP = re.compile(
     r"(?:Z|[+-]\d{2}:\d{2})$"
 )
 _SAFE_BUILD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+_ACTIVE_STALE_SOURCE_COUNT_QUERIES = (
+    """
+    SELECT COUNT(*)
+    FROM packages AS package
+    LEFT JOIN source_revisions AS revision
+      ON revision.revision_id=package.current_revision_id
+    WHERE source_revision_is_fresh(
+            revision.source_kind,
+            revision.source_uri,
+            revision.source_fingerprint,
+            revision.producer_version,
+            revision.schema_version,
+            revision.generated_at,
+            revision.freshness_status
+          )=0
+    """,
+    """
+    SELECT COUNT(*)
+    FROM knowledge_roles AS role
+    LEFT JOIN source_revisions AS revision
+      ON revision.revision_id=role.source_revision_id
+    WHERE role.status IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+      AND source_revision_is_fresh(
+            revision.source_kind,
+            revision.source_uri,
+            revision.source_fingerprint,
+            revision.producer_version,
+            revision.schema_version,
+            revision.generated_at,
+            revision.freshness_status
+          )=0
+    """,
+    """
+    SELECT COUNT(*)
+    FROM domain_memberships AS membership
+    LEFT JOIN source_revisions AS revision
+      ON revision.revision_id=membership.source_revision_id
+    WHERE membership.status IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+      AND source_revision_is_fresh(
+            revision.source_kind,
+            revision.source_uri,
+            revision.source_fingerprint,
+            revision.producer_version,
+            revision.schema_version,
+            revision.generated_at,
+            revision.freshness_status
+          )=0
+    """,
+    """
+    SELECT COUNT(*)
+    FROM edges AS edge
+    LEFT JOIN source_revisions AS revision
+      ON revision.revision_id=edge.source_revision_id
+    WHERE edge.status IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+      AND (
+        source_revision_is_fresh(
+          revision.source_kind,
+          revision.source_uri,
+          revision.source_fingerprint,
+          revision.producer_version,
+          revision.schema_version,
+          revision.generated_at,
+          revision.freshness_status
+        )=0
+        OR evidence_uri_is_recovered(edge.evidence_uri)=0
+      )
+    """,
+    """
+    SELECT COUNT(*)
+    FROM facts AS fact
+    WHERE fact.current=1
+      AND fact.status IN (
+        'CONFIRMED', 'VERIFIED', 'RESOLVED', 'CONFIRMED_EMPTY'
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM fact_evidence AS evidence
+        JOIN source_revisions AS revision
+          ON revision.revision_id=evidence.source_revision_id
+        WHERE evidence.fact_id=fact.fact_id
+          AND evidence_uri_is_recovered(evidence.evidence_uri)=1
+          AND source_revision_is_fresh(
+                revision.source_kind,
+                revision.source_uri,
+                revision.source_fingerprint,
+                revision.producer_version,
+                revision.schema_version,
+                revision.generated_at,
+                revision.freshness_status
+              )=1
+      )
+    """,
+    """
+    SELECT COUNT(*)
+    FROM native_functions AS function
+    LEFT JOIN source_revisions AS revision
+      ON revision.revision_id=function.source_revision_id
+    WHERE function.status IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+      AND source_revision_is_fresh(
+            revision.source_kind,
+            revision.source_uri,
+            revision.source_fingerprint,
+            revision.producer_version,
+            revision.schema_version,
+            revision.generated_at,
+            revision.freshness_status
+          )=0
+    """,
+    """
+    SELECT COUNT(*)
+    FROM native_blueprint_links AS link
+    LEFT JOIN source_revisions AS graph_revision
+      ON graph_revision.revision_id=link.blueprint_graph_source_revision_id
+    LEFT JOIN native_functions AS function
+      ON function.native_function_id=link.native_function_id
+    LEFT JOIN source_revisions AS native_revision
+      ON native_revision.revision_id=function.source_revision_id
+    WHERE link.status IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+      AND (
+        source_revision_is_fresh(
+          graph_revision.source_kind,
+          graph_revision.source_uri,
+          graph_revision.source_fingerprint,
+          graph_revision.producer_version,
+          graph_revision.schema_version,
+          graph_revision.generated_at,
+          graph_revision.freshness_status
+        )=0
+        OR function.native_function_id IS NULL
+        OR function.status NOT IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+        OR function.confidence NOT IN ('HIGH', 'CONFIRMED')
+        OR source_revision_is_fresh(
+             native_revision.source_kind,
+             native_revision.source_uri,
+             native_revision.source_fingerprint,
+             native_revision.producer_version,
+             native_revision.schema_version,
+             native_revision.generated_at,
+             native_revision.freshness_status
+           )=0
+      )
+    """,
+    """
+    SELECT COUNT(*)
+    FROM asset_class_assignments AS assignment
+    LEFT JOIN source_revisions AS revision
+      ON revision.revision_id=assignment.source_revision_id
+    WHERE assignment.status IN (
+        'EXTRACTED', 'CONFIRMED', 'VERIFIED', 'RESOLVED'
+      )
+      AND (
+        source_revision_is_fresh(
+          revision.source_kind,
+          revision.source_uri,
+          revision.source_fingerprint,
+          revision.producer_version,
+          revision.schema_version,
+          revision.generated_at,
+          revision.freshness_status
+        )=0
+        OR evidence_uri_is_recovered(assignment.evidence_uri)=0
+      )
+    """,
+    """
+    SELECT COUNT(*)
+    FROM class_edges AS edge
+    LEFT JOIN source_revisions AS revision
+      ON revision.revision_id=edge.source_revision_id
+    WHERE edge.status IN ('CONFIRMED', 'VERIFIED', 'RESOLVED')
+      AND (
+        source_revision_is_fresh(
+          revision.source_kind,
+          revision.source_uri,
+          revision.source_fingerprint,
+          revision.producer_version,
+          revision.schema_version,
+          revision.generated_at,
+          revision.freshness_status
+        )=0
+        OR evidence_uri_is_recovered(edge.evidence_id)=0
+      )
+    """,
+    """
+    SELECT COUNT(*)
+    FROM classes AS class
+    LEFT JOIN source_revisions AS revision
+      ON revision.revision_id=class.source_revision_id
+    WHERE class.status IN (
+        'IDENTIFIED', 'EXTRACTED', 'CONFIRMED', 'VERIFIED', 'RESOLVED'
+      )
+      AND source_revision_is_fresh(
+            revision.source_kind,
+            revision.source_uri,
+            revision.source_fingerprint,
+            revision.producer_version,
+            revision.schema_version,
+            revision.generated_at,
+            revision.freshness_status
+          )=0
+    """,
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +299,137 @@ class CurrentSnapshot:
     build_id: str
     manifest: dict[str, object]
     layout: str
+
+
+def _sql_source_revision_is_fresh(
+    source_kind: object,
+    source_uri: object,
+    source_fingerprint: object,
+    producer_version: object,
+    schema_version: object,
+    generated_at: object,
+    freshness: object,
+) -> int:
+    return int(
+        source_revision_is_fresh(
+            {
+                "sourceKind": source_kind,
+                "sourceUri": source_uri,
+                "sourceFingerprint": source_fingerprint,
+                "producerVersion": producer_version,
+                "schemaVersion": schema_version,
+                "generatedAt": generated_at,
+                "freshness": freshness,
+            },
+            require_revision_id=False,
+        )
+    )
+
+
+def _register_runtime_health_functions(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.create_function(
+        "source_revision_is_fresh",
+        7,
+        _sql_source_revision_is_fresh,
+    )
+    connection.create_function(
+        "evidence_uri_is_recovered",
+        1,
+        lambda value: int(is_valid_generic_evidence_uri(value)),
+    )
+
+
+def active_stale_source_count(connection: sqlite3.Connection) -> int:
+    """Count active semantic rows that lack recovered, fresh provenance."""
+
+    _register_runtime_health_functions(connection)
+    return sum(
+        int(connection.execute(sql).fetchone()[0] or 0)
+        for sql in _ACTIVE_STALE_SOURCE_COUNT_QUERIES
+    )
+
+
+def _seal_runtime_health_summary(
+    *,
+    core_path: Path,
+    build_id: str,
+    source_sha256: str,
+) -> dict[str, object]:
+    with closing(sqlite3.connect(core_path)) as core:
+        active_stale_sources = active_stale_source_count(core)
+        core.executemany(
+            """
+            INSERT INTO metadata(key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (
+                ("runtime_health_schema", RUNTIME_HEALTH_SCHEMA),
+                (
+                    "runtime_health_active_stale_sources",
+                    str(active_stale_sources),
+                ),
+                ("runtime_health_build_id", build_id),
+                ("runtime_health_source_sha256", source_sha256),
+            ),
+        )
+        core.commit()
+    return {
+        "schema": RUNTIME_HEALTH_SCHEMA,
+        "buildId": build_id,
+        "sourceSha256": source_sha256,
+        "activeStaleSources": active_stale_sources,
+        "sealedInSnapshotManifest": True,
+    }
+
+
+def validate_snapshot_runtime_health_summary(
+    *,
+    manifest: Mapping[str, object],
+    core_metadata: Mapping[str, object],
+) -> int:
+    """Bind the sealed runtime-health count to manifest and core metadata."""
+
+    summary = manifest.get("runtimeHealth")
+    expected_keys = {
+        "schema",
+        "buildId",
+        "sourceSha256",
+        "activeStaleSources",
+        "sealedInSnapshotManifest",
+    }
+    source = manifest.get("source")
+    source_mapping = source if isinstance(source, Mapping) else {}
+    if not isinstance(summary, Mapping) or set(summary) != expected_keys:
+        raise ValueError("sealed runtime health summary is missing or invalid")
+    active_stale_sources = summary.get("activeStaleSources")
+    if (
+        summary.get("schema") != RUNTIME_HEALTH_SCHEMA
+        or summary.get("buildId") != manifest.get("buildId")
+        or summary.get("sourceSha256") != source_mapping.get("sha256")
+        or isinstance(active_stale_sources, bool)
+        or not isinstance(active_stale_sources, int)
+        or active_stale_sources < 0
+        or summary.get("sealedInSnapshotManifest") is not True
+    ):
+        raise ValueError("sealed runtime health summary identity is invalid")
+    expected_metadata = {
+        "runtime_health_schema": RUNTIME_HEALTH_SCHEMA,
+        "runtime_health_active_stale_sources": str(active_stale_sources),
+        "runtime_health_build_id": str(manifest.get("buildId") or ""),
+        "runtime_health_source_sha256": str(
+            source_mapping.get("sha256") or ""
+        ),
+    }
+    if any(
+        str(core_metadata.get(key) or "") != value
+        for key, value in expected_metadata.items()
+    ):
+        raise ValueError(
+            "sealed runtime health summary does not match core metadata"
+        )
+    return active_stale_sources
 
 
 def _read_json_object(
@@ -1043,6 +1381,126 @@ def _is_ontology_version(value: object) -> bool:
     )
 
 
+def _snapshot_database_relative_names(
+    *,
+    include_cache: bool,
+) -> tuple[str, ...]:
+    main_names = tuple(
+        name
+        for name in DATABASE_NAMES
+        if include_cache or name != "cache.sqlite"
+    )
+    return (
+        *main_names,
+        *(
+            f"domain_exports/{name}.sqlite"
+            for name in DOMAIN_PROJECTIONS
+        ),
+    )
+
+
+def validate_snapshot_journal_safety(
+    snapshot_dir: Path,
+    *,
+    require_delete: bool,
+    include_cache: bool = True,
+) -> None:
+    """Reject logical SQLite content that is not sealed in the main file."""
+
+    for relative_name in _snapshot_database_relative_names(
+        include_cache=include_cache,
+    ):
+        path = snapshot_dir / relative_name
+        wal_path = Path(f"{path}-wal")
+        shm_path = Path(f"{path}-shm")
+        try:
+            wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+        except OSError as exc:
+            raise ValueError(
+                f"{relative_name} WAL sidecar is unreadable"
+            ) from exc
+        if wal_bytes:
+            raise ValueError(
+                f"{relative_name} has a non-empty WAL sidecar"
+            )
+        if require_delete and (wal_path.exists() or shm_path.exists()):
+            raise ValueError(
+                f"{relative_name} has an unsealed SQLite sidecar"
+            )
+        if not require_delete or not path.is_file():
+            continue
+        try:
+            with closing(
+                sqlite3.connect(
+                    f"file:{path.resolve().as_posix()}?mode=ro",
+                    uri=True,
+                )
+            ) as connection:
+                journal_mode = str(
+                    connection.execute(
+                        "PRAGMA journal_mode"
+                    ).fetchone()[0]
+                ).lower()
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise ValueError(
+                f"{relative_name} journal mode is unreadable"
+            ) from exc
+        if journal_mode != "delete":
+            raise ValueError(
+                f"{relative_name} journal mode is not sealed"
+            )
+
+
+def _finalize_staged_database_journals(staging: Path) -> None:
+    """Checkpoint build-time WAL files and publish main-file-only stores."""
+
+    for relative_name in DATABASE_NAMES:
+        path = staging / relative_name
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        connection = sqlite3.connect(path)
+        try:
+            mode = str(
+                connection.execute(
+                    "PRAGMA journal_mode"
+                ).fetchone()[0]
+            ).lower()
+            if mode == "wal":
+                checkpoint = tuple(
+                    int(value)
+                    for value in connection.execute(
+                        "PRAGMA wal_checkpoint(TRUNCATE)"
+                    ).fetchone()
+                )
+                if checkpoint[0] != 0:
+                    raise ValueError(
+                        f"{relative_name} WAL checkpoint is busy"
+                    )
+            sealed_mode = str(
+                connection.execute(
+                    "PRAGMA journal_mode=DELETE"
+                ).fetchone()[0]
+            ).lower()
+            if sealed_mode != "delete":
+                raise ValueError(
+                    f"{relative_name} journal mode could not be sealed"
+                )
+        finally:
+            connection.close()
+        wal_path = Path(f"{path}-wal")
+        shm_path = Path(f"{path}-shm")
+        if wal_path.exists() and wal_path.stat().st_size:
+            raise ValueError(
+                f"{relative_name} WAL remained non-empty after checkpoint"
+            )
+        wal_path.unlink(missing_ok=True)
+        shm_path.unlink(missing_ok=True)
+    validate_snapshot_journal_safety(
+        staging,
+        require_delete=True,
+    )
+
+
 def validate_snapshot_source_identity(
     manifest: Mapping[str, object],
 ) -> dict[str, str]:
@@ -1544,13 +2002,14 @@ def _validate_staged_snapshot_for_promotion(
             "snapshot_source_fingerprint": source_sha256,
         },
     }
+    validated_main_metadata: dict[str, dict[str, str]] = {}
     for relative_name in DATABASE_NAMES:
         declared = databases.get(relative_name)
         if not isinstance(declared, Mapping):
             raise ValueError(
                 f"database metrics are missing: {relative_name}"
             )
-        _validate_staged_database(
+        validated_main_metadata[relative_name] = _validate_staged_database(
             staging=staging,
             relative_name=relative_name,
             declared=declared,
@@ -1559,6 +2018,10 @@ def _validate_staged_snapshot_for_promotion(
             require_snapshot_identity=True,
             expected_metadata=main_metadata[relative_name],
         )
+    active_stale_sources = validate_snapshot_runtime_health_summary(
+        manifest=manifest,
+        core_metadata=validated_main_metadata["core.sqlite"],
+    )
     for relative_name in sorted(expected_exports):
         declared = databases.get(relative_name)
         if not isinstance(declared, Mapping):
@@ -1632,6 +2095,10 @@ def _validate_staged_snapshot_for_promotion(
                 + relative_name
             )
 
+    validate_snapshot_journal_safety(
+        staging,
+        require_delete=True,
+    )
     validate_snapshot_database_schemas(staging)
     validate_snapshot_projection_bindings(
         snapshot_dir=staging,
@@ -1641,6 +2108,21 @@ def _validate_staged_snapshot_for_promotion(
         snapshot_dir=staging,
         manifest=manifest,
     )
+    quality = manifest.get("qualityGates")
+    cutover = manifest.get("cutover")
+    if (
+        active_stale_sources > 0
+        and isinstance(quality, Mapping)
+        and isinstance(cutover, Mapping)
+        and (
+            bool(quality.get("cutoverEligible"))
+            or str(cutover.get("mode") or "") == "ready"
+            or str(cutover.get("defaultQuerySource") or "") == "vnext"
+        )
+    ):
+        raise ValueError(
+            "snapshot with active stale sources cannot be promoted as ready"
+        )
 
 
 def _promote_snapshot(
@@ -1784,6 +2266,11 @@ def build_vnext_snapshot(
             snapshot_build_id=build_id,
             snapshot_source_fingerprint=semantic_inputs_sha,
         )
+        runtime_health_summary = _seal_runtime_health_summary(
+            core_path=staging / "core.sqlite",
+            build_id=build_id,
+            source_sha256=semantic_inputs_sha,
+        )
         projection_counts = build_domain_projections(
             core_path=staging / "core.sqlite",
             output_dir=staging / "domain_exports",
@@ -1810,6 +2297,7 @@ def build_vnext_snapshot(
             snapshot_build_id=build_id,
             snapshot_source_fingerprint=semantic_inputs_sha,
         )
+        _finalize_staged_database_journals(staging)
         metrics = {
             name: database_metrics(staging / name)
             for name in DATABASE_NAMES
@@ -1861,6 +2349,7 @@ def build_vnext_snapshot(
                 "domainProjections": projection_counts,
             },
             "databases": published_metrics,
+            "runtimeHealth": runtime_health_summary,
             "cutover": {
                 "mode": "shadow",
                 "defaultQuerySource": "legacy",
@@ -1869,6 +2358,19 @@ def build_vnext_snapshot(
             "incrementalUpdate": source_manifest_binding(source_manifest),
         }
         _write_json(staging / "manifest.json", manifest)
+        quality_report = _evaluate_staged_quality_gates(
+            project_root=project_root,
+            staging=staging,
+            discovery_database=discovery_database,
+            generated_at=generated_at,
+        )
+        manifest = _seal_staged_quality_report(
+            staging=staging,
+            manifest=manifest,
+            report=quality_report,
+        )
+        # The storage benchmark requires a strictly sealed immutable candidate.
+        # Re-evaluate after the provisional seal, then replace it atomically.
         quality_report = _evaluate_staged_quality_gates(
             project_root=project_root,
             staging=staging,
