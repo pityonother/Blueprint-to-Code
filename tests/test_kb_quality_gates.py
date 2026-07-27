@@ -660,6 +660,28 @@ class KnowledgeQualityGateTests(unittest.TestCase):
                 "cache": True,
                 "complete": True,
             },
+            "performanceGates": {
+                "checks": {
+                    name: {
+                        "target": True,
+                        "actual": True,
+                        "passed": True,
+                    }
+                    for name in (
+                        "ftsPlanUsed",
+                        "cacheValidHit",
+                        "cacheExpiredRejected",
+                        "cacheSourceRevisionRejected",
+                        "cacheInvalidationTokenRejected",
+                        "cacheBuildRejected",
+                        "degreeCohortsCovered",
+                        "fuzzyP95",
+                        "cacheHitP95",
+                        "oneHopP95",
+                        "twoHopP95",
+                    )
+                }
+            },
             "completeOrBoundedRate": 0.0,
             "simpleDbOnlyRate": 0.0,
             "unresolved": 120,

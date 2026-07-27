@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
+from difflib import SequenceMatcher
 from http import HTTPStatus
 from pathlib import Path
 from typing import Mapping
@@ -47,6 +49,10 @@ from .storage import (
 
 MAX_PAGE_SIZE = 100
 MAX_CURSOR = 1_000_000
+MAX_SEARCH_CANDIDATES = 500
+MAX_FUZZY_CANDIDATES = 200
+MAX_FUZZY_ALIASES_PER_ENTITY = 20
+MIN_FUZZY_SCORE = 0.55
 SNAPSHOT_SCHEMA = "ark-kb-vnext-snapshot/v1"
 SNAPSHOT_DATABASE_SCHEMAS = {
     "catalog.sqlite": CATALOG_SCHEMA_VERSION,
@@ -101,6 +107,49 @@ def _bounded_int(
             f"{name} must be between {minimum} and {maximum}.",
         )
     return parsed
+
+
+def _search_terms(value: str) -> tuple[str, ...]:
+    return tuple(
+        match.group(0)
+        for match in re.finditer(r"[^\W_]+", value, flags=re.UNICODE)
+    )
+
+
+def _fts_phrase(terms: tuple[str, ...]) -> str:
+    return '"' + " ".join(terms) + '"'
+
+
+def _fts_prefix(terms: tuple[str, ...]) -> str:
+    return " AND ".join(f'"{term}"*' for term in terms)
+
+
+def _fuzzy_similarity(query: str, values: list[str]) -> float:
+    normalized = query.casefold()
+    return max(
+        (
+            SequenceMatcher(
+                None,
+                normalized,
+                value.casefold(),
+                autojunk=False,
+            ).ratio()
+            for value in values
+            if value
+        ),
+        default=0.0,
+    )
+
+
+def _parse_aware_timestamp(value: object) -> datetime | None:
+    text = str(value or "")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
 
 
 def _source_revision(
@@ -438,12 +487,15 @@ class VNextKnowledgeService:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.core_path = self.root / "core.sqlite"
+        self.search_path = self.root / "search.sqlite"
         self.cache_path = self.root / "cache.sqlite"
         self.manifest_path = self.root / "manifests" / "current.json"
         self._database_digest_cache: dict[
             str,
             tuple[tuple[object, ...], str],
         ] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def _declared_database_matches(
         self,
@@ -736,6 +788,331 @@ class VNextKnowledgeService:
         connection.execute("PRAGMA query_only=ON")
         return connection
 
+    def _search(
+        self,
+        *,
+        validate_snapshot: bool = True,
+    ) -> sqlite3.Connection:
+        if not self.search_path.is_file():
+            raise KnowledgeApiError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "KB_VNEXT_NOT_BUILT",
+                "ARK Knowledge Base vNext search store is not available.",
+            )
+        if validate_snapshot and (
+            binding_error := self._snapshot_binding_error()
+        ):
+            raise KnowledgeApiError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "KB_VNEXT_SNAPSHOT_INVALID",
+                f"Snapshot runtime binding failed: {binding_error}.",
+            )
+        connection = sqlite3.connect(
+            f"file:{self.search_path.as_posix()}?mode=ro",
+            uri=True,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        return connection
+
+    def _cache_outcome(
+        self,
+        *,
+        hit: bool,
+        reason: str,
+    ) -> dict[str, object]:
+        if hit:
+            self._cache_hits += 1
+        else:
+            self._cache_misses += 1
+        return {
+            "status": "HIT" if hit else "MISS",
+            "reason": reason,
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+        }
+
+    def _cache_metrics(self) -> dict[str, int]:
+        return {
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+        }
+
+    def _cache_snapshot_identity(
+        self,
+        cache: sqlite3.Connection,
+    ) -> tuple[str, str] | None:
+        try:
+            manifest = json.loads(
+                self.manifest_path.read_text(encoding="utf-8")
+            )
+            metadata = dict(
+                cache.execute("SELECT key, value FROM metadata")
+            )
+        except (OSError, json.JSONDecodeError, sqlite3.DatabaseError):
+            return None
+        if not isinstance(manifest, Mapping):
+            return None
+        source = manifest.get("source")
+        if not isinstance(source, Mapping):
+            return None
+        build_id = str(manifest.get("buildId") or "")
+        source_fingerprint = str(source.get("sha256") or "")
+        generated_at = str(manifest.get("generatedAt") or "")
+        if (
+            not build_id
+            or not _is_sha256(source_fingerprint)
+            or str(metadata.get("schema_version") or "")
+            != CACHE_SCHEMA_VERSION
+            or str(metadata.get("source_fingerprint") or "")
+            != source_fingerprint
+            or str(metadata.get("snapshot_build_id") or "")
+            != build_id
+            or str(
+                metadata.get("snapshot_source_fingerprint") or ""
+            )
+            != source_fingerprint
+            or str(metadata.get("generated_at") or "")
+            != generated_at
+            or str(metadata.get("disposable") or "").casefold()
+            != "true"
+        ):
+            return None
+        return build_id, source_fingerprint
+
+    @staticmethod
+    def _cached_revision_ids(
+        response: Mapping[str, object],
+    ) -> tuple[int, ...]:
+        revision_ids: set[int] = set()
+
+        def visit(value: object) -> None:
+            if isinstance(value, Mapping):
+                for key, child in value.items():
+                    if (
+                        key in {"sourceRevisionId", "revisionId"}
+                        and child is not None
+                    ):
+                        try:
+                            revision_ids.add(int(child))
+                        except (TypeError, ValueError):
+                            pass
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        # Revisions may be attached to identity, facts, relationships, or
+        # top-level Evidence.  The cache binding must cover every claim, not
+        # only the response's flattened Evidence page.
+        visit(response)
+        return tuple(sorted(revision_ids))
+
+    @staticmethod
+    def _source_revision_set_hash(
+        core: sqlite3.Connection,
+        revision_ids: tuple[int, ...],
+    ) -> str | None:
+        if not revision_ids:
+            rows: list[dict[str, object]] = []
+        else:
+            placeholders = ",".join("?" for _ in revision_ids)
+            rows = [
+                {
+                    "revisionId": int(row[0]),
+                    "sourceKind": str(row[1]),
+                    "sourceUri": str(row[2]),
+                    "sourceFingerprint": str(row[3]),
+                    "producerVersion": str(row[4]),
+                    "schemaVersion": str(row[5]),
+                    "generatedAt": str(row[6]),
+                    "freshness": str(row[7]),
+                }
+                for row in core.execute(
+                    f"""
+                    SELECT revision_id, source_kind, source_uri,
+                           source_fingerprint, producer_version,
+                           schema_version, generated_at, freshness_status
+                    FROM source_revisions
+                    WHERE revision_id IN ({placeholders})
+                    ORDER BY revision_id
+                    """,
+                    revision_ids,
+                )
+            ]
+            if len(rows) != len(revision_ids):
+                return None
+        return hashlib.sha256(
+            json.dumps(
+                rows,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _current_invalidation_token(
+        self,
+        *,
+        build_id: str,
+        revision_hash: str,
+    ) -> str:
+        # Cache lookup must not become O(total invalidation history).  SQLite's
+        # file change counter plus the WAL identity form a conservative
+        # snapshot-wide invalidation generation: every committed Core change
+        # invalidates cached answers, while the source-revision hash above
+        # still binds each answer to its claim-specific revisions.
+        paths = (self.core_path, self.core_path.with_name("core.sqlite-wal"))
+        file_generation: list[dict[str, object]] = []
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            try:
+                change_token = _file_change_token(path)
+            except OSError:
+                continue
+            change_counter = ""
+            if path == self.core_path:
+                try:
+                    with path.open("rb") as handle:
+                        header = handle.read(28)
+                    change_counter = header[24:28].hex()
+                except OSError:
+                    change_counter = ""
+            file_generation.append(
+                {
+                    "name": path.name,
+                    "bytes": stat.st_size,
+                    "modifiedNs": stat.st_mtime_ns,
+                    "changeToken": change_token,
+                    "sqliteChangeCounter": change_counter,
+                }
+            )
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "buildId": build_id,
+                    "sourceRevisionSet": revision_hash,
+                    "coreGeneration": file_generation,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _cache_request_identity(
+        request: Mapping[str, object],
+    ) -> tuple[str, str]:
+        request_json = json.dumps(
+            request,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (
+            request_json,
+            hashlib.sha256(request_json.encode("utf-8")).hexdigest(),
+        )
+
+    def _read_cached_query(
+        self,
+        request: Mapping[str, object],
+    ) -> tuple[dict[str, object] | None, str]:
+        if not self.cache_path.is_file():
+            return None, "CACHE_UNAVAILABLE"
+        request_json, fingerprint = self._cache_request_identity(request)
+        try:
+            cache = sqlite3.connect(
+                f"file:{self.cache_path.as_posix()}?mode=ro",
+                uri=True,
+            )
+            cache.row_factory = sqlite3.Row
+            cache.execute("PRAGMA query_only=ON")
+        except sqlite3.DatabaseError:
+            return None, "CACHE_UNAVAILABLE"
+        try:
+            identity = self._cache_snapshot_identity(cache)
+            if identity is None:
+                return None, "BUILD_MISMATCH"
+            build_id, _source_fingerprint = identity
+            row = cache.execute(
+                """
+                SELECT snapshot_id, request_json, response_json,
+                       source_revision_set_hash, invalidation_token,
+                       created_at, expires_at, status
+                FROM query_snapshots
+                WHERE query_fingerprint=?
+                """,
+                (fingerprint,),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None, "CACHE_UNAVAILABLE"
+        finally:
+            cache.close()
+        if row is None:
+            return None, "NOT_FOUND"
+        if (
+            str(row["snapshot_id"])
+            != "query-snapshot://" + fingerprint
+            or str(row["request_json"]) != request_json
+            or str(row["status"]) != "VALID"
+        ):
+            return None, "ENTRY_INVALID"
+        created_at = _parse_aware_timestamp(row["created_at"])
+        expires_at = _parse_aware_timestamp(row["expires_at"])
+        now = datetime.now(UTC)
+        if (
+            created_at is None
+            or expires_at is None
+            or created_at > now
+            or expires_at <= now
+            or expires_at <= created_at
+        ):
+            return None, "EXPIRED"
+        try:
+            raw_response = json.loads(str(row["response_json"]))
+        except json.JSONDecodeError:
+            return None, "ENTRY_INVALID"
+        if not isinstance(raw_response, Mapping):
+            return None, "ENTRY_INVALID"
+        response = dict(raw_response)
+        required_response_fields = {
+            "status",
+            "route",
+            "evidence",
+            "contextPack",
+            "gap",
+        }
+        if not required_response_fields <= set(response):
+            return None, "ENTRY_INVALID"
+        revision_ids = self._cached_revision_ids(response)
+        try:
+            with closing(self._core()) as core:
+                revision_hash = self._source_revision_set_hash(
+                    core,
+                    revision_ids,
+                )
+                if (
+                    revision_hash is None
+                    or revision_hash
+                    != str(row["source_revision_set_hash"])
+                ):
+                    return None, "SOURCE_REVISION_SET_CHANGED"
+                invalidation_token = self._current_invalidation_token(
+                    build_id=build_id,
+                    revision_hash=revision_hash,
+                )
+        except sqlite3.DatabaseError:
+            return None, "CACHE_UNAVAILABLE"
+        if invalidation_token != str(row["invalidation_token"]):
+            return None, "INVALIDATION_TOKEN_CHANGED"
+        response.pop("cache", None)
+        return response, "VALID"
+
     def _page(
         self,
         *,
@@ -794,6 +1171,7 @@ class VNextKnowledgeService:
                     "typedMapUsageEvidence": False,
                     "queryProvenance": False,
                 },
+                "cacheMetrics": self._cache_metrics(),
                 "gap": [
                     {
                         "code": "KB_VNEXT_NOT_BUILT",
@@ -1348,8 +1726,223 @@ class VNextKnowledgeService:
                     capabilities["queryProvenance"]
                 ),
             },
+            "cacheMetrics": self._cache_metrics(),
             "gap": gaps,
         }
+
+    def _rank_search_candidates(
+        self,
+        search: sqlite3.Connection,
+        query: str,
+    ) -> list[dict[str, object]]:
+        ranked: dict[int, dict[str, object]] = {}
+
+        def add(
+            rows: list[tuple[int, str]],
+            *,
+            match_type: str,
+            base_score: float,
+        ) -> None:
+            for index, (entity_id, matched_alias) in enumerate(rows):
+                if (
+                    entity_id in ranked
+                    or len(ranked) >= MAX_SEARCH_CANDIDATES
+                ):
+                    continue
+                candidate: dict[str, object] = {
+                    "entityId": entity_id,
+                    "matchType": match_type,
+                    "score": round(
+                        max(0.0, base_score - index / 1_000_000),
+                        6,
+                    ),
+                }
+                if matched_alias:
+                    candidate["matchedAlias"] = matched_alias
+                ranked[entity_id] = candidate
+
+        exact_uri_rows = [
+            (int(row[0]), "")
+            for row in search.execute(
+                """
+                SELECT entity_id
+                FROM entity_search_meta
+                WHERE canonical_uri=?
+                ORDER BY entity_id
+                LIMIT ?
+                """,
+                (query, MAX_SEARCH_CANDIDATES),
+            )
+        ]
+        add(
+            exact_uri_rows,
+            match_type="EXACT_CANONICAL_URI",
+            base_score=1.0,
+        )
+        exact_alias_rows = [
+            (int(row[0]), str(row[1]))
+            for row in search.execute(
+                """
+                SELECT entity_id, alias
+                FROM search_aliases
+                WHERE alias=?
+                ORDER BY
+                  CASE confidence
+                    WHEN 'HIGH' THEN 0
+                    WHEN 'MEDIUM' THEN 1
+                    ELSE 2
+                  END,
+                  entity_id
+                LIMIT ?
+                """,
+                (query, MAX_SEARCH_CANDIDATES),
+            )
+        ]
+        add(
+            exact_alias_rows,
+            match_type="EXACT_ALIAS",
+            base_score=0.98,
+        )
+
+        terms = _search_terms(query)
+
+        def fts_rows(expression: str) -> list[tuple[int, str]]:
+            if not expression:
+                return []
+            return [
+                (int(row[0]), "")
+                for row in search.execute(
+                    """
+                    SELECT CAST(entity_id AS INTEGER), bm25(entities_fts)
+                    FROM entities_fts
+                    WHERE entities_fts MATCH ?
+                    ORDER BY bm25(entities_fts), CAST(entity_id AS INTEGER)
+                    LIMIT ?
+                    """,
+                    (expression, MAX_SEARCH_CANDIDATES),
+                )
+            ]
+
+        if terms:
+            add(
+                fts_rows(_fts_phrase(terms)),
+                match_type="FTS_PHRASE",
+                base_score=0.9,
+            )
+            add(
+                fts_rows(_fts_prefix(terms)),
+                match_type="FTS_PREFIX",
+                base_score=0.8,
+            )
+
+            anchor = terms[0][: min(2, len(terms[0]))]
+            fuzzy_ids = [
+                int(row[0])
+                for row in search.execute(
+                    """
+                    SELECT CAST(entity_id AS INTEGER)
+                    FROM entities_fts
+                    WHERE entities_fts MATCH ?
+                    ORDER BY bm25(entities_fts), CAST(entity_id AS INTEGER)
+                    LIMIT ?
+                    """,
+                    (_fts_prefix((anchor,)), MAX_FUZZY_CANDIDATES),
+                )
+            ]
+            alias_anchor_ids = [
+                int(row[0])
+                for row in search.execute(
+                    """
+                    SELECT entity_id
+                    FROM search_aliases
+                    WHERE alias>=? AND alias<?
+                    ORDER BY alias, entity_id
+                    LIMIT ?
+                    """,
+                    (
+                        anchor,
+                        anchor + "\U0010ffff",
+                        MAX_FUZZY_CANDIDATES,
+                    ),
+                )
+            ]
+            fuzzy_ids = list(
+                dict.fromkeys([*fuzzy_ids, *alias_anchor_ids])
+            )[:MAX_FUZZY_CANDIDATES]
+            fuzzy_ids = [
+                entity_id
+                for entity_id in fuzzy_ids
+                if entity_id not in ranked
+            ]
+            if fuzzy_ids:
+                placeholders = ",".join("?" for _ in fuzzy_ids)
+                meta = {
+                    int(row["entity_id"]): row
+                    for row in search.execute(
+                        f"""
+                        SELECT entity_id, canonical_uri,
+                               display_name, internal_name
+                        FROM entity_search_meta
+                        WHERE entity_id IN ({placeholders})
+                        """,
+                        fuzzy_ids,
+                    )
+                }
+                aliases: dict[int, list[str]] = {}
+                for row in search.execute(
+                    f"""
+                    WITH ranked_aliases AS (
+                      SELECT
+                        entity_id, alias,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY entity_id
+                          ORDER BY alias
+                        ) AS alias_rank
+                      FROM search_aliases
+                      WHERE entity_id IN ({placeholders})
+                    )
+                    SELECT entity_id, alias
+                    FROM ranked_aliases
+                    WHERE alias_rank<=?
+                    ORDER BY entity_id, alias
+                    """,
+                    (
+                        *fuzzy_ids,
+                        MAX_FUZZY_ALIASES_PER_ENTITY,
+                    ),
+                ):
+                    aliases.setdefault(int(row[0]), []).append(str(row[1]))
+                fuzzy: list[tuple[float, int]] = []
+                for entity_id in fuzzy_ids:
+                    row = meta.get(entity_id)
+                    if row is None:
+                        continue
+                    canonical_uri = str(row["canonical_uri"])
+                    score = _fuzzy_similarity(
+                        query,
+                        [
+                            canonical_uri,
+                            canonical_uri.rsplit("/", 1)[-1],
+                            str(row["display_name"]),
+                            str(row["internal_name"]),
+                            *aliases.get(entity_id, []),
+                        ],
+                    )
+                    if score >= MIN_FUZZY_SCORE:
+                        fuzzy.append((score, entity_id))
+                for score, entity_id in sorted(
+                    fuzzy,
+                    key=lambda item: (-item[0], item[1]),
+                ):
+                    if len(ranked) >= MAX_SEARCH_CANDIDATES:
+                        break
+                    ranked[entity_id] = {
+                        "entityId": entity_id,
+                        "matchType": "FUZZY_CANDIDATE",
+                        "score": round(score * 0.7, 6),
+                    }
+
+        return list(ranked.values())
 
     def search_entities(
         self,
@@ -1359,11 +1952,11 @@ class VNextKnowledgeService:
         cursor: object = 0,
     ) -> dict[str, object]:
         query = query.strip()
-        if not query:
+        if not query or len(query) > 500:
             raise KnowledgeApiError(
                 HTTPStatus.BAD_REQUEST,
                 "REQUEST_INVALID",
-                "q is required.",
+                "q is required and must be at most 500 characters.",
             )
         page_size = _bounded_int(
             limit,
@@ -1379,34 +1972,20 @@ class VNextKnowledgeService:
             minimum=0,
             maximum=MAX_CURSOR,
         )
-        escaped = (
-            query.replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
-        with closing(self._core()) as core:
-            parameters = (escaped, escaped, escaped, escaped)
-            where = """
-                entity.canonical_uri LIKE '%' || ? || '%' ESCAPE '\\'
-                OR COALESCE(entity.display_name, '') LIKE '%' || ? || '%' ESCAPE '\\'
-                OR COALESCE(entity.internal_name, '') LIKE '%' || ? || '%' ESCAPE '\\'
-                OR COALESCE(alias.alias, '') LIKE '%' || ? || '%' ESCAPE '\\'
-            """
-            total = int(
-                core.execute(
-                    f"""
-                    SELECT COUNT(DISTINCT entity.entity_id)
-                    FROM entities AS entity
-                    LEFT JOIN aliases AS alias
-                      ON alias.entity_id=entity.entity_id
-                    WHERE {where}
-                    """,
-                    parameters,
-                ).fetchone()[0]
-            )
-            rows = core.execute(
+        with closing(self._search()) as search:
+            ranked = self._rank_search_candidates(search, query)
+        total = len(ranked)
+        page = ranked[offset : offset + page_size]
+        entity_ids = [int(item["entityId"]) for item in page]
+        rows_by_id: dict[int, sqlite3.Row] = {}
+        if entity_ids:
+            placeholders = ",".join("?" for _ in entity_ids)
+            with closing(self._core(validate_snapshot=False)) as core:
+                rows_by_id = {
+                    int(row["entity_id"]): row
+                    for row in core.execute(
                 f"""
-                SELECT DISTINCT
+                SELECT
                     entity.entity_id, entity.canonical_uri,
                     entity.entity_kind, entity.display_name,
                     entity.internal_name, entity.status,
@@ -1421,47 +2000,50 @@ class VNextKnowledgeService:
                     revision.generated_at AS identity_generated_at,
                     revision.freshness_status AS identity_freshness
                 FROM entities AS entity
-                LEFT JOIN aliases AS alias
-                  ON alias.entity_id=entity.entity_id
                 LEFT JOIN packages AS package
                   ON package.package_id=entity.package_id
                 LEFT JOIN source_revisions AS revision
                   ON revision.revision_id=package.current_revision_id
-                WHERE {where}
-                ORDER BY entity.entity_id
-                LIMIT ? OFFSET ?
+                WHERE entity.entity_id IN ({placeholders})
                 """,
-                (*parameters, page_size, offset),
+                        entity_ids,
+                    )
+                }
+        items = []
+        for candidate in page:
+            row = rows_by_id.get(int(candidate["entityId"]))
+            if row is None:
+                continue
+            source_revision = _source_revision(
+                revision_id=row["identity_revision_id"],
+                source_kind=row["identity_source_kind"],
+                source_uri=row["identity_source_uri"],
+                source_fingerprint=row["identity_source_fingerprint"],
+                producer_version=row["identity_producer_version"],
+                schema_version=row["identity_schema_version"],
+                generated_at=row["identity_generated_at"],
+                freshness=row["identity_freshness"],
             )
-            items = []
-            for row in rows:
-                source_revision = _source_revision(
-                    revision_id=row["identity_revision_id"],
-                    source_kind=row["identity_source_kind"],
-                    source_uri=row["identity_source_uri"],
-                    source_fingerprint=row[
-                        "identity_source_fingerprint"
-                    ],
-                    producer_version=row["identity_producer_version"],
-                    schema_version=row["identity_schema_version"],
-                    generated_at=row["identity_generated_at"],
-                    freshness=row["identity_freshness"],
-                )
-                freshness = _revision_freshness(
-                    source_revision,
-                    status=row["status"],
-                )
-                items.append({
-                    "entityId": int(row["entity_id"]),
-                    "canonicalUri": str(row["canonical_uri"]),
-                    "entityKind": str(row["entity_kind"]),
-                    "displayName": str(row["display_name"] or ""),
-                    "internalName": str(row["internal_name"] or ""),
-                    "status": str(row["status"]),
-                    "confidence": str(row["confidence"]),
-                    "sourceRevision": source_revision,
-                    "freshness": freshness,
-                })
+            freshness = _revision_freshness(
+                source_revision,
+                status=row["status"],
+            )
+            item = {
+                "entityId": int(row["entity_id"]),
+                "canonicalUri": str(row["canonical_uri"]),
+                "entityKind": str(row["entity_kind"]),
+                "displayName": str(row["display_name"] or ""),
+                "internalName": str(row["internal_name"] or ""),
+                "status": str(row["status"]),
+                "confidence": str(row["confidence"]),
+                "sourceRevision": source_revision,
+                "freshness": freshness,
+                "matchType": str(candidate["matchType"]),
+                "score": float(candidate["score"]),
+            }
+            if candidate.get("matchedAlias"):
+                item["matchedAlias"] = str(candidate["matchedAlias"])
+            items.append(item)
         evidence = [
             {
                 "entityId": item["entityId"],
@@ -2371,6 +2953,13 @@ class VNextKnowledgeService:
             evidence_limit=evidence_limit,
             answer_mode=answer_mode,
         )
+        cached_response, cache_reason = self._read_cached_query(body)
+        if cached_response is not None:
+            cached_response["cache"] = self._cache_outcome(
+                hit=True,
+                reason=cache_reason,
+            )
+            return cached_response
         with closing(self._core()) as core:
             capabilities = core_schema_capabilities(core)
             try:
@@ -2464,6 +3053,10 @@ class VNextKnowledgeService:
             "gap": result["missingRequirements"],
         }
         self._cache_query(body, response)
+        response["cache"] = self._cache_outcome(
+            hit=False,
+            reason=cache_reason,
+        )
         return response
 
     def _cache_query(
@@ -2473,34 +3066,43 @@ class VNextKnowledgeService:
     ) -> None:
         if not self.cache_path.is_file():
             return
-        request_json = json.dumps(
-            request, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        request_json, fingerprint = self._cache_request_identity(request)
+        cacheable_response = dict(response)
+        cacheable_response.pop("cache", None)
         response_json = json.dumps(
-            response, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            cacheable_response,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
-        fingerprint = hashlib.sha256(
-            request_json.encode("utf-8")
-        ).hexdigest()
-        evidence = response.get("evidence")
-        revision_ids = sorted(
-            {
-                int(item["sourceRevisionId"])
-                for item in evidence
-                if isinstance(item, Mapping)
-                and item.get("sourceRevisionId") is not None
-            }
-        ) if isinstance(evidence, list) else []
-        revision_hash = hashlib.sha256(
-            json.dumps(revision_ids, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        invalidation_token = hashlib.sha256(
-            (
-                revision_hash
-                + str(response.get("freshness"))
-                + json.dumps(response.get("gap"), sort_keys=True)
-            ).encode("utf-8")
-        ).hexdigest()
+        revision_ids = self._cached_revision_ids(cacheable_response)
+        try:
+            with closing(self._core()) as core:
+                revision_hash = self._source_revision_set_hash(
+                    core,
+                    revision_ids,
+                )
+                if revision_hash is None:
+                    return
+                raw_manifest = json.loads(
+                    self.manifest_path.read_text(encoding="utf-8")
+                )
+                if not isinstance(raw_manifest, Mapping):
+                    return
+                build_id = str(raw_manifest.get("buildId") or "")
+                if not build_id:
+                    return
+                invalidation_token = self._current_invalidation_token(
+                    build_id=build_id,
+                    revision_hash=revision_hash,
+                )
+        except (
+            KnowledgeApiError,
+            OSError,
+            json.JSONDecodeError,
+            sqlite3.DatabaseError,
+        ):
+            return
         snapshot_id = "query-snapshot://" + fingerprint
         context_pack_id = "context-pack://" + fingerprint
         now = datetime.now(UTC)
@@ -2513,9 +3115,15 @@ class VNextKnowledgeService:
         except sqlite3.DatabaseError:
             return
         try:
+            if self._cache_snapshot_identity(cache) is None:
+                return
             cache.execute(
                 """
-                INSERT OR REPLACE INTO query_snapshots VALUES (
+                INSERT OR REPLACE INTO query_snapshots(
+                    snapshot_id, query_fingerprint, request_json,
+                    response_json, source_revision_set_hash,
+                    invalidation_token, created_at, expires_at, status
+                ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, 'VALID'
                 )
                 """,
@@ -2530,7 +3138,7 @@ class VNextKnowledgeService:
                     expires_at,
                 ),
             )
-            pack = response["contextPack"]
+            pack = cacheable_response["contextPack"]
             cache.execute(
                 """
                 INSERT OR REPLACE INTO context_packs VALUES (

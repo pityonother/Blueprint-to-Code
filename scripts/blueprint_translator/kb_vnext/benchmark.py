@@ -5,14 +5,20 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import random
+import shutil
 import sqlite3
+import tempfile
 import time
 from collections import Counter, defaultdict
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from .kb_context import build_bounded_context_pack
+from .map_usage import MAP_USAGE_EDGE_TYPES
 from .query_planner import (
     COMPLETE_CONFIDENCE,
     GAP_CODES,
@@ -101,6 +107,11 @@ UNUSABLE_VALUE_KINDS = {
     "FINGERPRINT",
     "CONFIRMED_EMPTY",
 }
+PERFORMANCE_SAMPLE_TARGET = 20
+SEARCH_FUZZY_P95_LIMIT_MS = 250.0
+CACHE_HIT_P95_LIMIT_MS = 250.0
+ONE_HOP_P95_LIMIT_MS = 250.0
+TWO_HOP_P95_LIMIT_MS = 800.0
 
 
 def _expected_gap_probe(
@@ -210,7 +221,9 @@ def _expected_gap_requirement(
     if code == "RUNTIME_DYNAMIC_BRANCH":
         return "materialized confirmed runtime observation"
     if code == "MAP_USAGE_INCOMPLETE":
-        requested = ", ".join(edge_types) or "typed map usage"
+        requested = ", ".join(
+            edge_types or list(MAP_USAGE_EDGE_TYPES)
+        )
         return (
             f"{requested}: confirmed typed direct, PCG, or "
             "World Partition map usage"
@@ -1015,6 +1028,16 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
     return ordered[index]
 
 
+def _latency_summary(values: Sequence[float]) -> dict[str, object]:
+    return {
+        "samples": len(values),
+        "p50": round(_percentile(values, 0.50), 3),
+        "p95": round(_percentile(values, 0.95), 3),
+        "p99": round(_percentile(values, 0.99), 3),
+        "maximum": round(max(values), 3) if values else 0.0,
+    }
+
+
 def _actual_fact_value(fact: Mapping[str, object]) -> object:
     kind = str(fact.get("valueKind") or "").upper()
     if kind in {"TEXT", "ENTITY_REF"}:
@@ -1689,8 +1712,37 @@ def _metric(
 
 def _degree_samples(
     connection: sqlite3.Connection,
-) -> list[tuple[str, int, str]]:
-    samples: list[tuple[str, int, str]] = []
+) -> tuple[list[tuple[str, int, str, int]], dict[str, int]]:
+    samples: list[tuple[str, int, str, int]] = []
+    available = {
+        "TOP_OUT_DEGREE": int(
+            connection.execute(
+                "SELECT COUNT(DISTINCT source_entity_id) FROM edges"
+            ).fetchone()[0]
+        ),
+        "TOP_IN_DEGREE": int(
+            connection.execute(
+                "SELECT COUNT(DISTINCT target_entity_id) FROM edges"
+            ).fetchone()[0]
+        ),
+        "TOP_CROSS_DOMAIN": int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM (
+                  SELECT edge.source_entity_id
+                  FROM edges AS edge
+                  JOIN domain_memberships AS source_domain
+                    ON source_domain.entity_id=edge.source_entity_id
+                  JOIN domain_memberships AS target_domain
+                    ON target_domain.entity_id=edge.target_entity_id
+                   AND target_domain.domain_id<>source_domain.domain_id
+                  GROUP BY edge.source_entity_id
+                )
+                """
+            ).fetchone()[0]
+        ),
+        "RANDOM_MEDIAN_DEGREE": 0,
+    }
     queries = {
         "TOP_OUT_DEGREE": (
             """
@@ -1710,7 +1762,8 @@ def _degree_samples(
         ),
         "TOP_CROSS_DOMAIN": (
             """
-            SELECT edge.source_entity_id, COUNT(*) AS degree
+            SELECT edge.source_entity_id,
+                   COUNT(DISTINCT edge.edge_id) AS degree
             FROM edges AS edge
             JOIN domain_memberships AS source_domain
               ON source_domain.entity_id=edge.source_entity_id
@@ -1722,37 +1775,79 @@ def _degree_samples(
             """,
             "OUT",
         ),
-        "MEDIAN_DEGREE": (
-            """
-            WITH degrees AS (
-              SELECT source_entity_id AS entity_id, COUNT(*) AS degree
-              FROM edges GROUP BY source_entity_id
-            ), ranked AS (
-              SELECT entity_id, degree,
-                     ROW_NUMBER() OVER (ORDER BY degree, entity_id) AS rank,
-                     COUNT(*) OVER () AS total
-              FROM degrees
-            )
-            SELECT entity_id, degree FROM ranked
-            ORDER BY ABS(rank - ((total + 1) / 2.0)), entity_id
-            LIMIT 20
-            """,
-            "OUT",
-        ),
     }
     for label, (sql, direction) in queries.items():
         samples.extend(
-            (label, int(row[0]), direction)
+            (label, int(row[0]), direction, int(row[1]))
             for row in connection.execute(sql)
         )
-    return samples
+    degrees = [
+        (int(row[0]), int(row[1]))
+        for row in connection.execute(
+            """
+            SELECT source_entity_id, COUNT(*) AS degree
+            FROM edges
+            GROUP BY source_entity_id
+            ORDER BY degree, source_entity_id
+            """
+        )
+    ]
+    if degrees:
+        median_degree = degrees[(len(degrees) - 1) // 2][1]
+        median_pool = [
+            item for item in degrees if item[1] == median_degree
+        ]
+        available["RANDOM_MEDIAN_DEGREE"] = len(median_pool)
+        randomizer = random.Random(0xA4B5C6)
+        selected = randomizer.sample(
+            median_pool,
+            k=min(PERFORMANCE_SAMPLE_TARGET, len(median_pool)),
+        )
+        samples.extend(
+            ("RANDOM_MEDIAN_DEGREE", entity_id, "OUT", degree)
+            for entity_id, degree in selected
+        )
+    return samples, available
 
 
 def _degree_latency(
     connection: sqlite3.Connection,
 ) -> dict[str, object]:
-    by_path: dict[str, list[float]] = defaultdict(list)
-    for path, entity_id, direction in _degree_samples(connection):
+    one_hop: dict[str, list[float]] = defaultdict(list)
+    two_hop: dict[str, list[float]] = defaultdict(list)
+    degree_values: dict[str, list[int]] = defaultdict(list)
+    samples, available = _degree_samples(connection)
+    for path, entity_id, direction, degree in samples:
+        degree_values[path].append(degree)
+        started = time.perf_counter()
+        if direction == "OUT":
+            list(
+                connection.execute(
+                    """
+                    SELECT target_entity_id
+                    FROM edges
+                    WHERE source_entity_id=?
+                    LIMIT 500
+                    """,
+                    (entity_id,),
+                )
+            )
+        else:
+            list(
+                connection.execute(
+                    """
+                    SELECT source_entity_id
+                    FROM edges
+                    WHERE target_entity_id=?
+                    LIMIT 500
+                    """,
+                    (entity_id,),
+                )
+            )
+        one_hop[path].append(
+            (time.perf_counter() - started) * 1_000
+        )
+
         started = time.perf_counter()
         if direction == "OUT":
             list(
@@ -1780,22 +1875,805 @@ def _degree_latency(
                     (entity_id,),
                 )
             )
-        by_path[path].append((time.perf_counter() - started) * 1_000)
-    all_values = [
-        latency for values in by_path.values() for latency in values
+        two_hop[path].append(
+            (time.perf_counter() - started) * 1_000
+        )
+    all_one_hop = [
+        latency for values in one_hop.values() for latency in values
     ]
+    all_two_hop = [
+        latency for values in two_hop.values() for latency in values
+    ]
+    cohort_names = (
+        "TOP_OUT_DEGREE",
+        "TOP_IN_DEGREE",
+        "TOP_CROSS_DOMAIN",
+        "RANDOM_MEDIAN_DEGREE",
+    )
     return {
-        "samples": len(all_values),
-        "p50": round(_percentile(all_values, 0.50), 3),
-        "p95": round(_percentile(all_values, 0.95), 3),
-        "p99": round(_percentile(all_values, 0.99), 3),
+        # Compatibility aliases continue to describe the two-hop path.
+        **_latency_summary(all_two_hop),
+        "oneHop": _latency_summary(all_one_hop),
+        "twoHop": _latency_summary(all_two_hop),
         "byPath": {
             path: {
-                "samples": len(values),
-                "p95": round(_percentile(values, 0.95), 3),
+                "requested": PERFORMANCE_SAMPLE_TARGET,
+                "available": available[path],
+                "samples": len(two_hop.get(path, [])),
+                "degreeMinimum": (
+                    min(degree_values[path])
+                    if degree_values.get(path)
+                    else 0
+                ),
+                "degreeMaximum": (
+                    max(degree_values[path])
+                    if degree_values.get(path)
+                    else 0
+                ),
+                "oneHop": _latency_summary(one_hop.get(path, [])),
+                "twoHop": _latency_summary(two_hop.get(path, [])),
             }
-            for path, values in sorted(by_path.items())
+            for path in cohort_names
         },
+    }
+
+
+def _copy_snapshot_for_benchmark(
+    snapshot_root: Path,
+    isolated_root: Path,
+) -> None:
+    snapshot_root = snapshot_root.resolve()
+    isolated_root = isolated_root.resolve()
+    manifest_path = snapshot_root / "manifests" / "current.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, Mapping):
+        raise ValueError("Snapshot manifest must be an object")
+    build_id = str(manifest.get("buildId") or "")
+    databases = manifest.get("databases")
+    if not build_id or not isinstance(databases, Mapping):
+        raise ValueError("Snapshot manifest is missing build databases")
+
+    manifests = isolated_root / "manifests"
+    manifests.mkdir(parents=True)
+    shutil.copy2(manifest_path, manifests / "current.json")
+    shutil.copy2(
+        snapshot_root / "manifests" / f"{build_id}.json",
+        manifests / f"{build_id}.json",
+    )
+    for raw_name in databases:
+        name = str(raw_name)
+        relative = Path(name)
+        canonical_root_names = {
+            "cache.sqlite",
+            "catalog.sqlite",
+            "core.sqlite",
+            "search.sqlite",
+        }
+        canonical_export = (
+            len(relative.parts) == 2
+            and relative.parts[0] == "domain_exports"
+            and relative.parts[1].endswith(".sqlite")
+            and relative.parts[1] not in {"", ".", ".."}
+        )
+        if (
+            relative.is_absolute()
+            or name not in canonical_root_names
+            and not canonical_export
+            or ".." in relative.parts
+        ):
+            raise ValueError(
+                f"Unsafe snapshot database path: {name!r}"
+            )
+        source = (snapshot_root / relative).resolve()
+        destination = (isolated_root / relative).resolve()
+        if (
+            not source.is_relative_to(snapshot_root)
+            or not destination.is_relative_to(isolated_root)
+        ):
+            raise ValueError(
+                f"Snapshot database escapes its root: {name!r}"
+            )
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if name == "cache.sqlite":
+            source_uri = (
+                f"file:{source.resolve().as_posix()}?mode=ro"
+            )
+            with closing(
+                sqlite3.connect(source_uri, uri=True)
+            ) as source_cache:
+                with closing(sqlite3.connect(destination)) as target_cache:
+                    source_cache.backup(target_cache)
+            continue
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+
+
+def _connection_latency(
+    path: Path,
+    *,
+    sample_count: int,
+) -> dict[str, object]:
+    cold: list[float] = []
+    for _ in range(sample_count):
+        started = time.perf_counter()
+        connection = sqlite3.connect(
+            f"file:{path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        )
+        try:
+            connection.execute("SELECT 1").fetchone()
+        finally:
+            connection.close()
+        cold.append((time.perf_counter() - started) * 1_000)
+
+    warm: list[float] = []
+    connection = sqlite3.connect(
+        f"file:{path.resolve().as_posix()}?mode=ro",
+        uri=True,
+    )
+    try:
+        connection.execute("SELECT 1").fetchone()
+        for _ in range(sample_count):
+            started = time.perf_counter()
+            connection.execute("SELECT 1").fetchone()
+            warm.append((time.perf_counter() - started) * 1_000)
+    finally:
+        connection.close()
+    return {
+        "coldConnection": _latency_summary(cold),
+        "warmConnection": _latency_summary(warm),
+    }
+
+
+def _search_probe_queries(
+    service: object,
+    search_path: Path,
+) -> dict[str, str]:
+    desired: dict[str, list[str]] = {
+        "EXACT_CANONICAL_URI": [],
+        "EXACT_ALIAS": [],
+        "FTS_PHRASE": [],
+        "FUZZY_CANDIDATE": [],
+    }
+    connection = sqlite3.connect(
+        f"file:{search_path.resolve().as_posix()}?mode=ro",
+        uri=True,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    try:
+        desired["EXACT_CANONICAL_URI"] = [
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT canonical_uri
+                FROM entity_search_meta
+                WHERE canonical_uri<>''
+                ORDER BY entity_id
+                LIMIT 100
+                """
+            )
+        ]
+        desired["EXACT_ALIAS"] = [
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT alias
+                FROM search_aliases
+                WHERE alias<>''
+                ORDER BY entity_id, alias
+                LIMIT 100
+                """
+            )
+        ]
+        phrase_candidates: list[str] = []
+        fuzzy_sources: list[str] = []
+        for row in connection.execute(
+            """
+            SELECT display_name, internal_name
+            FROM entity_search_meta
+            ORDER BY entity_id
+            LIMIT 500
+            """
+        ):
+            for value in (str(row[0]), str(row[1])):
+                terms = tuple(
+                    token
+                    for token in value.replace("_", " ").split()
+                    if token
+                )
+                if len(terms) >= 2:
+                    phrase_candidates.append(" ".join(terms[:2]))
+                fuzzy_sources.extend(terms)
+                if value:
+                    fuzzy_sources.append(value)
+        for row in connection.execute(
+            """
+            SELECT alias
+            FROM search_aliases
+            WHERE alias<>''
+            ORDER BY entity_id, alias
+            LIMIT 500
+            """
+        ):
+            fuzzy_sources.append(str(row[0]))
+        desired["FTS_PHRASE"] = phrase_candidates
+        fuzzy_candidates: list[str] = []
+        for source in fuzzy_sources:
+            compact = source.strip()
+            if len(compact) < 5:
+                continue
+            fuzzy_candidates.append(
+                compact[:2] + compact[3] + compact[2] + compact[4:]
+            )
+        desired["FUZZY_CANDIDATE"] = fuzzy_candidates
+    finally:
+        connection.close()
+
+    selected: dict[str, str] = {}
+    search_entities = getattr(service, "search_entities")
+    for match_type, candidates in desired.items():
+        seen: set[str] = set()
+        for query in candidates:
+            if not query or query in seen:
+                continue
+            seen.add(query)
+            result = search_entities(query=query, limit=20)
+            items = result.get("items", [])
+            if any(
+                isinstance(item, Mapping)
+                and item.get("matchType") == match_type
+                for item in items
+            ):
+                selected[match_type] = query
+                break
+    return selected
+
+
+def _query_fingerprint(request: Mapping[str, object]) -> str:
+    encoded = json.dumps(
+        request,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _clear_cache_probe(cache_path: Path, fingerprint: str) -> None:
+    snapshot_id = "query-snapshot://" + fingerprint
+    with closing(sqlite3.connect(cache_path)) as cache:
+        cache.execute(
+            "DELETE FROM context_packs WHERE snapshot_id=?",
+            (snapshot_id,),
+        )
+        cache.execute(
+            "DELETE FROM query_snapshots WHERE query_fingerprint=?",
+            (fingerprint,),
+        )
+        cache.commit()
+
+
+def _cache_probe_request(search_path: Path) -> dict[str, object]:
+    with closing(
+        sqlite3.connect(
+            f"file:{search_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        )
+    ) as search:
+        row = search.execute(
+            """
+            SELECT canonical_uri
+            FROM entity_search_meta
+            WHERE canonical_uri<>''
+            ORDER BY entity_id
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        raise ValueError("Search store has no entity for cache probe")
+    return {
+        "entity": str(row[0]),
+        "answerMode": "IDENTITY",
+        "budgetTokens": 500,
+    }
+
+
+def _cache_reason(response: Mapping[str, object]) -> str:
+    cache = response.get("cache")
+    return (
+        str(cache.get("reason") or "")
+        if isinstance(cache, Mapping)
+        else ""
+    )
+
+
+def _cache_status(response: Mapping[str, object]) -> str:
+    cache = response.get("cache")
+    return (
+        str(cache.get("status") or "")
+        if isinstance(cache, Mapping)
+        else ""
+    )
+
+
+def run_storage_path_benchmark(
+    snapshot_root: Path,
+    *,
+    sample_count: int = PERFORMANCE_SAMPLE_TARGET,
+) -> dict[str, object]:
+    """Exercise Search and Cache through an isolated copy of a real snapshot."""
+
+    if sample_count < 1:
+        raise ValueError("sample_count must be at least 1")
+    empty = {
+        "sampleTarget": sample_count,
+        "connections": {},
+        "search": {
+            "ftsPlanUsed": False,
+            "paths": {},
+            "coldOperation": _latency_summary([]),
+            "warmOperation": _latency_summary([]),
+        },
+        "cache": {
+            "validHit": False,
+            "expiredRejected": False,
+            "sourceRevisionRejected": False,
+            "invalidationTokenRejected": False,
+            "buildRejected": False,
+            "miss": _latency_summary([]),
+            "hit": _latency_summary([]),
+            "coldOperation": _latency_summary([]),
+            "warmOperation": _latency_summary([]),
+        },
+        "coverage": {
+            "search": False,
+            "cache": False,
+            "complete": False,
+        },
+        "error": "",
+    }
+    try:
+        # The local import avoids storage -> benchmark -> API -> storage cycles.
+        from .kb_api import VNextKnowledgeService
+
+        with tempfile.TemporaryDirectory(
+            prefix="ark-kb-storage-benchmark-"
+        ) as temporary:
+            isolated_root = Path(temporary) / "snapshot"
+            isolated_root.mkdir()
+            _copy_snapshot_for_benchmark(
+                snapshot_root.resolve(),
+                isolated_root,
+            )
+            service = VNextKnowledgeService(isolated_root)
+            search_path = isolated_root / "search.sqlite"
+            cache_path = isolated_root / "cache.sqlite"
+
+            connections = {
+                name: _connection_latency(
+                    isolated_root / name,
+                    sample_count=sample_count,
+                )
+                for name in (
+                    "core.sqlite",
+                    "search.sqlite",
+                    "cache.sqlite",
+                )
+            }
+
+            with closing(
+                sqlite3.connect(
+                    f"file:{search_path.resolve().as_posix()}?mode=ro",
+                    uri=True,
+                )
+            ) as search:
+                fts_plan = " ".join(
+                    str(row[3])
+                    for row in search.execute(
+                        """
+                        EXPLAIN QUERY PLAN
+                        SELECT rowid FROM entities_fts
+                        WHERE entities_fts MATCH ?
+                        """,
+                        ('"benchmark"*',),
+                    )
+                )
+            fts_plan_used = "VIRTUAL TABLE INDEX" in fts_plan.upper()
+            queries = _search_probe_queries(
+                service,
+                search_path,
+            )
+            cold_search_values: list[float] = []
+            cold_search_query = queries.get("EXACT_CANONICAL_URI")
+            if cold_search_query is not None:
+                cold_search_service = VNextKnowledgeService(
+                    isolated_root
+                )
+                started = time.perf_counter()
+                cold_search_service.search_entities(
+                    query=cold_search_query,
+                    limit=20,
+                )
+                cold_search_values.append(
+                    (time.perf_counter() - started) * 1_000
+                )
+            search_paths: dict[str, dict[str, object]] = {}
+            for match_type in (
+                "EXACT_CANONICAL_URI",
+                "EXACT_ALIAS",
+                "FTS_PHRASE",
+                "FUZZY_CANDIDATE",
+            ):
+                query = queries.get(match_type)
+                values: list[float] = []
+                observed = False
+                if query is not None:
+                    for _ in range(sample_count):
+                        started = time.perf_counter()
+                        result = service.search_entities(
+                            query=query,
+                            limit=20,
+                        )
+                        values.append(
+                            (time.perf_counter() - started) * 1_000
+                        )
+                        observed = observed or any(
+                            isinstance(item, Mapping)
+                            and item.get("matchType") == match_type
+                            for item in result.get("items", [])
+                        )
+                search_paths[match_type] = {
+                    "queryAvailable": query is not None,
+                    "matchTypeObserved": observed,
+                    **_latency_summary(values),
+                }
+
+            request = _cache_probe_request(search_path)
+            fingerprint = _query_fingerprint(request)
+            _clear_cache_probe(cache_path, fingerprint)
+            cache_service = VNextKnowledgeService(isolated_root)
+            started = time.perf_counter()
+            first = cache_service.query(request)
+            cold_cache_ms = (
+                time.perf_counter() - started
+            ) * 1_000
+            second = cache_service.query(request)
+            valid_hit = (
+                _cache_status(first) == "MISS"
+                and _cache_status(second) == "HIT"
+                and _cache_reason(second) == "VALID"
+            )
+
+            snapshot_id = "query-snapshot://" + fingerprint
+            with closing(sqlite3.connect(cache_path)) as cache:
+                cache.execute(
+                    """
+                    UPDATE query_snapshots
+                    SET expires_at='2000-01-01T00:00:00+00:00'
+                    WHERE snapshot_id=?
+                    """,
+                    (snapshot_id,),
+                )
+                cache.commit()
+            expired = cache_service.query(request)
+
+            with closing(sqlite3.connect(cache_path)) as cache:
+                cache.execute(
+                    """
+                    UPDATE query_snapshots
+                    SET source_revision_set_hash=?
+                    WHERE snapshot_id=?
+                    """,
+                    ("0" * 64, snapshot_id),
+                )
+                cache.commit()
+            source_revision = cache_service.query(request)
+
+            with closing(sqlite3.connect(cache_path)) as cache:
+                cache.execute(
+                    """
+                    UPDATE query_snapshots
+                    SET invalidation_token=?
+                    WHERE snapshot_id=?
+                    """,
+                    ("0" * 64, snapshot_id),
+                )
+                cache.commit()
+            invalidation = cache_service.query(request)
+
+            with closing(sqlite3.connect(cache_path)) as cache:
+                row = cache.execute(
+                    """
+                    SELECT value FROM metadata
+                    WHERE key='snapshot_build_id'
+                    """
+                ).fetchone()
+                if row is None:
+                    raise ValueError(
+                        "Cache metadata has no snapshot_build_id"
+                    )
+                build_id = str(row[0])
+                cache.execute(
+                    """
+                    UPDATE metadata SET value='benchmark-build-mismatch'
+                    WHERE key='snapshot_build_id'
+                    """
+                )
+                cache.commit()
+            build = cache_service.query(request)
+            with closing(sqlite3.connect(cache_path)) as cache:
+                cache.execute(
+                    """
+                    UPDATE metadata SET value=?
+                    WHERE key='snapshot_build_id'
+                    """,
+                    (build_id,),
+                )
+                cache.commit()
+
+            misses: list[float] = []
+            hits: list[float] = []
+            miss_observed = True
+            hit_observed = True
+            for _ in range(sample_count):
+                _clear_cache_probe(cache_path, fingerprint)
+                started = time.perf_counter()
+                miss = cache_service.query(request)
+                misses.append(
+                    (time.perf_counter() - started) * 1_000
+                )
+                miss_observed = (
+                    miss_observed
+                    and _cache_status(miss) == "MISS"
+                )
+                started = time.perf_counter()
+                hit = cache_service.query(request)
+                hits.append(
+                    (time.perf_counter() - started) * 1_000
+                )
+                hit_observed = (
+                    hit_observed
+                    and _cache_status(hit) == "HIT"
+                    and _cache_reason(hit) == "VALID"
+                )
+
+            cache_result = {
+                "validHit": valid_hit,
+                "expiredRejected": (
+                    _cache_status(expired) == "MISS"
+                    and _cache_reason(expired) == "EXPIRED"
+                ),
+                "sourceRevisionRejected": (
+                    _cache_status(source_revision) == "MISS"
+                    and _cache_reason(source_revision)
+                    == "SOURCE_REVISION_SET_CHANGED"
+                ),
+                "invalidationTokenRejected": (
+                    _cache_status(invalidation) == "MISS"
+                    and _cache_reason(invalidation)
+                    == "INVALIDATION_TOKEN_CHANGED"
+                ),
+                "buildRejected": (
+                    _cache_status(build) == "MISS"
+                    and _cache_reason(build) == "BUILD_MISMATCH"
+                ),
+                "missObserved": miss_observed,
+                "hitObserved": hit_observed,
+                "miss": _latency_summary(misses),
+                "hit": _latency_summary(hits),
+                "coldOperation": _latency_summary(
+                    [cold_cache_ms]
+                ),
+                "warmOperation": _latency_summary(hits),
+            }
+            search_complete = (
+                fts_plan_used
+                and all(
+                    path["queryAvailable"]
+                    and path["matchTypeObserved"]
+                    and int(path["samples"]) == sample_count
+                    for path in search_paths.values()
+                )
+            )
+            cache_complete = all(
+                bool(cache_result[key])
+                for key in (
+                    "validHit",
+                    "expiredRejected",
+                    "sourceRevisionRejected",
+                    "invalidationTokenRejected",
+                    "buildRejected",
+                    "missObserved",
+                    "hitObserved",
+                )
+            )
+            return {
+                "sampleTarget": sample_count,
+                "connections": connections,
+                "search": {
+                    "ftsPlanUsed": fts_plan_used,
+                    "paths": search_paths,
+                    "coldOperation": _latency_summary(
+                        cold_search_values
+                    ),
+                    "warmOperation": dict(
+                        search_paths.get(
+                            "EXACT_CANONICAL_URI",
+                            _latency_summary([]),
+                        )
+                    ),
+                },
+                "cache": cache_result,
+                "coverage": {
+                    "search": search_complete,
+                    "cache": cache_complete,
+                    "complete": search_complete and cache_complete,
+                },
+                "error": "",
+            }
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        sqlite3.DatabaseError,
+    ) as error:
+        return {
+            **empty,
+            "error": f"{type(error).__name__}: {error}",
+        }
+
+
+def _runtime_performance_gates(
+    storage: Mapping[str, object],
+    degree: Mapping[str, object],
+) -> dict[str, object]:
+    raw_search = storage.get("search")
+    search = raw_search if isinstance(raw_search, Mapping) else {}
+    raw_paths = search.get("paths")
+    paths = raw_paths if isinstance(raw_paths, Mapping) else {}
+    raw_fuzzy = paths.get("FUZZY_CANDIDATE")
+    fuzzy = raw_fuzzy if isinstance(raw_fuzzy, Mapping) else {}
+    raw_cache = storage.get("cache")
+    cache = raw_cache if isinstance(raw_cache, Mapping) else {}
+    raw_hit = cache.get("hit")
+    hit = raw_hit if isinstance(raw_hit, Mapping) else {}
+    raw_one_hop = degree.get("oneHop")
+    one_hop = (
+        raw_one_hop if isinstance(raw_one_hop, Mapping) else {}
+    )
+    raw_two_hop = degree.get("twoHop")
+    two_hop = (
+        raw_two_hop if isinstance(raw_two_hop, Mapping) else {}
+    )
+    raw_degree_paths = degree.get("byPath")
+    degree_paths = (
+        raw_degree_paths
+        if isinstance(raw_degree_paths, Mapping)
+        else {}
+    )
+    required_cohorts = (
+        "TOP_OUT_DEGREE",
+        "TOP_IN_DEGREE",
+        "TOP_CROSS_DOMAIN",
+        "RANDOM_MEDIAN_DEGREE",
+    )
+    cohort_actual: dict[str, dict[str, int]] = {}
+    cohort_coverage = True
+    for name in required_cohorts:
+        raw_cohort = degree_paths.get(name)
+        cohort = (
+            raw_cohort if isinstance(raw_cohort, Mapping) else {}
+        )
+        try:
+            requested = int(cohort.get("requested"))
+            available = int(cohort.get("available"))
+            samples = int(cohort.get("samples"))
+        except (TypeError, ValueError):
+            requested = 0
+            available = 0
+            samples = 0
+        required = min(requested, available)
+        cohort_actual[name] = {
+            "requested": requested,
+            "available": available,
+            "required": required,
+            "samples": samples,
+        }
+        cohort_coverage = (
+            cohort_coverage
+            and requested == PERFORMANCE_SAMPLE_TARGET
+            and available > 0
+            and samples == required
+        )
+
+    def threshold_check(
+        metrics: Mapping[str, object],
+        *,
+        limit: float,
+        minimum_samples: int,
+    ) -> dict[str, object]:
+        try:
+            actual = float(metrics.get("p95"))
+            samples = int(metrics.get("samples"))
+        except (TypeError, ValueError):
+            actual = 0.0
+            samples = 0
+        return {
+            "target": f"<{limit:g} ms with >= {minimum_samples} samples",
+            "actual": {"p95Ms": actual, "samples": samples},
+            "passed": samples >= minimum_samples and actual < limit,
+        }
+
+    checks: dict[str, dict[str, object]] = {
+        "ftsPlanUsed": {
+            "target": True,
+            "actual": search.get("ftsPlanUsed"),
+            "passed": search.get("ftsPlanUsed") is True,
+        },
+        "cacheValidHit": {
+            "target": True,
+            "actual": cache.get("validHit"),
+            "passed": cache.get("validHit") is True,
+        },
+        "cacheExpiredRejected": {
+            "target": True,
+            "actual": cache.get("expiredRejected"),
+            "passed": cache.get("expiredRejected") is True,
+        },
+        "cacheSourceRevisionRejected": {
+            "target": True,
+            "actual": cache.get("sourceRevisionRejected"),
+            "passed": cache.get("sourceRevisionRejected") is True,
+        },
+        "cacheInvalidationTokenRejected": {
+            "target": True,
+            "actual": cache.get("invalidationTokenRejected"),
+            "passed": cache.get("invalidationTokenRejected") is True,
+        },
+        "cacheBuildRejected": {
+            "target": True,
+            "actual": cache.get("buildRejected"),
+            "passed": cache.get("buildRejected") is True,
+        },
+        "degreeCohortsCovered": {
+            "target": (
+                "all available members, up to 20, from each required cohort"
+            ),
+            "actual": cohort_actual,
+            "passed": cohort_coverage,
+        },
+        "fuzzyP95": threshold_check(
+            fuzzy,
+            limit=SEARCH_FUZZY_P95_LIMIT_MS,
+            minimum_samples=PERFORMANCE_SAMPLE_TARGET,
+        ),
+        "cacheHitP95": threshold_check(
+            hit,
+            limit=CACHE_HIT_P95_LIMIT_MS,
+            minimum_samples=PERFORMANCE_SAMPLE_TARGET,
+        ),
+        "oneHopP95": threshold_check(
+            one_hop,
+            limit=ONE_HOP_P95_LIMIT_MS,
+            minimum_samples=1,
+        ),
+        "twoHopP95": threshold_check(
+            two_hop,
+            limit=TWO_HOP_P95_LIMIT_MS,
+            minimum_samples=1,
+        ),
+    }
+    return {
+        "checks": checks,
+        "passed": all(
+            bool(check.get("passed")) for check in checks.values()
+        ),
     }
 
 
@@ -1917,6 +2795,11 @@ def run_query_benchmark(
         degree_latency = _degree_latency(connection)
     finally:
         connection.close()
+    storage_performance = run_storage_path_benchmark(core_path.parent)
+    performance_gates = _runtime_performance_gates(
+        storage_performance,
+        degree_latency,
+    )
     metrics = {
         "protocolCompliance": _metric(
             results,
@@ -2054,6 +2937,9 @@ def run_query_benchmark(
             "max": round(max(latencies), 3) if latencies else 0.0,
             "coldConnection": round(cold_ms, 3),
             "warmConnection": round(warm_ms, 3),
+            "oneHopP95": degree_latency["oneHop"]["p95"],
+            "oneHopP99": degree_latency["oneHop"]["p99"],
+            "oneHopSamples": degree_latency["oneHop"]["samples"],
             "twoHopP95": degree_latency["p95"],
             "twoHopP99": degree_latency["p99"],
             "twoHopSamples": degree_latency["samples"],
@@ -2070,11 +2956,23 @@ def run_query_benchmark(
         },
         "storagePathCoverage": {
             "core": True,
-            "search": False,
-            "cache": False,
-            "complete": False,
-            "gapCode": "SEARCH_CACHE_BENCHMARK_NOT_WIRED",
+            "search": bool(
+                storage_performance["coverage"]["search"]
+            ),
+            "cache": bool(
+                storage_performance["coverage"]["cache"]
+            ),
+            "complete": bool(
+                storage_performance["coverage"]["complete"]
+            ),
+            "gapCode": (
+                ""
+                if storage_performance["coverage"]["complete"]
+                else "SEARCH_CACHE_BENCHMARK_INCOMPLETE"
+            ),
         },
+        "storagePathPerformance": storage_performance,
+        "performanceGates": performance_gates,
         "contextTokens": {
             "maximum": context_max,
             "budget": 2_000,

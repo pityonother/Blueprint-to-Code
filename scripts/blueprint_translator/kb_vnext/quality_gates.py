@@ -678,7 +678,7 @@ def _query_benchmark_gates(
         and gold.get("selectionMode") == "MANUAL_FIXED"
         and gold.get("generatedFromCore") is False
     )
-    return [
+    gates = [
         _gate(
             "queries.fixed_gold_cases",
             "queries",
@@ -825,6 +825,74 @@ def _query_benchmark_gates(
             ),
         ),
     ]
+    raw_performance = benchmark.get("performanceGates")
+    performance = (
+        raw_performance
+        if isinstance(raw_performance, Mapping)
+        else {}
+    )
+    raw_checks = performance.get("checks")
+    checks = raw_checks if isinstance(raw_checks, Mapping) else {}
+    runtime_checks = {
+        "ftsPlanUsed": (
+            "queries.search_fts_plan_used",
+            "FTS EXPLAIN plan uses the virtual-table index.",
+        ),
+        "cacheValidHit": (
+            "queries.cache_valid_hit",
+            "A matching fingerprint is read as a validated cache hit.",
+        ),
+        "cacheExpiredRejected": (
+            "queries.cache_expired_rejected",
+            "An expired query snapshot is rejected before reuse.",
+        ),
+        "cacheSourceRevisionRejected": (
+            "queries.cache_source_revision_rejected",
+            "A changed source-revision set invalidates the cached answer.",
+        ),
+        "cacheInvalidationTokenRejected": (
+            "queries.cache_invalidation_token_rejected",
+            "A changed invalidation token invalidates the cached answer.",
+        ),
+        "cacheBuildRejected": (
+            "queries.cache_build_rejected",
+            "Cache metadata from a different build cannot be reused.",
+        ),
+        "degreeCohortsCovered": (
+            "queries.degree_cohorts_covered",
+            "Every available member, up to 20, is sampled in all cohorts.",
+        ),
+        "fuzzyP95": (
+            "queries.search_fuzzy_p95_ms",
+            "Bounded fuzzy search meets the fixed p95 threshold.",
+        ),
+        "cacheHitP95": (
+            "queries.cache_hit_p95_ms",
+            "Validated cache reads meet the fixed p95 threshold.",
+        ),
+        "oneHopP95": (
+            "queries.one_hop_p95_ms",
+            "Degree-stratified one-hop reads meet the fixed threshold.",
+        ),
+        "twoHopP95": (
+            "queries.degree_stratified_two_hop_p95_ms",
+            "Degree-stratified two-hop reads meet the fixed threshold.",
+        ),
+    }
+    for check_name, (gate_id, detail) in runtime_checks.items():
+        raw_check = checks.get(check_name)
+        check = raw_check if isinstance(raw_check, Mapping) else {}
+        gates.append(
+            _gate(
+                gate_id,
+                "performance",
+                target=check.get("target", True),
+                actual=check.get("actual"),
+                passed=check.get("passed") is True,
+                detail=detail,
+            )
+        )
+    return gates
 
 
 def _typed_map_usage_metrics(

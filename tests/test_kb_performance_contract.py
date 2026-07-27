@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -17,9 +18,20 @@ from blueprint_translator.kb_vnext.benchmark import (  # noqa: E402
     MAJOR_DOMAINS,
     NEGATIVE_CASES,
     TIER_COUNTS,
+    BenchmarkCase,
+    _copy_snapshot_for_benchmark,
+    _expected_gap_requirement,
+    _runtime_performance_gates,
     build_benchmark_cases,
     materialize_benchmark_queries,
     run_query_benchmark,
+    run_storage_path_benchmark,
+)
+from blueprint_translator.kb_vnext.map_usage import (  # noqa: E402
+    MAP_USAGE_EDGE_TYPES,
+)
+from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
+    _query_benchmark_gates,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     FULL_CORE_SCHEMA_SQL,
@@ -89,6 +101,297 @@ def _fixture(path: Path) -> sqlite3.Connection:
 
 
 class KnowledgeBenchmarkContractTests(unittest.TestCase):
+    def test_gap_requirements_share_map_and_relationship_contracts(self):
+        base = {
+            "query_id": "gap-contract",
+            "question": "What is missing?",
+            "category": "MAP",
+            "primary_domain": "map_world",
+            "entity": "/Game/Test/Asset.Asset",
+            "expected": {
+                "route": "EVIDENCE_REQUIRED",
+                "gapCodes": ["MAP_USAGE_INCOMPLETE"],
+                "semanticExpectation": "GAP_ONLY",
+            },
+            "review_status": "FIXTURE_EXACT",
+            "protocol_boundary_only": True,
+        }
+        map_case = BenchmarkCase(
+            **base,
+            request={
+                "entity": base["entity"],
+                "edgeTypes": [],
+                "requiresMapEvidence": True,
+            },
+        )
+        relationship_case = BenchmarkCase(
+            **{
+                **base,
+                "category": "RELATIONSHIP",
+                "primary_domain": "inventory",
+                "request": {
+                    "entity": base["entity"],
+                    "edgeTypes": ["OWNS_COMPONENT"],
+                },
+            }
+        )
+
+        map_requirement = _expected_gap_requirement(
+            map_case,
+            "MAP_USAGE_INCOMPLETE",
+        )
+        relationship_requirement = _expected_gap_requirement(
+            relationship_case,
+            "REFERENCE_CLOSURE_OPEN",
+        )
+
+        self.assertEqual(
+            map_requirement,
+            (
+                f"{', '.join(MAP_USAGE_EDGE_TYPES)}: confirmed typed "
+                "direct, PCG, or World Partition map usage"
+            ),
+        )
+        self.assertEqual(
+            relationship_requirement,
+            "OWNS_COMPONENT:confirmed edge evidence",
+        )
+
+    def test_storage_benchmark_uses_real_fts_and_cache_validation_paths(self):
+        test_root = PROJECT_ROOT / "tests"
+        if str(test_root) not in sys.path:
+            sys.path.insert(0, str(test_root))
+        from test_kb_api import _snapshot
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "vnext"
+            _snapshot(root)
+            report = run_storage_path_benchmark(
+                root,
+                sample_count=3,
+            )
+            original_cache = sqlite3.connect(root / "cache.sqlite")
+            try:
+                original_cache_rows = int(
+                    original_cache.execute(
+                        "SELECT COUNT(*) FROM query_snapshots"
+                    ).fetchone()[0]
+                )
+            finally:
+                original_cache.close()
+
+        self.assertEqual(report["error"], "")
+        self.assertTrue(report["coverage"]["complete"])
+        self.assertTrue(report["search"]["ftsPlanUsed"])
+        self.assertEqual(
+            set(report["search"]["paths"]),
+            {
+                "EXACT_CANONICAL_URI",
+                "EXACT_ALIAS",
+                "FTS_PHRASE",
+                "FUZZY_CANDIDATE",
+            },
+        )
+        for metrics in report["search"]["paths"].values():
+            self.assertTrue(metrics["matchTypeObserved"])
+            self.assertEqual(metrics["samples"], 3)
+            self.assertTrue(
+                {"p50", "p95", "p99"} <= set(metrics)
+            )
+        self.assertEqual(
+            report["search"]["coldOperation"]["samples"],
+            1,
+        )
+        self.assertEqual(
+            report["search"]["warmOperation"]["samples"],
+            3,
+        )
+        for key in (
+            "validHit",
+            "expiredRejected",
+            "sourceRevisionRejected",
+            "invalidationTokenRejected",
+            "buildRejected",
+        ):
+            self.assertTrue(report["cache"][key], key)
+        self.assertEqual(
+            report["cache"]["coldOperation"]["samples"],
+            1,
+        )
+        self.assertEqual(
+            report["cache"]["warmOperation"]["samples"],
+            3,
+        )
+        for store in (
+            "core.sqlite",
+            "search.sqlite",
+            "cache.sqlite",
+        ):
+            connection = report["connections"][store]
+            for mode in ("coldConnection", "warmConnection"):
+                self.assertEqual(connection[mode]["samples"], 3)
+                self.assertTrue(
+                    {"p50", "p95", "p99"} <= set(connection[mode])
+                )
+        self.assertEqual(original_cache_rows, 0)
+
+    def test_storage_benchmark_rejects_manifest_path_escape(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source_root = base / "source" / "snapshot"
+            manifests = source_root / "manifests"
+            manifests.mkdir(parents=True)
+            isolated_root = base / "target" / "snapshot"
+            isolated_root.mkdir(parents=True)
+            payload = {
+                "buildId": "unsafe-build",
+                "databases": {"../escape.sqlite": {}},
+            }
+            manifest_text = json.dumps(payload)
+            (manifests / "current.json").write_text(
+                manifest_text,
+                encoding="utf-8",
+            )
+            (manifests / "unsafe-build.json").write_text(
+                manifest_text,
+                encoding="utf-8",
+            )
+            escaped_source = source_root.parent / "escape.sqlite"
+            escaped_source.write_text("source", encoding="utf-8")
+            escaped_target = isolated_root.parent / "escape.sqlite"
+            escaped_target.write_text("do-not-overwrite", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unsafe snapshot database path",
+            ):
+                _copy_snapshot_for_benchmark(
+                    source_root,
+                    isolated_root,
+                )
+
+            self.assertEqual(
+                escaped_target.read_text(encoding="utf-8"),
+                "do-not-overwrite",
+            )
+
+    def test_runtime_performance_gates_are_fail_closed_and_sample_bound(self):
+        functional_check_names = {
+            "ftsPlanUsed",
+            "cacheValidHit",
+            "cacheExpiredRejected",
+            "cacheSourceRevisionRejected",
+            "cacheInvalidationTokenRejected",
+            "cacheBuildRejected",
+        }
+        missing = _runtime_performance_gates({}, {})
+        self.assertTrue(
+            all(
+                not check["passed"]
+                for check in missing["checks"].values()
+            )
+        )
+
+        storage = {
+            "search": {
+                "ftsPlanUsed": True,
+                "paths": {
+                    "FUZZY_CANDIDATE": {
+                        "samples": 19,
+                        "p95": 1.0,
+                    }
+                },
+            },
+            "cache": {
+                "validHit": True,
+                "expiredRejected": True,
+                "sourceRevisionRejected": True,
+                "invalidationTokenRejected": True,
+                "buildRejected": True,
+                "hit": {"samples": 19, "p95": 1.0},
+            },
+        }
+        degree = {
+            "oneHop": {"samples": 1, "p95": 1.0},
+            "twoHop": {"samples": 1, "p95": 1.0},
+            "byPath": {
+                name: {
+                    "requested": 20,
+                    "available": 1,
+                    "samples": 1,
+                }
+                for name in (
+                    "TOP_OUT_DEGREE",
+                    "TOP_IN_DEGREE",
+                    "TOP_CROSS_DOMAIN",
+                    "RANDOM_MEDIAN_DEGREE",
+                )
+            },
+        }
+        gates = _runtime_performance_gates(storage, degree)
+        self.assertTrue(
+            all(
+                gates["checks"][name]["passed"]
+                for name in functional_check_names
+            )
+        )
+        self.assertFalse(gates["checks"]["fuzzyP95"]["passed"])
+        self.assertFalse(gates["checks"]["cacheHitP95"]["passed"])
+        self.assertTrue(
+            gates["checks"]["degreeCohortsCovered"]["passed"]
+        )
+        self.assertTrue(gates["checks"]["oneHopP95"]["passed"])
+        self.assertTrue(gates["checks"]["twoHopP95"]["passed"])
+        missing_cohort = {
+            **degree,
+            "byPath": {
+                **degree["byPath"],
+                "TOP_CROSS_DOMAIN": {
+                    "requested": 20,
+                    "available": 1,
+                    "samples": 0,
+                },
+            },
+        }
+        self.assertFalse(
+            _runtime_performance_gates(
+                storage,
+                missing_cohort,
+            )["checks"]["degreeCohortsCovered"]["passed"]
+        )
+
+        global_gates = {
+            str(gate["id"]): gate
+            for gate in _query_benchmark_gates(
+                {"performanceGates": gates}
+            )
+        }
+        self.assertTrue(
+            global_gates["queries.search_fts_plan_used"]["passed"]
+        )
+        self.assertFalse(
+            global_gates["queries.search_fuzzy_p95_ms"]["passed"]
+        )
+        absent_global_gates = {
+            str(gate["id"]): gate
+            for gate in _query_benchmark_gates({})
+        }
+        self.assertTrue(
+            all(
+                not absent_global_gates[gate_id]["passed"]
+                for gate_id in (
+                    "queries.search_fts_plan_used",
+                    "queries.cache_valid_hit",
+                    "queries.cache_expired_rejected",
+                    "queries.cache_source_revision_rejected",
+                    "queries.cache_invalidation_token_rejected",
+                    "queries.cache_build_rejected",
+                    "queries.degree_cohorts_covered",
+                    "queries.search_fuzzy_p95_ms",
+                )
+            )
+        )
+
     def test_fixed_shape_has_all_categories_and_negative_families(self):
         connection = sqlite3.connect(":memory:")
         connection.executescript(FULL_CORE_SCHEMA_SQL)
@@ -146,8 +449,8 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
         ]
         self.assertEqual(result["total"], 130)
         self.assertEqual(result["tierCounts"], TIER_COUNTS)
-        self.assertEqual(len(route_matches), 42)
-        self.assertEqual(len(route_mismatches), 88)
+        self.assertEqual(len(route_matches), 28)
+        self.assertEqual(len(route_mismatches), 102)
         self.assertEqual(
             sum(item["protocolCompliance"] for item in route_matches),
             1,
@@ -157,7 +460,7 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
         )
         self.assertEqual(
             sum(item["wrongAnswer"] for item in route_matches),
-            41,
+            27,
         )
         self.assertTrue(all(item["wrongAnswer"] for item in route_mismatches))
         self.assertEqual(result["unresolved"], 129)
@@ -181,7 +484,27 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
         self.assertLessEqual(result["contextTokens"]["maximum"], 2_000)
         self.assertLess(result["latencyMs"]["p95"], 250)
         self.assertLess(result["latencyMs"]["p99"], 250)
+        self.assertLess(result["latencyMs"]["oneHopP95"], 250)
         self.assertLess(result["latencyMs"]["twoHopP95"], 800)
+        self.assertEqual(
+            set(result["latencyMs"]["degreePaths"]),
+            {
+                "TOP_OUT_DEGREE",
+                "TOP_IN_DEGREE",
+                "TOP_CROSS_DOMAIN",
+                "RANDOM_MEDIAN_DEGREE",
+            },
+        )
+        for cohort in result["latencyMs"]["degreePaths"].values():
+            self.assertGreater(cohort["samples"], 0)
+            self.assertTrue(
+                {"p50", "p95", "p99"}
+                <= set(cohort["oneHop"])
+            )
+            self.assertTrue(
+                {"p50", "p95", "p99"}
+                <= set(cohort["twoHop"])
+            )
         self.assertFalse(result["storagePathCoverage"]["complete"])
 
 

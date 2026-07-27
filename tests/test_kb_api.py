@@ -46,8 +46,7 @@ from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CORE_SCHEMA_VERSION,
     FULL_CATALOG_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
-    SEARCH_SCHEMA_SQL,
-    SEARCH_SCHEMA_VERSION,
+    build_search_database,
     database_metrics,
 )
 import blueprint_tool_server as tool_server  # noqa: E402
@@ -156,6 +155,17 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
             (3, "/Game/Test/Other.Other", "Other", "Other"),
         ],
     )
+    core.executemany(
+        """
+        INSERT INTO aliases(
+            alias, entity_id, alias_kind, language, confidence
+        ) VALUES (?, ?, 'DISPLAY_NAME', 'en', 'HIGH')
+        """,
+        [
+            ("PrimaryItem", 1),
+            ("SecondaryItem", 2),
+        ],
+    )
     fact_id = store_fact(
         core,
         ontology=ontology,
@@ -249,23 +259,14 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
     catalog.commit()
     catalog.close()
 
-    search = sqlite3.connect(root / "search.sqlite")
-    search.executescript(SEARCH_SCHEMA_SQL)
-    search.executemany(
-        "INSERT INTO metadata VALUES (?, ?)",
-        [
-            ("schema_version", SEARCH_SCHEMA_VERSION),
-            ("source_fingerprint", semantic_fingerprint),
-            ("snapshot_build_id", build_id),
-            (
-                "snapshot_source_fingerprint",
-                semantic_fingerprint,
-            ),
-            ("generated_at", generated_at),
-        ],
+    build_search_database(
+        core_path=root / "core.sqlite",
+        output_path=root / "search.sqlite",
+        source_fingerprint=semantic_fingerprint,
+        generated_at=generated_at,
+        snapshot_build_id=build_id,
+        snapshot_source_fingerprint=semantic_fingerprint,
     )
-    search.commit()
-    search.close()
 
     cache = sqlite3.connect(root / "cache.sqlite")
     cache.executescript(CACHE_SCHEMA_SQL)
@@ -636,6 +637,230 @@ def _seed_invalid_active_evidence(root: Path, scenario: str) -> None:
 
 
 class KnowledgeApiTests(unittest.TestCase):
+    def test_search_uses_ranked_search_database_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+
+            exact_uri = service.search_entities(
+                query="/Game/Test/ItemA.ItemA",
+            )
+            exact_alias = service.search_entities(query="PrimaryItem")
+            phrase = service.search_entities(query="Item A")
+            prefix = service.search_entities(query="Ite")
+            fuzzy = service.search_entities(query="ItmeA")
+            fuzzy_alias = service.search_entities(query="PrimrayItem")
+
+            search = sqlite3.connect(root / "search.sqlite")
+            try:
+                query_plan = " ".join(
+                    str(row[3])
+                    for row in search.execute(
+                        """
+                        EXPLAIN QUERY PLAN
+                        SELECT rowid FROM entities_fts
+                        WHERE entities_fts MATCH ?
+                        """,
+                        ('"Item"*',),
+                    )
+                )
+            finally:
+                search.close()
+
+        self.assertEqual(
+            exact_uri["items"][0]["matchType"],
+            "EXACT_CANONICAL_URI",
+        )
+        self.assertEqual(
+            exact_alias["items"][0]["matchType"],
+            "EXACT_ALIAS",
+        )
+        self.assertEqual(
+            phrase["items"][0]["matchType"],
+            "FTS_PHRASE",
+        )
+        self.assertEqual(
+            prefix["items"][0]["matchType"],
+            "FTS_PREFIX",
+        )
+        self.assertEqual(
+            fuzzy["items"][0]["matchType"],
+            "FUZZY_CANDIDATE",
+        )
+        self.assertEqual(fuzzy["items"][0]["entityId"], 1)
+        self.assertEqual(
+            fuzzy_alias["items"][0]["matchType"],
+            "FUZZY_CANDIDATE",
+        )
+        self.assertEqual(fuzzy_alias["items"][0]["entityId"], 1)
+        for result in (
+            exact_uri,
+            exact_alias,
+            phrase,
+            prefix,
+            fuzzy,
+            fuzzy_alias,
+        ):
+            self.assertGreater(result["items"][0]["score"], 0.0)
+            self.assertLessEqual(result["items"][0]["score"], 1.0)
+        self.assertIn("VIRTUAL TABLE INDEX", query_plan)
+
+    def test_query_reads_valid_cache_and_reports_hit_miss_metrics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            request = {
+                "entity": "ItemA",
+                "factTypes": ["ITEM_PROPERTY"],
+                "budgetTokens": 500,
+                "evidenceLimit": 10,
+            }
+
+            cold = service.query(request)
+            warm = service.query(request)
+            health = service.health()
+
+        self.assertEqual(cold["cache"]["status"], "MISS")
+        self.assertEqual(warm["cache"]["status"], "HIT")
+        self.assertEqual(warm["status"], cold["status"])
+        self.assertEqual(warm["route"], cold["route"])
+        self.assertEqual(warm["facts"], cold["facts"])
+        self.assertEqual(
+            health["cacheMetrics"],
+            {"hits": 1, "misses": 1},
+        )
+
+    def test_query_rejects_expired_cache_entry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            request = {
+                "entity": "ItemA",
+                "factTypes": ["ITEM_PROPERTY"],
+                "budgetTokens": 500,
+                "evidenceLimit": 10,
+            }
+
+            service.query(request)
+            cache = sqlite3.connect(root / "cache.sqlite")
+            try:
+                cache.execute(
+                    """
+                    UPDATE query_snapshots
+                    SET expires_at='2020-01-01T00:00:00+00:00'
+                    """
+                )
+                cache.commit()
+            finally:
+                cache.close()
+
+            refreshed = service.query(request)
+
+        self.assertEqual(refreshed["cache"]["status"], "MISS")
+        self.assertEqual(refreshed["cache"]["reason"], "EXPIRED")
+
+    def test_query_rejects_changed_source_revision_set(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            request = {
+                "entity": "ItemA",
+                "factTypes": ["ITEM_PROPERTY"],
+                "budgetTokens": 500,
+                "evidenceLimit": 10,
+            }
+
+            service.query(request)
+            core = sqlite3.connect(root / "core.sqlite")
+            try:
+                core.execute(
+                    """
+                    UPDATE source_revisions
+                    SET producer_version='test-v2'
+                    WHERE revision_id=1
+                    """
+                )
+                core.commit()
+            finally:
+                core.close()
+            _refresh_snapshot_database_metrics(root)
+
+            refreshed = service.query(request)
+
+        self.assertEqual(refreshed["cache"]["status"], "MISS")
+        self.assertEqual(
+            refreshed["cache"]["reason"],
+            "SOURCE_REVISION_SET_CHANGED",
+        )
+
+    def test_query_rejects_changed_invalidation_token(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            request = {
+                "entity": "ItemA",
+                "factTypes": ["ITEM_PROPERTY"],
+                "budgetTokens": 500,
+                "evidenceLimit": 10,
+            }
+
+            service.query(request)
+            core = sqlite3.connect(root / "core.sqlite")
+            try:
+                core.execute(
+                    """
+                    INSERT INTO invalidation_events(
+                        event_id, event_kind, upstream_revision_id,
+                        payload_json, created_at, status
+                    ) VALUES (
+                        'event://fixture/1', 'SOURCE_REVISION_CHANGED', 1,
+                        '{}', '2026-07-28T00:00:00+00:00', 'PENDING'
+                    )
+                    """
+                )
+                core.commit()
+            finally:
+                core.close()
+            _refresh_snapshot_database_metrics(root)
+
+            refreshed = service.query(request)
+
+        self.assertEqual(refreshed["cache"]["status"], "MISS")
+        self.assertEqual(
+            refreshed["cache"]["reason"],
+            "INVALIDATION_TOKEN_CHANGED",
+        )
+
+    def test_query_rejects_cache_from_another_build(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            service = _snapshot(root)
+            request = {
+                "entity": "ItemA",
+                "factTypes": ["ITEM_PROPERTY"],
+                "budgetTokens": 500,
+                "evidenceLimit": 10,
+            }
+
+            service.query(request)
+            cache = sqlite3.connect(root / "cache.sqlite")
+            try:
+                cache.execute(
+                    """
+                    UPDATE metadata
+                    SET value='snapshot-build://another'
+                    WHERE key='snapshot_build_id'
+                    """
+                )
+                cache.commit()
+            finally:
+                cache.close()
+
+            refreshed = service.query(request)
+
+        self.assertEqual(refreshed["cache"]["status"], "MISS")
+        self.assertEqual(refreshed["cache"]["reason"], "BUILD_MISMATCH")
+
     def test_http_routes_inherit_session_origin_and_host_security(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             service = _snapshot(Path(temp_dir) / "vnext")
