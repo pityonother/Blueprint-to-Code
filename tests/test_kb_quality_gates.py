@@ -23,6 +23,7 @@ from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     _class_closure_metrics,
     _effective_candidate_metrics,
     _integrity_metrics,
+    _native_gold_metrics,
     _privacy_scan,
     _query_benchmark_gates,
     _registration_confidence_gate,
@@ -847,6 +848,93 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             "TYPED_MAP_USAGE_CAPABILITY_MISSING",
         )
         self.assertTrue(all(not bool(gate["passed"]) for gate in gates))
+        core.close()
+
+    def test_native_gold_metrics_require_exact_identity_and_no_gap(self):
+        core = sqlite3.connect(":memory:")
+        core.executescript(FULL_CORE_SCHEMA_SQL)
+        core.execute(
+            """
+            INSERT INTO source_revisions(
+                revision_id, source_kind, source_uri, source_fingerprint,
+                producer_version, schema_version, generated_at,
+                freshness_status
+            ) VALUES (
+                1, 'native_evidence', 'native-evidence://fixture',
+                'fixture-sha', 'fixture-producer', 'fixture-schema',
+                '2026-07-28T00:00:00Z', 'FRESH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO native_functions(
+                native_function_id, canonical_uri, qualified_symbol,
+                module_name, rva, signature, binary_sha256, pdb_sha256,
+                pdb_guid_age, recipe_ids_json, evidence_set_ids_json,
+                caller_count, callee_count, callsite_status, status,
+                confidence, source_revision_id
+            ) VALUES (
+                1, 'native-function://fixture/Test::Run',
+                'Test::Run', 'Fixture', '0x0000000000001234',
+                'void Test::Run()', 'binary-sha', 'pdb-sha', 'guid-age',
+                '["fixture-recipe"]', '["fixture-evidence"]',
+                0, 0, 'NOT_RECOVERED', 'CONFIRMED', 'HIGH', 1
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO native_gold_targets(
+                target_id, domain_id, qualified_symbol, expected_rva,
+                recipe_id, native_function_id, status, gap_code
+            ) VALUES (
+                'target-1', 'fixture-domain', 'Test::Run',
+                '0x0000000000001234', 'fixture-recipe', 1,
+                'CONFIRMED', ''
+            )
+            """
+        )
+
+        self.assertEqual(
+            _native_gold_metrics(core),
+            {"targets": 1, "confirmed": 1},
+        )
+
+        invalid_mutations = (
+            ("gap_code", "SOURCE_REVISION_STALE"),
+            ("qualified_symbol", "Other::Run"),
+            ("expected_rva", "0x0000000000009999"),
+            ("recipe_id", "other-recipe"),
+        )
+        for column, value in invalid_mutations:
+            with self.subTest(column=column):
+                core.execute(
+                    f"UPDATE native_gold_targets SET {column}=?",
+                    (value,),
+                )
+                self.assertEqual(
+                    _native_gold_metrics(core),
+                    {"targets": 1, "confirmed": 0},
+                )
+                core.execute("DELETE FROM native_gold_targets")
+                core.execute(
+                    """
+                    INSERT INTO native_gold_targets VALUES (
+                        'target-1', 'fixture-domain', 'Test::Run',
+                        '0x0000000000001234', 'fixture-recipe', 1,
+                        'CONFIRMED', ''
+                    )
+                    """
+                )
+
+        core.execute(
+            "UPDATE native_functions SET recipe_ids_json='{broken'"
+        )
+        self.assertEqual(
+            _native_gold_metrics(core),
+            {"targets": 1, "confirmed": 0},
+        )
         core.close()
 
     def test_typed_map_metrics_validate_confirmed_candidate_and_stale_rows(

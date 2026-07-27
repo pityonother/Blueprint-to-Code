@@ -456,6 +456,52 @@ def _role_gold_metrics(project_root: Path) -> dict[str, object]:
     }
 
 
+def _native_gold_metrics(
+    core: sqlite3.Connection,
+) -> dict[str, int]:
+    """Count only gold targets bound to the exact fresh native identity."""
+
+    targets, confirmed = core.execute(
+        """
+        SELECT COUNT(*),
+               SUM(
+                 CASE
+                   WHEN target.status='CONFIRMED'
+                    AND target.gap_code=''
+                    AND function.status='CONFIRMED'
+                    AND function.confidence='HIGH'
+                    AND revision.freshness_status='FRESH'
+                    AND target.qualified_symbol=function.qualified_symbol
+                    AND target.expected_rva=function.rva
+                    AND EXISTS (
+                      SELECT 1
+                      FROM json_each(
+                        CASE
+                          WHEN json_valid(function.recipe_ids_json)
+                          THEN function.recipe_ids_json
+                          ELSE '[]'
+                        END
+                      ) AS recipe
+                      WHERE recipe.type='text'
+                        AND recipe.value=target.recipe_id
+                    )
+                   THEN 1
+                   ELSE 0
+                 END
+               )
+        FROM native_gold_targets AS target
+        LEFT JOIN native_functions AS function
+          ON function.native_function_id=target.native_function_id
+        LEFT JOIN source_revisions AS revision
+          ON revision.revision_id=function.source_revision_id
+        """
+    ).fetchone()
+    return {
+        "targets": int(targets or 0),
+        "confirmed": int(confirmed or 0),
+    }
+
+
 def _integrity_metrics(snapshot_root: Path) -> dict[str, object]:
     result: dict[str, object] = {}
     paths = [
@@ -1374,28 +1420,9 @@ def evaluate_quality_gates(
                 ),
             ]
         )
-        native_targets, native_confirmed = core.execute(
-            """
-            SELECT COUNT(*),
-                   SUM(
-                     CASE
-                       WHEN target.status='CONFIRMED'
-                        AND function.status='CONFIRMED'
-                        AND function.confidence='HIGH'
-                        AND revision.freshness_status='FRESH'
-                       THEN 1
-                       ELSE 0
-                     END
-                   )
-            FROM native_gold_targets AS target
-            LEFT JOIN native_functions AS function
-              ON function.native_function_id=target.native_function_id
-            LEFT JOIN source_revisions AS revision
-              ON revision.revision_id=function.source_revision_id
-            """
-        ).fetchone()
-        native_targets = int(native_targets or 0)
-        native_confirmed = int(native_confirmed or 0)
+        native_gold = _native_gold_metrics(core)
+        native_targets = native_gold["targets"]
+        native_confirmed = native_gold["confirmed"]
         confirmed_links, valid_links = core.execute(
             """
             SELECT
