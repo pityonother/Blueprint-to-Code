@@ -35,6 +35,80 @@ def _ratio(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator else 0.0
 
 
+def _class_closure_metrics(
+    core: sqlite3.Connection,
+) -> dict[str, int | float]:
+    placeholders = ", ".join("?" for _ in OPEN_CLASS_GAPS)
+    row = core.execute(
+        f"""
+        WITH selected_assignment AS (
+            SELECT
+                policy.entity_id,
+                COALESCE(
+                    MAX(
+                        CASE
+                            WHEN assignment.assignment_kind='GENERATED_CLASS'
+                            THEN assignment.class_id
+                        END
+                    ),
+                    MAX(
+                        CASE
+                            WHEN assignment.assignment_kind='ASSET_CLASS'
+                            THEN assignment.class_id
+                        END
+                    )
+                ) AS class_id
+            FROM knowledge_depth_policies AS policy
+            LEFT JOIN asset_class_assignments AS assignment
+              ON assignment.entity_id=policy.entity_id
+            WHERE policy.depth_policy IN ('DEEP', 'SEMANTIC')
+            GROUP BY policy.entity_id
+        ),
+        open_class AS (
+            SELECT DISTINCT class_id
+            FROM class_gaps
+            WHERE gap_kind IN ({placeholders})
+        )
+        SELECT
+            COUNT(*) AS total_count,
+            SUM(CASE WHEN selected.class_id IS NOT NULL THEN 1 ELSE 0 END)
+                AS applicable_count,
+            SUM(CASE WHEN selected.class_id IS NULL THEN 1 ELSE 0 END)
+                AS not_applicable_count,
+            SUM(
+                CASE
+                    WHEN selected.class_id IS NOT NULL
+                     AND open.class_id IS NULL
+                    THEN 1 ELSE 0
+                END
+            ) AS closed_count,
+            SUM(
+                CASE
+                    WHEN selected.class_id IS NOT NULL
+                     AND open.class_id IS NOT NULL
+                    THEN 1 ELSE 0
+                END
+            ) AS open_count
+        FROM selected_assignment AS selected
+        LEFT JOIN open_class AS open ON open.class_id=selected.class_id
+        """,
+        OPEN_CLASS_GAPS,
+    ).fetchone()
+    total_count = int(row[0] or 0)
+    applicable_count = int(row[1] or 0)
+    not_applicable_count = int(row[2] or 0)
+    closed_count = int(row[3] or 0)
+    open_count = int(row[4] or 0)
+    return {
+        "classApplicableCount": applicable_count,
+        "classClosedCount": closed_count,
+        "classNotApplicableCount": not_applicable_count,
+        "classOpenCount": open_count,
+        "deepSemanticEntityCount": total_count,
+        "closureRate": _ratio(closed_count, applicable_count),
+    }
+
+
 def _gate(
     gate_id: str,
     category: str,
@@ -222,40 +296,24 @@ def evaluate_quality_gates(
                 detail=f"{class_known}/{blueprint_total} Blueprint assets",
             )
         )
-        deep_total = int(
-            core.execute(
-                """
-                SELECT COUNT(*) FROM knowledge_depth_policies
-                WHERE depth_policy IN ('DEEP', 'SEMANTIC')
-                """
-            ).fetchone()[0]
+        closure_metrics = _class_closure_metrics(core)
+        closure_rate = float(closure_metrics["closureRate"])
+        applicable_count = int(
+            closure_metrics["classApplicableCount"]
         )
-        deep_open = int(
-            core.execute(
-                """
-                SELECT COUNT(DISTINCT policy.entity_id)
-                FROM knowledge_depth_policies AS policy
-                LEFT JOIN asset_class_assignments AS assignment
-                  ON assignment.entity_id=policy.entity_id
-                 AND assignment.assignment_kind='GENERATED_CLASS'
-                LEFT JOIN class_gaps AS gap
-                  ON gap.class_id=assignment.class_id
-                 AND gap.gap_kind IN (?, ?, ?)
-                WHERE policy.depth_policy IN ('DEEP', 'SEMANTIC')
-                  AND (assignment.class_id IS NULL OR gap.class_id IS NOT NULL)
-                """,
-                OPEN_CLASS_GAPS,
-            ).fetchone()[0]
-        )
-        closure_rate = _ratio(deep_total - deep_open, deep_total)
         gates.append(
             _gate(
                 "identity.deep_parent_native_closure",
                 "identity",
                 target=">=0.98",
-                actual=closure_rate,
-                passed=deep_total > 0 and closure_rate >= 0.98,
-                detail=f"{deep_total - deep_open}/{deep_total} deep/semantic entities",
+                actual=closure_metrics,
+                passed=applicable_count > 0 and closure_rate >= 0.98,
+                detail=(
+                    f"{closure_metrics['classClosedCount']}/"
+                    f"{applicable_count} applicable deep/semantic entities; "
+                    f"{closure_metrics['classNotApplicableCount']} "
+                    "not applicable"
+                ),
             )
         )
         class_gap_count = int(

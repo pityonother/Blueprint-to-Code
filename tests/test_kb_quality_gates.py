@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     QUALITY_GATE_SCHEMA,
+    _class_closure_metrics,
     publish_gate_report,
 )
 
@@ -87,6 +89,53 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             )
         self.assertEqual(cutover["mode"], "ready")
         self.assertEqual(cutover["defaultQuerySource"], "vnext")
+
+    def test_class_closure_gate_prefers_generated_then_asset_assignment(self):
+        core = sqlite3.connect(":memory:")
+        core.executescript(
+            """
+            CREATE TABLE knowledge_depth_policies(
+                entity_id INTEGER PRIMARY KEY,
+                depth_policy TEXT NOT NULL
+            );
+            CREATE TABLE asset_class_assignments(
+                entity_id INTEGER NOT NULL,
+                class_id INTEGER NOT NULL,
+                assignment_kind TEXT NOT NULL
+            );
+            CREATE TABLE class_gaps(
+                class_id INTEGER NOT NULL,
+                gap_kind TEXT NOT NULL
+            );
+
+            INSERT INTO knowledge_depth_policies VALUES (1, 'DEEP');
+            INSERT INTO knowledge_depth_policies VALUES (2, 'SEMANTIC');
+            INSERT INTO knowledge_depth_policies VALUES (3, 'DEEP');
+            INSERT INTO knowledge_depth_policies VALUES (4, 'DEEP');
+            INSERT INTO knowledge_depth_policies VALUES (5, 'INDEX_ONLY');
+
+            INSERT INTO asset_class_assignments VALUES
+                (1, 101, 'GENERATED_CLASS'),
+                (1, 201, 'ASSET_CLASS'),
+                (2, 202, 'ASSET_CLASS'),
+                (3, 203, 'ASSET_CLASS'),
+                (5, 205, 'ASSET_CLASS');
+
+            INSERT INTO class_gaps VALUES
+                (201, 'NATIVE_ROOT_NOT_REACHED'),
+                (203, 'NATIVE_ROOT_NOT_REACHED'),
+                (205, 'NATIVE_ROOT_NOT_REACHED');
+            """
+        )
+
+        metrics = _class_closure_metrics(core)
+
+        self.assertEqual(metrics["classApplicableCount"], 3)
+        self.assertEqual(metrics["classClosedCount"], 2)
+        self.assertEqual(metrics["classNotApplicableCount"], 1)
+        self.assertEqual(metrics["classOpenCount"], 1)
+        self.assertAlmostEqual(metrics["closureRate"], 2 / 3)
+        core.close()
 
 
 if __name__ == "__main__":
