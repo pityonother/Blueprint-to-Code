@@ -1,0 +1,69 @@
+{
+  "bounds": {
+    "provisionalRowsPerTier": 300,
+    "targetBytes": 20971520,
+    "topRowsPerFile": 300
+  },
+  "exportRowCounts": {
+    "class_identity_coverage.csv": 300,
+    "current_provisional_tiers.csv": 1051,
+    "data_asset_classification_candidates.csv": 94,
+    "existing_kb_coverage.csv": 74,
+    "query_corpus.jsonl": 38,
+    "representative_sample_manifest.json": 109,
+    "stale_and_high_gap_assets.csv": 300,
+    "system_registration_summary.csv": 4,
+    "top_component_reuse_assets.csv": 0,
+    "top_cross_domain_assets.csv": 300,
+    "top_descendant_assets.csv": 300,
+    "top_native_boundary_candidates.csv": 50,
+    "top_referenced_assets.csv": 300,
+    "top_registration_targets.csv": 26
+  },
+  "schema": "blueprint-to-code-kb-discovery-review/v1",
+  "source": {
+    "databaseSha256": "9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50",
+    "databaseSizeBytes": 3816177664,
+    "discoveryGeneratedAt": "2026-07-26T22:13:14+00:00",
+    "discoverySchema": "blueprint-to-code-kb-discovery/v1",
+    "sourceCommit": "7411c56310c4096afd35e536fd18cd4de32f432e"
+  },
+  "sqlFiles": [
+    "class_identity_coverage.csv",
+    "current_provisional_tiers.csv",
+    "data_asset_classification_candidates.csv",
+    "existing_kb_coverage.csv",
+    "query_corpus.jsonl",
+    "representative_sample_manifest.json",
+    "stale_and_high_gap_assets.csv",
+    "system_registration_summary.csv",
+    "top_component_reuse_assets.csv",
+    "top_cross_domain_assets.csv",
+    "top_descendant_assets.csv",
+    "top_native_boundary_candidates.csv",
+    "top_referenced_assets.csv",
+    "top_registration_targets.csv"
+  ],
+  "tableCounts": {
+    "asset_references": 3480942,
+    "assets": 577579,
+    "blueprint_functions": 2062,
+    "blueprint_native_edges": 132,
+    "class_edges": 38394,
+    "components": 147,
+    "coverage": 1155160,
+    "default_property_surface": 10588,
+    "existing_knowledge_tables": 74,
+    "graphs": 2252,
+    "interfaces": 2494,
+    "metadata": 9,
+    "native_field_accesses": 0,
+    "native_gap_summary": 3,
+    "native_symbols": 204,
+    "query_corpus": 38,
+    "sample_membership": 109,
+    "scan_failures": 26,
+    "source_inventory": 5,
+    "system_registrations": 27
+  }
+}

@@ -1,0 +1,5 @@
+registration_type,registration_count,owner_count,target_count,high_confidence_count,non_high_confidence_count
+global_asset_reference,14,4,13,14,0
+buff_registration,7,2,7,0,7
+creature_registration,4,2,4,0,4
+item_registration,2,1,2,0,2
