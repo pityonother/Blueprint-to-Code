@@ -70,8 +70,6 @@ class FixedGoldCorpusTests(unittest.TestCase):
                     case.expected.get("identityEvidence"),
                     dict,
                 )
-                and case.expected["identityEvidence"].get("evidenceUri")
-                == "discovery://ark/full-snapshot"
                 and case.expected["identityEvidence"].get("evidenceRole")
                 == "IDENTITY_REVISION"
                 and isinstance(
@@ -80,6 +78,31 @@ class FixedGoldCorpusTests(unittest.TestCase):
                     ),
                     dict,
                 )
+                and case.expected["identityEvidence"].get("evidenceUri")
+                == case.expected["identityEvidence"]["sourceRevision"].get(
+                    "sourceUri"
+                )
+                and case.expected["identityEvidence"]["sourceRevision"].get(
+                    "sourceKind"
+                )
+                == "asset_package"
+                and str(
+                    case.expected["identityEvidence"]["sourceRevision"].get(
+                        "sourceUri"
+                    )
+                ).startswith("package:///Game/")
+                and case.expected["identityEvidence"]["sourceRevision"].get(
+                    "schemaVersion"
+                )
+                == "ark-asset-package/v1"
+                and len(
+                    str(
+                        case.expected["identityEvidence"][
+                            "sourceRevision"
+                        ].get("sourceFingerprint")
+                    )
+                )
+                == 64
                 for case in identity_cases
             )
         )
@@ -101,7 +124,10 @@ class FixedGoldCorpusTests(unittest.TestCase):
                 and case.expected["relationships"][0][
                     "evidenceLayer"
                 ]
-                == "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY"
+                in {
+                    "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+                    "ASSET_REGISTRY_SOFT_PACKAGE_DEPENDENCY",
+                }
                 and case.expected["relationships"][0][
                     "claimsCompleteMapUsage"
                 ]

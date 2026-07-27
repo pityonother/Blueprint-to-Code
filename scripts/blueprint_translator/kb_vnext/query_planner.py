@@ -77,6 +77,11 @@ CLASS_EVIDENCE_COMPLETE_STATUSES = frozenset(
         *RELATIONSHIP_COMPLETE_STATUSES,
     }
 )
+FACT_BACKED_RELATIONSHIP_RULES = {
+    "OWNS_COMPONENT": (
+        ("HARVEST_RULE", "DeathHarvestingComponent"),
+    ),
+}
 OPEN_STATUSES = {
     "UNKNOWN",
     "AMBIGUOUS",
@@ -166,6 +171,20 @@ def is_valid_generic_evidence_uri(value: object) -> bool:
     return is_recovered_evidence_uri(
         value,
         allowed_schemes=GENERIC_EVIDENCE_URI_SCHEMES,
+    )
+
+
+def _is_valid_relationship_target_uri(value: object) -> bool:
+    raw = str(value or "")
+    text = raw.strip()
+    leaf = text.rsplit("/", 1)[-1]
+    return (
+        raw == text
+        and text.startswith(("/Game/", "/Mods/", "/Script/"))
+        and "." in leaf
+        and "\\" not in text
+        and ":" not in text
+        and ".." not in text
     )
 
 
@@ -1532,6 +1551,185 @@ def _native_mechanism_projection(
     return relationship, evidence
 
 
+def _class_assignment_relationships(
+    connection: sqlite3.Connection,
+    *,
+    entity_id: int,
+) -> list[dict[str, object]]:
+    rows = connection.execute(
+        """
+        SELECT
+            assignment.class_id, assignment.status,
+            assignment.confidence, assignment.evidence_uri,
+            class.class_path, revision.revision_id,
+            revision.source_kind, revision.source_uri,
+            revision.source_fingerprint, revision.producer_version,
+            revision.schema_version, revision.generated_at,
+            revision.freshness_status
+        FROM asset_class_assignments AS assignment
+        JOIN classes AS class ON class.class_id=assignment.class_id
+        LEFT JOIN source_revisions AS revision
+          ON revision.revision_id=assignment.source_revision_id
+        WHERE assignment.entity_id=?
+          AND assignment.assignment_kind='ASSET_CLASS'
+        ORDER BY assignment.class_id
+        """,
+        (entity_id,),
+    )
+    relationships: list[dict[str, object]] = []
+    for row in rows:
+        revision = (
+            {
+                "revisionId": int(row[5]),
+                "sourceKind": str(row[6]),
+                "sourceUri": str(row[7]),
+                "sourceFingerprint": str(row[8]),
+                "producerVersion": str(row[9]),
+                "schemaVersion": str(row[10]),
+                "generatedAt": str(row[11]),
+                "freshness": str(row[12]),
+            }
+            if row[5] is not None
+            else None
+        )
+        edge_id = f"class-assignment:{entity_id}:{int(row[0])}"
+        evidence = {
+            "edgeId": edge_id,
+            "classId": int(row[0]),
+            "evidenceUri": str(row[3]),
+            "evidenceRole": "CLASS_ASSIGNMENT",
+            "sourceRevisionId": (
+                revision.get("revisionId")
+                if revision is not None
+                else None
+            ),
+            "sourceRevision": revision,
+            "freshness": str(row[12] or "UNKNOWN"),
+        }
+        raw_status = str(row[1]).upper()
+        target_uri = str(row[4])
+        relationships.append(
+            {
+                "edgeId": edge_id,
+                "edgeType": "ASSET_CLASS",
+                "edgeStrength": "DIRECT_ASSIGNMENT",
+                "status": (
+                    "CONFIRMED"
+                    if (
+                        raw_status in CLASS_EVIDENCE_COMPLETE_STATUSES
+                        and _is_valid_relationship_target_uri(target_uri)
+                    )
+                    else raw_status
+                ),
+                "sourceEvidenceStatus": raw_status,
+                "confidence": str(row[2]),
+                "sourceEntityId": entity_id,
+                "targetUri": target_uri,
+                "evidenceUri": str(row[3]),
+                "sourceRevisionId": evidence["sourceRevisionId"],
+                "sourceRevision": revision,
+                "freshness": str(row[12] or "UNKNOWN"),
+                "evidence": [evidence],
+            }
+        )
+    return relationships
+
+
+def _fact_backed_relationships(
+    connection: sqlite3.Connection,
+    *,
+    entity_id: int,
+    edge_type: str,
+) -> list[dict[str, object]]:
+    rules = FACT_BACKED_RELATIONSHIP_RULES.get(edge_type, ())
+    projected: dict[int, dict[str, object]] = {}
+    for fact_type, fact_name in rules:
+        rows = connection.execute(
+            """
+            SELECT
+                fact.fact_id, fact.fact_name, fact.value_text,
+                fact.status, fact.confidence, evidence.evidence_uri,
+                evidence.evidence_role, revision.revision_id,
+                revision.source_kind, revision.source_uri,
+                revision.source_fingerprint, revision.producer_version,
+                revision.schema_version, revision.generated_at,
+                revision.freshness_status
+            FROM facts AS fact
+            LEFT JOIN fact_evidence AS evidence
+              ON evidence.fact_id=fact.fact_id
+            LEFT JOIN source_revisions AS revision
+              ON revision.revision_id=evidence.source_revision_id
+            WHERE fact.subject_entity_id=?
+              AND fact.current=1
+              AND fact.fact_type=?
+              AND fact.fact_name=?
+              AND fact.value_kind='ENTITY_REF'
+            ORDER BY fact.fact_id, evidence.evidence_uri
+            """,
+            (entity_id, fact_type, fact_name),
+        )
+        for row in rows:
+            fact_id = int(row[0])
+            revision = (
+                {
+                    "revisionId": int(row[7]),
+                    "sourceKind": str(row[8]),
+                    "sourceUri": str(row[9]),
+                    "sourceFingerprint": str(row[10]),
+                    "producerVersion": str(row[11]),
+                    "schemaVersion": str(row[12]),
+                    "generatedAt": str(row[13]),
+                    "freshness": str(row[14]),
+                }
+                if row[7] is not None
+                else None
+            )
+            target_uri = str(row[2] or "")
+            raw_status = str(row[3])
+            relationship = projected.setdefault(
+                fact_id,
+                {
+                    "edgeId": f"fact-relationship:{fact_id}:{edge_type}",
+                    "edgeType": edge_type,
+                    "edgeStrength": "TYPED_FACT",
+                    "status": (
+                        raw_status
+                        if _is_valid_relationship_target_uri(target_uri)
+                        else "NOT_RECOVERED"
+                    ),
+                    "confidence": str(row[4]),
+                    "sourceEntityId": entity_id,
+                    "targetUri": target_uri,
+                    "sourceProperty": str(row[1]),
+                    "factId": fact_id,
+                    "evidenceUri": str(row[5] or ""),
+                    "sourceRevisionId": (
+                        revision.get("revisionId")
+                        if revision is not None
+                        else None
+                    ),
+                    "sourceRevision": revision,
+                    "freshness": str(row[14] or "UNKNOWN"),
+                    "evidence": [],
+                },
+            )
+            evidence_uri = str(row[5] or "")
+            if not evidence_uri or revision is None:
+                continue
+            relationship["evidence"].append(
+                {
+                    "edgeId": relationship["edgeId"],
+                    "factId": fact_id,
+                    "evidenceUri": evidence_uri,
+                    "evidenceRole": str(row[6]),
+                    "sourceRevisionId": revision["revisionId"],
+                    "sourceRevision": revision,
+                    "freshness": str(row[14]),
+                }
+            )
+    return list(projected.values())
+
+
 def load_effective_class_evidence(
     connection: sqlite3.Connection,
     *,
@@ -2083,70 +2281,84 @@ def plan_query(
             relationship_gate_freshness.append(map_freshness)
             handled_map_edge_types.add(normalized_edge_type)
             continue
-        rows = list(
-            connection.execute(
-                """
-                SELECT
-                    edge.edge_id, edge.edge_type, edge.edge_strength,
-                    edge.status, edge.confidence, target.entity_id,
-                    target.canonical_uri, edge.evidence_uri,
-                    revision.revision_id, revision.source_kind,
-                    revision.source_uri, revision.source_fingerprint,
-                    revision.producer_version, revision.schema_version,
-                    revision.generated_at,
-                    revision.freshness_status
-                FROM edges AS edge
-                JOIN entities AS target
-                  ON target.entity_id=edge.target_entity_id
-                JOIN source_revisions AS revision
-                  ON revision.revision_id=edge.source_revision_id
-                WHERE edge.source_entity_id=? AND edge.edge_type=?
-                ORDER BY edge.edge_id
-                """,
-                (entity_id, normalized_edge_type),
+        if normalized_edge_type == "ASSET_CLASS":
+            projected_rows = _class_assignment_relationships(
+                connection,
+                entity_id=entity_id,
             )
-        )
-        projected_rows: list[dict[str, object]] = []
-        for row in rows:
-            source_revision = {
-                "revisionId": int(row[8]),
-                "sourceKind": str(row[9]),
-                "sourceUri": str(row[10]),
-                "sourceFingerprint": str(row[11]),
-                "producerVersion": str(row[12]),
-                "schemaVersion": str(row[13]),
-                "generatedAt": str(row[14]),
-                "freshness": str(row[15]),
-            }
-            edge_evidence = {
-                "edgeId": int(row[0]),
-                "evidenceUri": str(row[7]),
-                "evidenceRole": "EDGE_EVIDENCE",
-                "sourceRevisionId": int(row[8]),
-                "sourceRevision": source_revision,
-                "freshness": str(row[15]),
-            }
-            projected_rows.append(
-                {
+        elif normalized_edge_type in FACT_BACKED_RELATIONSHIP_RULES:
+            projected_rows = _fact_backed_relationships(
+                connection,
+                entity_id=entity_id,
+                edge_type=normalized_edge_type,
+            )
+        else:
+            rows = list(
+                connection.execute(
+                    """
+                    SELECT
+                        edge.edge_id, edge.edge_type, edge.edge_strength,
+                        edge.status, edge.confidence, target.entity_id,
+                        target.canonical_uri, edge.evidence_uri,
+                        revision.revision_id, revision.source_kind,
+                        revision.source_uri, revision.source_fingerprint,
+                        revision.producer_version, revision.schema_version,
+                        revision.generated_at,
+                        revision.freshness_status
+                    FROM edges AS edge
+                    JOIN entities AS target
+                      ON target.entity_id=edge.target_entity_id
+                    JOIN source_revisions AS revision
+                      ON revision.revision_id=edge.source_revision_id
+                    WHERE edge.source_entity_id=? AND edge.edge_type=?
+                    ORDER BY edge.edge_id
+                    """,
+                    (entity_id, normalized_edge_type),
+                )
+            )
+            projected_rows = []
+            for row in rows:
+                source_revision = {
+                    "revisionId": int(row[8]),
+                    "sourceKind": str(row[9]),
+                    "sourceUri": str(row[10]),
+                    "sourceFingerprint": str(row[11]),
+                    "producerVersion": str(row[12]),
+                    "schemaVersion": str(row[13]),
+                    "generatedAt": str(row[14]),
+                    "freshness": str(row[15]),
+                }
+                edge_evidence = {
                     "edgeId": int(row[0]),
-                    "edgeType": str(row[1]),
-                    "edgeStrength": str(row[2]),
-                    "status": str(row[3]),
-                    "confidence": str(row[4]),
-                    "targetEntityId": int(row[5]),
-                    "targetUri": str(row[6]),
                     "evidenceUri": str(row[7]),
+                    "evidenceRole": "EDGE_EVIDENCE",
                     "sourceRevisionId": int(row[8]),
                     "sourceRevision": source_revision,
                     "freshness": str(row[15]),
-                    "evidence": [edge_evidence],
                 }
-            )
-        if not rows:
+                projected_rows.append(
+                    {
+                        "edgeId": int(row[0]),
+                        "edgeType": str(row[1]),
+                        "edgeStrength": str(row[2]),
+                        "status": str(row[3]),
+                        "confidence": str(row[4]),
+                        "targetEntityId": int(row[5]),
+                        "targetUri": str(row[6]),
+                        "evidenceUri": str(row[7]),
+                        "sourceRevisionId": int(row[8]),
+                        "sourceRevision": source_revision,
+                        "freshness": str(row[15]),
+                        "evidence": [edge_evidence],
+                    }
+                )
+        if not projected_rows:
             missing.append(
                 {
                     "code": "REFERENCE_CLOSURE_OPEN",
-                    "requirement": normalized_edge_type,
+                    "requirement": (
+                        f"{normalized_edge_type}:confirmed edge evidence"
+                    ),
                 }
             )
             relationship_gate_freshness.append("UNKNOWN")
@@ -2170,16 +2382,18 @@ def plan_query(
             returned_usable_rows = usable_rows[:evidence_limit]
             relationships.extend(returned_usable_rows)
             relationship_evidence.extend(
-                relationship["evidence"][0]
+                evidence
                 for relationship in returned_usable_rows
+                for evidence in relationship.get("evidence", [])
             )
             relationship_gate_freshness.append("FRESH")
             continue
         returned_projected_rows = projected_rows[:evidence_limit]
         relationships.extend(returned_projected_rows)
         relationship_evidence.extend(
-            relationship["evidence"][0]
+            evidence
             for relationship in returned_projected_rows
+            for evidence in relationship.get("evidence", [])
         )
         has_stale_row = any(
             str(relationship["status"]).upper() == "STALE"

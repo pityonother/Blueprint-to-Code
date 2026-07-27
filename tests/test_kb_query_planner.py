@@ -1144,6 +1144,141 @@ class KnowledgeQueryPlannerTests(unittest.TestCase):
                 )
                 connection.close()
 
+    def test_asset_class_assignment_is_a_typed_relationship(self):
+        connection = _fixture()
+        connection.execute(
+            """
+            INSERT INTO classes(
+                class_id, class_path, class_name, module_or_package,
+                class_kind, is_native, source_revision_id,
+                status, confidence
+            ) VALUES (
+                12, '/Script/Engine.Blueprint', 'Blueprint', 'Engine',
+                'NATIVE_CLASS', 1, 1, 'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO asset_class_assignments(
+                entity_id, class_id, assignment_kind, evidence_uri,
+                status, confidence, source_revision_id
+            ) VALUES (
+                1, 12, 'ASSET_CLASS',
+                'discovery://asset/%2FGame%2FTest%2FItem.Item#asset-class',
+                'EXTRACTED', 'HIGH', 1
+            )
+            """
+        )
+
+        result = plan_query(
+            connection,
+            QueryRequirements(
+                entity_query="/Game/Test/Item.Item",
+                edge_types=("ASSET_CLASS",),
+                answer_mode="RELATIONSHIP",
+            ),
+        )
+
+        self.assertEqual(result["route"], "DB_SEMANTIC_COMPLETE")
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["missingRequirements"], [])
+        self.assertEqual(len(result["relationships"]), 1)
+        relationship = result["relationships"][0]
+        self.assertEqual(relationship["edgeType"], "ASSET_CLASS")
+        self.assertEqual(
+            relationship["targetUri"],
+            "/Script/Engine.Blueprint",
+        )
+        self.assertEqual(relationship["status"], "CONFIRMED")
+        self.assertEqual(
+            relationship["sourceEvidenceStatus"],
+            "EXTRACTED",
+        )
+        self.assertEqual(relationship["freshness"], "FRESH")
+        self.assertEqual(
+            relationship["evidenceUri"],
+            "discovery://asset/%2FGame%2FTest%2FItem.Item#asset-class",
+        )
+        connection.close()
+
+    def test_confirmed_entity_ref_fact_is_a_typed_component_relationship(self):
+        connection = _fixture()
+        ontology = load_ontology(PROJECT_ROOT / "ontology")
+        store_fact(
+            connection,
+            ontology=ontology,
+            subject_entity_id=1,
+            fact_type="HARVEST_RULE",
+            fact_name="DeathHarvestingComponent",
+            scope_kind="DERIVED_STATIC",
+            declared_on_entity_id=1,
+            value=FactValue(
+                "ENTITY_REF",
+                value_text="/Game/Test/Other.Other_C",
+            ),
+            status="CONFIRMED",
+            confidence="HIGH",
+            source_revision_id=1,
+            evidence_uri="bp://fixture/default/DeathHarvestingComponent",
+            evidence_role="DIRECT_FIELD",
+        )
+
+        result = plan_query(
+            connection,
+            QueryRequirements(
+                entity_query="/Game/Test/Item.Item",
+                edge_types=("OWNS_COMPONENT",),
+                answer_mode="RELATIONSHIP",
+            ),
+        )
+
+        self.assertEqual(result["route"], "DB_SEMANTIC_COMPLETE")
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["missingRequirements"], [])
+        self.assertEqual(len(result["relationships"]), 1)
+        relationship = result["relationships"][0]
+        self.assertEqual(relationship["edgeType"], "OWNS_COMPONENT")
+        self.assertEqual(
+            relationship["targetUri"],
+            "/Game/Test/Other.Other_C",
+        )
+        self.assertEqual(relationship["status"], "CONFIRMED")
+        self.assertEqual(relationship["freshness"], "FRESH")
+        self.assertEqual(
+            relationship["evidenceUri"],
+            "bp://fixture/default/DeathHarvestingComponent",
+        )
+        connection.execute(
+            """
+            UPDATE facts
+            SET value_text='UNKNOWN'
+            WHERE fact_type='HARVEST_RULE'
+              AND fact_name='DeathHarvestingComponent'
+            """
+        )
+        invalid_target = plan_query(
+            connection,
+            QueryRequirements(
+                entity_query="/Game/Test/Item.Item",
+                edge_types=("OWNS_COMPONENT",),
+                answer_mode="RELATIONSHIP",
+            ),
+        )
+        self.assertEqual(invalid_target["route"], "DB_PARTIAL")
+        self.assertEqual(
+            invalid_target["relationships"][0]["status"],
+            "NOT_RECOVERED",
+        )
+        self.assertEqual(
+            {
+                item["code"]
+                for item in invalid_target["missingRequirements"]
+            },
+            {"REFERENCE_CLOSURE_OPEN"},
+        )
+        connection.close()
+
     def test_complete_relationship_answer_does_not_leak_candidate_rows(self):
         connection = _fixture()
         connection.executemany(

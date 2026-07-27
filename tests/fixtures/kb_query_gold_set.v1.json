@@ -2706,7 +2706,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Acrocanthosaurus/Buffs/Buff_AcroAdrenaline.Buff_AcroAdrenaline#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FAcrocanthosaurus%2FBuffs%2FBuff_AcroAdrenaline.Buff_AcroAdrenaline#asset-class"
           }
         ],
         "gapCodes": [],
@@ -2746,7 +2746,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FAcrocanthosaurus%2FDinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus#asset-class"
           }
         ],
         "gapCodes": [],
@@ -2786,7 +2786,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Archelon/Dinos/Buffs/Buff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FArchelon%2FDinos%2FBuffs%2FBuff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA#asset-class"
           }
         ],
         "gapCodes": [],
@@ -2826,7 +2826,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FArchelon%2FDinos%2FDinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA#asset-class"
           }
         ],
         "gapCodes": [],
@@ -2866,7 +2866,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Bison/Abilities/Buff_BisonHeadLaunch.Buff_BisonHeadLaunch#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FBison%2FAbilities%2FBuff_BisonHeadLaunch.Buff_BisonHeadLaunch#asset-class"
           }
         ],
         "gapCodes": [],
@@ -2906,7 +2906,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FBison%2FDinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison#asset-class"
           }
         ],
         "gapCodes": [],
@@ -2946,7 +2946,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Cat/Buff_CatAggro.Buff_CatAggro#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FCat%2FBuff_CatAggro.Buff_CatAggro#asset-class"
           }
         ],
         "gapCodes": [],
@@ -2986,7 +2986,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FCat%2FDinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat#asset-class"
           }
         ],
         "gapCodes": [],
@@ -3026,7 +3026,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Ceratosaurus/Dinos/Buffs/Buff_BloodDrunk_ASA.Buff_BloodDrunk_ASA#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FCeratosaurus%2FDinos%2FBuffs%2FBuff_BloodDrunk_ASA.Buff_BloodDrunk_ASA#asset-class"
           }
         ],
         "gapCodes": [],
@@ -3066,7 +3066,7 @@
             "edgeType": "ASSET_CLASS",
             "targetUri": "/Script/Engine.Blueprint",
             "status": "CONFIRMED",
-            "evidenceUri": "discovery://asset//Game/ASA/Dinos/Ceratosaurus/Dinos/DinoCharacterStatusComponent_BP_Ceratosaurus_ASA.DinoCharacterStatusComponent_BP_Ceratosaurus_ASA#asset-class"
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FCeratosaurus%2FDinos%2FDinoCharacterStatusComponent_BP_Ceratosaurus_ASA.DinoCharacterStatusComponent_BP_Ceratosaurus_ASA#asset-class"
           }
         ],
         "gapCodes": [],
@@ -3098,7 +3098,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/PrimalEarth/CoreBlueprints/COREMEDIA_PrimalGameData_BP.COREMEDIA_PrimalGameData_BP",
         "facts": [],
         "relationships": [],
@@ -3133,7 +3133,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/PrimalEarth/CoreBlueprints/PrimalGameDataARKNX_BP.PrimalGameDataARKNX_BP",
         "facts": [],
         "relationships": [],
@@ -3168,7 +3168,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/PrimalEarth/CoreBlueprints/BASE_PrimalGameData_BP.BASE_PrimalGameData_BP",
         "facts": [],
         "relationships": [],
@@ -3665,7 +3665,7 @@
             "edgeType": "MAP_DIRECT_REFERENCE",
             "status": "CONFIRMED",
             "freshness": "FRESH",
-            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "evidenceLayer": "ASSET_REGISTRY_SOFT_PACKAGE_DEPENDENCY",
             "claimsCompleteMapUsage": false,
             "claimsSpawnCoordinates": false,
             "evidenceUri": "registry-reference://865253863be0fe17dd0db668"
@@ -3749,7 +3749,7 @@
             "edgeType": "MAP_DIRECT_REFERENCE",
             "status": "CONFIRMED",
             "freshness": "FRESH",
-            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "evidenceLayer": "ASSET_REGISTRY_SOFT_PACKAGE_DEPENDENCY",
             "claimsCompleteMapUsage": false,
             "claimsSpawnCoordinates": false,
             "evidenceUri": "registry-reference://eb561bb3e3ab02dfaa51e2ee"
@@ -3791,7 +3791,7 @@
             "edgeType": "MAP_DIRECT_REFERENCE",
             "status": "CONFIRMED",
             "freshness": "FRESH",
-            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "evidenceLayer": "ASSET_REGISTRY_SOFT_PACKAGE_DEPENDENCY",
             "claimsCompleteMapUsage": false,
             "claimsSpawnCoordinates": false,
             "evidenceUri": "registry-reference://561a0fc216b0248869531697"
@@ -3998,7 +3998,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
         "facts": [],
         "relationships": [],
@@ -4031,7 +4031,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
         "facts": [],
         "relationships": [],
@@ -4130,7 +4130,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
         "facts": [],
         "relationships": [],
@@ -4761,7 +4761,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
         "facts": [],
         "relationships": [],
@@ -4798,7 +4798,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
         "facts": [],
         "relationships": [],
@@ -4835,7 +4835,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
         "facts": [],
         "relationships": [],
@@ -4872,7 +4872,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP",
         "facts": [],
         "relationships": [],
@@ -4909,7 +4909,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP",
         "facts": [],
         "relationships": [],
@@ -4944,7 +4944,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/PrimalEarth/CoreBlueprints/COREMEDIA_PrimalGameData_BP.COREMEDIA_PrimalGameData_BP",
         "facts": [],
         "relationships": [],
@@ -4979,7 +4979,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/PrimalEarth/CoreBlueprints/PrimalGameDataARKNX_BP.PrimalGameDataARKNX_BP",
         "facts": [],
         "relationships": [],
@@ -5014,7 +5014,7 @@
         "budgetTokens": 2000
       },
       "expected": {
-        "route": "EVIDENCE_REQUIRED",
+        "route": "DB_PARTIAL",
         "identityUri": "/Game/PrimalEarth/CoreBlueprints/BASE_PrimalGameData_BP.BASE_PrimalGameData_BP",
         "facts": [],
         "relationships": [],
@@ -5123,15 +5123,15 @@
         "identityStatus": "EXTRACTED",
         "identityConfidence": "HIGH",
         "identityEvidence": {
-          "evidenceUri": "discovery://ark/full-snapshot",
+          "evidenceUri": "package:///Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris",
           "evidenceRole": "IDENTITY_REVISION",
           "freshness": "FRESH",
           "sourceRevision": {
-            "sourceKind": "discovery",
-            "sourceUri": "discovery://ark/full-snapshot",
-            "sourceFingerprint": "9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50",
+            "sourceKind": "asset_package",
+            "sourceUri": "package:///Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris",
+            "sourceFingerprint": "d5fcaac794c1133b64ab52354a9c5f817ad568ba38b96810fea8e3af3ae2b1eb",
             "producerVersion": "Blueprint-to-Code",
-            "schemaVersion": "ark-kb-core/v4",
+            "schemaVersion": "ark-asset-package/v1",
             "freshness": "FRESH"
           }
         },
@@ -5170,15 +5170,15 @@
         "identityStatus": "EXTRACTED",
         "identityConfidence": "HIGH",
         "identityEvidence": {
-          "evidenceUri": "discovery://ark/full-snapshot",
+          "evidenceUri": "package:///Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP",
           "evidenceRole": "IDENTITY_REVISION",
           "freshness": "FRESH",
           "sourceRevision": {
-            "sourceKind": "discovery",
-            "sourceUri": "discovery://ark/full-snapshot",
-            "sourceFingerprint": "9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50",
+            "sourceKind": "asset_package",
+            "sourceUri": "package:///Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP",
+            "sourceFingerprint": "a910e5cbf70ad0e2af5490e624c098012a1241f39eeb0beac9ab68446acade3b",
             "producerVersion": "Blueprint-to-Code",
-            "schemaVersion": "ark-kb-core/v4",
+            "schemaVersion": "ark-asset-package/v1",
             "freshness": "FRESH"
           }
         },
@@ -5217,15 +5217,15 @@
         "identityStatus": "EXTRACTED",
         "identityConfidence": "HIGH",
         "identityEvidence": {
-          "evidenceUri": "discovery://ark/full-snapshot",
+          "evidenceUri": "package:///Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP",
           "evidenceRole": "IDENTITY_REVISION",
           "freshness": "FRESH",
           "sourceRevision": {
-            "sourceKind": "discovery",
-            "sourceUri": "discovery://ark/full-snapshot",
-            "sourceFingerprint": "9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50",
+            "sourceKind": "asset_package",
+            "sourceUri": "package:///Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP",
+            "sourceFingerprint": "d17d4e79f99e631289d438c6585b47f5287e5532e37ebec35243e9deecdd5ef9",
             "producerVersion": "Blueprint-to-Code",
-            "schemaVersion": "ark-kb-core/v4",
+            "schemaVersion": "ark-asset-package/v1",
             "freshness": "FRESH"
           }
         },
