@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 from typing import Mapping
 
+from .benchmark import materialize_benchmark_queries
 from .class_hierarchy import CLASS_TABLES_SQL, materialize_discovery_classes
 from .fact_store import (
     materialize_declared_defaults,
@@ -428,7 +429,9 @@ CREATE TABLE benchmark_queries(
     tier TEXT NOT NULL,
     primary_domain TEXT NOT NULL,
     expected_answer_type TEXT NOT NULL,
-    expected_gap_code TEXT NOT NULL DEFAULT ''
+    expected_gap_code TEXT NOT NULL DEFAULT '',
+    query_json TEXT NOT NULL,
+    negative_case TEXT NOT NULL DEFAULT ''
 ) WITHOUT ROWID;
 
 CREATE INDEX idx_entities_kind ON entities(entity_kind, entity_id);
@@ -1121,6 +1124,7 @@ def build_core_database(
             generated_at=generated_at,
         )
         invalidation_counts = rebuild_invalidation_dependencies(connection)
+        benchmark_counts = materialize_benchmark_queries(connection)
         connection.execute("ANALYZE main")
         connection.commit()
         return {
@@ -1141,6 +1145,7 @@ def build_core_database(
             **fact_counts,
             **effective_counts,
             **native_counts,
+            **benchmark_counts,
             "invalidationDependencies": sum(
                 invalidation_counts.values()
             ),

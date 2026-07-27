@@ -45,6 +45,18 @@ from .shadow_compare import (
     LegacyVNextComparator,
     query_legacy_read_only,
 )
+from .benchmark import (
+    BENCHMARK_SCHEMA,
+    TIER_COUNTS,
+    build_benchmark_cases,
+    materialize_benchmark_queries,
+    run_query_benchmark,
+)
+from .quality_gates import (
+    QUALITY_GATE_SCHEMA,
+    evaluate_quality_gates,
+    publish_gate_report,
+)
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -80,4 +92,12 @@ __all__ = [
     "build_bounded_context_pack",
     "LegacyVNextComparator",
     "query_legacy_read_only",
+    "BENCHMARK_SCHEMA",
+    "TIER_COUNTS",
+    "build_benchmark_cases",
+    "materialize_benchmark_queries",
+    "run_query_benchmark",
+    "QUALITY_GATE_SCHEMA",
+    "evaluate_quality_gates",
+    "publish_gate_report",
 ]

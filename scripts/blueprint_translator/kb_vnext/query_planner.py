@@ -77,6 +77,19 @@ def resolve_entities(
         return []
     connection.row_factory = sqlite3.Row
     limit = _bounded_limit(limit, maximum=50)
+    canonical = connection.execute(
+        """
+        SELECT
+            entity_id, canonical_uri, entity_kind, display_name,
+            internal_name, status, confidence
+        FROM entities
+        WHERE canonical_uri=?
+        LIMIT 1
+        """,
+        (query,),
+    ).fetchone()
+    if canonical is not None:
+        return [_entity_projection(canonical)]
     exact = list(
         connection.execute(
             """
@@ -86,16 +99,14 @@ def resolve_entities(
                 entity.internal_name, entity.status, entity.confidence
             FROM entities AS entity
             LEFT JOIN aliases AS alias ON alias.entity_id=entity.entity_id
-            WHERE lower(entity.canonical_uri)=lower(?)
-               OR lower(COALESCE(entity.display_name, ''))=lower(?)
+            WHERE lower(COALESCE(entity.display_name, ''))=lower(?)
                OR lower(COALESCE(entity.internal_name, ''))=lower(?)
                OR lower(COALESCE(alias.alias, ''))=lower(?)
             ORDER BY
-                CASE WHEN lower(entity.canonical_uri)=lower(?) THEN 0 ELSE 1 END,
                 entity.entity_id
             LIMIT ?
             """,
-            (query, query, query, query, query, limit),
+            (query, query, query, limit),
         )
     )
     if exact:

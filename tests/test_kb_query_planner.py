@@ -19,6 +19,7 @@ from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
 from blueprint_translator.kb_vnext.query_planner import (  # noqa: E402
     QueryRequirements,
     plan_query,
+    resolve_entities,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     FULL_CORE_SCHEMA_SQL,
@@ -118,6 +119,26 @@ def _fixture() -> sqlite3.Connection:
 
 
 class KnowledgeQueryPlannerTests(unittest.TestCase):
+    def test_exact_canonical_uri_uses_unique_index_fast_path(self):
+        connection = _fixture()
+        plan = list(
+            connection.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT entity_id FROM entities
+                WHERE canonical_uri='/Game/Test/Item.Item'
+                LIMIT 1
+                """
+            )
+        )
+        self.assertIn("INDEX", " ".join(str(row[3]) for row in plan).upper())
+        result = resolve_entities(
+            connection,
+            "/Game/Test/Item.Item",
+        )
+        self.assertEqual(result[0]["canonicalUri"], "/Game/Test/Item.Item")
+        connection.close()
+
     def test_complete_fact_query_returns_db_only_with_evidence(self):
         connection = _fixture()
         result = plan_query(
