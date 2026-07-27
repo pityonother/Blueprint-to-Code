@@ -94,6 +94,20 @@ claim://<report-id>/<claim-id>
 - [ARK Knowledge Discovery：GPT Pro 视察说明](docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)
 - [授权与分发策略](docs/LICENSE_POLICY.md)
 
+## Knowledge Discovery 视察包
+
+供 GPT Pro 视察的派生调查包位于
+`knowledge_base/discovery_bundle.zip`，通过 Git LFS 托管。拉取本分支后执行：
+
+```text
+git lfs install
+git lfs pull --include="knowledge_base/discovery_bundle.zip"
+```
+
+完整 clone、分支和 SHA-256 验证命令见
+[GPT Pro 视察说明](docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)。该 ZIP 只用于视察
+Codex 的发现进度，不是项目交接包。
+
 ## Control Center
 
 The easiest entrypoint is the local web control center. It uses the existing Vite

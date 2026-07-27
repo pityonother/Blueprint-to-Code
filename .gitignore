@@ -18,7 +18,8 @@ captures/
 output/
 .tmp/
 .tmp_*/
-knowledge_base/
+knowledge_base/*
+!knowledge_base/discovery_bundle.zip
 analysis/
 .playwright-cli/
 

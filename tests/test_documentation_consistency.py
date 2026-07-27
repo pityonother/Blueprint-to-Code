@@ -125,11 +125,49 @@ class DocumentationConsistencyTests(unittest.TestCase):
             "## 已发现的知识",
             "它不是交接文档，也不是要求 GPT Pro 接管实现",
             "`knowledge_base/discovery_bundle.zip`",
-            "仓库完整测试：637 项通过，0 失败",
+            "仓库完整测试：638 项通过，0 失败",
             "请给出审查结论与下一阶段方向即可；不需要接管或重写",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, review)
+
+    def test_discovery_review_documents_git_lfs_retrieval_contract(self):
+        review = (
+            ROOT
+            / "docs"
+            / "GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md"
+        ).read_text(encoding="utf-8")
+        lfs_path = "`knowledge_base/discovery_bundle.zip`"
+        lfs_pull = (
+            'git lfs pull --include="knowledge_base/discovery_bundle.zip"'
+        )
+
+        for document in (self.readme, review):
+            with self.subTest(document=document[:30]):
+                self.assertIn("Git LFS", document)
+                self.assertIn(lfs_path, document)
+                self.assertIn(lfs_pull, document)
+
+        self.assertIn("git clone --branch codex/fix-partner-devkit-root", review)
+        self.assertIn(
+            "git pull --ff-only origin codex/fix-partner-devkit-root",
+            review,
+        )
+        self.assertIn("不是项目交接包", review)
+        self.assertIn("不要求 GPT Pro 接管或重写实现", review)
+
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn(
+            (
+                "knowledge_base/discovery_bundle.zip "
+                "filter=lfs diff=lfs merge=lfs -text"
+            ),
+            attributes,
+        )
+
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("knowledge_base/*", gitignore)
+        self.assertIn("!knowledge_base/discovery_bundle.zip", gitignore)
 
 
 if __name__ == "__main__":

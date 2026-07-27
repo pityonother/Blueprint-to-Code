@@ -6,6 +6,39 @@
 
 本轮严格停留在“范围发现”阶段：没有重构或迁移最终知识库，没有把启发式结果伪装成已确认事实，也没有把 ARK 原始包、二进制、PDB、Ghidra 工程、完整反编译文本、本机绝对路径或秘密写入产物。
 
+## 从 GitHub 获取视察 ZIP（Git LFS）
+
+`knowledge_base/discovery_bundle.zip` 已通过 Git LFS 托管在公开仓库
+`https://github.com/pityonother/Blueprint-to-Code` 的
+`codex/fix-partner-devkit-root` 分支。它只用于让 GPT Pro 视察本轮发现结果，不是项目交接包，也不要求 GPT Pro 接管或重写实现。
+
+首次获取：
+
+```text
+git lfs install
+git clone --branch codex/fix-partner-devkit-root --single-branch https://github.com/pityonother/Blueprint-to-Code.git
+cd Blueprint-to-Code
+git lfs pull --include="knowledge_base/discovery_bundle.zip"
+```
+
+已有该分支的本地仓库：
+
+```text
+git switch codex/fix-partner-devkit-root
+git pull --ff-only origin codex/fix-partner-devkit-root
+git lfs pull --include="knowledge_base/discovery_bundle.zip"
+```
+
+拉取后应验证文件身份：
+
+```powershell
+Get-FileHash -Algorithm SHA256 knowledge_base\discovery_bundle.zip
+```
+
+预期 SHA-256：
+`7eae98300ea5c1665c50222cc888580be8349aac1b92e5f8ee7f3713cae2292d`。
+如果没有安装 Git LFS，Git 只能取得很小的 pointer 文件，不能取得完整 ZIP。
+
 ## Codex 已完成的工程工作
 
 1. 实现了可断点、可增量运行的发现管线：
@@ -141,7 +174,7 @@
 
 | 产物 | 仓库相对路径 | 大小 | SHA-256 |
 | --- | --- | ---: | --- |
-| 可上传调查包 | `knowledge_base/discovery_bundle.zip` | 505,740,267 bytes | `7eae98300ea5c1665c50222cc888580be8349aac1b92e5f8ee7f3713cae2292d` |
+| Git LFS 托管的视察调查包 | `knowledge_base/discovery_bundle.zip` | 505,740,267 bytes | `7eae98300ea5c1665c50222cc888580be8349aac1b92e5f8ee7f3713cae2292d` |
 | 调查数据库 | `knowledge_base/discovery_bundle/kb_discovery.sqlite` | 3,816,177,664 bytes | `9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50` |
 | 14 问发现报告 | `knowledge_base/discovery_bundle/discovery_report.md` | 11,736 bytes | `bc929d2e9ebac819ba9deca9b22138d748b1e0350f186599b033ad0847c08b54` |
 | 发现 manifest | `knowledge_base/discovery_bundle/discovery_manifest.json` | 3,721 bytes | `3495da024840a354bbc789c23520a5903f999b90e3ef8fc5cf24abe99958756a` |
@@ -163,7 +196,7 @@ ZIP 中共有 215 个文件，SQLite 成员使用 ZIP64。manifest 记录的源�
 - `SHA256SUMS.txt` 覆盖除其自身外的 214 个文件。
 - 报告、README、manifest 和样本清单没有 Unicode replacement character。
 - 发现工具专项测试：11/11 通过。
-- 仓库完整测试：637 项通过，0 失败。
+- 仓库完整测试：638 项通过，0 失败。
 - Ruff、Python compile、Git diff whitespace 检查通过。
 
 ## 目前仍不能声称已经解决的内容
