@@ -8,44 +8,53 @@ Stage 8/9 已把 typed registration、真实角色信号、独立 gold 计分、
 快照和发布前门禁做成 fail-closed 实现，但当前独立语义证据仍不满足切换
 条件。旧库不能删除，vNext 不能改为默认。
 
-本文中的快照统计来自最后一个已经发布到本机默认目录的基线。该基线仍是
-兼容读取的 legacy-v1 布局；新的构建器会发布
-`current.json -> snapshots/<buildId>` 的 immutable-v2 布局。没有重新构建
-并密封门禁的新 snapshot 之前，不能把代码层修复解释为该旧基线已经通过
-新门禁。
+本文中的统计来自本机规范 `current.json` 指向的真实全量 immutable-v2
+快照。质量报告已在 pointer 可见前密封；发布后的外部复核得到相同
+`58/75` 结果，但不能改变 current。
 
-## 已发布基线身份
+## 已发布快照身份
 
 | 项目 | 值 |
 |---|---:|
-| Build ID | `20260727T035514+0000-9f106a091815` |
-| Discovery SHA-256 | `9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50` |
-| Discovery bytes | 3,816,177,664 |
+| Build ID | `20260727T222549-a2d56bd7fed8` |
+| Source SHA-256 | `a2d56bd7fed88edd1098915ea3723da0fdef0b0a263567b56f46bae074f385cd` |
+| Discovery SHA-256 | `028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f` |
+| Discovery bytes | 3,816,792,064 |
 | Snapshot schema | `ark-kb-vnext-snapshot/v1` |
-| Published layout | `legacy-v1`（兼容读取；待下一次完整构建迁移） |
+| Published layout | `immutable-v2`：`current.json -> snapshots/<buildId>` |
+| Sealed quality | 58 / 75 passed，17 failed |
+| Runtime health | `activeStaleSources=0` |
 | Published cutover | `mode=shadow`, `defaultQuerySource=legacy` |
 
-## 已发布基线内容
+## 已发布快照内容
 
-下表用于标识仍在本机 current 中的实际数据，不是新门禁通过声明。
-
-| 指标 | 基线实际 |
+| 指标 | 当前实际 |
 |---|---:|
 | Entities / assets | 577,579 |
-| Catalog edges | 3,441,879 |
-| Classes / closure rows | 26,495 / 92,248 |
-| Roles | 1,091,275 |
-| Typed registration rows / materialized edges | 135 / 28 |
-| Declared / effective facts | 10,588 / 102,330 |
+| Catalog edges | 3,442,470 |
+| Classes / closure rows | 26,495 / 92,033 |
+| Roles | 1,091,270 |
+| Typed registration rows / materialized edges | 145 / 26 |
+| Declared / effective facts | 10,587 / 102,329 |
+| Semantic facts | 136 |
 | Legacy lineage rows | 298,003 |
-| Invalidation dependencies | 593,234 |
+| Invalidation dependencies | 1,199,519 |
 | Exact native functions | 20 |
-| Blueprint-native candidate / confirmed links | 132 / 0 |
+| Blueprint-native candidate / confirmed links | 713 / 1 |
 
-基线的六个核心领域投影 `buff_effects`、`item_properties`、
-`status_values`、`loot_entries`、`harvest_rules` 和
-`mission_rewards` 均为 0 行。空投影表示当前没有满足 typed value、fresh
-Evidence 和 lineage 要求的行，不能解释成该领域不存在。
+六个领域投影均已生成并通过 artifact/Core binding：
+
+| Projection | Rows | Complete | Partial | Validation |
+|---|---:|---:|---:|---|
+| `buff_effects` | 46 | 46 | 0 | `VALID` |
+| `item_properties` | 28 | 28 | 0 | `VALID` |
+| `status_values` | 13 | 13 | 0 | `VALID` |
+| `loot_entries` | 28 | 0 | 28 | `VALID` |
+| `harvest_rules` | 10 | 0 | 10 | `VALID` |
+| `mission_rewards` | 11 | 9 | 2 | `VALID` |
+
+`loot_entries` 和 `harvest_rules` 的行仍是 partial；非零不等于完整，也不把
+legacy-only 或 fingerprint 值提升为可用语义。
 
 ## 独立 gold 现状
 
@@ -58,7 +67,7 @@ Evidence 和 lineage 要求的行，不能解释成该领域不存在。
 | Query human gold | 5 / 130 cases | ≥120 reviewed | 阻断 |
 | Registration Owner→Target gold | 0 / 100 | ≥100 reviewed | 阻断 |
 | Role gold | 0 / 300 | ≥300，precision/recall ≥95% | 阻断 |
-| Blueprint-native confirmed link | 已发布基线 0；验证快照 1 | ≥1 且双侧 Evidence | 实现已验证，尚未进入规范 current |
+| Blueprint-native confirmed link | 1 confirmed / 1 fully bound | ≥1 且双侧 Evidence | 通过 |
 
 Registration 的 property-name unit fixture 不再计作真实关系 gold。
 `kb_registration_gold_set.json` 当前明确记录
@@ -70,16 +79,15 @@ Role gold 文件当前不存在，因此计数为 0。即使 classifier unit cas
 `correct=true`，也不能代替 300 个真实 canonical entity 的两轮独立复核和
 分歧 adjudication。
 
-已发布快照的 Blueprint-native confirmed 数仍是 0。工作树验证快照
-`20260727T205302-3e842d2336d2` 已得到恰好 1 条
+规范快照已得到恰好 1 条
 `CONFIRMED/HIGH` link：Shapeshifter Small Blueprint 的
 `AddItemObjectEx` 指向
 `UPrimalInventoryComponent::AddItemObjectEx`（RVA `0x1390DB0`），
 resolution 为 `verified_callsite`，双方 source revision 均为 `FRESH`；
-旧 name-only 行没有升级。该快照不属于规范
-`knowledge_base/vnext/current`，且自身仍密封为 `shadow / legacy`
-（39 项门禁失败），所以本表继续按已发布基线 0 处理，不把验证结果误写成
-已切换状态。
+双方 fingerprint 都是规范 SHA-256，Blueprint revision 为
+`uasset-graph-reader-evidence-v3 / ark.blueprint.evidence.v2`。其余 713
+条保持 candidate。Native 两门均已通过，但整体仍因其他 17 门保持
+`shadow / legacy`。
 
 ## Stage 8 实现覆盖
 
@@ -127,7 +135,16 @@ snapshots/<buildId>/
 - 已存在 immutable build 不可覆盖；
 - pointer 切换前崩溃仍读旧 snapshot；
 - 旧 SQLite 连接在新发布后继续可读；
-- 并发 reader 不观察到混合 build ID。
+- 并发 reader 不观察到混合 build ID；
+- 发布前 checkpoint、`journal_mode=DELETE` 与 WAL/SHM sidecar 拒绝；
+- `runtimeHealth` 与 Core metadata 绑定，活动陈旧来源不能进入
+  `ready/vnext`。
+
+当前快照的 10 个数据库/投影均通过 integrity、FK 与绑定验证；没有
+WAL/SHM sidecar。`storage.integrity` 通过，Core/Discovery 大小比为
+`0.6804`。服务初始化约 `0.043s`，轻量 `health()` 约 `0.024s`，返回
+`READY / FRESH`；首次完整摘要绑定搜索约 `2.79s`，同服务缓存后约
+`0.13s`。
 
 对已经发布的 snapshot 运行门禁，只能写
 `reports/<buildId>/quality_gates.json`、`query_benchmark.json` 和
@@ -154,8 +171,9 @@ Queue worker 的任务状态、receipt、恢复和 fail-closed 行为已经实�
 
 Source-manifest fingerprint 明确排除顶层 `generatedAt`，不会仅因扫描时间
 不同产生假变化。当前 runtime 没有可验证的 observation-set loader，因此只
-记录汇总 hash；不声称 per-set 粒度。本文所列 legacy-v1 已发布基线尚无该
-binding，它的第一次 update 仍会要求 full rebuild。
+记录汇总 hash；不声称 per-set 粒度。当前快照已经绑定 source manifest；
+相同输入 update 实测返回 `cacheHit=true`、`published=false`、
+`fullRebuildPerformed=false`，current 与快照目录数均未改变。
 
 因此“单资产增量摄取到原子发布”仍未通过生产门禁。当前安全更新方式仍是
 显式 `--full-snapshot`。不能把 unchanged cache hit 或 fail-fast 安全性描述
@@ -178,15 +196,19 @@ binding，它的第一次 update 仍会要求 full rebuild。
 }
 ```
 
-才允许把 vNext 设为默认。当前已知阻断至少包括：
+才允许把 vNext 设为默认。当前 17 个失败门按原因归组为：
 
-1. query human gold 仅 5/130；
-2. registration relationship gold 0/100；
-3. role gold 0/300；
-4. 已发布快照 BP-native confirmed 0；工作树验证快照已有 1 条，但尚未
-   进入规范 current；
-5. 六个核心领域投影尚无 reviewed nonzero coverage；
-6. 生产选择性 ingest/backend/publisher 尚未闭合。
+1. role 独立 gold 仍为 0/300；
+2. registration 真实 Owner→Target gold 仍为 0/100，因此 count、
+   precision/recall、classification、Owner/Target resolution、
+   materialization、Evidence 和 lineage 共 10 门阻断；
+3. query human gold 仅 5/130，corpus 尚未 ready；
+4. query protocol compliance `91.54%`、expected-gap match `76.60%`、
+   wrong-answer rate `9.23%`，未达到 fail-closed 门槛；
+5. single-entity P95 为 `358.929ms`，高于 `<250ms` 门槛。
+
+生产选择性 ingest/backend/publisher 仍是工程能力边界，但当前 sealed
+质量报告中的 native、projection、storage 和 stale-leak 门已经通过。
 
 所以当前必须保持：
 

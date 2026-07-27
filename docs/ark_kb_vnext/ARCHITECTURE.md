@@ -13,7 +13,7 @@ Ghidra 工程、完整反编译 C 或本机绝对路径。
 
 ## 不可变快照与原子 current pointer
 
-v2 发布布局是：
+当前发布布局是：
 
 ```text
 knowledge_base/vnext/
@@ -47,12 +47,16 @@ knowledge_base/vnext/
 
 发布顺序是：
 
-1. 在同卷 staging 目录完整构建四库、领域投影与候选 manifest；
-2. 对 staging 快照运行质量门禁；
-3. 将门禁报告及其 SHA-256 密封进 staging 的 `manifest.json`；
-4. 以目录级 `os.replace` 把完整 staging 放到
+1. 在同卷 staging 目录完整构建四库、领域投影、运行时健康摘要与候选
+   manifest；
+2. checkpoint 所有 WAL，把主库切换为 `DELETE` journal，并拒绝任何待发布
+   sidecar；
+3. 对 staging 运行第一遍质量门禁并生成 provisional seal；
+4. 在该严格封存候选上运行真实存储基准，再以第二遍结果替换为 final seal；
+5. 验证报告哈希、数据库/投影绑定、`activeStaleSources` 与 cutover 状态一致；
+6. 以目录级 `os.replace` 把完整 staging 放到
    `snapshots/<buildId>/`，已经存在的 build 不允许覆盖；
-5. 最后原子替换小型 `current.json`。
+7. 最后原子替换小型 `current.json`。
 
 因此，指针切换前崩溃会保留旧 current；已经打开旧 SQLite 的服务继续读取
 旧 immutable snapshot；新服务只会从同一个新 snapshot 目录打开四库，不会
@@ -60,8 +64,8 @@ knowledge_base/vnext/
 
 `VNextKnowledgeService` 在构造时只解析一次 current pointer，并把
 Core、Search、Cache 和 manifest 绑定到该次解析的 snapshot。历史
-`manifests/current.json` 布局仍可只读解析，供现有本机快照迁移；下一次完整
-发布才会生成 v2 根指针。
+`manifests/current.json` 布局仍可只读解析；本机规范 current 已迁移到
+immutable-v2 根指针。
 
 ## 发布前门禁是 manifest 的一部分
 
@@ -75,6 +79,12 @@ Core、Search、Cache 和 manifest 绑定到该次解析的 snapshot。历史
 - `mode` 与 `defaultQuerySource`；
 
 写入同一个 immutable snapshot。
+
+同一 manifest 还密封 `runtimeHealth`。该摘要与 Core metadata 绑定，并要求
+`activeStaleSources=0` 才能通过现有的 critical
+`storage.integrity` 门。即使报告被伪造成全绿，只要健康摘要仍显示活动陈旧
+来源，promotion 也会拒绝 `ready/vnext` 矛盾状态。健康端点读取这份摘要，
+查询端点仍执行完整数据库摘要绑定。
 
 对已经发布的 immutable snapshot 再运行门禁，只能写
 `reports/<buildId>/` 下的外部报告与 attestation。即使该外部报告显示全部
@@ -147,15 +157,17 @@ percentile。缺失、不新鲜或自生成 benchmark 信号不会按零伪装�
 | Query human gold | 5 / 130 固定 cases | 至少 120 |
 | Owner→Target registration gold | 0 / 100 | 至少 100 |
 | Role gold | 0 / 300 | 至少 300，且两轮独立复核 |
-| Blueprint→native confirmed link | 已发布基线 0；工作树验证快照 1 | 至少 1 条双侧 Evidence 的确认边 |
+| Blueprint→native confirmed link | 1 confirmed / 1 fully bound | 至少 1 条双侧 Evidence 的确认边 |
 
 `correct=true`、classifier 自己生成的标签、property-name unit fixture、exact
 native function identity 和 gap-only protocol case 都不能代替上述独立
-gold。工作树验证快照 `20260727T205302-3e842d2336d2` 已用
-`verified_callsite` 生成 1 条 `CONFIRMED/HIGH` link，并通过双方 Evidence、
-signature、freshness、recipe 与 identity 校验；旧 name-only 行仍是
-`CANDIDATE/LOW`。该快照尚未成为规范 current，且自身门禁仍密封为
-`shadow / legacy`，所以已发布状态不得据此改写。
+gold。规范快照 `20260727T222549-a2d56bd7fed8` 已用
+`verified_callsite` 生成 1 条 `CONFIRMED/HIGH` link：
+`Shapeshifter_Small_Character_BP.AddItemObjectEx` 指向
+`UPrimalInventoryComponent::AddItemObjectEx`。双方 Evidence、规范
+SHA-256、带时区 revision、signature、freshness、recipe 与 identity 均通过；
+其余 713 条仍是 candidate。该 native 门已经闭合，但不会替代 query、
+registration 或 role 的独立 gold。
 
 ## 增量失效与当前能力边界
 
@@ -198,7 +210,8 @@ backend。
 顶层 `generatedAt` 不参与 fingerprint，因此构建后的第一次 update 在所有
 输入未变时会返回 cache hit，且不会进入 staging。当前没有 runtime
 observation-set loader，所以 runtime 只承诺汇总 hash；文档不虚构 per-set
-粒度。旧 legacy-v1 基线没有该 binding，必须先 full rebuild。
+粒度。当前 immutable-v2 快照已经具备该 binding；实测相同输入 update
+返回 `cacheHit=true`、`published=false`。
 
 只要发现首次运行、runtime/非选择性输入变化、删除或尚无生产能力的选择性
 变更，默认路径都会在 lock、staging、queue mutation 和 publication 之前
@@ -216,6 +229,7 @@ fail fast，并返回 `fullRebuildRequired=true`。它目前不是“单资产�
   --native-root native_evidence `
   --runtime-root runtime_observations `
   --legacy-kb-root knowledge_base\db `
+  --map-evidence-catalog analysis\harvest_nodes\resource_node_catalog.json `
   --output knowledge_base\vnext `
   --full-snapshot
 ```
@@ -239,7 +253,8 @@ fail fast，并返回 `fullRebuildRequired=true`。它目前不是“单资产�
 }
 ```
 
-当前独立证据不足，必须保持：
+当前规范快照的密封门禁为 `58/75`，17 个 critical gate 仍开放，因此必须
+保持：
 
 ```json
 {

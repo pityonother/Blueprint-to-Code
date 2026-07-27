@@ -19,52 +19,54 @@ implementation hardened
 
 ## Build identity
 
-以下身份是本机默认目录中最后一个已经发布的基线，不是尚未生成的
-post-hardening immutable-v2 快照：
+以下身份来自本机规范 current 指向的真实全量 post-hardening 快照：
 
-- Build：`20260727T035514+0000-9f106a091815`
-- Source SHA-256：`9f106a091815dd88aa729d28140db728e0f1b37dbeebf2fd5f2182492ef4ea50`
-- 当前发布布局：`legacy-v1` 兼容读取
-- 新发布合同：根 `current.json` 指向
+- Build：`20260727T222549-a2d56bd7fed8`
+- Source SHA-256：`a2d56bd7fed88edd1098915ea3723da0fdef0b0a263567b56f46bae074f385cd`
+- Discovery SHA-256：`028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f`
+- 当前发布布局：`immutable-v2`
+- 发布合同：根 `current.json` 指向
   `snapshots/<buildId>/manifest.json`
+- 密封门禁：58/75 passed，17 failed
+- Runtime health：`activeStaleSources=0`
 - 当前 cutover：`shadow / legacy`
 
-下一次完整构建会以完整 semantic input set 生成 source identity，并在
-pointer 可见前把质量报告密封到 snapshot manifest。只有该新快照的报告
-才能代表本轮加固后的真实全量统计。
+质量报告、benchmark、runtime health 和数据库 identity 已在 pointer 可见
+前密封到 snapshot manifest；发布后的外部复核得到相同 58/75 结果。
 
 ## Actual semantic content
 
-已发布基线仍包含：
+当前快照包含：
 
 - 577,579 entities；
-- 10,588 declared facts；
-- 102,330 effective facts；
-- 135 typed registration rows；
-- 28 materialized relationship edges；
+- 10,587 declared facts；
+- 102,329 effective facts；
+- 136 semantic facts；
+- 145 typed registration rows；
+- 26 materialized relationship edges；
 - 298,003 preserved legacy lineage rows；
+- 1,199,519 invalidation dependencies；
 - 20 exact native functions；
-- 132 Blueprint-native candidates、0 confirmed links；
-- 六个核心 domain projections 均为 0 行。
+- 713 Blueprint-native candidates、1 confirmed link；
+- 六个核心 domain projections 共 136 行。
 
-这些数字只描述旧基线存量。新的 typed value、registration edge v2、role
-signal v2 和 quality-gate 口径必须通过一次新 full snapshot 才能回填真实
-全量数量。fingerprint、`LEGACY_UNVERIFIED`、`STALE`、
-`NOT_RECOVERED` 和 candidate edge 不计作可用语义答案。
+这些是本轮 full snapshot 的真实统计。fingerprint、
+`LEGACY_UNVERIFIED`、`STALE`、`NOT_RECOVERED` 和 candidate edge 仍不计作
+可用语义答案。
 
 ## Domain projections
 
-| Projection | 已发布基线 | 切换要求 |
-|---|---:|---|
-| `buff_effects` | 0 | reviewed、fresh、非零 |
-| `item_properties` | 0 | reviewed、fresh、非零 |
-| `status_values` | 0 | reviewed、fresh、非零 |
-| `loot_entries` | 0 | reviewed、fresh、非零 |
-| `harvest_rules` | 0 | reviewed、fresh、非零 |
-| `mission_rewards` | 0 | reviewed、fresh、非零 |
+| Projection | Rows | Complete | Partial | 状态 |
+|---|---:|---:|---:|---|
+| `buff_effects` | 46 | 46 | 0 | `VALID` |
+| `item_properties` | 28 | 28 | 0 | `VALID` |
+| `status_values` | 13 | 13 | 0 | `VALID` |
+| `loot_entries` | 28 | 0 | 28 | `VALID` |
+| `harvest_rules` | 10 | 0 | 10 | `VALID` |
+| `mission_rewards` | 11 | 9 | 2 | `VALID` |
 
-零行保持显式 coverage gap；不会用 legacy-only 行或 fingerprint 填充来让
-门禁变绿。
+投影均通过 Core/artifact content binding。`loot_entries` 与
+`harvest_rules` 仍是 partial，文档不会把非零误写成完整。
 
 ## Query gold
 
@@ -110,13 +112,12 @@ precision/recall 已达标。
 
 ## Native
 
-- 已发布基线 exact functions：20；
-- 已发布基线 confirmed BP-native edges：0；
-- 已发布基线 confirmed field accesses：0；
-- 已发布基线 ambiguous/candidate BP-native links：132。
+- exact functions：20/20 gold targets；
+- confirmed BP-native edges：1；
+- confirmed field accesses：0；
+- candidate BP-native links：713。
 
-工作树验证快照 `20260727T205302-3e842d2336d2` 已生成恰好 1 条
-`CONFIRMED/HIGH` BP-native link：
+规范 current 已生成恰好 1 条 `CONFIRMED/HIGH` BP-native link：
 
 - Blueprint：
   `/Game/Genesis/Dinos/Shapeshifter/Shapeshifter_Small/Shapeshifter_Small_Character_BP.Shapeshifter_Small_Character_BP`；
@@ -126,12 +127,12 @@ precision/recall 已达标。
 - resolution：`verified_callsite`；
 - Blueprint 与 Native source revision 均为 `FRESH`。
 
-该验证快照已通过 qualified symbol、RVA、真实 callsite、signature、双方
-Evidence 与 freshness 校验；旧 name-only 行仍保持 `CANDIDATE/LOW`。
-但它位于 `.tmp/stage8-native-confirmation/snapshot-final2`，不是本机规范
-`knowledge_base/vnext/current`，而且其密封门禁仍为
-`shadow / legacy`、39 项失败。因此这里记录 Stage 8 的验证完成，不把
-已发布基线 confirmed 数从 0 改写为 1，也不宣称已完成 cutover。
+该行通过 qualified symbol、RVA、真实 callsite、signature、双方 Evidence、
+规范 SHA-256、带时区 revision 与 freshness 校验；旧 name-only/未绑定行
+保持 candidate。`native.gold_targets_resolved` 与
+`native.blueprint_link_precision` 均通过。整体仍为
+`shadow / legacy`，因为 native 通过不能替代独立 query、registration 和
+role gold。
 
 ## Incremental
 
@@ -156,8 +157,15 @@ Evidence 与 freshness 校验；旧 name-only 行仍保持 `CANDIDATE/LOW`。
 - 绑定 source manifest 的生产 atomic incremental publisher。
 
 当前没有可验证的 runtime observation-set loader，所以 runtime 只绑定汇总
-hash，不虚构 per-set entries。旧 legacy-v1 基线也没有 source-manifest
-binding，必须先 full rebuild；之后未变输入才会 cache hit。
+hash，不虚构 per-set entries。当前 immutable-v2 快照已绑定完整 source
+manifest。对完全相同输入运行 update，实测：
+
+```text
+status=cache_hit
+cacheHit=true
+fullRebuildPerformed=false
+published=false
+```
 
 生产默认 `scripts/update_ark_kb_vnext.py` 对 runtime 或其他真实变化会在
 任何 lock/staging/queue/current mutation 前 fail fast，并返回稳定 gap 与
@@ -183,6 +191,13 @@ current.json
 rename，最后原子替换 pointer。Reader 解析一次 pointer 后只从同一个
 snapshot 目录打开所有库。
 
+发布前会 checkpoint WAL、把所有主库切到 `journal_mode=DELETE` 并拒绝
+sidecar。当前快照未发现 WAL/SHM；10 个主库/投影全部通过 integrity、FK、
+schema 和绑定验证。密封 `runtimeHealth` 与 Core metadata 一致，
+`activeStaleSources=0`。服务初始化约 `0.043s`，轻量 `health()` 约
+`0.024s` 并返回 `READY / FRESH`；首次完整摘要绑定搜索约 `2.79s`，同服务
+缓存后约 `0.13s`。
+
 发布后的外部门禁报告位于 `reports/<buildId>/`，只作为 attestation。它
 不能修改 current、immutable manifest 或默认来源；即使外部报告变为 eligible，
 也必须构建一个密封该结果的新 snapshot。
@@ -201,7 +216,14 @@ snapshot 目录打开所有库。
   receipt 的 fail-closed 路径；
 - 文档 build/source identity 与当前已发布 manifest 一致性。
 
-最终验收应在所有并行实现合并后重新运行，而不沿用旧报告中的历史测试总数：
+本轮最终受影响矩阵实跑结果为 `136 passed, 135 subtests passed`；合并后的
+`test_kb_*.py` 全量验收为 `439 tests OK`，update 专项为 `46 passed`，
+performance/document 专项为 `12 passed, 6 subtests passed`。Ruff 与
+`git diff --check` 通过。真实 full build、发布后 sealed validator、API
+health/search、外部门禁和 unchanged update 均已执行。外部门禁按预期以
+非零退出并报告 58/75，而不是把 shadow 误报成失败构建。
+
+复现命令：
 
 ```powershell
 .\runtime\python\python.exe -m unittest discover -s tests -p "test_kb_*.py"
@@ -216,10 +238,14 @@ git diff --check
 1. query human gold 5/130，低于 120；
 2. registration relationship gold 0/100；
 3. role gold 0/300；
-4. 已发布基线 confirmed BP-native link 0；工作树验证快照已有 1 条，但
-   尚未进入规范 current；
-5. 六个 reviewed core projections 尚未非零；
+4. query protocol compliance `91.54%`、expected-gap match `76.60%` 和
+   wrong-answer rate `9.23%` 未达门槛；
+5. single-entity P95 `358.929ms`，高于 `<250ms`；
 6. 单资产生产选择性 ingest/backend/publisher 尚未闭合。
+
+密封报告中 native、projection、storage、runtime freshness 和 stale-leak
+门已经通过；17 个失败门集中在 role gold、registration gold/派生指标和
+query gold/正确性/延迟。
 
 只有所有关键门禁在发布前通过并密封到新 manifest，才允许：
 

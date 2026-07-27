@@ -83,20 +83,27 @@ claim://<report-id>/<claim-id>
 
 vNext 已实现为与 legacy 并行的四库快照：`catalog.sqlite` 保存全量范围图，
 `core.sqlite` 保存语义事实与 lineage，`search.sqlite` 提供搜索投影，
-`cache.sqlite` 只保存可丢弃查询缓存。当前真实全量构建为 577,579 entities、
-3,441,879 catalog edges、10,588 declared facts 和 102,330 effective facts。
+`cache.sqlite` 只保存可丢弃查询缓存。当前规范 immutable-v2 全量构建
+`20260727T222549-a2d56bd7fed8` 包含 577,579 entities、
+3,442,470 catalog edges、10,587 declared facts、102,329 effective facts，
+以及 1 条严格双侧 Evidence 绑定的 confirmed Blueprint-native link。
 
-质量门禁当前为 23/26 通过，因此工作台保持 `shadow`，默认查询来源仍是
-`legacy`。这不是失败降级：`vNext` 和 `compare` 已可用于查证，但在类链闭合、
-独立 300 资产角色 gold set、Blueprint-native 确认边三项证据补齐前不会自动
-切换默认来源。
+密封质量门禁当前为 58/75 通过，`activeStaleSources=0`，因此工作台保持
+`shadow`，默认查询来源仍是 `legacy`。这不是失败降级：native、projection、
+storage 和 stale-leak 门已经闭合，`vNext` 与 `compare` 可用于查证；独立
+query/registration/300 资产 role gold 与剩余正确性、延迟门未通过前不会
+自动切换默认来源。
 
 构建与门禁：
 
 ```powershell
 .\runtime\python\python.exe scripts\build_ark_kb_vnext.py `
   --discovery-database knowledge_base\discovery_bundle\kb_discovery.sqlite `
+  --capture-root captures `
+  --native-root native_evidence `
+  --runtime-root runtime_observations `
   --legacy-kb-root knowledge_base\db `
+  --map-evidence-catalog analysis\harvest_nodes\resource_node_catalog.json `
   --output knowledge_base\vnext `
   --full-snapshot
 
