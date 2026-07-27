@@ -79,6 +79,44 @@ claim://<report-id>/<claim-id>
 - 提供 loopback 默认、本地 session、同源 POST、请求体上限、脱敏 job 快照与
   进程树取消的 Web 控制中心。
 
+## ARK Knowledge Base vNext
+
+vNext 已实现为与 legacy 并行的四库快照：`catalog.sqlite` 保存全量范围图，
+`core.sqlite` 保存语义事实与 lineage，`search.sqlite` 提供搜索投影，
+`cache.sqlite` 只保存可丢弃查询缓存。当前真实全量构建为 577,579 entities、
+3,441,879 catalog edges、10,588 declared facts 和 102,330 effective facts。
+
+质量门禁当前为 23/26 通过，因此工作台保持 `shadow`，默认查询来源仍是
+`legacy`。这不是失败降级：`vNext` 和 `compare` 已可用于查证，但在类链闭合、
+独立 300 资产角色 gold set、Blueprint-native 确认边三项证据补齐前不会自动
+切换默认来源。
+
+构建与门禁：
+
+```powershell
+.\runtime\python\python.exe scripts\build_ark_kb_vnext.py `
+  --discovery-database knowledge_base\discovery_bundle\kb_discovery.sqlite `
+  --legacy-kb-root knowledge_base\db `
+  --output knowledge_base\vnext `
+  --full-snapshot
+
+.\runtime\python\python.exe scripts\run_ark_kb_vnext_gates.py `
+  --discovery-database knowledge_base\discovery_bundle\kb_discovery.sqlite `
+  --snapshot-root knowledge_base\vnext
+```
+
+门禁未全部通过时，第二条命令会以非零状态结束并保留 legacy 默认，这是预期的
+fail-closed 行为。启动控制中心后打开
+`http://127.0.0.1:8765/?view=knowledge`，可选择 `legacy`、`vNext` 或
+`compare`。API 包括 `/api/kb/query`、`/api/kb/plan`、
+`/api/kb/compare`、实体搜索/详情/事实/关系/Coverage/生效默认值端点。
+
+完整架构、实测覆盖和切换条件见：
+
+- [vNext 架构](docs/ark_kb_vnext/ARCHITECTURE.md)
+- [覆盖率与切换报告](docs/ark_kb_vnext/COVERAGE_AND_CUTOVER.md)
+- [实施完成报告](docs/ark_kb_vnext/COMPLETION_REPORT.md)
+
 ## 文档索引
 
 - [中文使用手册](docs/USER_GUIDE_zh.md)
@@ -92,6 +130,9 @@ claim://<report-id>/<claim-id>
 - [Harvest Runtime 实测协议](docs/HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)
 - [ARK 资源点 Explorer](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)
 - [ARK Knowledge Discovery：GPT Pro 视察说明](docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)
+- [ARK Knowledge Base vNext 架构](docs/ark_kb_vnext/ARCHITECTURE.md)
+- [ARK Knowledge Base vNext 覆盖率与切换报告](docs/ark_kb_vnext/COVERAGE_AND_CUTOVER.md)
+- [ARK Knowledge Base vNext 实施完成报告](docs/ark_kb_vnext/COMPLETION_REPORT.md)
 - [授权与分发策略](docs/LICENSE_POLICY.md)
 
 ## Knowledge Discovery 视察包
