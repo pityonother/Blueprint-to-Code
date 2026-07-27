@@ -135,9 +135,10 @@ def build_vnext_snapshot(
 ) -> dict[str, object]:
     """Build all four stores in staging, validate, then atomically promote."""
 
-    del capture_root, native_root
+    del native_root
     project_root = project_root.resolve()
     discovery_database = discovery_database.resolve()
+    capture_root = capture_root.resolve()
     output_dir = output_dir.resolve()
     if not full_snapshot:
         raise ValueError("--full-snapshot is required for the first vNext build")
@@ -167,6 +168,7 @@ def build_vnext_snapshot(
         )
         core_counts = build_core_database(
             discovery_path=discovery_database,
+            capture_root=capture_root,
             output_path=staging / "core.sqlite",
             source_fingerprint=discovery_sha,
             generated_at=generated_at,

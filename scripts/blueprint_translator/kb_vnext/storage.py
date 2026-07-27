@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import sqlite3
 from pathlib import Path
 from typing import Mapping
 
 from .benchmark import materialize_benchmark_queries
+from .blueprint_ingest import materialize_blueprint_defaults
 from .class_hierarchy import CLASS_TABLES_SQL, materialize_discovery_classes
 from .fact_store import (
     materialize_declared_defaults,
@@ -971,6 +971,7 @@ def _materialize_registration_edges(
 def build_core_database(
     *,
     discovery_path: Path,
+    capture_root: Path,
     output_path: Path,
     source_fingerprint: str,
     generated_at: str,
@@ -1105,12 +1106,55 @@ def build_core_database(
         registration_edge_count, registration_domain_count = (
             _materialize_registration_edges(connection, ontology)
         )
-        fact_counts = materialize_declared_defaults(
+        blueprint_result = materialize_blueprint_defaults(
+            discovery,
+            connection,
+            capture_root=capture_root,
+            ontology=ontology,
+        )
+        materialize_declared_defaults(
             discovery,
             connection,
             ontology=ontology,
             source_revision_id=1,
+            covered_properties=blueprint_result.covered_properties,
+            freshness_gap_assets=blueprint_result.freshness_gap_assets,
+            untrusted_assets=blueprint_result.untrusted_assets,
         )
+        fact_counts = {
+            "declaredFacts": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM facts
+                    WHERE fact_type='DECLARED_DEFAULT' AND current=1
+                    """
+                ).fetchone()[0]
+            ),
+            "factEvidence": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM fact_evidence AS evidence
+                    JOIN facts AS fact ON fact.fact_id=evidence.fact_id
+                    WHERE fact.fact_type='DECLARED_DEFAULT'
+                      AND fact.current=1
+                    """
+                ).fetchone()[0]
+            ),
+            "notRecoveredFacts": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM facts
+                    WHERE fact_type='DECLARED_DEFAULT'
+                      AND current=1
+                      AND status IN (
+                          'UNKNOWN', 'NOT_RECOVERED',
+                          'SOURCE_NOT_AVAILABLE'
+                      )
+                    """
+                ).fetchone()[0]
+            ),
+        }
         effective_counts = materialize_effective_defaults(connection)
         native_counts = materialize_native_gold_set(
             discovery,
@@ -1143,6 +1187,10 @@ def build_core_database(
             **role_counts,
             **registration_counts,
             **fact_counts,
+            **{
+                "blueprint" + key[0].upper() + key[1:]: value
+                for key, value in blueprint_result.counts.items()
+            },
             **effective_counts,
             **native_counts,
             **benchmark_counts,

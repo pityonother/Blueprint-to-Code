@@ -66,6 +66,13 @@ def _discovery() -> sqlite3.Connection:
             source_evidence_id TEXT NOT NULL,
             confidence TEXT NOT NULL
         );
+        CREATE TABLE assets(
+            object_path TEXT NOT NULL,
+            evidence_freshness TEXT NOT NULL
+        );
+        INSERT INTO assets VALUES (
+            '/Game/Test/BP_Base.BP_Base', 'FRESH'
+        );
         """
     )
     return source
@@ -182,6 +189,54 @@ class KnowledgeFactStoreTests(unittest.TestCase):
         self.assertNotIn("CONFIRMED", {row[-1] for row in rows})
         core.close()
         source.close()
+
+    def test_nonfresh_or_ambiguous_asset_never_keeps_confirmed_fallback(
+        self,
+    ):
+        for freshness_rows in (
+            ("UNKNOWN",),
+            (),
+            ("FRESH", "UNKNOWN"),
+        ):
+            with self.subTest(freshness_rows=freshness_rows):
+                core = _core()
+                source = _discovery()
+                source.execute("DELETE FROM assets")
+                source.executemany(
+                    "INSERT INTO assets VALUES (?, ?)",
+                    [
+                        ("/Game/Test/BP_Base.BP_Base", freshness)
+                        for freshness in freshness_rows
+                    ],
+                )
+                source.execute(
+                    """
+                    INSERT INTO default_property_surface VALUES (
+                        's1', '/Game/Test/BP_Base.BP_Base', 'Damage',
+                        'FloatProperty', 1, 'CONFIRMED_FINGERPRINT_ONLY',
+                        'abc123', 'bp://fixture/default/damage', 'HIGH'
+                    )
+                    """
+                )
+
+                materialize_declared_defaults(
+                    source,
+                    core,
+                    ontology=self.ontology,
+                    source_revision_id=1,
+                )
+
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT value_kind, value_text, status
+                        FROM facts
+                        """
+                    ).fetchall(),
+                    [("UNKNOWN", None, "NOT_RECOVERED")],
+                )
+                core.close()
+                source.close()
 
     def test_fact_requires_evidence_and_missing_status_rejects_placeholder(self):
         core = _core()

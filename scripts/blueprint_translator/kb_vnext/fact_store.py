@@ -211,6 +211,9 @@ def materialize_declared_defaults(
     *,
     ontology: OntologyBundle,
     source_revision_id: int,
+    covered_properties: Iterable[tuple[str, str]] | None = None,
+    freshness_gap_assets: Iterable[str] | None = None,
+    untrusted_assets: Iterable[str] | None = None,
 ) -> dict[str, int]:
     """Import the bounded default surface without inventing decoded values."""
 
@@ -227,14 +230,44 @@ def materialize_declared_defaults(
             "SELECT canonical_uri, entity_id FROM entities"
         )
     }
-    cursor = discovery.execute(
+    covered = set(covered_properties or ())
+    freshness_gaps = set(freshness_gap_assets or ())
+    untrusted = set(untrusted_assets or ())
+    asset_columns = (
+        {
+            str(column[1])
+            for column in discovery.execute('PRAGMA table_info("assets")')
+        }
+        if _table_exists(discovery, "assets")
+        else set()
+    )
+    freshness_projection = (
         """
+        , (
+            SELECT CASE
+                WHEN COUNT(*)=1 THEN MAX(asset.evidence_freshness)
+                ELSE 'AMBIGUOUS'
+            END
+            FROM assets AS asset
+            WHERE asset.object_path=surface.asset_object_path
+          ) AS evidence_freshness
+        """
+        if {"object_path", "evidence_freshness"}.issubset(asset_columns)
+        else ", '' AS evidence_freshness"
+    )
+    cursor = discovery.execute(
+        f"""
         SELECT
-            asset_object_path, property_name, property_type,
-            has_value, value_status, value_fingerprint,
-            source_evidence_id, confidence
-        FROM default_property_surface
-        ORDER BY asset_object_path, property_name, surface_id
+            surface.asset_object_path, surface.property_name,
+            surface.property_type, surface.has_value,
+            surface.value_status, surface.value_fingerprint,
+            surface.source_evidence_id, surface.confidence
+            {freshness_projection}
+        FROM default_property_surface AS surface
+        ORDER BY
+            surface.asset_object_path,
+            surface.property_name,
+            surface.surface_id
         """
     )
     imported: set[int] = set()
@@ -242,9 +275,36 @@ def materialize_declared_defaults(
     for batch in iter(lambda: cursor.fetchmany(10_000), []):
         for source in batch:
             row = dict(source)
+            property_key = (
+                str(row["asset_object_path"]),
+                str(row["property_name"]),
+            )
+            if property_key in covered:
+                continue
             entity_id = entity_ids.get(str(row["asset_object_path"]))
             if entity_id is None:
                 continue
+            freshness = str(row.get("evidence_freshness") or "").upper()
+            if str(row["asset_object_path"]) in freshness_gaps:
+                row["value_status"] = "STALE"
+            elif str(row["asset_object_path"]) in untrusted:
+                row["value_status"] = "NOT_RECOVERED"
+            elif freshness == "STALE":
+                row["value_status"] = "STALE"
+            elif freshness in {
+                "SOURCE_NOT_AVAILABLE",
+                "NOT_AVAILABLE",
+            }:
+                row["value_status"] = "SOURCE_NOT_AVAILABLE"
+            elif freshness != "FRESH" and str(
+                row.get("value_status") or ""
+            ).upper() not in {
+                "NOT_RECOVERED",
+                "SOURCE_NOT_AVAILABLE",
+                "STALE",
+                "UNKNOWN",
+            }:
+                row["value_status"] = "NOT_RECOVERED"
             value, status = _declared_value(row)
             if status in MISSING_STATUSES:
                 not_recovered += 1

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -16,9 +18,168 @@ if str(SCRIPT_ROOT) not in sys.path:
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     build_vnext_snapshot,
 )
+from blueprint_translator.evidence_schema import (  # noqa: E402
+    make_asset_id,
+    make_revision_id,
+)
+from blueprint_translator.asset_ledger import (  # noqa: E402
+    metadata_fingerprint,
+)
 
 
-def _discovery_fixture(path: Path) -> None:
+def _blueprint_capture_fixture(
+    capture_root: Path,
+) -> tuple[str, str, str, int, str]:
+    asset_name = "BP_Base"
+    object_path = "/Game/Test/BP_Base.BP_Base"
+    asset_id = make_asset_id(object_path)
+    parser = "uasset-graph-reader-evidence-v3"
+    schema = "ark.blueprint.evidence.v2"
+    source_path = "@memory/normalized_graph_facts"
+    source_sha = "b" * 64
+    asset_root = capture_root / asset_name
+    asset_root.mkdir(parents=True)
+    package_path = asset_root / "BP_Base.uasset"
+    package_bytes = b"synthetic-storage-uasset"
+    package_path.write_bytes(package_bytes)
+    binary_path = f"binary/{package_path.name}"
+    binary_sha = hashlib.sha256(package_bytes).hexdigest()
+    source_hashes = {
+        binary_path: binary_sha,
+        source_path: source_sha,
+    }
+    compact = json.dumps(
+        sorted(source_hashes.items()),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    fingerprint = hashlib.sha256(compact).hexdigest()
+    revision = make_revision_id(
+        source_hashes,
+        parser_version=parser,
+        schema_version=schema,
+    )
+    default_ref = f"bp://{asset_id}@{revision}/default/Count"
+    evidence_root = asset_root / "evidence"
+    evidence_root.mkdir(parents=True)
+    connection = sqlite3.connect(evidence_root / "evidence.sqlite")
+    connection.executescript(
+        """
+        CREATE TABLE asset_revisions(
+            revision_id TEXT PRIMARY KEY,
+            asset_id TEXT NOT NULL,
+            asset_name TEXT NOT NULL,
+            object_path TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            uasset_path TEXT NOT NULL
+        );
+        CREATE TABLE class_defaults(
+            default_ref TEXT PRIMARY KEY,
+            revision_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            type_name TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            value_codec TEXT NOT NULL,
+            value_blob BLOB,
+            confidence TEXT NOT NULL,
+            source TEXT NOT NULL,
+            extra_json TEXT NOT NULL
+        );
+        CREATE TABLE source_manifest(
+            revision_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            source_kind TEXT NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO asset_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            revision,
+            asset_id,
+            asset_name,
+            object_path,
+            fingerprint,
+            parser,
+            schema,
+            "2026-07-27T00:00:00+00:00",
+            str(package_path),
+        ),
+    )
+    connection.execute(
+        "INSERT INTO class_defaults VALUES (?, ?, 'Count', 'IntProperty', '7', 'json', NULL, 'high', 'fixture', '{}')",
+        (default_ref, revision),
+    )
+    connection.executemany(
+        "INSERT INTO source_manifest VALUES (?, ?, ?, ?, ?)",
+        [
+            (
+                revision,
+                binary_path,
+                binary_sha,
+                len(package_bytes),
+                "package_binary",
+            ),
+            (
+                revision,
+                source_path,
+                source_sha,
+                123,
+                "in_memory_capture",
+            ),
+        ],
+    )
+    connection.commit()
+    connection.close()
+    (evidence_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "asset_id": asset_id,
+                "asset_name": asset_name,
+                "object_path": object_path,
+                "revision_id": revision,
+                "source_fingerprint": fingerprint,
+                "parser_version": parser,
+                "schema": schema,
+                "database": "evidence.sqlite",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    stat = package_path.stat()
+    package_modified = datetime.fromtimestamp(
+        stat.st_mtime,
+        UTC,
+    ).isoformat()
+    package_fingerprint = metadata_fingerprint(
+        uasset_size=stat.st_size,
+        uasset_modified=package_modified,
+    )
+    return (
+        revision,
+        default_ref,
+        package_fingerprint,
+        stat.st_size,
+        package_modified,
+    )
+
+
+def _discovery_fixture(
+    path: Path,
+    *,
+    evidence_revision: str = "",
+    evidence_ref: str = "",
+    package_fingerprint: str = "sha-base",
+    package_size: int = 100,
+    package_modified: str = "2026-07-27T00:00:00+00:00",
+) -> None:
     connection = sqlite3.connect(path)
     connection.executescript(
         """
@@ -40,10 +201,14 @@ def _discovery_fixture(path: Path) -> None:
             is_function_library INTEGER,
             is_blueprint_interface INTEGER,
             is_map INTEGER NOT NULL,
+            has_uasset INTEGER NOT NULL,
+            has_uexp INTEGER NOT NULL,
+            has_ubulk INTEGER NOT NULL,
             file_size_total INTEGER NOT NULL,
             source_fingerprint TEXT NOT NULL,
             source_modified TEXT NOT NULL,
             capture_exists INTEGER NOT NULL,
+            evidence_revision TEXT NOT NULL,
             evidence_freshness TEXT NOT NULL,
             parse_status TEXT NOT NULL,
             identity_status TEXT NOT NULL,
@@ -112,6 +277,17 @@ def _discovery_fixture(path: Path) -> None:
             generated_at TEXT NOT NULL,
             limitations_json TEXT NOT NULL
         );
+        CREATE TABLE default_property_surface(
+            surface_id TEXT PRIMARY KEY,
+            asset_object_path TEXT NOT NULL,
+            property_name TEXT NOT NULL,
+            property_type TEXT NOT NULL,
+            has_value INTEGER NOT NULL,
+            value_status TEXT NOT NULL,
+            value_fingerprint TEXT NOT NULL,
+            source_evidence_id TEXT NOT NULL,
+            confidence TEXT NOT NULL
+        );
         """
     )
     assets = [
@@ -132,10 +308,14 @@ def _discovery_fixture(path: Path) -> None:
             0,
             0,
             0,
-            100,
-            "sha-base",
-            "2026-07-27T00:00:00+00:00",
             1,
+            0,
+            0,
+            package_size,
+            package_fingerprint,
+            package_modified,
+            1,
+            evidence_revision,
             "FRESH",
             "CONFIRMED",
             "EXTRACTED",
@@ -169,10 +349,14 @@ def _discovery_fixture(path: Path) -> None:
             0,
             0,
             0,
+            1,
+            0,
+            0,
             200,
             "sha-texture",
             "2026-07-27T00:00:00+00:00",
             0,
+            "",
             "NOT_MEASURED",
             "NOT_MEASURED",
             "EXTRACTED",
@@ -192,10 +376,22 @@ def _discovery_fixture(path: Path) -> None:
     ]
     connection.executemany(
         "INSERT INTO assets VALUES ("
-        + ",".join("?" for _ in range(35))
+        + ",".join("?" for _ in range(39))
         + ")",
         assets,
     )
+    if evidence_ref:
+        connection.execute(
+            """
+            INSERT INTO default_property_surface VALUES (
+                'surface-count', '/Game/Test/BP_Base.BP_Base',
+                'Count', 'IntProperty', 1,
+                'CONFIRMED_FINGERPRINT_ONLY', 'fallback-fingerprint',
+                ?, 'HIGH'
+            )
+            """,
+            (evidence_ref,),
+        )
     connection.execute(
         """
         INSERT INTO asset_references VALUES (
@@ -252,7 +448,21 @@ class KnowledgeStorageTests(unittest.TestCase):
             root = Path(temp_dir)
             discovery = root / "discovery.sqlite"
             output = root / "vnext"
-            _discovery_fixture(discovery)
+            (
+                revision,
+                evidence_ref,
+                package_fingerprint,
+                package_size,
+                package_modified,
+            ) = _blueprint_capture_fixture(root / "captures")
+            _discovery_fixture(
+                discovery,
+                evidence_revision=revision,
+                evidence_ref=evidence_ref,
+                package_fingerprint=package_fingerprint,
+                package_size=package_size,
+                package_modified=package_modified,
+            )
             result = build_vnext_snapshot(
                 project_root=PROJECT_ROOT,
                 discovery_database=discovery,
@@ -266,6 +476,10 @@ class KnowledgeStorageTests(unittest.TestCase):
             self.assertEqual(result["status"], "complete")
             self.assertEqual(
                 result["cutover"]["defaultQuerySource"], "legacy"
+            )
+            self.assertEqual(
+                result["counts"]["core"]["blueprintPackageVerifiedAssets"],
+                1,
             )
             for name in (
                 "catalog.sqlite",
@@ -333,6 +547,28 @@ class KnowledgeStorageTests(unittest.TestCase):
                         (texture_id,),
                     ).fetchone()[0],
                     "INDEX_ONLY",
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT value_kind, value_integer, status
+                        FROM facts
+                        WHERE fact_type='DECLARED_DEFAULT'
+                          AND fact_name='Count'
+                        """
+                    ).fetchall(),
+                    [("INTEGER", 7, "CONFIRMED")],
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM source_revisions
+                        WHERE source_kind='blueprint_evidence'
+                          AND source_uri LIKE 'bp://%'
+                        """
+                    ).fetchone()[0],
+                    1,
                 )
             finally:
                 catalog.close()
