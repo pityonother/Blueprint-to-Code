@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .benchmark import run_query_benchmark
 from .registrations import classify_registration_property
+from .semantic_quality import semantic_quality_gates
 
 
 QUALITY_GATE_SCHEMA = "ark-kb-quality-gates/v1"
@@ -596,6 +597,7 @@ def evaluate_quality_gates(
                 ),
             ]
         )
+        gates.extend(semantic_quality_gates(core, manifest))
         gates.extend(
             [
                 _gate(
