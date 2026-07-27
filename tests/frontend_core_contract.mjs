@@ -23,6 +23,7 @@ try {
     '&lt;&amp;&gt;&quot;&#039;',
   );
   assert.equal(workspaceViewFromSearch('?view=harvest'), 'harvest');
+  assert.equal(workspaceViewFromSearch('?view=knowledge'), 'knowledge');
   assert.equal(workspaceViewFromSearch('?view=blueprint'), 'blueprint');
 
   const harvestUrl = workspaceUrl(
@@ -32,6 +33,13 @@ try {
   assert.equal(harvestUrl.searchParams.get('view'), 'harvest');
   assert.equal(harvestUrl.searchParams.get('q'), 'metal');
   assert.equal(harvestUrl.searchParams.get('keep'), '1');
+
+  const knowledgeUrl = workspaceUrl(
+    'http://127.0.0.1:8765/?keep=1',
+    'knowledge',
+  );
+  assert.equal(knowledgeUrl.searchParams.get('view'), 'knowledge');
+  assert.equal(knowledgeUrl.searchParams.get('keep'), '1');
 
   const blueprintUrl = workspaceUrl(
     'http://127.0.0.1:8765/?view=harvest&q=metal&node=n1&resource=r1&keep=1',

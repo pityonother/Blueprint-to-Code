@@ -43,6 +43,9 @@ try {
   const { requestHarvestJson } = await server.ssrLoadModule(
     '/src/harvest/api.ts',
   );
+  const { queryKnowledge } = await server.ssrLoadModule(
+    '/src/kb/api.ts',
+  );
 
   await api('/api/open-captures', {
     method: 'POST',
@@ -52,6 +55,11 @@ try {
   await requestHarvestJson('/api/harvest/build', {
     method: 'POST',
     body: JSON.stringify({ options: {} }),
+  });
+  await queryKnowledge({
+    entity: 'ItemA',
+    factTypes: ['ITEM_PROPERTY'],
+    budgetTokens: 500,
   });
   await api('/api/state');
   configureApiAuthToken('remote-contract-token');
@@ -72,7 +80,7 @@ try {
     'Bearer remote-contract-token',
   );
   const posts = requests.filter((request) => request.method === 'POST');
-  assert.equal(posts.length, 3);
+  assert.equal(posts.length, 4);
   for (const post of posts) {
     assert.equal(
       post.headers.get('X-Blueprint-Session'),
@@ -83,8 +91,9 @@ try {
   assert.equal(posts[0].headers.get('X-Caller-Header'), 'kept');
   assert.equal(posts[0].headers.get('Authorization'), null);
   assert.equal(posts[1].headers.get('Authorization'), null);
+  assert.equal(posts[2].headers.get('Authorization'), null);
   assert.equal(
-    posts[2].headers.get('Authorization'),
+    posts[3].headers.get('Authorization'),
     'Bearer remote-contract-token',
   );
   const stateGet = requests.find((request) => request.path === '/api/state');

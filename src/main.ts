@@ -5,6 +5,7 @@ import {
   type WorkspaceView,
 } from './app/router';
 import { HarvestExplorer } from './harvest/explorer';
+import { KnowledgeWorkspace } from './kb/workspace';
 import { ApiFailure, api, type ApiResult } from './shared/api';
 import { readableError } from './shared/errors';
 import { escapeHtml } from './shared/html';
@@ -186,6 +187,7 @@ if (!app) {
 const root = app;
 let workspaceView = workspaceViewFromSearch(window.location.search);
 const harvestExplorer = new HarvestExplorer(() => render());
+const knowledgeWorkspace = new KnowledgeWorkspace(() => render());
 
 const reportLabels: Record<ReportKey, string> = {
   agent_index: 'AI 证据索引',
@@ -844,16 +846,23 @@ function currentAsset(): AssetSummary | undefined {
 }
 
 function renderTopbar(): string {
+  const titles: Record<WorkspaceView, [string, string]> = {
+    blueprint: ['蓝图分析工作台', '从 .uasset 还原 Unreal/ARK Blueprint，再生成中文行为说明。'],
+    harvest: ['ARK 资源点采集查询', '资源节点 → HarvestComponent → 产出资源 → 生物排行'],
+    knowledge: ['ARK 知识库 vNext', '实体、角色、领域、事实、Evidence 与数据库优先查询计划。'],
+  };
+  const [title, subtitle] = titles[workspaceView];
   return `
     <header class="topbar">
       <div class="topbar-title">
-        <h1>${workspaceView === 'harvest' ? 'ARK 资源点采集查询' : '蓝图分析工作台'}</h1>
-        <small>${workspaceView === 'harvest' ? '资源节点 → HarvestComponent → 产出资源 → 生物排行' : '从 .uasset 还原 Unreal/ARK Blueprint，再生成中文行为说明。'}</small>
+        <h1>${escapeHtml(title)}</h1>
+        <small>${escapeHtml(subtitle)}</small>
       </div>
       <div class="top-actions">
         <nav class="workspace-tabs" aria-label="工作区">
           <button class="workspace-tab ${workspaceView === 'blueprint' ? 'active' : ''}" type="button" data-workspace="blueprint" aria-current="${workspaceView === 'blueprint' ? 'page' : 'false'}">蓝图分析</button>
           <button class="workspace-tab ${workspaceView === 'harvest' ? 'active' : ''}" type="button" data-workspace="harvest" aria-current="${workspaceView === 'harvest' ? 'page' : 'false'}">资源点采集排行</button>
+          <button class="workspace-tab ${workspaceView === 'knowledge' ? 'active' : ''}" type="button" data-workspace="knowledge" aria-current="${workspaceView === 'knowledge' ? 'page' : 'false'}">知识库 vNext</button>
         </nav>
         ${workspaceView === 'blueprint' ? actionButton('刷新状态', 'refresh', 'ghost', busy) : ''}
         ${workspaceView === 'blueprint' ? actionButton('打开 captures 目录', 'open-capture-root', 'ghost') : ''}
@@ -1210,6 +1219,21 @@ function renderMain(): void {
     harvestExplorer.ensureLoaded();
     return;
   }
+  if (workspaceView === 'knowledge') {
+    root.innerHTML = `
+      <div class="shell">
+        ${renderTopbar()}
+        <main class="workspace kb-main">
+          ${knowledgeWorkspace.render()}
+        </main>
+        ${renderVersionFooter()}
+      </div>
+    `;
+    bindEvents();
+    knowledgeWorkspace.bind();
+    knowledgeWorkspace.ensureLoaded();
+    return;
+  }
 
   const asset = currentAsset();
   if (asset && asset.path !== selectedPath) {
@@ -1250,7 +1274,7 @@ function renderLoading(): void {
 }
 
 function render(): void {
-  if (workspaceView === 'harvest') {
+  if (workspaceView === 'harvest' || workspaceView === 'knowledge') {
     renderMain();
     return;
   }
@@ -1279,7 +1303,10 @@ function syncInputs(): void {
 function bindEvents(): void {
   document.querySelectorAll<HTMLButtonElement>('[data-workspace]').forEach((button) => {
     button.addEventListener('click', () => {
-      const nextView: WorkspaceView = button.dataset.workspace === 'harvest' ? 'harvest' : 'blueprint';
+      const requested = button.dataset.workspace;
+      const nextView: WorkspaceView = requested === 'harvest' || requested === 'knowledge'
+        ? requested
+        : 'blueprint';
       if (nextView === workspaceView) {
         return;
       }
@@ -1290,6 +1317,9 @@ function bindEvents(): void {
       render();
       if (workspaceView === 'blueprint' && !state) {
         void refreshState();
+      }
+      if (workspaceView === 'knowledge') {
+        knowledgeWorkspace.ensureLoaded();
       }
     });
   });

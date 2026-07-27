@@ -71,6 +71,10 @@ from blueprint_translator.uasset_graphs import (
     write_graph_candidate_files,
     write_uasset_graph_read_files,
 )
+from blueprint_translator.kb_vnext.kb_api import (
+    KnowledgeApiError,
+    VNextKnowledgeService,
+)
 from blueprint_server.jobs import (
     JOB_TIMEOUT_SECONDS,
     cancel_job,
@@ -98,6 +102,7 @@ PROJECT_VERSION = read_project_version(PROJECT_ROOT)
 CAPTURE_ROOT = PROJECT_ROOT / "captures"
 DIST_ROOT = PROJECT_ROOT / "dist"
 KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge_base"
+KB_VNEXT_SERVICE = VNextKnowledgeService(KNOWLEDGE_ROOT / "vnext")
 EXPORT_SCRIPT = PROJECT_ROOT / "scripts" / "devkit_exporters" / "export_current_blueprint_defaults.py"
 DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
@@ -1591,6 +1596,81 @@ def api_state() -> dict[str, object]:
     return STATE_ROUTE.state()
 
 
+def _kb_api_problem(exc: KnowledgeApiError) -> ApiProblem:
+    return ApiProblem(
+        exc.status,
+        {
+            "ok": False,
+            "code": exc.code,
+            "error": exc.message,
+        },
+    )
+
+
+def _kb_query_value(
+    values: dict[str, list[str]], key: str, default: str = ""
+) -> str:
+    raw = values.get(key, [default])
+    return raw[0] if raw else default
+
+
+def kb_get_payload(path: str, query: str) -> dict[str, object] | None:
+    try:
+        values = parse_qs(query, keep_blank_values=True)
+        if path == "/api/kb/health":
+            return KB_VNEXT_SERVICE.health()
+        if path == "/api/kb/entities/search":
+            return KB_VNEXT_SERVICE.search_entities(
+                query=_kb_query_value(values, "q"),
+                limit=_kb_query_value(values, "limit", "25"),
+                cursor=_kb_query_value(values, "cursor", "0"),
+            )
+        prefix = "/api/kb/entities/"
+        if path.startswith(prefix):
+            remainder = unquote(path.removeprefix(prefix)).strip("/")
+            parts = remainder.split("/")
+            if not parts[0].isdigit() or int(parts[0]) <= 0:
+                raise KnowledgeApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "REQUEST_INVALID",
+                    "Entity id must be a positive integer.",
+                )
+            entity_id = int(parts[0])
+            if len(parts) == 1:
+                return KB_VNEXT_SERVICE.entity(entity_id)
+            if len(parts) == 2 and parts[1] in {
+                "facts",
+                "relationships",
+                "coverage",
+                "effective-defaults",
+            }:
+                return KB_VNEXT_SERVICE.entity_collection(
+                    entity_id,
+                    kind=parts[1],
+                    limit=_kb_query_value(values, "limit", "50"),
+                    cursor=_kb_query_value(values, "cursor", "0"),
+                )
+            raise KnowledgeApiError(
+                HTTPStatus.NOT_FOUND,
+                "API_ENDPOINT_NOT_FOUND",
+                "Unknown knowledge endpoint.",
+            )
+        if path.startswith("/api/kb/jobs/"):
+            job_id = unquote(path.removeprefix("/api/kb/jobs/")).strip("/")
+            return {
+                "job": get_job(job_id),
+                "returned": 1,
+                "omitted": 0,
+                "nextQuery": "",
+                "freshness": "FRESH",
+                "evidence": [],
+                "gap": [],
+            }
+        return None
+    except KnowledgeApiError as exc:
+        raise _kb_api_problem(exc) from exc
+
+
 _UNREAD_BODY_PROBLEM_CODES = frozenset(
     {
         "HOST_FORBIDDEN",
@@ -1728,6 +1808,10 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                     }
                 )
                 return
+            kb_payload = kb_get_payload(parsed.path, parsed.query)
+            if kb_payload is not None:
+                self.send_json({"ok": True, **kb_payload})
+                return
             state_payload = state_route_payload(parsed.path, api_state)
             if state_payload is not None:
                 self.send_json(state_payload)
@@ -1861,6 +1945,35 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 server_port=int(self.server.server_address[1]),
             )
             body = self.read_json_body()
+            if self.path in {"/api/kb/query", "/api/kb/plan"}:
+                try:
+                    result = KB_VNEXT_SERVICE.query(body)
+                except KnowledgeApiError as exc:
+                    raise _kb_api_problem(exc) from exc
+                self.send_json({"ok": True, **result})
+                return
+            if (
+                self.path.startswith("/api/kb/jobs/")
+                and self.path.endswith("/cancel")
+            ):
+                job_id = unquote(
+                    self.path[
+                        len("/api/kb/jobs/") : -len("/cancel")
+                    ]
+                ).strip("/")
+                self.send_json(
+                    {
+                        "ok": True,
+                        "job": cancel_job(job_id),
+                        "returned": 1,
+                        "omitted": 0,
+                        "nextQuery": "",
+                        "freshness": "FRESH",
+                        "evidence": [],
+                        "gap": [],
+                    }
+                )
+                return
             if self.path == "/api/harvest/build":
                 self.send_json(
                     {"ok": True, "job": start_harvest_build_for_request(body)},

@@ -39,6 +39,8 @@ from .query_planner import (
     plan_query,
     resolve_entities,
 )
+from .kb_api import KnowledgeApiError, VNextKnowledgeService
+from .kb_context import build_bounded_context_pack
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -69,4 +71,7 @@ __all__ = [
     "QueryRequirements",
     "plan_query",
     "resolve_entities",
+    "KnowledgeApiError",
+    "VNextKnowledgeService",
+    "build_bounded_context_pack",
 ]
