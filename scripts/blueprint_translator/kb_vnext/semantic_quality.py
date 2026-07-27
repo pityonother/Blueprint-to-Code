@@ -15,8 +15,6 @@ USABLE_FACT_STATUSES = (
     "CONFIRMED_EMPTY",
 )
 USABLE_EFFECTIVE_STATUSES = (
-    "CONFIRMED",
-    "VERIFIED",
     "RESOLVED",
 )
 REVIEWED_PROJECTION_STATUSES = {
@@ -50,17 +48,75 @@ def _gate(
     }
 
 
-def _usable_fact_predicate(alias: str) -> str:
-    statuses = ", ".join(f"'{value}'" for value in USABLE_FACT_STATUSES)
+def typed_usable_fact_predicate(alias: str) -> str:
+    regular_statuses = ", ".join(
+        f"'{value}'"
+        for value in USABLE_FACT_STATUSES
+        if value != "CONFIRMED_EMPTY"
+    )
     return f"""
-        UPPER({alias}.status) IN ({statuses})
-        AND UPPER({alias}.value_kind) NOT IN ('FINGERPRINT', 'UNKNOWN')
-        AND (
-            UPPER({alias}.value_kind)='CONFIRMED_EMPTY'
-            OR {alias}.value_text IS NOT NULL
-            OR {alias}.value_number IS NOT NULL
-            OR {alias}.value_integer IS NOT NULL
-            OR {alias}.value_json IS NOT NULL
+        (
+            (
+                UPPER({alias}.status)='CONFIRMED_EMPTY'
+                AND UPPER({alias}.value_kind)='CONFIRMED_EMPTY'
+                AND {alias}.value_text IS NULL
+                AND {alias}.value_number IS NULL
+                AND {alias}.value_integer IS NULL
+                AND {alias}.value_json IS NULL
+            )
+            OR (
+                UPPER({alias}.status) IN ({regular_statuses})
+                AND (
+                    (
+                        UPPER({alias}.value_kind)='BOOLEAN'
+                        AND TYPEOF({alias}.value_integer)='integer'
+                        AND {alias}.value_integer IN (0, 1)
+                        AND {alias}.value_text IS NULL
+                        AND {alias}.value_number IS NULL
+                        AND {alias}.value_json IS NULL
+                    )
+                    OR (
+                        UPPER({alias}.value_kind)='INTEGER'
+                        AND TYPEOF({alias}.value_integer)='integer'
+                        AND {alias}.value_text IS NULL
+                        AND {alias}.value_number IS NULL
+                        AND {alias}.value_json IS NULL
+                    )
+                    OR (
+                        UPPER({alias}.value_kind)='NUMBER'
+                        AND TYPEOF({alias}.value_number)
+                            IN ('integer', 'real')
+                        AND ABS({alias}.value_number)
+                            <=1.7976931348623157e308
+                        AND {alias}.value_text IS NULL
+                        AND {alias}.value_integer IS NULL
+                        AND {alias}.value_json IS NULL
+                    )
+                    OR (
+                        UPPER({alias}.value_kind)='TEXT'
+                        AND TYPEOF({alias}.value_text)='text'
+                        AND {alias}.value_number IS NULL
+                        AND {alias}.value_integer IS NULL
+                        AND {alias}.value_json IS NULL
+                    )
+                    OR (
+                        UPPER({alias}.value_kind)='ENTITY_REF'
+                        AND TYPEOF({alias}.value_text)='text'
+                        AND SUBSTR({alias}.value_text, 1, 1)='/'
+                        AND {alias}.value_number IS NULL
+                        AND {alias}.value_integer IS NULL
+                        AND {alias}.value_json IS NULL
+                    )
+                    OR (
+                        UPPER({alias}.value_kind)='JSON'
+                        AND TYPEOF({alias}.value_json)='text'
+                        AND JSON_VALID({alias}.value_json)=1
+                        AND {alias}.value_text IS NULL
+                        AND {alias}.value_number IS NULL
+                        AND {alias}.value_integer IS NULL
+                    )
+                )
+            )
         )
     """
 
@@ -68,7 +124,7 @@ def _usable_fact_predicate(alias: str) -> str:
 def _semantic_fact_metrics(
     core: sqlite3.Connection,
 ) -> dict[str, int | float]:
-    usable = _usable_fact_predicate("fact")
+    usable = typed_usable_fact_predicate("fact")
     total_facts, usable_facts = core.execute(
         f"""
         SELECT
@@ -108,15 +164,15 @@ def _semantic_fact_metrics(
             COUNT(*),
             SUM(
                 CASE
-                    WHEN {usable}
+                    WHEN fact.current=1
+                     AND {usable}
                      AND UPPER(effective.resolution_status)
                          IN ({effective_statuses})
                     THEN 1 ELSE 0
                 END
             )
         FROM effective_facts AS effective
-        JOIN facts AS fact ON fact.fact_id=effective.fact_id
-        WHERE fact.current=1
+        LEFT JOIN facts AS fact ON fact.fact_id=effective.fact_id
         """
     ).fetchone()
     total_effective = int(total_effective or 0)
@@ -171,7 +227,7 @@ def _semantic_projection_metrics(
             """
         )
     }
-    usable = _usable_fact_predicate("fact")
+    usable = typed_usable_fact_predicate("fact")
     result: dict[str, dict[str, object]] = {}
     for projection_name, fact_types in DOMAIN_PROJECTIONS.items():
         placeholders = ", ".join("?" for _ in fact_types)

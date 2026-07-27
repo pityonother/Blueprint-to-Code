@@ -7,6 +7,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Iterable
 
+from .schema_capabilities import supports_effective_candidate_explanations
+
 
 GAP_CODES = {
     "NO_ENTITY_MATCH",
@@ -19,6 +21,7 @@ GAP_CODES = {
     "RUNTIME_DYNAMIC_BRANCH",
     "MAP_USAGE_INCOMPLETE",
     "UNSUPPORTED_SERIALIZATION",
+    "SCHEMA_MIGRATION_REQUIRED",
 }
 COMPLETE_STATUSES = {
     "CONFIRMED",
@@ -34,6 +37,11 @@ OPEN_STATUSES = {
     "LEGACY_UNVERIFIED",
     "CONFIRMED_FINGERPRINT_ONLY",
 }
+MAX_EFFECTIVE_CANDIDATES_PER_FACT = 8
+CANDIDATE_EXPLANATION_AVAILABLE = "AVAILABLE"
+CANDIDATE_EXPLANATION_SCHEMA_MIGRATION_REQUIRED = (
+    "SCHEMA_MIGRATION_REQUIRED"
+)
 
 
 @dataclass(frozen=True)
@@ -146,26 +154,32 @@ def _fact_rows(
 ) -> list[dict[str, object]]:
     connection.row_factory = sqlite3.Row
     parameters: list[object] = [entity_id]
-    name_filter = ""
+    fact_name_filter = ""
+    effective_name_filter = ""
     if fact_names:
         placeholders = ",".join("?" for _ in fact_names)
-        name_filter = f" AND f.fact_name IN ({placeholders})"
+        fact_name_filter = f" AND f.fact_name IN ({placeholders})"
+        effective_name_filter = (
+            f" AND effective.fact_name IN ({placeholders})"
+        )
         parameters.extend(fact_names)
     parameters.append(limit)
     if fact_type == "EFFECTIVE_DEFAULT":
         rows = connection.execute(
             f"""
             SELECT
-                f.fact_id, effective.fact_type, effective.fact_name,
+                effective.fact_id, effective.fact_type, effective.fact_name,
                 f.value_kind, f.value_text, f.value_number,
                 f.value_integer, f.value_json, f.unit, f.status,
                 f.confidence, effective.resolution_status,
                 effective.inherited_from_entity_id,
                 effective.resolution_chain_json
             FROM effective_facts AS effective
-            JOIN facts AS f ON f.fact_id=effective.fact_id
+            LEFT JOIN facts AS f
+              ON f.fact_id=effective.fact_id
+             AND f.current=1
             WHERE effective.entity_id=?
-              {name_filter}
+              {effective_name_filter}
             ORDER BY effective.fact_name
             LIMIT ?
             """,
@@ -185,7 +199,7 @@ def _fact_rows(
             FROM facts AS f
             WHERE f.subject_entity_id=? AND f.fact_type=?
               AND f.current=1
-              {name_filter}
+              {fact_name_filter}
             ORDER BY f.fact_name, f.fact_id
             LIMIT ?
             """,
@@ -193,17 +207,33 @@ def _fact_rows(
         )
     return [
         {
-            "factId": int(row["fact_id"]),
+            "factId": (
+                int(row["fact_id"])
+                if row["fact_id"] is not None
+                else None
+            ),
             "factType": str(row["fact_type"]),
             "factName": str(row["fact_name"]),
-            "valueKind": str(row["value_kind"]),
+            "valueKind": (
+                str(row["value_kind"])
+                if row["value_kind"] is not None
+                else None
+            ),
             "valueText": row["value_text"],
             "valueNumber": row["value_number"],
             "valueInteger": row["value_integer"],
             "valueJson": row["value_json"],
-            "unit": str(row["unit"]),
-            "status": str(row["status"]),
-            "confidence": str(row["confidence"]),
+            "unit": (
+                str(row["unit"]) if row["unit"] is not None else None
+            ),
+            "status": (
+                str(row["status"]) if row["status"] is not None else None
+            ),
+            "confidence": (
+                str(row["confidence"])
+                if row["confidence"] is not None
+                else None
+            ),
             "resolutionStatus": str(row["resolution_status"]),
             "inheritedFromEntityId": row["inherited_from_entity_id"],
             "resolutionChain": json.loads(
@@ -214,13 +244,142 @@ def _fact_rows(
     ]
 
 
+def load_effective_candidate_explanations(
+    connection: sqlite3.Connection,
+    *,
+    entity_id: int,
+    fact_names: Iterable[str],
+    per_fact_limit: int = MAX_EFFECTIVE_CANDIDATES_PER_FACT,
+) -> dict[str, dict[str, object]]:
+    """Load selected/rejected effective candidates with a hard per-fact cap."""
+
+    names = tuple(
+        dict.fromkeys(
+            str(fact_name)
+            for fact_name in fact_names
+            if str(fact_name)
+        )
+    )
+    if not names:
+        return {}
+    limit = _bounded_limit(
+        per_fact_limit,
+        maximum=MAX_EFFECTIVE_CANDIDATES_PER_FACT,
+    )
+    explanations: dict[str, dict[str, object]] = {
+        fact_name: {
+            "candidates": [],
+            "candidateTotal": 0,
+            "candidateReturned": 0,
+            "candidateOmitted": 0,
+            "candidateExplanationStatus": (
+                CANDIDATE_EXPLANATION_AVAILABLE
+            ),
+        }
+        for fact_name in names
+    }
+    if not supports_effective_candidate_explanations(connection):
+        for explanation in explanations.values():
+            explanation["candidateExplanationStatus"] = (
+                CANDIDATE_EXPLANATION_SCHEMA_MIGRATION_REQUIRED
+            )
+        return explanations
+    placeholders = ",".join("?" for _ in names)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        f"""
+        WITH ranked_candidates AS (
+            SELECT
+                candidate.fact_name,
+                candidate.candidate_fact_id,
+                candidate.declared_on_entity_id,
+                owner.canonical_uri AS declared_on_uri,
+                candidate.inheritance_depth,
+                candidate.path_status,
+                candidate.selected,
+                candidate.rejection_reason,
+                fact.value_kind,
+                fact.value_text,
+                fact.value_number,
+                fact.value_integer,
+                fact.value_json,
+                fact.unit,
+                fact.status,
+                fact.confidence,
+                COUNT(*) OVER (
+                    PARTITION BY candidate.fact_name
+                ) AS candidate_total,
+                ROW_NUMBER() OVER (
+                    PARTITION BY candidate.fact_name
+                    ORDER BY
+                        candidate.selected DESC,
+                        candidate.inheritance_depth,
+                        candidate.declared_on_entity_id,
+                        candidate.candidate_fact_id
+                ) AS candidate_rank
+            FROM effective_fact_candidates AS candidate
+            JOIN entities AS owner
+              ON owner.entity_id=candidate.declared_on_entity_id
+            JOIN facts AS fact
+              ON fact.fact_id=candidate.candidate_fact_id
+            WHERE candidate.entity_id=?
+              AND candidate.fact_type='EFFECTIVE_DEFAULT'
+              AND candidate.fact_name IN ({placeholders})
+        )
+        SELECT *
+        FROM ranked_candidates
+        WHERE candidate_rank<=?
+        ORDER BY fact_name, candidate_rank
+        """,
+        (entity_id, *names, limit),
+    )
+    for row in rows:
+        fact_name = str(row["fact_name"])
+        explanation = explanations[fact_name]
+        explanation["candidateTotal"] = int(row["candidate_total"])
+        candidates = explanation["candidates"]
+        if not isinstance(candidates, list):
+            raise AssertionError("Candidate explanation must be a list")
+        candidates.append(
+            {
+                "candidateFactId": int(row["candidate_fact_id"]),
+                "declaredOnEntityId": int(
+                    row["declared_on_entity_id"]
+                ),
+                "declaredOnUri": str(row["declared_on_uri"]),
+                "inheritanceDepth": int(row["inheritance_depth"]),
+                "pathStatus": str(row["path_status"]),
+                "selected": bool(row["selected"]),
+                "rejectionReason": str(row["rejection_reason"]),
+                "valueKind": str(row["value_kind"]),
+                "valueText": row["value_text"],
+                "valueNumber": row["value_number"],
+                "valueInteger": row["value_integer"],
+                "valueJson": row["value_json"],
+                "unit": str(row["unit"]),
+                "status": str(row["status"]),
+                "confidence": str(row["confidence"]),
+            }
+        )
+    for explanation in explanations.values():
+        candidates = explanation["candidates"]
+        if not isinstance(candidates, list):
+            raise AssertionError("Candidate explanation must be a list")
+        total = int(explanation["candidateTotal"])
+        explanation["candidateReturned"] = len(candidates)
+        explanation["candidateOmitted"] = max(0, total - len(candidates))
+    return explanations
+
+
 def _fact_evidence(
     connection: sqlite3.Connection,
-    fact_ids: Iterable[int],
+    fact_ids: Iterable[int | None],
     *,
     limit: int,
 ) -> tuple[list[dict[str, object]], int]:
-    values = tuple(sorted({int(value) for value in fact_ids}))
+    values = tuple(
+        sorted({int(value) for value in fact_ids if value is not None})
+    )
     if not values:
         return [], 0
     placeholders = ",".join("?" for _ in values)
@@ -243,7 +402,13 @@ def _fact_evidence(
         JOIN source_revisions AS revision
           ON revision.revision_id=evidence.source_revision_id
         WHERE evidence.fact_id IN ({placeholders})
-        ORDER BY evidence.fact_id, evidence.evidence_uri
+        ORDER BY
+            CASE
+                WHEN UPPER(revision.freshness_status)='FRESH' THEN 0
+                ELSE 1
+            END,
+            evidence.fact_id,
+            evidence.evidence_uri
         LIMIT ?
         """,
         (*values, limit),
@@ -262,6 +427,42 @@ def _fact_evidence(
         ],
         total,
     )
+
+
+def _fact_evidence_freshness(
+    connection: sqlite3.Connection,
+    fact_ids: Iterable[int | None],
+) -> tuple[set[int], set[int]]:
+    values = sorted({int(value) for value in fact_ids if value is not None})
+    fresh: set[int] = set()
+    evidenced: set[int] = set()
+    for offset in range(0, len(values), 900):
+        batch = values[offset : offset + 900]
+        placeholders = ",".join("?" for _ in batch)
+        for fact_id, has_fresh in connection.execute(
+            f"""
+            SELECT
+                evidence.fact_id,
+                MAX(
+                    CASE
+                        WHEN evidence.evidence_uri<>''
+                         AND UPPER(revision.freshness_status)='FRESH'
+                        THEN 1 ELSE 0
+                    END
+                )
+            FROM fact_evidence AS evidence
+            JOIN source_revisions AS revision
+              ON revision.revision_id=evidence.source_revision_id
+            WHERE evidence.fact_id IN ({placeholders})
+            GROUP BY evidence.fact_id
+            """,
+            tuple(batch),
+        ):
+            normalized_id = int(fact_id)
+            evidenced.add(normalized_id)
+            if int(has_fresh or 0) == 1:
+                fresh.add(normalized_id)
+    return fresh, evidenced
 
 
 def _probe(
@@ -312,6 +513,13 @@ def _probe(
             "asset": asset,
             "operation": "bounded_neighborhood",
             "budgetTokens": 1000,
+            "reason": code,
+        }
+    if code == "SCHEMA_MIGRATION_REQUIRED":
+        return {
+            "probeType": "snapshot_rebuild",
+            "operation": "rebuild_core_v2_snapshot",
+            "budgetTokens": 500,
             "reason": code,
         }
     operation = (
@@ -393,9 +601,18 @@ def plan_query(
             )
             continue
         for fact in matched:
-            status = str(fact["status"]).upper()
-            resolution = str(fact["resolutionStatus"]).upper()
-            if status == "STALE" or resolution == "STALE":
+            status = str(fact["status"] or "").upper()
+            resolution = str(fact["resolutionStatus"] or "").upper()
+            if resolution == "PARENT_CHAIN_OPEN":
+                missing.append(
+                    {
+                        "code": "PARENT_CHAIN_OPEN",
+                        "requirement": (
+                            f"{normalized_type}:{fact['factName']}"
+                        ),
+                    }
+                )
+            elif status == "STALE" or resolution == "STALE":
                 missing.append(
                     {
                         "code": "STALE_SOURCE",
@@ -417,6 +634,33 @@ def plan_query(
                         ),
                     }
                 )
+    effective_facts = [
+        fact
+        for fact in facts
+        if fact["factType"] == "EFFECTIVE_DEFAULT"
+    ]
+    candidate_explanations = load_effective_candidate_explanations(
+        connection,
+        entity_id=entity_id,
+        fact_names=(
+            str(fact["factName"]) for fact in effective_facts
+        ),
+    )
+    for fact in effective_facts:
+        fact.update(
+            candidate_explanations[str(fact["factName"])]
+        )
+    if any(
+        fact.get("candidateExplanationStatus")
+        == CANDIDATE_EXPLANATION_SCHEMA_MIGRATION_REQUIRED
+        for fact in effective_facts
+    ):
+        missing.append(
+            {
+                "code": "SCHEMA_MIGRATION_REQUIRED",
+                "requirement": "Core v2 effective candidate lineage",
+            }
+        )
     if "EFFECTIVE_DEFAULT" in {
         value.upper() for value in requirements.fact_types
     }:
@@ -541,17 +785,28 @@ def plan_query(
             )
     evidence, evidence_total = _fact_evidence(
         connection,
-        (int(fact["factId"]) for fact in facts),
+        (fact["factId"] for fact in facts),
         limit=evidence_limit,
     )
-    if any(
-        item["freshness"] != "FRESH"
-        for item in evidence
-    ):
+    returned_fact_ids = {
+        int(fact_id)
+        for fact in facts
+        if (fact_id := fact["factId"]) is not None
+    }
+    fresh_fact_ids, evidenced_fact_ids = _fact_evidence_freshness(
+        connection,
+        returned_fact_ids,
+    )
+    missing_current_fact = any(
+        fact["factId"] is not None
+        and (fact["valueKind"] is None or fact["status"] is None)
+        for fact in facts
+    )
+    if returned_fact_ids - fresh_fact_ids:
         missing.append(
             {
                 "code": "STALE_SOURCE",
-                "requirement": "fresh evidence revision",
+                "requirement": "one fresh evidence revision per returned fact",
             }
         )
     missing = [
@@ -566,13 +821,16 @@ def plan_query(
     if any(code not in GAP_CODES for code in gap_codes):
         raise AssertionError("Planner emitted an unknown gap code")
     probes = [_probe(code, entity) for code in sorted(set(gap_codes))]
-    freshness = (
-        "FRESH"
-        if evidence and all(
-            item["freshness"] == "FRESH" for item in evidence
-        )
-        else ("UNKNOWN" if not evidence else "STALE")
-    )
+    if (
+        returned_fact_ids
+        and returned_fact_ids <= fresh_fact_ids
+        and not missing_current_fact
+    ):
+        freshness = "FRESH"
+    elif (returned_fact_ids - fresh_fact_ids) & evidenced_fact_ids:
+        freshness = "STALE"
+    else:
+        freshness = "UNKNOWN"
     return {
         "route": (
             "DB_ONLY_COMPLETE" if not missing else "EVIDENCE_REQUIRED"

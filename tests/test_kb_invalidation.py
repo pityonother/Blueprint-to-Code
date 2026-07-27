@@ -37,6 +37,30 @@ def _fixture() -> tuple[sqlite3.Connection, dict[str, int]]:
         [
             (1, "discovery", "discovery://fixture", "discovery-sha"),
             (2, "native_evidence", "native://fixture", "native-sha"),
+            (
+                3,
+                "blueprint_parser",
+                "parser://fixture/class-edges",
+                "parser-edge-sha",
+            ),
+            (
+                4,
+                "native_evidence",
+                "native://fixture/class-edges",
+                "native-edge-sha",
+            ),
+            (
+                5,
+                "native_evidence",
+                "native://fixture/class-root",
+                "native-root-sha",
+            ),
+            (
+                6,
+                "blueprint_parser",
+                "parser://fixture/alternate-parent",
+                "alternate-parent-sha",
+            ),
         ],
     )
     connection.executemany(
@@ -56,34 +80,86 @@ def _fixture() -> tuple[sqlite3.Connection, dict[str, int]]:
         """
         INSERT INTO classes(
             class_id, class_path, class_name, module_or_package,
-            class_kind, is_native, status, confidence
-        ) VALUES (?, ?, ?, '/Game/Test', 'BLUEPRINT_GENERATED_CLASS',
-                  0, 'CONFIRMED', 'HIGH')
+            class_kind, is_native, source_revision_id, status, confidence
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, 'IDENTIFIED', 'HIGH')
         """,
         [
-            (11, "/Game/Test/Base.Base_C", "Base_C"),
-            (12, "/Game/Test/Child.Child_C", "Child_C"),
-            (13, "/Game/Test/Leaf.Leaf_C", "Leaf_C"),
-            (14, "/Game/Test/Other.Other_C", "Other_C"),
+            (
+                100,
+                "/Script/CoreUObject.Object",
+                "Object",
+                "CoreUObject",
+                "NATIVE",
+                1,
+            ),
+            (
+                11,
+                "/Game/Test/Base.Base_C",
+                "Base_C",
+                "/Game/Test",
+                "BLUEPRINT_GENERATED_CLASS",
+                0,
+            ),
+            (
+                12,
+                "/Game/Test/Child.Child_C",
+                "Child_C",
+                "/Game/Test",
+                "BLUEPRINT_GENERATED_CLASS",
+                0,
+            ),
+            (
+                13,
+                "/Game/Test/Leaf.Leaf_C",
+                "Leaf_C",
+                "/Game/Test",
+                "BLUEPRINT_GENERATED_CLASS",
+                0,
+            ),
+            (
+                14,
+                "/Game/Test/Other.Other_C",
+                "Other_C",
+                "/Game/Test",
+                "BLUEPRINT_GENERATED_CLASS",
+                0,
+            ),
+        ],
+    )
+    connection.execute(
+        "UPDATE classes SET source_revision_id=5 WHERE class_id=100"
+    )
+    connection.executemany(
+        "INSERT INTO class_edges VALUES (?, ?, ?, ?, ?, 'CONFIRMED', 'HIGH')",
+        [
+            (11, 100, "native_parent", "edge://base/root", 4),
+            (12, 11, "blueprint_parent", "edge://child/base", 3),
+            (13, 12, "blueprint_parent", "edge://leaf/child", 3),
+            (14, 100, "native_parent", "edge://other/root", 4),
         ],
     )
     connection.executemany(
-        "INSERT INTO class_closure VALUES (?, ?, ?, 'CONFIRMED')",
+        "INSERT INTO class_closure VALUES (?, ?, ?, ?)",
         [
-            (11, 11, 0),
-            (11, 12, 1),
-            (12, 12, 0),
-            (11, 13, 2),
-            (12, 13, 1),
-            (13, 13, 0),
-            (14, 14, 0),
+            (100, 100, 0, "SELF"),
+            (11, 11, 0, "SELF"),
+            (100, 11, 1, "CONFIRMED"),
+            (12, 12, 0, "SELF"),
+            (11, 12, 1, "CONFIRMED"),
+            (100, 12, 2, "CONFIRMED"),
+            (13, 13, 0, "SELF"),
+            (12, 13, 1, "CONFIRMED"),
+            (11, 13, 2, "CONFIRMED"),
+            (100, 13, 3, "CONFIRMED"),
+            (14, 14, 0, "SELF"),
+            (100, 14, 1, "CONFIRMED"),
         ],
     )
     connection.executemany(
         """
         INSERT INTO asset_class_assignments VALUES (
             ?, ?, 'GENERATED_CLASS', 'fixture://class',
-            'CONFIRMED', 'HIGH'
+            'EXTRACTED', 'HIGH'
         )
         """,
         [(1, 11), (2, 12), (3, 13), (4, 14)],
@@ -98,12 +174,15 @@ def _fixture() -> tuple[sqlite3.Connection, dict[str, int]]:
             fact_name="Rate",
             scope_kind="DECLARED",
             declared_on_entity_id=entity_id,
-            value=FactValue("FINGERPRINT", value_text=label),
-            status="CONFIRMED_FINGERPRINT_ONLY",
+            value=FactValue(
+                "INTEGER",
+                value_integer={"base": 1, "leaf": 3, "other": 4}[label],
+            ),
+            status="CONFIRMED",
             confidence="HIGH",
             source_revision_id=1,
             evidence_uri=f"bp://fixture/{label}",
-            evidence_role="DEFAULT_VALUE_FINGERPRINT",
+            evidence_role="DEFAULT_VALUE_ACTUAL",
         )
     fact_ids["native"] = store_fact(
         connection,
@@ -188,6 +267,535 @@ def _fixture() -> tuple[sqlite3.Connection, dict[str, int]]:
 
 
 class KnowledgeInvalidationTests(unittest.TestCase):
+    def test_candidate_evidence_from_selected_and_rejected_facts_invalidates_effective_entity(
+        self,
+    ):
+        connection, fact_ids = _fixture()
+        connection.execute(
+            """
+            INSERT INTO fact_evidence VALUES (
+                ?, 2, 'bp://fixture/rejected/revision-2',
+                'DEFAULT_VALUE'
+            )
+            """,
+            (fact_ids["base"],),
+        )
+        materialize_effective_defaults(
+            connection,
+            changed_fact_ids=[fact_ids["base"]],
+        )
+        rebuild_invalidation_dependencies(connection)
+
+        revisions = {
+            int(row[0])
+            for row in connection.execute(
+                """
+                SELECT upstream_revision_id
+                FROM invalidation_dependencies
+                WHERE downstream_kind='EFFECTIVE_ENTITY'
+                  AND downstream_id=3
+                  AND dependency_reason='EFFECTIVE_FACT_SOURCE'
+                """
+            )
+        }
+        self.assertEqual(revisions, {1, 2})
+        connection.close()
+
+    def test_parser_edge_revision_invalidates_only_entities_using_that_path(
+        self,
+    ):
+        connection, _ = _fixture()
+
+        plan = plan_invalidation(
+            connection,
+            event_kind="PARSER",
+            upstream_revision_id=3,
+        )
+
+        self.assertEqual(plan.downstream["EFFECTIVE_ENTITY"], (2, 3))
+        self.assertNotIn("FACT", plan.downstream)
+        self.assertEqual(
+            {
+                (int(row[0]), str(row[1]))
+                for row in connection.execute(
+                    """
+                    SELECT downstream_id, dependency_reason
+                    FROM invalidation_dependencies
+                    WHERE upstream_revision_id=3
+                      AND downstream_kind='EFFECTIVE_ENTITY'
+                    """
+                )
+            },
+            {
+                (2, "EFFECTIVE_SELECTED_CLASS_EDGE"),
+                (2, "EFFECTIVE_NATIVE_ROOT_CLASS_EDGE"),
+                (3, "EFFECTIVE_NATIVE_ROOT_CLASS_EDGE"),
+            },
+        )
+        apply_invalidation_plan(
+            connection,
+            plan,
+            created_at="2026-07-27T00:30:00Z",
+        )
+        self.assertEqual(
+            {
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT entity_id FROM effective_facts"
+                )
+            },
+            {1, 4},
+        )
+        self.assertEqual(
+            {
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT entity_id FROM effective_fact_candidates"
+                )
+            },
+            {1, 4},
+        )
+        connection.close()
+
+    def test_native_root_edge_revision_invalidates_effective_closure_proof(
+        self,
+    ):
+        connection, _ = _fixture()
+
+        plan = plan_invalidation(
+            connection,
+            event_kind="NATIVE",
+            upstream_revision_id=4,
+        )
+
+        self.assertEqual(
+            plan.downstream["EFFECTIVE_ENTITY"],
+            (1, 2, 3, 4),
+        )
+        self.assertNotIn("FACT", plan.downstream)
+        apply_invalidation_plan(
+            connection,
+            plan,
+            created_at="2026-07-27T00:31:00Z",
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM effective_facts"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM effective_fact_candidates"
+            ).fetchone()[0],
+            0,
+        )
+        connection.close()
+
+    def test_native_root_class_revision_invalidates_effective_closure_proof(
+        self,
+    ):
+        connection, _ = _fixture()
+
+        plan = plan_invalidation(
+            connection,
+            event_kind="NATIVE",
+            upstream_revision_id=5,
+        )
+
+        self.assertEqual(
+            plan.downstream["EFFECTIVE_ENTITY"],
+            (1, 2, 3, 4),
+        )
+        self.assertNotIn("FACT", plan.downstream)
+        self.assertEqual(
+            {
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT dependency_reason
+                    FROM invalidation_dependencies
+                    WHERE upstream_revision_id=5
+                      AND downstream_kind='EFFECTIVE_ENTITY'
+                    """
+                )
+            },
+            {"EFFECTIVE_NATIVE_ROOT_SOURCE"},
+        )
+        connection.close()
+
+    def test_missing_native_root_proof_fails_closed_without_erasing_dependencies(
+        self,
+    ):
+        connection, _ = _fixture()
+        dependency_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            """
+            UPDATE effective_facts
+            SET resolution_chain_json=json_remove(
+                resolution_chain_json, '$.nativeRootProof'
+            )
+            WHERE entity_id=2
+              AND fact_type='EFFECTIVE_DEFAULT'
+              AND fact_name='Rate'
+            """
+        )
+
+        with self.assertRaisesRegex(ValueError, "resolution path"):
+            rebuild_invalidation_dependencies(connection)
+
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0],
+            dependency_count,
+        )
+        connection.close()
+
+    def test_stale_native_root_revision_requeues_parent_chain_open_entities(
+        self,
+    ):
+        connection, _ = _fixture()
+        connection.execute(
+            """
+            UPDATE source_revisions
+            SET freshness_status='STALE'
+            WHERE revision_id=5
+            """
+        )
+        materialize_effective_defaults(connection)
+        rebuild_invalidation_dependencies(connection)
+        self.assertEqual(
+            {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT resolution_status FROM effective_facts"
+                )
+            },
+            {"PARENT_CHAIN_OPEN"},
+        )
+
+        plan = plan_invalidation(
+            connection,
+            event_kind="NATIVE",
+            upstream_revision_id=5,
+        )
+
+        self.assertEqual(
+            plan.downstream["EFFECTIVE_ENTITY"],
+            (1, 2, 3, 4),
+        )
+        connection.execute(
+            """
+            UPDATE source_revisions
+            SET freshness_status='FRESH'
+            WHERE revision_id=5
+            """
+        )
+        apply_invalidation_plan(
+            connection,
+            plan,
+            created_at="2026-07-27T00:32:00Z",
+        )
+        materialize_effective_defaults(
+            connection,
+            affected_entity_ids=plan.downstream["EFFECTIVE_ENTITY"],
+        )
+        self.assertEqual(
+            {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT resolution_status FROM effective_facts"
+                )
+            },
+            {"RESOLVED"},
+        )
+        connection.close()
+
+    def test_unresolved_inherited_owner_fails_before_erasing_dependencies(
+        self,
+    ):
+        connection, _ = _fixture()
+        connection.execute(
+            """
+            UPDATE source_revisions
+            SET freshness_status='STALE'
+            WHERE revision_id=5
+            """
+        )
+        materialize_effective_defaults(connection)
+        rebuild_invalidation_dependencies(connection)
+        dependency_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            """
+            UPDATE effective_facts
+            SET inherited_from_entity_id=1
+            WHERE entity_id=2
+              AND fact_type='EFFECTIVE_DEFAULT'
+              AND fact_name='Rate'
+              AND resolution_status='PARENT_CHAIN_OPEN'
+            """
+        )
+
+        with self.assertRaisesRegex(ValueError, "unresolved facts"):
+            rebuild_invalidation_dependencies(connection)
+
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0],
+            dependency_count,
+        )
+        connection.close()
+
+    def test_removed_ambiguous_edge_revision_requeues_only_its_descendants(
+        self,
+    ):
+        connection, _ = _fixture()
+        connection.execute(
+            """
+            INSERT INTO classes(
+                class_id, class_path, class_name, module_or_package,
+                class_kind, is_native, source_revision_id,
+                status, confidence
+            ) VALUES (
+                15, '/Game/Test/Alternate.Alternate_C', 'Alternate_C',
+                '/Game/Test', 'BLUEPRINT_GENERATED_CLASS', 0, 1,
+                'IDENTIFIED', 'HIGH'
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO class_edges VALUES (
+                ?, ?, ?, ?, ?, 'CONFIRMED', 'HIGH'
+            )
+            """,
+            [
+                (
+                    12,
+                    15,
+                    "blueprint_parent",
+                    "edge://child/alternate",
+                    6,
+                ),
+                (
+                    15,
+                    100,
+                    "native_parent",
+                    "edge://alternate/root",
+                    4,
+                ),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO class_closure VALUES (?, ?, ?, ?)",
+            [
+                (15, 15, 0, "SELF"),
+                (100, 15, 1, "CONFIRMED"),
+                (15, 12, 1, "CONFIRMED"),
+                (15, 13, 2, "CONFIRMED"),
+            ],
+        )
+        materialize_effective_defaults(connection)
+        rebuild_invalidation_dependencies(connection)
+        self.assertEqual(
+            {
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT entity_id
+                    FROM effective_facts
+                    WHERE resolution_status='AMBIGUOUS_INHERITANCE'
+                    """
+                )
+            },
+            {2, 3},
+        )
+
+        plan = plan_invalidation(
+            connection,
+            event_kind="PARSER",
+            upstream_revision_id=6,
+        )
+
+        self.assertEqual(plan.downstream["EFFECTIVE_ENTITY"], (2, 3))
+        connection.execute(
+            """
+            DELETE FROM class_edges
+            WHERE child_class_id=12 AND parent_class_id=15
+            """
+        )
+        connection.execute(
+            """
+            DELETE FROM class_closure
+            WHERE ancestor_class_id=15
+              AND descendant_class_id IN (12, 13)
+            """
+        )
+        apply_invalidation_plan(
+            connection,
+            plan,
+            created_at="2026-07-27T00:33:00Z",
+        )
+        materialize_effective_defaults(
+            connection,
+            affected_entity_ids=plan.downstream["EFFECTIVE_ENTITY"],
+        )
+        self.assertEqual(
+            {
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT resolution_status
+                    FROM effective_facts
+                    WHERE entity_id IN (2, 3)
+                    """
+                )
+            },
+            {"RESOLVED"},
+        )
+        connection.close()
+
+    def test_assignment_path_mismatch_fails_before_erasing_dependencies(
+        self,
+    ):
+        connection, _ = _fixture()
+        dependency_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            """
+            UPDATE asset_class_assignments
+            SET class_id=14
+            WHERE entity_id=2
+              AND assignment_kind='GENERATED_CLASS'
+            """
+        )
+
+        with self.assertRaisesRegex(ValueError, "assignment"):
+            rebuild_invalidation_dependencies(connection)
+
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0],
+            dependency_count,
+        )
+        connection.close()
+
+    def test_selected_candidate_mismatch_fails_before_erasing_dependencies(
+        self,
+    ):
+        connection, _ = _fixture()
+        dependency_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            """
+            UPDATE effective_fact_candidates
+            SET selected=0, rejection_reason='TAMPERED'
+            WHERE entity_id=2
+              AND fact_type='EFFECTIVE_DEFAULT'
+              AND fact_name='Rate'
+              AND selected=1
+            """
+        )
+
+        with self.assertRaisesRegex(ValueError, "selected candidate"):
+            rebuild_invalidation_dependencies(connection)
+
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0],
+            dependency_count,
+        )
+        connection.close()
+
+    def test_revision_hash_mismatch_fails_before_erasing_dependencies(self):
+        connection, _ = _fixture()
+        dependency_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            """
+            UPDATE effective_facts
+            SET source_revision_set_hash='tampered'
+            WHERE entity_id=2
+              AND fact_type='EFFECTIVE_DEFAULT'
+              AND fact_name='Rate'
+            """
+        )
+
+        with self.assertRaisesRegex(ValueError, "revision set hash"):
+            rebuild_invalidation_dependencies(connection)
+
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM invalidation_dependencies"
+            ).fetchone()[0],
+            dependency_count,
+        )
+        connection.close()
+
+    def test_dependency_rebuild_rolls_back_all_rows_on_insert_failure(self):
+        connection, _ = _fixture()
+        before = list(
+            connection.execute(
+                """
+                SELECT upstream_revision_id, downstream_kind,
+                       downstream_id, dependency_reason
+                FROM invalidation_dependencies
+                ORDER BY 1, 2, 3, 4
+                """
+            )
+        )
+        connection.execute(
+            """
+            CREATE TEMP TRIGGER abort_invalidation_insert
+            BEFORE INSERT ON invalidation_dependencies
+            BEGIN
+                SELECT RAISE(ABORT, 'forced invalidation insert failure');
+            END
+            """
+        )
+
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "forced invalidation insert failure",
+        ):
+            rebuild_invalidation_dependencies(connection)
+
+        self.assertEqual(
+            list(
+                connection.execute(
+                    """
+                    SELECT upstream_revision_id, downstream_kind,
+                           downstream_id, dependency_reason
+                    FROM invalidation_dependencies
+                    ORDER BY 1, 2, 3, 4
+                    """
+                )
+            ),
+            before,
+        )
+        connection.close()
+
     def test_leaf_asset_change_does_not_trigger_full_rebuild(self):
         connection, fact_ids = _fixture()
         plan = plan_invalidation(
@@ -209,6 +817,40 @@ class KnowledgeInvalidationTests(unittest.TestCase):
         self.assertEqual(current[fact_ids["leaf"]], 0)
         self.assertEqual(current[fact_ids["base"]], 1)
         self.assertEqual(current[fact_ids["other"]], 1)
+        connection.close()
+
+    def test_effective_invalidation_deletes_candidates_for_only_affected_entities(
+        self,
+    ):
+        connection, fact_ids = _fixture()
+        plan = plan_invalidation(
+            connection, event_kind="ASSET", entity_ids=[3]
+        )
+
+        apply_invalidation_plan(
+            connection,
+            plan,
+            created_at="2026-07-27T01:00:30Z",
+        )
+
+        self.assertEqual(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM effective_fact_candidates
+                WHERE entity_id=3
+                """
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM effective_fact_candidates
+                WHERE entity_id=4
+                """
+            ).fetchone()[0],
+            1,
+        )
         connection.close()
 
     def test_parent_change_recomputes_descendants_without_deleting_declared_facts(self):
@@ -236,6 +878,31 @@ class KnowledgeInvalidationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM effective_facts WHERE entity_id=4"
             ).fetchone()[0],
             1,
+        )
+        connection.close()
+
+    def test_class_change_keeps_prechange_affected_entities_after_closure_changes(
+        self,
+    ):
+        connection, _ = _fixture()
+        connection.execute(
+            """
+            DELETE FROM class_closure
+            WHERE ancestor_class_id=11
+              AND descendant_class_id IN (12, 13)
+            """
+        )
+
+        plan = plan_invalidation(
+            connection,
+            event_kind="CLASS",
+            class_ids=[11],
+            affected_entity_ids=[2, 3],
+        )
+
+        self.assertEqual(
+            plan.downstream["EFFECTIVE_ENTITY"],
+            (1, 2, 3),
         )
         connection.close()
 

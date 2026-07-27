@@ -10,6 +10,7 @@ from typing import Mapping
 
 MIN_CONTEXT_TOKENS = 300
 MAX_CONTEXT_TOKENS = 2_000
+MAX_CONTEXT_CANDIDATES_PER_FACT = 3
 _LOCAL_PATH = re.compile(
     r"(?i)(?:[a-z]:\\(?:users|windows|program files|programdata)\\|"
     r"/(?:home|users|etc|var|tmp)/)"
@@ -21,7 +22,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def _safe_text(value: object) -> str:
-    text = str(value or "")
+    text = "" if value is None else str(value)
     if _LOCAL_PATH.search(text):
         return "[LOCAL_PATH_REDACTED]"
     return text
@@ -44,10 +45,127 @@ def _fact_line(fact: Mapping[str, object]) -> str:
     rendered = _safe_text(value)
     if len(rendered) > 240:
         rendered = rendered[:237] + "..."
+    status = (
+        fact.get("status")
+        or fact.get("resolutionStatus")
+        or "UNKNOWN"
+    )
+    value_kind = fact.get("valueKind") or "UNKNOWN"
     return (
         f"- {fact.get('factType')}:{fact.get('factName')} "
-        f"[{fact.get('status')}/{fact.get('valueKind')}] {rendered}"
+        f"[{status}/{value_kind}] {rendered}"
     )
+
+
+def _short_text(value: object, *, maximum: int) -> str:
+    rendered = _safe_text(value)
+    if len(rendered) <= maximum:
+        return rendered
+    return rendered[: maximum - 3] + "..."
+
+
+def _candidate_line(candidate: Mapping[str, object]) -> str:
+    value = next(
+        (
+            candidate.get(key)
+            for key in (
+                "valueText",
+                "valueNumber",
+                "valueInteger",
+                "valueJson",
+            )
+            if candidate.get(key) is not None
+        ),
+        None,
+    )
+    disposition = (
+        "selected" if candidate.get("selected") is True else "rejected"
+    )
+    owner = candidate.get("declaredOnUri")
+    if not owner:
+        owner = "entity#" + _safe_text(
+            candidate.get("declaredOnEntityId")
+        )
+    rendered = (
+        disposition
+        + " candidate #"
+        + _short_text(candidate.get("candidateFactId"), maximum=20)
+        + " owner="
+        + _short_text(owner, maximum=100)
+        + " depth="
+        + _short_text(candidate.get("inheritanceDepth"), maximum=12)
+        + " path="
+        + _short_text(candidate.get("pathStatus"), maximum=40)
+        + " ["
+        + _short_text(candidate.get("status") or "UNKNOWN", maximum=30)
+        + "/"
+        + _short_text(
+            candidate.get("valueKind") or "UNKNOWN",
+            maximum=30,
+        )
+        + "]"
+    )
+    if value is not None:
+        rendered += "=" + _short_text(value, maximum=60)
+    if disposition == "rejected":
+        rendered += " reason=" + _short_text(
+            candidate.get("rejectionReason") or "UNSPECIFIED",
+            maximum=60,
+        )
+    return rendered
+
+
+def _effective_candidates_line(fact: Mapping[str, object]) -> str:
+    raw_candidates = fact.get("candidates")
+    candidates = [
+        item
+        for item in (
+            raw_candidates if isinstance(raw_candidates, list) else []
+        )
+        if isinstance(item, Mapping)
+    ]
+    candidates.sort(
+        key=lambda item: 0 if item.get("selected") is True else 1
+    )
+    shown = candidates[:MAX_CONTEXT_CANDIDATES_PER_FACT]
+    try:
+        reported_total = max(0, int(fact.get("candidateTotal") or 0))
+    except (TypeError, ValueError):
+        reported_total = 0
+    try:
+        reported_omitted = max(
+            0, int(fact.get("candidateOmitted") or 0)
+        )
+    except (TypeError, ValueError):
+        reported_omitted = 0
+    total = max(
+        reported_total,
+        len(candidates) + reported_omitted,
+        len(candidates),
+    )
+    resolution = _safe_text(
+        fact.get("resolutionStatus") or "UNKNOWN"
+    )
+    state = (
+        "resolved"
+        if fact.get("factId") is not None and resolution == "RESOLVED"
+        else "unresolved=" + resolution
+    )
+    prefix = (
+        "- EFFECTIVE_DEFAULT:"
+        + _short_text(fact.get("factName"), maximum=80)
+        + " "
+        + state
+    )
+    if not shown:
+        return prefix + "; no recorded candidates"
+    rendered = prefix + "; " + "; ".join(
+        _candidate_line(candidate) for candidate in shown
+    )
+    omitted = max(0, total - len(shown))
+    if omitted:
+        rendered += f"; {omitted} candidates omitted"
+    return rendered
 
 
 def build_bounded_context_pack(
@@ -93,6 +211,26 @@ def build_bounded_context_pack(
     optional_sections: list[tuple[str, list[str]]] = []
     facts = result.get("facts")
     if isinstance(facts, list) and facts:
+        effective_facts = [
+            item
+            for item in facts
+            if isinstance(item, Mapping)
+            and item.get("factType") == "EFFECTIVE_DEFAULT"
+            and (
+                isinstance(item.get("candidates"), list)
+                or item.get("candidateTotal") is not None
+            )
+        ]
+        if effective_facts:
+            optional_sections.append(
+                (
+                    "## Effective candidates",
+                    [
+                        _effective_candidates_line(item)
+                        for item in effective_facts
+                    ],
+                )
+            )
         optional_sections.append(
             (
                 "## Facts",

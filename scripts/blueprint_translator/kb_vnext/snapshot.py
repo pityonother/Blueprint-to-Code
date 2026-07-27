@@ -14,7 +14,7 @@ from .ontology import load_ontology
 from .projections import build_domain_projections
 from .storage import (
     CACHE_SCHEMA_SQL,
-    CATALOG_SCHEMA_SQL,
+    FULL_CATALOG_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
     SEARCH_SCHEMA_SQL,
     build_cache_database,
@@ -116,7 +116,10 @@ def _promote_snapshot(
     build_id = str(manifest["buildId"])
     _write_json(manifests / f"{build_id}.json", manifest)
     _write_json(current, manifest)
-    _write_text(manifests / "catalog_schema.sql", CATALOG_SCHEMA_SQL)
+    _write_text(
+        manifests / "catalog_schema.sql",
+        FULL_CATALOG_SCHEMA_SQL,
+    )
     _write_text(manifests / "core_schema.sql", FULL_CORE_SCHEMA_SQL)
     _write_text(manifests / "search_schema.sql", SEARCH_SCHEMA_SQL)
     _write_text(manifests / "cache_schema.sql", CACHE_SCHEMA_SQL)

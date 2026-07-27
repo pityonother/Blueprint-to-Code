@@ -13,7 +13,13 @@ from typing import Mapping
 from urllib.parse import urlencode
 
 from .kb_context import build_bounded_context_pack
-from .query_planner import QueryRequirements, plan_query
+from .query_planner import (
+    CANDIDATE_EXPLANATION_SCHEMA_MIGRATION_REQUIRED,
+    QueryRequirements,
+    load_effective_candidate_explanations,
+    plan_query,
+)
+from .schema_capabilities import core_schema_capabilities
 
 
 MAX_PAGE_SIZE = 100
@@ -132,6 +138,9 @@ class VNextKnowledgeService:
                 "nextQuery": "",
                 "freshness": "UNKNOWN",
                 "evidence": [],
+                "capabilities": {
+                    "effectiveCandidateExplanations": False,
+                },
                 "gap": [
                     {
                         "code": "KB_VNEXT_NOT_BUILT",
@@ -149,18 +158,36 @@ class VNextKnowledgeService:
             metadata = dict(
                 core.execute("SELECT key, value FROM metadata")
             )
-        available = integrity == "ok"
+            capabilities = core_schema_capabilities(core)
+        compatible = bool(capabilities["compatible"])
+        available = integrity == "ok" and compatible
+        status = (
+            "INVALID"
+            if integrity != "ok"
+            else ("READY" if compatible else "MIGRATION_REQUIRED")
+        )
+        gaps = []
+        if integrity == "ok" and not compatible:
+            gaps.append(
+                {
+                    "code": "KB_VNEXT_SCHEMA_MIGRATION_REQUIRED",
+                    "detail": (
+                        "Build an ark-kb-core/v2 snapshot before enabling "
+                        "vNext effective-default reads."
+                    ),
+                }
+            )
         return {
             "available": available,
-            "status": "READY" if available else "INVALID",
+            "status": status,
             "buildId": str(manifest.get("buildId") or ""),
-            "schemaVersion": str(metadata.get("schema_version") or ""),
+            "schemaVersion": str(capabilities["schemaVersion"]),
             "ontologyVersion": str(metadata.get("ontology_version") or ""),
             "cutover": manifest.get(
                 "cutover",
                 {"mode": "shadow", "defaultQuerySource": "legacy"},
             ),
-            "returned": 1,
+            "returned": int(available),
             "omitted": 0,
             "nextQuery": "",
             "freshness": (
@@ -176,7 +203,12 @@ class VNextKnowledgeService:
                     ),
                 }
             ],
-            "gap": [],
+            "capabilities": {
+                "effectiveCandidateExplanations": bool(
+                    capabilities["effectiveCandidateExplanations"]
+                ),
+            },
+            "gap": gaps,
         }
 
     def search_entities(
@@ -372,6 +404,7 @@ class VNextKnowledgeService:
             minimum=0,
             maximum=MAX_CURSOR,
         )
+        candidate_schema_unavailable = False
         with closing(self._core()) as core:
             self._entity_exists(core, entity_id)
             if kind == "facts":
@@ -511,7 +544,9 @@ class VNextKnowledgeService:
                         fact.value_integer, fact.value_json, fact.status,
                         fact.confidence
                     FROM effective_facts AS effective
-                    JOIN facts AS fact ON fact.fact_id=effective.fact_id
+                    LEFT JOIN facts AS fact
+                      ON fact.fact_id=effective.fact_id
+                     AND fact.current=1
                     WHERE effective.entity_id=?
                     ORDER BY effective.fact_name
                     LIMIT ? OFFSET ?
@@ -522,41 +557,163 @@ class VNextKnowledgeService:
                 items = [
                     {
                         "factName": str(row[0]),
-                        "factId": int(row[1]),
+                        "factId": (
+                            int(row[1]) if row[1] is not None else None
+                        ),
                         "inheritedFromEntityId": row[2],
                         "resolutionChain": json.loads(str(row[3])),
                         "resolutionStatus": str(row[4]),
                         "sourceRevisionSetHash": str(row[5]),
-                        "valueKind": str(row[6]),
+                        "valueKind": (
+                            str(row[6]) if row[6] is not None else None
+                        ),
                         "valueText": row[7],
                         "valueNumber": row[8],
                         "valueInteger": row[9],
                         "valueJson": row[10],
-                        "status": str(row[11]),
-                        "confidence": str(row[12]),
+                        "status": (
+                            str(row[11]) if row[11] is not None else None
+                        ),
+                        "confidence": (
+                            str(row[12]) if row[12] is not None else None
+                        ),
                     }
                     for row in rows
                 ]
+                candidate_explanations = (
+                    load_effective_candidate_explanations(
+                        core,
+                        entity_id=entity_id,
+                        fact_names=(
+                            str(item["factName"]) for item in items
+                        ),
+                    )
+                )
+                for item in items:
+                    item.update(
+                        candidate_explanations[str(item["factName"])]
+                    )
+                candidate_schema_unavailable = any(
+                    item.get("candidateExplanationStatus")
+                    == CANDIDATE_EXPLANATION_SCHEMA_MIGRATION_REQUIRED
+                    for item in items
+                )
                 evidence = self._evidence_for_facts(
-                    core, [int(row[1]) for row in rows]
+                    core, [row[1] for row in rows]
                 )
             else:
                 raise AssertionError(kind)
-        gaps = [
-            {
-                "code": "COVERAGE_OPEN",
-                "detail": item.get("failureReason", ""),
+        stale_evidence_fact_ids: set[int] = set()
+        unknown_evidence_fact_ids: set[int] = set()
+        if kind == "effective-defaults":
+            returned_fact_ids = {
+                int(fact_id)
+                for item in items
+                if (fact_id := item.get("factId")) is not None
             }
+            evidenced_fact_ids = {
+                int(fact_id)
+                for item in evidence
+                if (fact_id := item.get("factId")) is not None
+                and item.get("evidenceUri")
+            }
+            fresh_fact_ids = {
+                int(fact_id)
+                for item in evidence
+                if (fact_id := item.get("factId")) is not None
+                and item.get("evidenceUri")
+                and str(item.get("freshness") or "").upper() == "FRESH"
+            }
+            stale_evidence_fact_ids = (
+                returned_fact_ids - fresh_fact_ids
+            ) & evidenced_fact_ids
+            unknown_evidence_fact_ids = (
+                returned_fact_ids - evidenced_fact_ids
+            )
+            gaps = [
+                {
+                    "code": "COVERAGE_OPEN",
+                    "detail": str(item["resolutionStatus"]),
+                }
+                for item in items
+                if item["factId"] is None
+                or item["resolutionStatus"] != "RESOLVED"
+            ]
+            gaps.extend(
+                {
+                    "code": "COVERAGE_OPEN",
+                    "detail": (
+                        "EFFECTIVE_DEFAULT:"
+                        + str(item["factName"])
+                        + ":CURRENT_FACT_MISSING"
+                    ),
+                }
+                for item in items
+                if item["factId"] is not None
+                and (
+                    item.get("valueKind") is None
+                    or item.get("status") is None
+                )
+            )
+            if candidate_schema_unavailable:
+                gaps.append(
+                    {
+                        "code": "KB_VNEXT_SCHEMA_MIGRATION_REQUIRED",
+                        "detail": (
+                            "Core v2 effective candidate lineage is "
+                            "required for a complete explanation."
+                        ),
+                    }
+                )
+            gaps.extend(
+                {
+                    "code": "STALE_SOURCE",
+                    "detail": (
+                        "EFFECTIVE_DEFAULT:"
+                        + str(item["factName"])
+                        + ":FRESH_EVIDENCE_REQUIRED"
+                    ),
+                }
+                for item in items
+                if item.get("factId") in (
+                    stale_evidence_fact_ids
+                    | unknown_evidence_fact_ids
+                )
+            )
+        else:
+            gaps = [
+                {
+                    "code": "COVERAGE_OPEN",
+                    "detail": item.get("failureReason", ""),
+                }
+                for item in items
+                if item.get("status")
+                in {
+                    "UNKNOWN",
+                    "AMBIGUOUS",
+                    "NOT_RECOVERED",
+                    "SOURCE_NOT_AVAILABLE",
+                    "STALE",
+                }
+            ]
+        stale = any(
+            item.get("status") == "STALE"
+            or item.get("resolutionStatus") == "STALE"
             for item in items
-            if item.get("status")
-            in {
-                "UNKNOWN",
-                "AMBIGUOUS",
-                "NOT_RECOVERED",
-                "SOURCE_NOT_AVAILABLE",
-                "STALE",
-            }
-        ]
+        )
+        unresolved_effective = (
+            kind == "effective-defaults"
+            and (
+                candidate_schema_unavailable
+                or any(
+                    item.get("factId") is None
+                    or item.get("resolutionStatus") != "RESOLVED"
+                    or item.get("valueKind") is None
+                    or item.get("status") is None
+                    for item in items
+                )
+            )
+        )
         return self._page(
             items=items,
             total=total,
@@ -565,20 +722,27 @@ class VNextKnowledgeService:
             path=f"/api/kb/entities/{entity_id}/{kind}",
             query={},
             freshness=(
-                "STALE"
-                if any(item.get("status") == "STALE" for item in items)
-                else "FRESH"
+                "STALE" if stale or stale_evidence_fact_ids else (
+                    "UNKNOWN"
+                    if unresolved_effective or unknown_evidence_fact_ids
+                    else "FRESH"
+                )
             ),
             evidence=evidence,
             gaps=gaps,
         )
 
     def _evidence_for_facts(
-        self, core: sqlite3.Connection, fact_ids: list[int]
+        self,
+        core: sqlite3.Connection,
+        fact_ids: list[int | None],
     ) -> list[dict[str, object]]:
-        if not fact_ids:
+        values = sorted(
+            {int(fact_id) for fact_id in fact_ids if fact_id is not None}
+        )
+        if not values:
             return []
-        placeholders = ",".join("?" for _ in fact_ids)
+        placeholders = ",".join("?" for _ in values)
         return [
             {
                 "factId": int(row[0]),
@@ -599,7 +763,7 @@ class VNextKnowledgeService:
                 WHERE evidence.fact_id IN ({placeholders})
                 ORDER BY evidence.fact_id, evidence.evidence_uri
                 """,
-                fact_ids,
+                values,
             )
         ]
 

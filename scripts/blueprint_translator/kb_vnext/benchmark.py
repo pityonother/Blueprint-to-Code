@@ -13,6 +13,7 @@ from typing import Mapping
 
 from .kb_context import build_bounded_context_pack
 from .query_planner import QueryRequirements, plan_query
+from .semantic_quality import typed_usable_fact_predicate
 
 
 BENCHMARK_SCHEMA = "ark-kb-query-benchmark/v1"
@@ -157,6 +158,7 @@ def build_benchmark_cases(
 
     all_entities = _all_entities(connection)
     by_domain = _domain_entities(connection)
+    usable_fact = typed_usable_fact_predicate("fact")
     cases: list[BenchmarkCase] = []
     global_index = 0
     for tier, count in TIER_COUNTS.items():
@@ -212,8 +214,8 @@ def build_benchmark_cases(
             elif tier == "inheritance_effective":
                 effective = _row_value(
                     connection,
-                    """
-                    SELECT entity.canonical_uri, fact.fact_name
+                    f"""
+                    SELECT entity.canonical_uri, effective.fact_name
                     FROM effective_facts AS effective
                     JOIN entities AS entity
                       ON entity.entity_id=effective.entity_id
@@ -221,6 +223,20 @@ def build_benchmark_cases(
                     LEFT JOIN domain_memberships AS membership
                       ON membership.entity_id=entity.entity_id
                      AND membership.domain_id=?
+                    WHERE effective.resolution_status='RESOLVED'
+                      AND fact.current=1
+                      AND fact.fact_type='DECLARED_DEFAULT'
+                      AND {usable_fact}
+                      AND EXISTS (
+                        SELECT 1
+                        FROM fact_evidence AS evidence
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=
+                             evidence.source_revision_id
+                        WHERE evidence.fact_id=fact.fact_id
+                          AND evidence.evidence_uri<>''
+                          AND UPPER(revision.freshness_status)='FRESH'
+                      )
                     ORDER BY
                         CASE WHEN membership.entity_id IS NULL THEN 1 ELSE 0 END,
                         effective.entity_id, effective.fact_name

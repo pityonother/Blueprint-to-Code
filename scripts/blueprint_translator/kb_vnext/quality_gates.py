@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .benchmark import run_query_benchmark
+from .invalidation import validate_effective_resolution_dependencies
 from .registrations import classify_registration_property
 from .semantic_quality import semantic_quality_gates
 
@@ -19,6 +20,24 @@ OPEN_CLASS_GAPS = (
     "NATIVE_ROOT_NOT_REACHED",
     "INHERITANCE_CYCLE",
     "MULTIPLE_PARENT_CANDIDATES",
+)
+EFFECTIVE_CANDIDATE_PATH_STATUSES = (
+    "SELF",
+    "CONFIRMED",
+    "AMBIGUOUS",
+)
+EFFECTIVE_CANDIDATE_REJECTION_REASONS = (
+    "UNUSABLE_VALUE_KIND",
+    "UNUSABLE_FACT_STATUS",
+    "NO_FRESH_EVIDENCE",
+    "AMBIGUOUS_DECLARATION",
+    "AMBIGUOUS_PATH",
+    "SAME_DEPTH_CONFLICT",
+    "SHADOWED_BY_NEARER_USABLE",
+    "PARENT_CHAIN_OPEN",
+    "ASSIGNMENT_UNVERIFIED",
+    "MULTIPLE_PARENT_CANDIDATES",
+    "INHERITANCE_CYCLE",
 )
 
 
@@ -107,6 +126,154 @@ def _class_closure_metrics(
         "classOpenCount": open_count,
         "deepSemanticEntityCount": total_count,
         "closureRate": _ratio(closed_count, applicable_count),
+    }
+
+
+def _effective_candidate_metrics(
+    core: sqlite3.Connection,
+) -> dict[str, int | bool]:
+    row = core.execute(
+        """
+        WITH candidate_selection AS (
+            SELECT
+                entity_id, fact_type, fact_name,
+                SUM(CASE WHEN selected=1 THEN 1 ELSE 0 END)
+                    AS selected_count,
+                MAX(
+                    CASE WHEN selected=1 THEN candidate_fact_id END
+                ) AS selected_fact_id
+            FROM effective_fact_candidates
+            GROUP BY entity_id, fact_type, fact_name
+        )
+        SELECT
+            COUNT(*) AS effective_rows,
+            SUM(
+                CASE
+                    WHEN UPPER(effective.resolution_status)='RESOLVED'
+                    THEN 1 ELSE 0
+                END
+            ) AS resolved_rows,
+            SUM(
+                CASE
+                    WHEN UPPER(effective.resolution_status)<>'RESOLVED'
+                    THEN 1 ELSE 0
+                END
+            ) AS unresolved_rows,
+            SUM(
+                CASE
+                    WHEN UPPER(effective.resolution_status)='RESOLVED'
+                     AND (
+                        effective.fact_id IS NULL
+                        OR COALESCE(candidate.selected_count, 0)<>1
+                        OR candidate.selected_fact_id IS NULL
+                        OR candidate.selected_fact_id<>effective.fact_id
+                     )
+                    THEN 1
+                    WHEN UPPER(effective.resolution_status)<>'RESOLVED'
+                     AND (
+                        effective.fact_id IS NOT NULL
+                        OR COALESCE(candidate.selected_count, 0)<>0
+                     )
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS invalid_selection_rows
+        FROM effective_facts AS effective
+        LEFT JOIN candidate_selection AS candidate
+          ON candidate.entity_id=effective.entity_id
+         AND candidate.fact_type=effective.fact_type
+         AND candidate.fact_name=effective.fact_name
+        """
+    ).fetchone()
+    orphan_candidate_rows = int(
+        core.execute(
+            """
+            SELECT COUNT(*)
+            FROM effective_fact_candidates AS candidate
+            LEFT JOIN effective_facts AS effective
+              ON effective.entity_id=candidate.entity_id
+             AND effective.fact_type=candidate.fact_type
+             AND effective.fact_name=candidate.fact_name
+            WHERE effective.entity_id IS NULL
+            """
+        ).fetchone()[0]
+        or 0
+    )
+    path_placeholders = ", ".join(
+        "?" for _ in EFFECTIVE_CANDIDATE_PATH_STATUSES
+    )
+    reason_placeholders = ", ".join(
+        "?" for _ in EFFECTIVE_CANDIDATE_REJECTION_REASONS
+    )
+    invalid_candidate_lineage_rows = int(
+        core.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM effective_fact_candidates AS candidate
+            LEFT JOIN facts AS fact
+              ON fact.fact_id=candidate.candidate_fact_id
+            WHERE fact.fact_id IS NULL
+               OR fact.fact_type<>'DECLARED_DEFAULT'
+               OR fact.fact_name<>candidate.fact_name
+               OR fact.subject_entity_id<>candidate.declared_on_entity_id
+               OR fact.declared_on_entity_id IS NULL
+               OR fact.declared_on_entity_id<>candidate.declared_on_entity_id
+               OR fact.scope_kind<>'DECLARED'
+               OR fact.current<>1
+               OR candidate.inheritance_depth<0
+               OR candidate.path_status NOT IN ({path_placeholders})
+               OR (
+                    candidate.selected=1
+                    AND candidate.rejection_reason<>''
+               )
+               OR (
+                    candidate.selected=0
+                    AND candidate.rejection_reason NOT IN (
+                        {reason_placeholders}
+                    )
+               )
+            """,
+            (
+                *EFFECTIVE_CANDIDATE_PATH_STATUSES,
+                *EFFECTIVE_CANDIDATE_REJECTION_REASONS,
+            ),
+        ).fetchone()[0]
+        or 0
+    )
+    effective_rows = int(row[0] or 0)
+    resolved_rows = int(row[1] or 0)
+    unresolved_rows = int(row[2] or 0)
+    invalid_selection_rows = int(row[3] or 0)
+    return {
+        "effectiveRows": effective_rows,
+        "resolvedRows": resolved_rows,
+        "unresolvedRows": unresolved_rows,
+        "invalidSelectionRows": invalid_selection_rows,
+        "orphanCandidateRows": orphan_candidate_rows,
+        "invalidCandidateLineageRows": invalid_candidate_lineage_rows,
+        "consistent": (
+            invalid_selection_rows == 0
+            and orphan_candidate_rows == 0
+            and invalid_candidate_lineage_rows == 0
+        ),
+    }
+
+
+def _effective_resolution_metrics(
+    core: sqlite3.Connection,
+) -> dict[str, object]:
+    try:
+        dependencies = validate_effective_resolution_dependencies(core)
+    except (sqlite3.DatabaseError, ValueError) as error:
+        return {
+            "consistent": False,
+            "dependencyRows": 0,
+            "error": str(error),
+        }
+    return {
+        "consistent": True,
+        "dependencyRows": len(dependencies),
+        "error": "",
     }
 
 
@@ -543,12 +710,27 @@ def evaluate_quality_gates(
                 """
                 SELECT COUNT(*)
                 FROM effective_facts AS effective
-                JOIN facts AS fact ON fact.fact_id=effective.fact_id
-                WHERE fact.fact_type<>'DECLARED_DEFAULT'
-                   OR fact.declared_on_entity_id IS NULL
+                LEFT JOIN facts AS fact ON fact.fact_id=effective.fact_id
+                WHERE effective.fact_type<>'EFFECTIVE_DEFAULT'
+                   OR (
+                        UPPER(effective.resolution_status)='RESOLVED'
+                        AND (
+                            effective.fact_id IS NULL
+                            OR fact.fact_id IS NULL
+                            OR fact.fact_type<>'DECLARED_DEFAULT'
+                            OR fact.declared_on_entity_id IS NULL
+                            OR fact.current<>1
+                        )
+                   )
+                   OR (
+                        UPPER(effective.resolution_status)<>'RESOLVED'
+                        AND effective.fact_id IS NOT NULL
+                   )
                 """
             ).fetchone()[0]
         )
+        effective_candidates = _effective_candidate_metrics(core)
+        effective_resolution = _effective_resolution_metrics(core)
         duplicate_facts = int(
             core.execute(
                 """
@@ -585,7 +767,44 @@ def evaluate_quality_gates(
                     target=0,
                     actual=invalid_effective,
                     passed=invalid_effective == 0,
-                    detail="Every effective fact resolves a declared default.",
+                    detail=(
+                        "Resolved rows point to current declared defaults; "
+                        "unresolved rows retain a null fact_id."
+                    ),
+                ),
+                _gate(
+                    "facts.effective_candidate_consistency",
+                    "facts",
+                    target=(
+                        "one matching selected candidate for RESOLVED; "
+                        "none selected for unresolved; no orphan candidates"
+                    ),
+                    actual=effective_candidates,
+                    passed=bool(effective_candidates["consistent"]),
+                    detail=(
+                        f"{effective_candidates['invalidSelectionRows']} "
+                        "effective rows have invalid candidate selection; "
+                        f"{effective_candidates['orphanCandidateRows']} "
+                        "candidate rows have no effective row; "
+                        f"{effective_candidates['invalidCandidateLineageRows']} "
+                        "candidate rows have invalid declared lineage."
+                    ),
+                ),
+                _gate(
+                    "facts.effective_resolution_reality",
+                    "facts",
+                    target=(
+                        "all effective paths, assignments, selected facts, "
+                        "native-root proofs and revision hashes validate"
+                    ),
+                    actual=effective_resolution,
+                    passed=bool(effective_resolution["consistent"]),
+                    detail=(
+                        "Validated effective path reality and exact revision "
+                        "dependencies."
+                        if effective_resolution["consistent"]
+                        else str(effective_resolution["error"])
+                    ),
                 ),
                 _gate(
                     "facts.canonical_deduplicated",
@@ -779,16 +998,16 @@ def evaluate_quality_gates(
     return report
 
 
-def _write_json_atomic(path: Path, payload: object) -> None:
+def _write_json_atomic(path: Path, payload: object) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
+    contents = (
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-        + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+        + "\n"
+    ).encode("utf-8")
+    temporary.write_bytes(contents)
     os.replace(temporary, path)
+    return contents
 
 
 def publish_gate_report(
@@ -802,15 +1021,8 @@ def publish_gate_report(
     reports = snapshot_root / "reports"
     benchmark = report["benchmark"]
     _write_json_atomic(reports / "query_benchmark.json", benchmark)
-    _write_json_atomic(reports / "quality_gates.json", report)
-    gate_sha = hashlib.sha256(
-        json.dumps(
-            report,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    gate_bytes = _write_json_atomic(reports / "quality_gates.json", report)
+    gate_sha = hashlib.sha256(gate_bytes).hexdigest()
     current_path = snapshot_root / "manifests" / "current.json"
     manifest = json.loads(current_path.read_text(encoding="utf-8"))
     eligible = bool(report["summary"]["cutoverEligible"])

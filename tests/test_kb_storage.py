@@ -18,6 +18,12 @@ if str(SCRIPT_ROOT) not in sys.path:
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     build_vnext_snapshot,
 )
+from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
+    _effective_resolution_metrics,
+)
+from blueprint_translator.kb_vnext.storage import (  # noqa: E402
+    CORE_SCHEMA_VERSION,
+)
 from blueprint_translator.evidence_schema import (  # noqa: E402
     make_asset_id,
     make_revision_id,
@@ -333,6 +339,47 @@ def _discovery_fixture(
             "MEASURED",
         ),
         (
+            "/Game/Test/BP_Child.BP_Child",
+            "/Game/Test/BP_Child",
+            "BP_Child",
+            "/Script/Engine.Blueprint",
+            "Blueprint",
+            "/Game/Test/BP_Child.BP_Child_C",
+            "/Game/Test/BP_Base.BP_Base_C",
+            "/Script/Engine.Actor",
+            "/Game",
+            "base",
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            120,
+            "sha-child",
+            "2026-07-27T00:00:00+00:00",
+            0,
+            "",
+            "NOT_MEASURED",
+            "NOT_MEASURED",
+            "EXTRACTED",
+            "HIGH",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            "NOT_MEASURED",
+            None,
+            "NOT_MEASURED",
+        ),
+        (
             "/Game/Test/T_Texture.T_Texture",
             "/Game/Test/T_Texture",
             "T_Texture",
@@ -401,13 +448,27 @@ def _discovery_fixture(
         )
         """
     )
-    connection.execute(
+    connection.executemany(
         """
-        INSERT INTO class_edges VALUES (
-            '/Game/Test/BP_Base.BP_Base_C', '/Script/Engine.Actor',
-            'native_parent', 'fixture', 'HIGH'
-        )
-        """
+        INSERT INTO class_edges VALUES (?, ?, ?, 'fixture', 'HIGH')
+        """,
+        [
+            (
+                "/Game/Test/BP_Child.BP_Child_C",
+                "/Game/Test/BP_Base.BP_Base_C",
+                "blueprint_parent",
+            ),
+            (
+                "/Game/Test/BP_Base.BP_Base_C",
+                "/Script/Engine.Actor",
+                "native_parent",
+            ),
+            (
+                "/Script/Engine.Actor",
+                "/Script/CoreUObject.Object",
+                "native_parent",
+            ),
+        ],
     )
     connection.execute(
         """
@@ -570,6 +631,229 @@ class KnowledgeStorageTests(unittest.TestCase):
                     ).fetchone()[0],
                     1,
                 )
+                metadata = dict(
+                    core.execute("SELECT key, value FROM metadata")
+                )
+                self.assertEqual(
+                    metadata["schema_version"], CORE_SCHEMA_VERSION
+                )
+                self.assertEqual(CORE_SCHEMA_VERSION, "ark-kb-core/v2")
+                child_entity_id = core.execute(
+                    """
+                    SELECT entity_id FROM entities
+                    WHERE canonical_uri='/Game/Test/BP_Child.BP_Child'
+                    """
+                ).fetchone()[0]
+                base_entity_id = core.execute(
+                    """
+                    SELECT entity_id FROM entities
+                    WHERE canonical_uri='/Game/Test/BP_Base.BP_Base'
+                    """
+                ).fetchone()[0]
+                child_class_id = core.execute(
+                    """
+                    SELECT class_id FROM classes
+                    WHERE class_path='/Game/Test/BP_Child.BP_Child_C'
+                    """
+                ).fetchone()[0]
+                base_class_id = core.execute(
+                    """
+                    SELECT class_id FROM classes
+                    WHERE class_path='/Game/Test/BP_Base.BP_Base_C'
+                    """
+                ).fetchone()[0]
+                actor_class_id = core.execute(
+                    """
+                    SELECT class_id FROM classes
+                    WHERE class_path='/Script/Engine.Actor'
+                    """
+                ).fetchone()[0]
+                object_class_id = core.execute(
+                    """
+                    SELECT class_id FROM classes
+                    WHERE class_path='/Script/CoreUObject.Object'
+                    """
+                ).fetchone()[0]
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT depth, path_status
+                        FROM class_closure
+                        WHERE ancestor_class_id=?
+                          AND descendant_class_id=?
+                        """,
+                        (object_class_id, child_class_id),
+                    ).fetchone(),
+                    (3, "CONFIRMED"),
+                )
+                effective = core.execute(
+                    """
+                    SELECT
+                        effective.fact_id,
+                        effective.inherited_from_entity_id,
+                        effective.resolution_chain_json,
+                        effective.resolution_status,
+                        fact.value_kind,
+                        fact.value_integer
+                    FROM effective_facts AS effective
+                    JOIN facts AS fact ON fact.fact_id=effective.fact_id
+                    WHERE effective.entity_id=?
+                      AND effective.fact_type='EFFECTIVE_DEFAULT'
+                      AND effective.fact_name='Count'
+                    """,
+                    (child_entity_id,),
+                ).fetchone()
+                self.assertIsNotNone(effective)
+                self.assertEqual(effective[1], base_entity_id)
+                self.assertEqual(effective[3:], ("RESOLVED", "INTEGER", 7))
+                selected_edge_id = core.execute(
+                    """
+                    SELECT evidence_id
+                    FROM class_edges
+                    WHERE child_class_id=? AND parent_class_id=?
+                      AND edge_kind='blueprint_parent'
+                    """,
+                    (child_class_id, base_class_id),
+                ).fetchone()[0]
+                base_to_actor_edge_id = core.execute(
+                    """
+                    SELECT evidence_id
+                    FROM class_edges
+                    WHERE child_class_id=? AND parent_class_id=?
+                      AND edge_kind='native_parent'
+                    """,
+                    (base_class_id, actor_class_id),
+                ).fetchone()[0]
+                native_source = core.execute(
+                    """
+                    SELECT
+                        revision.source_kind,
+                        revision.source_uri,
+                        revision.source_fingerprint,
+                        revision.freshness_status
+                    FROM classes AS class
+                    JOIN source_revisions AS revision
+                      ON revision.revision_id=class.source_revision_id
+                    WHERE class.class_id=?
+                    """,
+                    (actor_class_id,),
+                ).fetchone()
+                self.assertEqual(
+                    json.loads(effective[2]),
+                    {
+                        "schema": "ark-kb-effective-path/v1",
+                        "startClassId": child_class_id,
+                        "declaredOnClassId": base_class_id,
+                        "declaredOnEntityId": base_entity_id,
+                        "overrideDepth": 1,
+                        "classes": [child_class_id, base_class_id],
+                        "edges": [
+                            {
+                                "childClassId": child_class_id,
+                                "parentClassId": base_class_id,
+                                "edgeKind": "blueprint_parent",
+                                "evidenceIds": [selected_edge_id],
+                                "status": "CONFIRMED",
+                            }
+                        ],
+                        "nativeRootProof": {
+                            "schema": "ark-kb-native-root-proof/v1",
+                            "startClassId": child_class_id,
+                            "rootClassId": actor_class_id,
+                            "classes": [
+                                child_class_id,
+                                base_class_id,
+                                actor_class_id,
+                            ],
+                            "edges": [
+                                {
+                                    "childClassId": child_class_id,
+                                    "parentClassId": base_class_id,
+                                    "edgeKind": "blueprint_parent",
+                                    "evidenceIds": [selected_edge_id],
+                                    "status": "CONFIRMED",
+                                },
+                                {
+                                    "childClassId": base_class_id,
+                                    "parentClassId": actor_class_id,
+                                    "edgeKind": "native_parent",
+                                    "evidenceIds": [base_to_actor_edge_id],
+                                    "status": "CONFIRMED",
+                                },
+                            ],
+                            "sourceRevision": {
+                                "sourceKind": native_source[0],
+                                "sourceUri": native_source[1],
+                                "sourceFingerprint": native_source[2],
+                                "freshnessStatus": native_source[3],
+                            },
+                        },
+                    },
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT
+                            candidate_fact_id, declared_on_entity_id,
+                            inheritance_depth, path_status, selected,
+                            rejection_reason
+                        FROM effective_fact_candidates
+                        WHERE entity_id=?
+                          AND fact_type='EFFECTIVE_DEFAULT'
+                          AND fact_name='Count'
+                        """,
+                        (child_entity_id,),
+                    ).fetchone(),
+                    (
+                        effective[0],
+                        base_entity_id,
+                        1,
+                        "CONFIRMED",
+                        1,
+                        "",
+                    ),
+                )
+                self.assertEqual(
+                    core.execute(
+                        "SELECT COUNT(*) FROM effective_fact_candidates"
+                    ).fetchone()[0],
+                    2,
+                )
+                self.assertEqual(
+                    core.execute(
+                        """
+                        SELECT DISTINCT revisions.freshness_status
+                        FROM effective_facts AS effective
+                        JOIN fact_evidence AS evidence
+                          ON evidence.fact_id=effective.fact_id
+                        JOIN source_revisions AS revisions
+                          ON revisions.revision_id=evidence.source_revision_id
+                        WHERE effective.entity_id=?
+                        """,
+                        (child_entity_id,),
+                    ).fetchall(),
+                    [("FRESH",)],
+                )
+                valid_resolution = _effective_resolution_metrics(core)
+                self.assertTrue(valid_resolution["consistent"])
+                self.assertGreater(
+                    int(valid_resolution["dependencyRows"]),
+                    0,
+                )
+                core.execute(
+                    """
+                    UPDATE effective_facts
+                    SET resolution_chain_json='{}'
+                    WHERE entity_id=? AND fact_name='Count'
+                    """,
+                    (child_entity_id,),
+                )
+                invalid_resolution = _effective_resolution_metrics(core)
+                self.assertFalse(invalid_resolution["consistent"])
+                self.assertIn(
+                    "unsupported envelope",
+                    str(invalid_resolution["error"]),
+                )
             finally:
                 catalog.close()
                 core.close()
@@ -582,6 +866,52 @@ class KnowledgeStorageTests(unittest.TestCase):
             self.assertEqual(
                 manifest["cutover"]["mode"], "shadow"
             )
+            for database_name in (
+                "catalog",
+                "core",
+                "search",
+                "cache",
+            ):
+                source = sqlite3.connect(
+                    output / f"{database_name}.sqlite"
+                )
+                replay = sqlite3.connect(":memory:")
+                try:
+                    replay.executescript(
+                        (
+                            output
+                            / "manifests"
+                            / f"{database_name}_schema.sql"
+                        ).read_text(encoding="utf-8")
+                    )
+
+                    def schema_objects(
+                        connection: sqlite3.Connection,
+                    ) -> set[tuple[str, str, str, str]]:
+                        return {
+                            (
+                                str(row[0]),
+                                str(row[1]),
+                                str(row[2]),
+                                " ".join(str(row[3] or "").split()),
+                            )
+                            for row in connection.execute(
+                                """
+                                SELECT type, name, tbl_name, sql
+                                FROM sqlite_schema
+                                WHERE name NOT LIKE 'sqlite_%'
+                                """
+                            )
+                        }
+
+                    self.assertEqual(
+                        schema_objects(replay),
+                        schema_objects(source),
+                        database_name,
+                    )
+                finally:
+                    replay.close()
+                    source.close()
 
     def test_refuses_first_build_without_full_snapshot(self):
         with tempfile.TemporaryDirectory() as temp_dir:

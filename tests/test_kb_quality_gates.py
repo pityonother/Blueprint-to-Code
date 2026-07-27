@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -16,6 +17,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     QUALITY_GATE_SCHEMA,
     _class_closure_metrics,
+    _effective_candidate_metrics,
     publish_gate_report,
 )
 from blueprint_translator.kb_vnext.semantic_quality import (  # noqa: E402
@@ -48,7 +50,11 @@ def _semantic_core_fixture() -> sqlite3.Connection:
             value_integer INTEGER,
             value_json TEXT,
             status TEXT NOT NULL,
-            current INTEGER NOT NULL
+            current INTEGER NOT NULL,
+            fact_name TEXT NOT NULL DEFAULT '',
+            subject_entity_id INTEGER NOT NULL DEFAULT 1,
+            declared_on_entity_id INTEGER,
+            scope_kind TEXT NOT NULL DEFAULT 'DECLARED'
         );
         CREATE TABLE source_revisions(
             revision_id INTEGER PRIMARY KEY,
@@ -63,8 +69,22 @@ def _semantic_core_fixture() -> sqlite3.Connection:
             entity_id INTEGER NOT NULL,
             fact_type TEXT NOT NULL,
             fact_name TEXT NOT NULL,
-            fact_id INTEGER NOT NULL,
+            fact_id INTEGER,
             resolution_status TEXT NOT NULL
+        );
+        CREATE TABLE effective_fact_candidates(
+            entity_id INTEGER NOT NULL,
+            fact_type TEXT NOT NULL,
+            fact_name TEXT NOT NULL,
+            candidate_fact_id INTEGER NOT NULL,
+            declared_on_entity_id INTEGER NOT NULL,
+            inheritance_depth INTEGER NOT NULL,
+            path_status TEXT NOT NULL,
+            selected INTEGER NOT NULL,
+            rejection_reason TEXT NOT NULL,
+            PRIMARY KEY(
+                entity_id, fact_type, fact_name, candidate_fact_id
+            )
         );
         CREATE TABLE projection_runs(
             projection_name TEXT NOT NULL,
@@ -76,7 +96,10 @@ def _semantic_core_fixture() -> sqlite3.Connection:
         INSERT INTO source_revisions VALUES (1, 'FRESH');
         INSERT INTO source_revisions VALUES (2, 'STALE');
 
-        INSERT INTO facts VALUES
+        INSERT INTO facts(
+            fact_id, fact_type, value_kind, value_text, value_number,
+            value_integer, value_json, status, current
+        ) VALUES
             (1, 'ITEM_PROPERTY', 'NUMBER', NULL, 2.5, NULL, NULL,
              'CONFIRMED', 1),
             (2, 'DECLARED_DEFAULT', 'FINGERPRINT', 'hash', NULL, NULL, NULL,
@@ -104,7 +127,8 @@ def _semantic_core_fixture() -> sqlite3.Connection:
             (1, 'EFFECTIVE_DEFAULT', 'Three', 3, 'RESOLVED'),
             (1, 'EFFECTIVE_DEFAULT', 'Four', 4, 'RESOLVED'),
             (1, 'EFFECTIVE_DEFAULT', 'Five', 5, 'RESOLVED'),
-            (1, 'EFFECTIVE_DEFAULT', 'Six', 6, 'AMBIGUOUS_INHERITANCE');
+            (1, 'EFFECTIVE_DEFAULT', 'Six', NULL, 'AMBIGUOUS_INHERITANCE'),
+            (1, 'EFFECTIVE_DEFAULT', 'Gap', NULL, 'PARENT_CHAIN_OPEN');
         """
     )
     return core
@@ -117,7 +141,10 @@ def _projection_fixture() -> tuple[sqlite3.Connection, dict[str, object]]:
     core.execute("DELETE FROM facts")
     core.executemany(
         """
-        INSERT INTO facts VALUES (
+        INSERT INTO facts(
+            fact_id, fact_type, value_kind, value_text, value_number,
+            value_integer, value_json, status, current
+        ) VALUES (
             ?, ?, 'NUMBER', NULL, 1.0, NULL, NULL, 'CONFIRMED', 1
         )
         """,
@@ -219,6 +246,19 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             current = json.loads(
                 (manifests / "current.json").read_text(encoding="utf-8")
             )
+            build_manifest = json.loads(
+                (manifests / "fixture-build.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            report_sha = hashlib.sha256(
+                (root / "reports" / "quality_gates.json").read_bytes()
+            ).hexdigest()
+            self.assertEqual(current, build_manifest)
+            self.assertEqual(
+                current["qualityGates"]["sha256"],
+                report_sha,
+            )
         self.assertEqual(cutover["mode"], "shadow")
         self.assertEqual(cutover["defaultQuerySource"], "legacy")
         self.assertEqual(current["qualityGates"]["failed"], 1)
@@ -292,9 +332,237 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         self.assertEqual(metrics["freshEvidenceSemanticFacts"], 2)
         self.assertAlmostEqual(metrics["usableValueFactRate"], 0.5)
         self.assertAlmostEqual(metrics["semanticFreshEvidenceRate"], 2 / 3)
-        self.assertEqual(metrics["totalEffectiveFacts"], 6)
+        self.assertEqual(metrics["totalEffectiveFacts"], 7)
         self.assertEqual(metrics["usableEffectiveFacts"], 2)
-        self.assertAlmostEqual(metrics["effectiveUsableValueRate"], 1 / 3)
+        self.assertAlmostEqual(metrics["effectiveUsableValueRate"], 2 / 7)
+        core.close()
+
+    def test_semantic_fact_metrics_require_payload_matching_value_kind(self):
+        core = _semantic_core_fixture()
+        core.execute("DELETE FROM effective_facts")
+        core.execute("DELETE FROM fact_evidence")
+        core.execute("DELETE FROM facts")
+        valid_rows = [
+            (1, "BOOLEAN", None, None, 0, None, "CONFIRMED", 1),
+            (2, "INTEGER", None, None, 42, None, "CONFIRMED", 1),
+            (3, "NUMBER", None, 2.5, None, None, "CONFIRMED", 1),
+            (4, "TEXT", "", None, None, None, "CONFIRMED", 1),
+            (
+                5,
+                "ENTITY_REF",
+                "/Game/Test/Target.Target",
+                None,
+                None,
+                None,
+                "CONFIRMED",
+                1,
+            ),
+            (
+                6,
+                "JSON",
+                None,
+                None,
+                None,
+                '{"items":[1,true]}',
+                "VERIFIED",
+                1,
+            ),
+            (
+                7,
+                "CONFIRMED_EMPTY",
+                None,
+                None,
+                None,
+                None,
+                "CONFIRMED_EMPTY",
+                1,
+            ),
+        ]
+        cross_wired_rows = [
+            (8, "BOOLEAN", "false", None, 0, None, "CONFIRMED", 1),
+            (9, "INTEGER", "42", None, 42, None, "CONFIRMED", 1),
+            (10, "NUMBER", "2.5", 2.5, None, None, "CONFIRMED", 1),
+            (11, "TEXT", "text", None, 1, None, "CONFIRMED", 1),
+            (
+                12,
+                "ENTITY_REF",
+                "/Game/Test/Target.Target",
+                1.0,
+                None,
+                None,
+                "CONFIRMED",
+                1,
+            ),
+            (
+                13,
+                "JSON",
+                "wrong-column",
+                None,
+                None,
+                '{"valid":true}',
+                "CONFIRMED",
+                1,
+            ),
+            (
+                14,
+                "CONFIRMED_EMPTY",
+                None,
+                None,
+                None,
+                "[]",
+                "CONFIRMED_EMPTY",
+                1,
+            ),
+        ]
+        core.executemany(
+            """
+            INSERT INTO facts(
+                fact_id, fact_type, value_kind, value_text, value_number,
+                value_integer, value_json, status, current
+            ) VALUES (
+                ?, 'DECLARED_DEFAULT', ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            [*valid_rows, *cross_wired_rows],
+        )
+
+        metrics = _semantic_fact_metrics(core)
+
+        self.assertEqual(metrics["totalFacts"], 14)
+        self.assertEqual(metrics["semanticFacts"], 7)
+        self.assertEqual(metrics["usableValueFacts"], 7)
+        self.assertAlmostEqual(metrics["usableValueFactRate"], 0.5)
+        core.close()
+
+    def test_effective_candidate_gate_matches_one_selection_only_to_resolved_row(
+        self,
+    ):
+        core = _semantic_core_fixture()
+        core.execute("DELETE FROM effective_facts")
+        core.execute(
+            """
+            UPDATE facts
+            SET
+                fact_type='DECLARED_DEFAULT',
+                fact_name=CASE fact_id
+                    WHEN 1 THEN 'Resolved'
+                    WHEN 2 THEN 'Gap'
+                    ELSE fact_name
+                END,
+                subject_entity_id=1,
+                declared_on_entity_id=1,
+                scope_kind='DECLARED',
+                current=1
+            WHERE fact_id IN (1, 2)
+            """
+        )
+        core.executemany(
+            """
+            INSERT INTO effective_facts VALUES (
+                1, 'EFFECTIVE_DEFAULT', ?, ?, ?
+            )
+            """,
+            [
+                ("Resolved", 1, "RESOLVED"),
+                ("Gap", None, "PARENT_CHAIN_OPEN"),
+            ],
+        )
+        core.executemany(
+            """
+            INSERT INTO effective_fact_candidates VALUES (
+                1, 'EFFECTIVE_DEFAULT', ?, ?, 1, 0,
+                'SELF', ?, ?
+            )
+            """,
+            [
+                ("Resolved", 1, 1, ""),
+                ("Gap", 2, 0, "PARENT_CHAIN_OPEN"),
+            ],
+        )
+
+        valid = _effective_candidate_metrics(core)
+
+        self.assertTrue(valid["consistent"])
+        self.assertEqual(valid["invalidSelectionRows"], 0)
+        self.assertEqual(valid["orphanCandidateRows"], 0)
+        self.assertEqual(valid["invalidCandidateLineageRows"], 0)
+
+        core.execute(
+            """
+            UPDATE effective_fact_candidates
+            SET declared_on_entity_id=2
+            WHERE fact_name='Resolved'
+            """
+        )
+        invalid_lineage = _effective_candidate_metrics(core)
+        self.assertFalse(invalid_lineage["consistent"])
+        self.assertEqual(
+            invalid_lineage["invalidCandidateLineageRows"],
+            1,
+        )
+        core.execute(
+            """
+            UPDATE effective_fact_candidates
+            SET declared_on_entity_id=1
+            WHERE fact_name='Resolved'
+            """
+        )
+
+        core.execute(
+            "UPDATE facts SET declared_on_entity_id=NULL WHERE fact_id=1"
+        )
+        null_declared_on = _effective_candidate_metrics(core)
+        self.assertFalse(null_declared_on["consistent"])
+        self.assertEqual(
+            null_declared_on["invalidCandidateLineageRows"],
+            1,
+        )
+        core.execute(
+            "UPDATE facts SET declared_on_entity_id=1 WHERE fact_id=1"
+        )
+
+        core.execute(
+            """
+            UPDATE effective_fact_candidates
+            SET candidate_fact_id=2
+            WHERE fact_name='Resolved'
+            """
+        )
+        mismatched = _effective_candidate_metrics(core)
+        self.assertFalse(mismatched["consistent"])
+        self.assertEqual(mismatched["invalidSelectionRows"], 1)
+        core.execute(
+            """
+            UPDATE effective_fact_candidates
+            SET candidate_fact_id=1
+            WHERE fact_name='Resolved'
+            """
+        )
+
+        core.execute(
+            """
+            UPDATE effective_fact_candidates
+            SET selected=1, rejection_reason=''
+            WHERE fact_name='Gap'
+            """
+        )
+        invalid_selection = _effective_candidate_metrics(core)
+        self.assertFalse(invalid_selection["consistent"])
+        self.assertEqual(invalid_selection["invalidSelectionRows"], 1)
+
+        core.execute(
+            """
+            UPDATE effective_fact_candidates
+            SET selected=0, rejection_reason='PARENT_CHAIN_OPEN'
+            WHERE fact_name='Gap'
+            """
+        )
+        core.execute(
+            "DELETE FROM effective_facts WHERE fact_name='Gap'"
+        )
+        orphan = _effective_candidate_metrics(core)
+        self.assertFalse(orphan["consistent"])
+        self.assertEqual(orphan["orphanCandidateRows"], 1)
         core.close()
 
     def test_projection_metrics_require_reviewed_nonzero_usable_fresh_rows(self):

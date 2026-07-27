@@ -24,10 +24,10 @@ from .registrations import (
     materialize_typed_registrations,
 )
 from .roles import ROLE_TABLES_SQL, materialize_discovery_roles
+from .schema_capabilities import CORE_SCHEMA_VERSION
 
 
 CATALOG_SCHEMA_VERSION = "ark-kb-catalog/v1"
-CORE_SCHEMA_VERSION = "ark-kb-core/v1"
 SEARCH_SCHEMA_VERSION = "ark-kb-search/v1"
 CACHE_SCHEMA_VERSION = "ark-kb-cache/v1"
 
@@ -164,6 +164,8 @@ CREATE INDEX idx_catalog_coverage_status
     ON catalog_coverage(stage, status);
 """
 
+FULL_CATALOG_SCHEMA_SQL = CATALOG_SCHEMA_SQL + "\n" + CATALOG_INDEX_SQL
+
 CORE_SCHEMA_SQL = """
 CREATE TABLE metadata(
     key TEXT PRIMARY KEY,
@@ -266,15 +268,43 @@ CREATE TABLE effective_facts(
     entity_id INTEGER NOT NULL,
     fact_type TEXT NOT NULL,
     fact_name TEXT NOT NULL DEFAULT '',
-    fact_id INTEGER NOT NULL,
+    fact_id INTEGER,
     inherited_from_entity_id INTEGER,
     resolution_chain_json TEXT NOT NULL,
     resolution_status TEXT NOT NULL,
     source_revision_set_hash TEXT NOT NULL,
     PRIMARY KEY(entity_id, fact_type, fact_name),
+    CHECK(
+        (resolution_status='RESOLVED' AND fact_id IS NOT NULL)
+        OR
+        (resolution_status<>'RESOLVED' AND fact_id IS NULL)
+    ),
     FOREIGN KEY(entity_id) REFERENCES entities(entity_id),
     FOREIGN KEY(fact_id) REFERENCES facts(fact_id),
     FOREIGN KEY(inherited_from_entity_id) REFERENCES entities(entity_id)
+) WITHOUT ROWID;
+
+CREATE TABLE effective_fact_candidates(
+    entity_id INTEGER NOT NULL,
+    fact_type TEXT NOT NULL,
+    fact_name TEXT NOT NULL DEFAULT '',
+    candidate_fact_id INTEGER NOT NULL,
+    declared_on_entity_id INTEGER NOT NULL,
+    inheritance_depth INTEGER NOT NULL CHECK(inheritance_depth >= 0),
+    path_status TEXT NOT NULL,
+    selected INTEGER NOT NULL CHECK(selected IN (0, 1)),
+    rejection_reason TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(
+        entity_id, fact_type, fact_name, candidate_fact_id
+    ),
+    CHECK(
+        (selected=1 AND rejection_reason='')
+        OR
+        (selected=0 AND rejection_reason<>'')
+    ),
+    FOREIGN KEY(entity_id) REFERENCES entities(entity_id),
+    FOREIGN KEY(candidate_fact_id) REFERENCES facts(fact_id),
+    FOREIGN KEY(declared_on_entity_id) REFERENCES entities(entity_id)
 ) WITHOUT ROWID;
 
 CREATE TABLE domain_memberships(
@@ -442,6 +472,15 @@ CREATE INDEX idx_facts_subject
     ON facts(subject_entity_id, fact_type, fact_name, current);
 CREATE INDEX idx_facts_type_status
     ON facts(fact_type, fact_name, status, confidence);
+CREATE UNIQUE INDEX idx_effective_candidate_one_selected
+    ON effective_fact_candidates(entity_id, fact_type, fact_name)
+    WHERE selected=1;
+CREATE INDEX idx_effective_candidate_declared
+    ON effective_fact_candidates(
+        declared_on_entity_id, fact_name, entity_id
+    );
+CREATE INDEX idx_effective_candidate_fact
+    ON effective_fact_candidates(candidate_fact_id, entity_id);
 CREATE INDEX idx_domain_memberships_domain
     ON domain_memberships(domain_id, status, confidence, entity_id);
 CREATE INDEX idx_coverage_status ON coverage(stage, status, entity_id);

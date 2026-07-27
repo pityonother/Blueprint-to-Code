@@ -27,6 +27,7 @@ from blueprint_translator.kb_vnext.shadow_compare import (  # noqa: E402
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CACHE_SCHEMA_SQL,
+    CORE_SCHEMA_VERSION,
     FULL_CORE_SCHEMA_SQL,
 )
 
@@ -48,7 +49,7 @@ def _fixture(
     core.executemany(
         "INSERT INTO metadata VALUES (?, ?)",
         [
-            ("schema_version", "ark-kb-core/v1"),
+            ("schema_version", CORE_SCHEMA_VERSION),
             ("ontology_version", ontology.version),
         ],
     )
