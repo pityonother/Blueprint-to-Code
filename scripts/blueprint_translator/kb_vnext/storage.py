@@ -15,6 +15,7 @@ from .fact_store import (
     materialize_effective_defaults,
 )
 from .legacy import import_legacy_lineage
+from .native_gold_set import materialize_native_gold_set
 from .ontology import OntologyBundle, infer_domain_memberships
 from .registrations import (
     REGISTRATION_TABLES_SQL,
@@ -344,10 +345,16 @@ CREATE TABLE native_functions(
     canonical_uri TEXT UNIQUE NOT NULL,
     qualified_symbol TEXT NOT NULL,
     module_name TEXT NOT NULL,
+    rva TEXT NOT NULL,
+    signature TEXT NOT NULL,
     binary_sha256 TEXT NOT NULL,
     pdb_sha256 TEXT NOT NULL,
     pdb_guid_age TEXT NOT NULL,
     recipe_ids_json TEXT NOT NULL,
+    evidence_set_ids_json TEXT NOT NULL,
+    caller_count INTEGER NOT NULL,
+    callee_count INTEGER NOT NULL,
+    callsite_status TEXT NOT NULL,
     status TEXT NOT NULL,
     confidence TEXT NOT NULL,
     source_revision_id INTEGER NOT NULL,
@@ -365,6 +372,34 @@ CREATE TABLE native_field_accesses(
     confidence TEXT NOT NULL,
     FOREIGN KEY(native_function_id) REFERENCES native_functions(native_function_id)
 );
+
+CREATE TABLE native_gold_targets(
+    target_id TEXT PRIMARY KEY,
+    domain_id TEXT NOT NULL,
+    qualified_symbol TEXT NOT NULL,
+    expected_rva TEXT NOT NULL,
+    recipe_id TEXT NOT NULL,
+    native_function_id INTEGER,
+    status TEXT NOT NULL,
+    gap_code TEXT NOT NULL,
+    FOREIGN KEY(native_function_id)
+      REFERENCES native_functions(native_function_id)
+) WITHOUT ROWID;
+
+CREATE TABLE native_blueprint_links(
+    link_id TEXT PRIMARY KEY,
+    blueprint_entity_id INTEGER NOT NULL,
+    blueprint_graph_evidence_uri TEXT NOT NULL,
+    blueprint_function_name TEXT NOT NULL,
+    native_function_id INTEGER,
+    native_evidence_uri TEXT NOT NULL,
+    resolution_method TEXT NOT NULL,
+    status TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    FOREIGN KEY(blueprint_entity_id) REFERENCES entities(entity_id),
+    FOREIGN KEY(native_function_id)
+      REFERENCES native_functions(native_function_id)
+) WITHOUT ROWID;
 
 CREATE TABLE benchmark_queries(
     query_id TEXT PRIMARY KEY,
@@ -390,6 +425,10 @@ CREATE INDEX idx_invalidation_downstream
     ON invalidation_dependencies(downstream_kind, downstream_id);
 CREATE INDEX idx_legacy_lineage_source
     ON legacy_lineage(legacy_database, legacy_table, legacy_primary_key);
+CREATE INDEX idx_native_qualified_symbol
+    ON native_functions(qualified_symbol, rva);
+CREATE INDEX idx_native_blueprint_entity
+    ON native_blueprint_links(blueprint_entity_id, status);
 """
 
 FULL_CORE_SCHEMA_SQL = (
@@ -911,6 +950,7 @@ def build_core_database(
     generated_at: str,
     ontology: OntologyBundle,
     legacy_kb_root: Path,
+    native_gold_set_path: Path,
 ) -> dict[str, int]:
     connection = _connect(output_path, FULL_CORE_SCHEMA_SQL)
     discovery = sqlite3.connect(
@@ -1046,6 +1086,12 @@ def build_core_database(
             source_revision_id=1,
         )
         effective_counts = materialize_effective_defaults(connection)
+        native_counts = materialize_native_gold_set(
+            discovery,
+            connection,
+            config_path=native_gold_set_path,
+            generated_at=generated_at,
+        )
         legacy_counts = import_legacy_lineage(
             core=connection,
             legacy_root=legacy_kb_root,
@@ -1070,6 +1116,7 @@ def build_core_database(
             **registration_counts,
             **fact_counts,
             **effective_counts,
+            **native_counts,
             "legacyRows": int(legacy_counts["rows"]),
             "legacyResolvedEntities": int(
                 legacy_counts["resolvedEntities"]

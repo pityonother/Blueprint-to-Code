@@ -172,6 +172,9 @@ def build_vnext_snapshot(
             generated_at=generated_at,
             ontology=ontology,
             legacy_kb_root=legacy_kb_root,
+            native_gold_set_path=(
+                project_root / "ontology" / "native_gold_set.v1.json"
+            ),
         )
         projection_counts = build_domain_projections(
             core_path=staging / "core.sqlite",

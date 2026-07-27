@@ -24,6 +24,10 @@ from .fact_store import (
     store_fact,
 )
 from .projections import build_domain_projections
+from .native_gold_set import (
+    load_native_gold_set,
+    materialize_native_gold_set,
+)
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -45,4 +49,6 @@ __all__ = [
     "materialize_effective_defaults",
     "store_fact",
     "build_domain_projections",
+    "load_native_gold_set",
+    "materialize_native_gold_set",
 ]
