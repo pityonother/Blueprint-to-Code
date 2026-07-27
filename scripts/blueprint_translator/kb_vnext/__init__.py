@@ -14,6 +14,7 @@ from .class_hierarchy import (
     rebuild_class_closure,
 )
 from .ontology import infer_domain_memberships, load_ontology
+from .registrations import materialize_typed_registrations
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -27,4 +28,5 @@ __all__ = [
     "rebuild_class_closure",
     "infer_domain_memberships",
     "load_ontology",
+    "materialize_typed_registrations",
 ]
