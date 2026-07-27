@@ -8,6 +8,11 @@ from .roles import (
     enrich_type_percentiles,
     materialize_discovery_roles,
 )
+from .class_hierarchy import (
+    inheritance_path_to_native_root,
+    materialize_discovery_classes,
+    rebuild_class_closure,
+)
 
 __all__ = [
     "DEPTH_POLICIES",
@@ -16,4 +21,7 @@ __all__ = [
     "classify_asset",
     "enrich_type_percentiles",
     "materialize_discovery_roles",
+    "inheritance_path_to_native_root",
+    "materialize_discovery_classes",
+    "rebuild_class_closure",
 ]
