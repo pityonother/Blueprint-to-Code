@@ -138,6 +138,69 @@ Then run the same `exec(open(...).read())` command again in Python Console mode.
 
 The local analyzer already accepts these sidecar formats.
 
+## Export The DevKit UClass Hierarchy
+
+First build the class seed in normal PowerShell from the repository root:
+
+```powershell
+python .\scripts\devkit_exporters\build_kb_class_hierarchy_seed.py
+```
+
+The builder opens the published
+`knowledge_base\discovery_bundle\kb_discovery.sqlite` database read-only and
+writes a deterministic seed to
+`knowledge_base\devkit_class_hierarchy\class_hierarchy_seed.json`. It covers
+class paths observed on the asset, class-edge, interface, component,
+function-owner, and default-owner surfaces. Short component names must resolve
+uniquely. If one does not, the builder fails before publishing the seed; supply
+an explicit mapping and rerun:
+
+```powershell
+python .\scripts\devkit_exporters\build_kb_class_hierarchy_seed.py --short-class MysteryComponent=/Script/Module.MysteryComponent
+```
+
+After a successful build, the script prints a ready-to-paste ARK DevKit Python
+Console command. Run that command after the Asset Registry is ready. It wires
+`BTC_KB_CLASS_HIERARCHY_SEED_FILE` to the generated seed before executing:
+
+```python
+import os; os.environ["BTC_KB_CLASS_HIERARCHY_SEED_FILE"] = r"<your Blueprint to Code folder>\knowledge_base\devkit_class_hierarchy\class_hierarchy_seed.json"; BLUEPRINT_TO_CODE_PROJECT_ROOT = r"<your Blueprint to Code folder>"; exec(open(r"<your Blueprint to Code folder>\scripts\devkit_exporters\export_kb_class_hierarchy_snapshot.py", encoding="utf-8").read())
+```
+
+It resolves class relationships from the Asset Registry's
+`TopLevelAssetPath` ancestry API and explicit Blueprint relationship tags.
+Undocumented `unreal.Class` methods are only retained as partial evidence:
+missing interface APIs never turn an unknown interface set into a confirmed
+empty set. Output is checkpointed and published as an immutable generation
+under:
+
+```text
+knowledge_base\devkit_class_hierarchy\
+  class_hierarchy_manifest.json
+  generations\<generation-id>\
+    class_hierarchy.jsonl
+    class_hierarchy_checkpoint.json
+```
+
+Set `BTC_KB_CLASS_HIERARCHY_OUTPUT` to use another working directory, or
+`BTC_KB_CLASS_HIERARCHY_BATCH_SIZE` to change the default 250-class progress-log
+group. Durability is still per class: the active marker is written before live
+reflection and the checkpoint is advanced after each committed row. The seed's
+content SHA participates in the generation signature. Set
+`BTC_KB_DEVKIT_BUILD_ID` when a DevKit package changes without changing the
+reported engine version.
+
+Rows expose separate `parent_status` and `interfaces_status` fields. Unknown
+relationships remain `PARTIAL` or `NOT_RECOVERED`; the exporter never guesses a
+native parent from a class name. A hard interruption leaves an active-class
+marker. The first interruption retries the same class and generation. Only a
+second consecutive interruption of that same class and generation emits
+`QUARANTINED_AFTER_REPEATED_INTERRUPTION` with reason
+`REPEATED_INTERRUPTION_SAME_CLASS_GENERATION`; confirmed Registry parent and
+interface evidence is retained on that row before the exporter advances to the
+next class. Prepared generations survive a Windows manifest sharing violation
+and are verified and republished on the next run.
+
 ## Graph Name Candidate Validation
 
 The local control center can mine likely graph page names from the Blueprint
