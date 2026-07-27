@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .class_hierarchy import class_hierarchy_contract_fingerprint
+from .native_ingest import native_evidence_input_sha256
 from .ontology import load_ontology
 from .projections import build_domain_projections
 from .storage import (
@@ -54,6 +55,7 @@ SNAPSHOT_SEMANTIC_INPUT_KEYS = frozenset(
         "benchmarkGold",
         "qualityGold",
         "mapEvidence",
+        "nativeEvidence",
     }
 )
 _RFC3339_TIMESTAMP = re.compile(
@@ -562,6 +564,7 @@ def _snapshot_semantic_input_hashes(
     discovery_database: Path,
     legacy_kb_root: Path,
     capture_root: Path,
+    native_root: Path,
     map_evidence_path: Path | None,
 ) -> dict[str, str]:
     """Fingerprint every source family that can affect snapshot bytes."""
@@ -624,6 +627,7 @@ def _snapshot_semantic_input_hashes(
                 b"MAP_EVIDENCE_NOT_AVAILABLE"
             ).hexdigest()
         ),
+        "nativeEvidence": native_evidence_input_sha256(native_root),
     }
     if set(hashes) != SNAPSHOT_SEMANTIC_INPUT_KEYS:
         raise AssertionError("snapshot semantic input registry is incomplete")
@@ -731,6 +735,7 @@ def build_vnext_snapshot(
     discovery_database = discovery_database.resolve()
     legacy_kb_root = legacy_kb_root.resolve()
     capture_root = capture_root.resolve()
+    native_root = native_root.resolve()
     map_evidence_path = (
         map_evidence_path.resolve()
         if map_evidence_path is not None
@@ -756,6 +761,7 @@ def build_vnext_snapshot(
         discovery_database=discovery_database,
         legacy_kb_root=legacy_kb_root,
         capture_root=capture_root,
+        native_root=native_root,
         map_evidence_path=map_evidence_path,
     )
     discovery_sha = semantic_input_hashes["discovery"]
@@ -795,6 +801,7 @@ def build_vnext_snapshot(
                 project_root / "ontology" / "projection_review.v1.json"
             ),
             map_evidence_path=map_evidence_path,
+            native_root=native_root,
             snapshot_build_id=build_id,
             snapshot_source_fingerprint=semantic_inputs_sha,
         )
@@ -880,6 +887,7 @@ def build_vnext_snapshot(
             discovery_database=discovery_database,
             legacy_kb_root=legacy_kb_root,
             capture_root=capture_root,
+            native_root=native_root,
             map_evidence_path=map_evidence_path,
         )
         if final_input_hashes != semantic_input_hashes:

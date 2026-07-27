@@ -1306,6 +1306,7 @@ def build_core_database(
     benchmark_gold_set_path: Path,
     projection_review_path: Path,
     map_evidence_path: Path | None = None,
+    native_root: Path,
     snapshot_build_id: str,
     snapshot_source_fingerprint: str,
 ) -> dict[str, int]:
@@ -1579,6 +1580,7 @@ def build_core_database(
             connection,
             config_path=native_gold_set_path,
             generated_at=generated_at,
+            native_root=native_root,
         )
         legacy_counts = import_legacy_lineage(
             core=connection,

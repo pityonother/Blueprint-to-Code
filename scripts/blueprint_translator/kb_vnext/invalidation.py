@@ -1295,6 +1295,14 @@ def apply_invalidation_plan(
     if native_functions := values("NATIVE_FUNCTION"):
         placeholders = ",".join("?" for _ in native_functions)
         connection.execute(
+            f"""
+            UPDATE native_gold_targets
+            SET status='GAP', gap_code='SOURCE_REVISION_STALE'
+            WHERE native_function_id IN ({placeholders})
+            """,
+            native_functions,
+        )
+        connection.execute(
             f"UPDATE native_functions SET status='STALE' WHERE native_function_id IN ({placeholders})",
             native_functions,
         )

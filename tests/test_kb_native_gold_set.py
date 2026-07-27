@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,12 +17,20 @@ from blueprint_translator.kb_vnext.native_gold_set import (  # noqa: E402
     load_native_gold_set,
     materialize_native_gold_set,
 )
+from blueprint_translator.kb_vnext.native_ingest import (  # noqa: E402
+    load_native_evidence_corpus,
+)
+from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
+    plan_invalidation,
+    rebuild_invalidation_dependencies,
+)
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     FULL_CORE_SCHEMA_SQL,
 )
 
 
 CONFIG = PROJECT_ROOT / "ontology" / "native_gold_set.v1.json"
+REAL_NATIVE_ROOT = PROJECT_ROOT / "native_evidence"
 
 
 def _core() -> sqlite3.Connection:
@@ -167,6 +177,239 @@ class KnowledgeNativeGoldSetTests(unittest.TestCase):
             ),
             20,
         )
+
+    def test_manifest_rejects_noncanonical_build_and_target_identities(self):
+        variants = {
+            "uppercase_binary_sha": lambda payload: payload.__setitem__(
+                "binarySha256",
+                str(payload["binarySha256"]).upper(),
+            ),
+            "uppercase_pdb_sha": lambda payload: payload.__setitem__(
+                "pdbSha256",
+                str(payload["pdbSha256"]).upper(),
+            ),
+            "uppercase_pdb_guid": lambda payload: payload.__setitem__(
+                "pdbGuidAge",
+                str(payload["pdbGuidAge"]).upper(),
+            ),
+            "leading_zero_rva": lambda payload: payload["targets"][0].__setitem__(
+                "rva",
+                "0x0" + str(payload["targets"][0]["rva"])[2:],
+            ),
+            "signed_rva": lambda payload: payload["targets"][0].__setitem__(
+                "rva",
+                "0x+" + str(payload["targets"][0]["rva"])[2:],
+            ),
+        }
+        baseline = json.loads(CONFIG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for label, mutate in variants.items():
+                with self.subTest(identity=label):
+                    payload = json.loads(json.dumps(baseline))
+                    mutate(payload)
+                    path = root / f"{label}.json"
+                    path.write_text(
+                        json.dumps(payload),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "canonical|SHA-256|GUID|RVA",
+                    ):
+                        load_native_gold_set(path)
+
+    def test_explicit_missing_native_root_never_falls_back_to_discovery_symbols(
+        self,
+    ):
+        source = _discovery()
+        core = _core()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = materialize_native_gold_set(
+                source,
+                core,
+                config_path=CONFIG,
+                generated_at="2026-07-27T00:00:00Z",
+                native_root=Path(temp_dir) / "missing-native-root",
+            )
+
+        self.assertEqual(result["nativeEvidenceSets"], 0)
+        self.assertEqual(result["nativeEvidenceFunctions"], 0)
+        self.assertEqual(result["nativeGoldTargets"], 20)
+        self.assertEqual(result["nativeConfirmedFunctions"], 0)
+        self.assertEqual(result["nativeTargetGaps"], 20)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT COUNT(*) FROM source_revisions
+                WHERE source_kind='native_evidence'
+                """
+            ).fetchone()[0],
+            0,
+        )
+        source.close()
+        core.close()
+
+    @unittest.skipUnless(
+        len(
+            list(
+                REAL_NATIVE_ROOT.glob(
+                    "stores/*/ark-*/evidence.manifest.json"
+                )
+            )
+        )
+        >= 2,
+        "real production Native Evidence stores are not present",
+    )
+    def test_real_corpus_materializes_per_store_revisions_and_all_gold_targets(
+        self,
+    ):
+        corpus = load_native_evidence_corpus(REAL_NATIVE_ROOT)
+        gold = load_native_gold_set(CONFIG)
+        expected_fanout: dict[str, int] = {}
+        for target in gold["targets"]:
+            function = corpus.match_gold_target(
+                target["recipeId"],
+                target["qualifiedSymbol"],
+                target["rva"],
+            )
+            self.assertIsNotNone(function)
+            assert function is not None
+            matching_origins = [
+                origin
+                for origin in function.origins
+                if origin.recipe_id == target["recipeId"]
+            ]
+            self.assertEqual(len(function.origins), 1)
+            self.assertEqual(len(matching_origins), 1)
+            evidence_set_id = matching_origins[0].evidence_set_id
+            expected_fanout[evidence_set_id] = (
+                expected_fanout.get(evidence_set_id, 0) + 1
+            )
+        source = _discovery()
+        core = _core()
+
+        result = materialize_native_gold_set(
+            source,
+            core,
+            config_path=CONFIG,
+            generated_at="2099-01-01T00:00:00Z",
+            native_root=REAL_NATIVE_ROOT,
+        )
+
+        self.assertEqual(result["nativeEvidenceSets"], 2)
+        self.assertEqual(result["nativeEvidenceFunctions"], 204)
+        self.assertEqual(result["nativeGoldTargets"], 20)
+        self.assertEqual(result["nativeConfirmedFunctions"], 20)
+        self.assertEqual(result["nativeTargetGaps"], 0)
+        self.assertEqual(result["nativeConfirmedFieldAccesses"], 0)
+        self.assertEqual(result["blueprintNativeConfirmedLinks"], 0)
+        self.assertEqual(result["blueprintNativeCandidateLinks"], 2)
+        revisions = list(
+            core.execute(
+                """
+                SELECT source_uri, source_fingerprint, producer_version,
+                       schema_version, generated_at, freshness_status
+                FROM source_revisions
+                WHERE source_kind='native_evidence'
+                ORDER BY source_uri
+                """
+            )
+        )
+        expected_revisions = sorted(
+            (
+                evidence_set.evidence_set_id,
+                evidence_set.source_sha256,
+                evidence_set.generator_commit,
+                "blueprint-to-code-native-evidence-set/v2",
+                evidence_set.generated_at,
+                "FRESH",
+            )
+            for evidence_set in corpus.evidence_sets
+        )
+        self.assertEqual(revisions, expected_revisions)
+        self.assertNotIn(
+            "2099-01-01T00:00:00Z",
+            {row[4] for row in revisions},
+        )
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT COUNT(*), COUNT(DISTINCT function.source_revision_id)
+                FROM native_gold_targets AS target
+                JOIN native_functions AS function
+                  ON function.native_function_id=target.native_function_id
+                JOIN source_revisions AS revision
+                  ON revision.revision_id=function.source_revision_id
+                WHERE target.status='CONFIRMED'
+                  AND target.gap_code=''
+                  AND function.status='CONFIRMED'
+                  AND function.confidence='HIGH'
+                  AND revision.source_kind='native_evidence'
+                  AND revision.freshness_status='FRESH'
+                """
+            ).fetchone(),
+            (20, 2),
+        )
+        actual_fanout = dict(
+            core.execute(
+                """
+                SELECT revision.source_uri, COUNT(*)
+                FROM native_functions AS function
+                JOIN source_revisions AS revision
+                  ON revision.revision_id=function.source_revision_id
+                GROUP BY revision.source_uri
+                """
+            )
+        )
+        self.assertEqual(actual_fanout, expected_fanout)
+        self.assertEqual(sorted(actual_fanout.values()), [4, 16])
+        self.assertEqual(
+            core.execute(
+                "SELECT COUNT(*) FROM native_field_accesses"
+            ).fetchone()[0],
+            0,
+        )
+        rebuild_invalidation_dependencies(core)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT COUNT(*), COUNT(DISTINCT dependency.upstream_revision_id)
+                FROM invalidation_dependencies AS dependency
+                JOIN source_revisions AS revision
+                  ON revision.revision_id=dependency.upstream_revision_id
+                WHERE dependency.downstream_kind='NATIVE_FUNCTION'
+                  AND dependency.dependency_reason='NATIVE_BUILD_BINDING'
+                  AND revision.source_kind='native_evidence'
+                """
+            ).fetchone(),
+            (20, 2),
+        )
+        native_plans = []
+        for revision_id, _source_uri in core.execute(
+            """
+            SELECT revision_id, source_uri
+            FROM source_revisions
+            WHERE source_kind='native_evidence'
+            ORDER BY source_uri
+            """
+        ):
+            plan = plan_invalidation(
+                core,
+                event_kind="NATIVE",
+                upstream_revision_id=int(revision_id),
+            )
+            native_plans.append(
+                set(plan.downstream["NATIVE_FUNCTION"])
+            )
+        self.assertEqual(
+            sorted(len(function_ids) for function_ids in native_plans),
+            [4, 16],
+        )
+        self.assertTrue(native_plans[0].isdisjoint(native_plans[1]))
+        self.assertEqual(len(native_plans[0] | native_plans[1]), 20)
+        source.close()
+        core.close()
 
     def test_exact_build_binding_confirms_function_and_reviewable_field_access(self):
         source = _discovery()

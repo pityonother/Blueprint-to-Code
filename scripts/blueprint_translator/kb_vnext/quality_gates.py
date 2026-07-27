@@ -1377,8 +1377,21 @@ def evaluate_quality_gates(
         native_targets, native_confirmed = core.execute(
             """
             SELECT COUNT(*),
-                   SUM(CASE WHEN status='CONFIRMED' THEN 1 ELSE 0 END)
-            FROM native_gold_targets
+                   SUM(
+                     CASE
+                       WHEN target.status='CONFIRMED'
+                        AND function.status='CONFIRMED'
+                        AND function.confidence='HIGH'
+                        AND revision.freshness_status='FRESH'
+                       THEN 1
+                       ELSE 0
+                     END
+                   )
+            FROM native_gold_targets AS target
+            LEFT JOIN native_functions AS function
+              ON function.native_function_id=target.native_function_id
+            LEFT JOIN source_revisions AS revision
+              ON revision.revision_id=function.source_revision_id
             """
         ).fetchone()
         native_targets = int(native_targets or 0)

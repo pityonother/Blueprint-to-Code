@@ -1407,6 +1407,105 @@ class KnowledgeStorageTests(unittest.TestCase):
         )
         self.assertNotEqual(variant["buildId"], baseline["buildId"])
 
+    def test_snapshot_semantic_input_registry_is_exact(self):
+        self.assertEqual(
+            snapshot_module.SNAPSHOT_SEMANTIC_INPUT_KEYS,
+            frozenset(
+                {
+                    "discovery",
+                    "captures",
+                    "classHierarchyContract",
+                    "semanticProducerContract",
+                    "legacy",
+                    "ontology",
+                    "benchmarkGold",
+                    "qualityGold",
+                    "mapEvidence",
+                    "nativeEvidence",
+                }
+            ),
+        )
+
+    def test_snapshot_identity_covers_native_evidence_input(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+            native_root = root / "native"
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "capture_root": root / "captures",
+                "native_root": native_root,
+                "map_evidence_path": map_evidence,
+            }
+            with patch.object(
+                snapshot_module,
+                "native_evidence_input_sha256",
+                return_value="a" * 64,
+            ) as native_hash:
+                baseline = _snapshot_identity_for_inputs(
+                    output_dir=root / "out-baseline",
+                    **common,
+                )
+                self.assertEqual(native_hash.call_count, 2)
+                native_hash.assert_called_with(native_root.resolve())
+            with patch.object(
+                snapshot_module,
+                "native_evidence_input_sha256",
+                return_value="b" * 64,
+            ) as native_hash:
+                variant = _snapshot_identity_for_inputs(
+                    output_dir=root / "out-variant",
+                    **common,
+                )
+                self.assertEqual(native_hash.call_count, 2)
+                native_hash.assert_called_with(native_root.resolve())
+
+        self.assertEqual(
+            variant["discoverySha256"],
+            baseline["discoverySha256"],
+        )
+        self.assertNotEqual(
+            variant["sourceSha256"],
+            baseline["sourceSha256"],
+        )
+        self.assertNotEqual(variant["buildId"], baseline["buildId"])
+
+    def test_snapshot_identity_is_path_free_for_missing_native_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            discovery = root / "discovery.sqlite"
+            discovery.write_bytes(b"stable-discovery-input")
+            map_evidence = root / "map.json"
+            map_evidence.write_bytes(b'{"catalog":"stable"}')
+            common = {
+                "project_root": PROJECT_ROOT,
+                "discovery_database": discovery,
+                "legacy_kb_root": root / "legacy",
+                "capture_root": root / "captures",
+                "map_evidence_path": map_evidence,
+            }
+            baseline = _snapshot_identity_for_inputs(
+                native_root=root / "missing-native-a",
+                output_dir=root / "out-baseline",
+                **common,
+            )
+            variant = _snapshot_identity_for_inputs(
+                native_root=root / "missing-native-b",
+                output_dir=root / "out-variant",
+                **common,
+            )
+
+        self.assertEqual(
+            variant["sourceSha256"],
+            baseline["sourceSha256"],
+        )
+        self.assertEqual(variant["buildId"], baseline["buildId"])
+
     def test_snapshot_identity_covers_every_semantic_input_family(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

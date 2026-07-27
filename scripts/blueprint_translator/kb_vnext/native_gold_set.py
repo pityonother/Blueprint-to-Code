@@ -8,9 +8,19 @@ import sqlite3
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import unquote, urlsplit
+from uuid import UUID
+
+from .native_ingest import (
+    NativeEvidenceCorpus,
+    NativeEvidenceOrigin,
+    NativeEvidenceSet,
+    NativeFunction,
+    load_native_evidence_corpus,
+)
 
 
 NATIVE_GOLD_SCHEMA = "ark-kb-native-gold-set/v1"
+NATIVE_EVIDENCE_SET_SCHEMA = "blueprint-to-code-native-evidence-set/v2"
 CONFIRMED_EDGE_METHODS = {
     "exact_native_evidence_id",
     "verified_callsite",
@@ -27,6 +37,43 @@ BLUEPRINT_GRAPH_EVIDENCE_SCHEMES = {
     "bp",
     "blueprint-graph",
 }
+
+
+def _is_canonical_sha256(value: object) -> bool:
+    text = str(value or "")
+    return (
+        len(text) == 64
+        and text == text.casefold()
+        and all(character in "0123456789abcdef" for character in text)
+    )
+
+
+def _is_canonical_rva(value: object) -> bool:
+    text = str(value or "")
+    if not text.startswith("0x") or len(text) <= 2:
+        return False
+    try:
+        number = int(text[2:], 16)
+    except ValueError:
+        return False
+    return number >= 0 and text == f"0x{number:X}"
+
+
+def _is_canonical_pdb_guid_age(value: object) -> bool:
+    text = str(value or "")
+    guid, separator, age = text.rpartition("/")
+    if not separator:
+        return False
+    try:
+        normalized_guid = str(UUID(guid))
+        normalized_age = str(int(age))
+    except (ValueError, AttributeError):
+        return False
+    return (
+        guid == normalized_guid
+        and age == normalized_age
+        and int(age) >= 0
+    )
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -55,22 +102,32 @@ def load_native_gold_set(path: Path) -> dict[str, object]:
         if not isinstance(target, dict):
             raise ValueError("Native gold-set target must be an object")
         required = ("id", "domain", "qualifiedSymbol", "rva", "recipeId")
-        if any(not str(target.get(key) or "").strip() for key in required):
+        if any(
+            not str(target.get(key) or "").strip()
+            or str(target.get(key)) != str(target.get(key)).strip()
+            for key in required
+        ):
             raise ValueError("Native gold-set target identity is incomplete")
+        if not _is_canonical_rva(target["rva"]):
+            raise ValueError("Native gold-set target RVA must be canonical")
         target_id = str(target["id"])
         identity = (str(target["qualifiedSymbol"]), str(target["rva"]))
         if target_id in target_ids or identity in identities:
             raise ValueError("Native gold-set targets must be unique")
         target_ids.add(target_id)
         identities.add(identity)
-    for key in (
-        "binarySha256",
-        "pdbSha256",
-        "pdbGuidAge",
-        "moduleName",
-        "version",
-    ):
-        if not str(payload.get(key) or "").strip():
+    for key in ("binarySha256", "pdbSha256"):
+        if not _is_canonical_sha256(payload.get(key)):
+            raise ValueError(
+                f"Native gold-set {key} must be a canonical SHA-256"
+            )
+    if not _is_canonical_pdb_guid_age(payload.get("pdbGuidAge")):
+        raise ValueError(
+            "Native gold-set pdbGuidAge must use canonical GUID/age"
+        )
+    for key in ("moduleName", "version"):
+        value = str(payload.get(key) or "")
+        if not value or value != value.strip():
             raise ValueError(f"Native gold-set {key} is required")
     return payload
 
@@ -320,18 +377,383 @@ def _native_field_rows(
     ]
 
 
+def _native_evidence_set_revision(
+    connection: sqlite3.Connection,
+    evidence_set: NativeEvidenceSet,
+) -> int:
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO source_revisions(
+            source_kind, source_uri, source_fingerprint,
+            producer_version, schema_version, generated_at,
+            freshness_status
+        ) VALUES (
+            'native_evidence', ?, ?, ?, ?, ?, 'FRESH'
+        )
+        """,
+        (
+            evidence_set.evidence_set_id,
+            evidence_set.source_sha256,
+            evidence_set.generator_commit,
+            NATIVE_EVIDENCE_SET_SCHEMA,
+            evidence_set.generated_at,
+        ),
+    )
+    row = connection.execute(
+        """
+        SELECT revision_id
+        FROM source_revisions
+        WHERE source_kind='native_evidence'
+          AND source_uri=?
+          AND source_fingerprint=?
+        """,
+        (
+            evidence_set.evidence_set_id,
+            evidence_set.source_sha256,
+        ),
+    ).fetchone()
+    if row is None:
+        raise ValueError(
+            "Native Evidence source revision was not materialized"
+        )
+    return int(row[0])
+
+
+def _matching_origin(
+    function: NativeFunction,
+    recipe_id: object,
+) -> NativeEvidenceOrigin | None:
+    matches = [
+        origin
+        for origin in function.origins
+        if origin.recipe_id == str(recipe_id)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _corpus_identity_gap(
+    target: Mapping[str, object],
+    function: NativeFunction | None,
+    origin: NativeEvidenceOrigin | None,
+    evidence_set: NativeEvidenceSet | None,
+    config: Mapping[str, object],
+) -> str:
+    if function is None:
+        return "EXACT_SYMBOL_NOT_FOUND"
+    if origin is None:
+        return "RECIPE_MISMATCH"
+    if evidence_set is None:
+        return "EVIDENCE_SET_NOT_BOUND"
+    checks = (
+        (
+            evidence_set.binary_sha256,
+            config["binarySha256"],
+            "BINARY_MISMATCH",
+        ),
+        (evidence_set.pdb_sha256, config["pdbSha256"], "PDB_MISMATCH"),
+        (
+            evidence_set.pdb_guid_age,
+            config["pdbGuidAge"],
+            "PDB_GUID_AGE_MISMATCH",
+        ),
+        (evidence_set.module, config["moduleName"], "MODULE_MISMATCH"),
+        (function.module, config["moduleName"], "MODULE_MISMATCH"),
+        (function.rva, target["rva"], "RVA_MISMATCH"),
+        (
+            function.qualified_symbol,
+            target["qualifiedSymbol"],
+            "SYMBOL_MISMATCH",
+        ),
+    )
+    for actual, expected, gap in checks:
+        if str(actual).casefold() != str(expected).casefold():
+            return gap
+    if (
+        evidence_set.trust_status != "VERIFIED"
+        or not evidence_set.formal_validation
+    ):
+        return "EVIDENCE_SET_UNVERIFIED"
+    if not evidence_set.pdb_loaded:
+        return "PDB_NOT_LOADED"
+    if not evidence_set.pdb_matches_binary:
+        return "PDB_BINARY_MISMATCH"
+    if (
+        origin.normalized_status != "CONFIRMED"
+        or origin.normalized_confidence != "HIGH"
+        or function.normalized_status != "CONFIRMED"
+        or function.normalized_confidence != "HIGH"
+    ):
+        return "SYMBOL_CONFIDENCE_INSUFFICIENT"
+    if not is_recovered_evidence_uri(
+        function.canonical_uri,
+        allowed_schemes={"native"},
+    ):
+        return "NATIVE_EVIDENCE_ID_INVALID"
+    if not is_recovered_identifier(function.signature):
+        return "SIGNATURE_NOT_RECOVERED"
+    return ""
+
+
+def _materialize_blueprint_links(
+    discovery: sqlite3.Connection,
+    core: sqlite3.Connection,
+    *,
+    confirmed_by_uri: Mapping[str, int],
+    gold_version: str,
+    generated_at: str,
+) -> tuple[int, int]:
+    entity_ids = {
+        str(uri): int(entity_id)
+        for uri, entity_id in core.execute(
+            "SELECT canonical_uri, entity_id FROM entities"
+        )
+    }
+    candidate_links = 0
+    confirmed_links = 0
+    blueprint_rows = (
+        discovery.execute(
+            "SELECT * FROM blueprint_native_edges ORDER BY edge_id"
+        )
+        if _table_exists(discovery, "blueprint_native_edges")
+        else ()
+    )
+    for row in blueprint_rows:
+        entity_id = entity_ids.get(str(row["blueprint_asset_path"]))
+        if entity_id is None:
+            continue
+        graph_revision_id = _blueprint_graph_revision(
+            core,
+            row=dict(row),
+            gold_version=gold_version,
+            generated_at=generated_at,
+        )
+        method = str(row["resolution_method"] or "")
+        input_confidence = str(
+            row["confidence"] or ""
+        ).strip().upper()
+        graph_evidence_uri = str(
+            row["blueprint_graph_evidence_id"] or ""
+        ).strip()
+        blueprint_function_name = str(
+            row["blueprint_function_name"] or ""
+        ).strip()
+        native_function_id = confirmed_by_uri.get(
+            str(row["native_evidence_id"])
+        )
+        confirmed = (
+            native_function_id is not None
+            and method in CONFIRMED_EDGE_METHODS
+            and str(row["status"] or "").upper() == "CONFIRMED"
+            and input_confidence in CONFIRMED_INPUT_CONFIDENCE
+            and is_valid_blueprint_graph_evidence_uri(
+                graph_evidence_uri
+            )
+            and is_recovered_identifier(blueprint_function_name)
+        )
+        status = "CONFIRMED" if confirmed else "CANDIDATE"
+        if confirmed:
+            confirmed_links += 1
+        else:
+            candidate_links += 1
+        core.execute(
+            """
+            INSERT INTO native_blueprint_links(
+                link_id, blueprint_entity_id,
+                blueprint_graph_evidence_uri, blueprint_function_name,
+                native_function_id, native_evidence_uri,
+                resolution_method, status, confidence,
+                blueprint_graph_source_revision_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["edge_id"],
+                entity_id,
+                graph_evidence_uri,
+                blueprint_function_name,
+                native_function_id,
+                row["native_evidence_id"],
+                method,
+                status,
+                input_confidence or "LOW",
+                graph_revision_id,
+            ),
+        )
+    return confirmed_links, candidate_links
+
+
+def _materialize_native_evidence_corpus(
+    discovery: sqlite3.Connection,
+    core: sqlite3.Connection,
+    *,
+    corpus: NativeEvidenceCorpus,
+    config: Mapping[str, object],
+    generated_at: str,
+) -> dict[str, int]:
+    revision_by_evidence_set = {
+        evidence_set.evidence_set_id: _native_evidence_set_revision(
+            core,
+            evidence_set,
+        )
+        for evidence_set in corpus.evidence_sets
+    }
+    evidence_sets = {
+        evidence_set.evidence_set_id: evidence_set
+        for evidence_set in corpus.evidence_sets
+    }
+    confirmed_by_uri: dict[str, int] = {}
+    confirmed_targets = 0
+    gap_targets = 0
+    for raw_target in config["targets"]:
+        target = dict(raw_target)
+        function = corpus.match_gold_target(
+            str(target["recipeId"]),
+            str(target["qualifiedSymbol"]),
+            str(target["rva"]),
+        )
+        origin = (
+            _matching_origin(function, target["recipeId"])
+            if function is not None
+            else None
+        )
+        evidence_set = (
+            evidence_sets.get(origin.evidence_set_id)
+            if origin is not None
+            else None
+        )
+        gap = _corpus_identity_gap(
+            target,
+            function,
+            origin,
+            evidence_set,
+            config,
+        )
+        native_function_id: int | None = None
+        if (
+            not gap
+            and function is not None
+            and origin is not None
+            and evidence_set is not None
+        ):
+            recipe_ids = sorted(
+                {row.recipe_id for row in function.origins}
+            )
+            evidence_set_ids = sorted(
+                {row.evidence_set_id for row in function.origins}
+            )
+            callsite_status = (
+                "AVAILABLE_VIA_EVIDENCE_STORE"
+                if function.callers or function.callees
+                else "NOT_RECOVERED"
+            )
+            core.execute(
+                """
+                INSERT INTO native_functions(
+                    canonical_uri, qualified_symbol, module_name, rva,
+                    signature, binary_sha256, pdb_sha256, pdb_guid_age,
+                    recipe_ids_json, evidence_set_ids_json, caller_count,
+                    callee_count, callsite_status, status, confidence,
+                    source_revision_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          'CONFIRMED', 'HIGH', ?)
+                """,
+                (
+                    function.canonical_uri,
+                    function.qualified_symbol,
+                    function.module,
+                    function.rva,
+                    function.signature,
+                    evidence_set.binary_sha256,
+                    evidence_set.pdb_sha256,
+                    evidence_set.pdb_guid_age,
+                    json.dumps(
+                        recipe_ids,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        evidence_set_ids,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    len(function.callers),
+                    len(function.callees),
+                    callsite_status,
+                    revision_by_evidence_set[origin.evidence_set_id],
+                ),
+            )
+            native_function_id = int(
+                core.execute("SELECT last_insert_rowid()").fetchone()[0]
+            )
+            confirmed_by_uri[function.canonical_uri] = native_function_id
+            confirmed_targets += 1
+        else:
+            gap_targets += 1
+        core.execute(
+            """
+            INSERT INTO native_gold_targets(
+                target_id, domain_id, qualified_symbol, expected_rva,
+                recipe_id, native_function_id, status, gap_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                target["id"],
+                target["domain"],
+                target["qualifiedSymbol"],
+                target["rva"],
+                target["recipeId"],
+                native_function_id,
+                "CONFIRMED" if native_function_id else "GAP",
+                gap,
+            ),
+        )
+    confirmed_links, candidate_links = _materialize_blueprint_links(
+        discovery,
+        core,
+        confirmed_by_uri=confirmed_by_uri,
+        gold_version=str(config["version"]),
+        generated_at=generated_at,
+    )
+    core.commit()
+    return {
+        "nativeEvidenceSets": len(corpus.evidence_sets),
+        "nativeEvidenceFunctions": len(corpus.functions),
+        "nativeGoldTargets": len(config["targets"]),
+        "nativeConfirmedFunctions": confirmed_targets,
+        "nativeTargetGaps": gap_targets,
+        "nativeConfirmedFieldAccesses": 0,
+        "blueprintNativeConfirmedLinks": confirmed_links,
+        "blueprintNativeCandidateLinks": candidate_links,
+    }
+
+
 def materialize_native_gold_set(
     discovery: sqlite3.Connection,
     core: sqlite3.Connection,
     *,
     config_path: Path,
     generated_at: str,
+    native_root: Path | None = None,
 ) -> dict[str, int]:
     """Confirm only exact build-bound functions; keep weaker links candidates."""
 
     config = load_native_gold_set(config_path)
+    if native_root is not None:
+        discovery.row_factory = sqlite3.Row
+        core.execute("DELETE FROM native_blueprint_links")
+        core.execute("DELETE FROM native_field_accesses")
+        core.execute("DELETE FROM native_gold_targets")
+        core.execute("DELETE FROM native_functions")
+        return _materialize_native_evidence_corpus(
+            discovery,
+            core,
+            corpus=load_native_evidence_corpus(native_root),
+            config=config,
+            generated_at=generated_at,
+        )
     if not _table_exists(discovery, "native_symbols"):
         return {
+            "nativeEvidenceSets": 0,
+            "nativeEvidenceFunctions": 0,
             "nativeGoldTargets": 0,
             "nativeConfirmedFunctions": 0,
             "nativeTargetGaps": 0,
@@ -496,84 +918,17 @@ def materialize_native_gold_set(
             )
             if status == "CONFIRMED":
                 field_count += 1
-    entity_ids = {
-        str(uri): int(entity_id)
-        for uri, entity_id in core.execute(
-            "SELECT canonical_uri, entity_id FROM entities"
-        )
-    }
-    candidate_links = 0
-    confirmed_links = 0
-    blueprint_rows = (
-        discovery.execute(
-            "SELECT * FROM blueprint_native_edges ORDER BY edge_id"
-        )
-        if _table_exists(discovery, "blueprint_native_edges")
-        else ()
+    confirmed_links, candidate_links = _materialize_blueprint_links(
+        discovery,
+        core,
+        confirmed_by_uri=confirmed_by_uri,
+        gold_version=str(config["version"]),
+        generated_at=generated_at,
     )
-    for row in blueprint_rows:
-        entity_id = entity_ids.get(str(row["blueprint_asset_path"]))
-        if entity_id is None:
-            continue
-        graph_revision_id = _blueprint_graph_revision(
-            core,
-            row=dict(row),
-            gold_version=str(config["version"]),
-            generated_at=generated_at,
-        )
-        method = str(row["resolution_method"] or "")
-        input_confidence = str(
-            row["confidence"] or ""
-        ).strip().upper()
-        graph_evidence_uri = str(
-            row["blueprint_graph_evidence_id"] or ""
-        ).strip()
-        blueprint_function_name = str(
-            row["blueprint_function_name"] or ""
-        ).strip()
-        native_function_id = confirmed_by_uri.get(
-            str(row["native_evidence_id"])
-        )
-        confirmed = (
-            native_function_id is not None
-            and method in CONFIRMED_EDGE_METHODS
-            and str(row["status"] or "").upper() == "CONFIRMED"
-            and input_confidence in CONFIRMED_INPUT_CONFIDENCE
-            and is_valid_blueprint_graph_evidence_uri(
-                graph_evidence_uri
-            )
-            and is_recovered_identifier(blueprint_function_name)
-        )
-        status = "CONFIRMED" if confirmed else "CANDIDATE"
-        if confirmed:
-            confirmed_links += 1
-        else:
-            candidate_links += 1
-        core.execute(
-            """
-            INSERT INTO native_blueprint_links(
-                link_id, blueprint_entity_id,
-                blueprint_graph_evidence_uri, blueprint_function_name,
-                native_function_id, native_evidence_uri,
-                resolution_method, status, confidence,
-                blueprint_graph_source_revision_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                row["edge_id"],
-                entity_id,
-                graph_evidence_uri,
-                blueprint_function_name,
-                native_function_id,
-                row["native_evidence_id"],
-                method,
-                status,
-                input_confidence or "LOW",
-                graph_revision_id,
-            ),
-        )
     core.commit()
     return {
+        "nativeEvidenceSets": len(confirmed_by_uri),
+        "nativeEvidenceFunctions": len(confirmed_by_uri),
         "nativeGoldTargets": len(config["targets"]),
         "nativeConfirmedFunctions": confirmed_targets,
         "nativeTargetGaps": gap_targets,

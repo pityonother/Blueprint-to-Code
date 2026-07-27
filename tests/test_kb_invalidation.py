@@ -920,6 +920,17 @@ class KnowledgeInvalidationTests(unittest.TestCase):
 
     def test_native_revision_stales_only_native_dependents(self):
         connection, fact_ids = _fixture()
+        connection.execute(
+            """
+            INSERT INTO native_gold_targets(
+                target_id, domain_id, qualified_symbol, expected_rva,
+                recipe_id, native_function_id, status, gap_code
+            ) VALUES (
+                'native-gold-21', 'loot', 'UItem::Rate', '0x10',
+                'ark-loot/v1', 21, 'CONFIRMED', ''
+            )
+            """
+        )
         plan = plan_invalidation(
             connection,
             event_kind="NATIVE",
@@ -937,6 +948,16 @@ class KnowledgeInvalidationTests(unittest.TestCase):
                 "SELECT status FROM native_functions WHERE native_function_id=21"
             ).fetchone()[0],
             "STALE",
+        )
+        self.assertEqual(
+            connection.execute(
+                """
+                SELECT status, gap_code
+                FROM native_gold_targets
+                WHERE target_id='native-gold-21'
+                """
+            ).fetchone(),
+            ("GAP", "SOURCE_REVISION_STALE"),
         )
         self.assertEqual(
             connection.execute(

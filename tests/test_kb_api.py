@@ -99,6 +99,7 @@ def _snapshot(root: Path) -> VNextKnowledgeService:
         "benchmarkGold": "3" * 64,
         "qualityGold": "4" * 64,
         "mapEvidence": "5" * 64,
+        "nativeEvidence": "6" * 64,
     }
     discovery_fingerprint = semantic_inputs["discovery"]
     semantic_fingerprint = semantic_inputs_sha256(semantic_inputs)
