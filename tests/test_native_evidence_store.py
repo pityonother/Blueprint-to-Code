@@ -19,17 +19,6 @@ from _python_interpreter import (
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 FIXTURE = ROOT / "tests" / "fixtures" / "native_evidence" / "native_evidence_v2.json"
-REAL_LOOT_EVIDENCE = (
-    ROOT
-    / "native_evidence"
-    / "stores"
-    / "b0e67e1e7625"
-    / (
-        "ark-loot-quality-v1-b81a1f3c01fd-20260727-032404-"
-        "d386cfd2851c49f292673cf60d1d13f8"
-    )
-    / "evidence.full.json"
-)
 sys.path.insert(0, str(SCRIPTS))
 
 from blueprint_translator.context_pack import estimate_tokens  # noqa: E402
@@ -149,9 +138,7 @@ class NativeEvidenceStoreTests(unittest.TestCase):
             "UNCONDITIONAL_CALL",
         )
 
-    def test_real_formal_recipe_evidence_preserves_exec_callsite_rva(self):
-        shutil.copyfile(REAL_LOOT_EVIDENCE, self.source)
-
+    def test_committed_formal_fixture_preserves_explicit_callsite_rva(self):
         write_native_evidence_artifacts(self.source, self.evidence_dir)
 
         with closing(
@@ -167,18 +154,18 @@ class NativeEvidenceStoreTests(unittest.TestCase):
                 JOIN native_functions AS callee
                   ON callee.evidence_id=site.callee_evidence_id
                 WHERE caller.qualified_name=
-                          'UPrimalInventoryComponent::execAddItemObjectEx'
+                          'FixtureMath::ComputeQuality(int)'
                   AND callee.qualified_name=
-                          'UPrimalInventoryComponent::AddItemObjectEx'
+                          'FixtureMath::ApplyClamp(int)'
                 """
             ).fetchone()
 
         self.assertEqual(
             row,
             (
-                "UPrimalInventoryComponent::execAddItemObjectEx",
-                "UPrimalInventoryComponent::AddItemObjectEx",
-                "0x43114E",
+                "FixtureMath::ComputeQuality(int)",
+                "FixtureMath::ApplyClamp(int)",
+                "0x1010",
             ),
         )
 

@@ -24,7 +24,8 @@ class CiContractTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
         required_commands = (
-            'python -m unittest discover -s tests -p "test_*.py"',
+            "python -m pip install pytest==9.0.3",
+            "python -m pytest -q",
             "npm ci",
             "npm run build",
             "node tests/api_frontend_contract.mjs",
