@@ -19,6 +19,71 @@ The following are not independent gold:
 
 ## Artifacts
 
+### Signed review contract v2
+
+Production review evaluation uses an externally managed
+`ark-kb-trusted-reviewer-registry/v2` and Ed25519
+`ark-kb-signed-receipt-envelope/v2` receipts. The existing blind
+`ark-kb-gold-review-pack/v1` remains the candidate input, but its v1 review
+receipts are diagnostics only and return `SIGNED_V2_RECEIPTS_REQUIRED`.
+
+Each signed payload binds the exact pack, source manifest, case, candidate,
+and review round. Its `artifactUri` and `artifactSha256` bind the complete
+`ark-kb-gold-review-artifact/v2` bytes, including answer, evidence, rationale,
+review time, and tool version. The validator reads those verified bytes
+directly; it does not reopen the mutable path to determine the review result.
+The receipt envelope contract is
+`schemas/kb_gold_review_receipt_v2.schema.json`; the detached review artifact
+has its own `schemas/kb_gold_review_artifact_v2.schema.json` contract.
+
+Production validation requires:
+
+- a 64-character lowercase SHA-256 `authorKeyFingerprint` in the pack;
+- the same trusted author fingerprint supplied independently with
+  `--expected-pack-author-key-fingerprint`;
+- two `REVIEWER` receipts in exact rounds 1 and 2;
+- distinct registered signer IDs and verified Ed25519 public-key
+  fingerprints;
+- exactly one round-3 `ADJUDICATOR` when the two signed answers differ;
+- an adjudicator key and ID distinct from both reviewers;
+- `FRESH` evidence for every `CONFIRMED` result;
+- an out-of-band expected registry SHA-256 supplied by the operator.
+
+The validator compares reviewer and pack-author IDs case-insensitively and
+also compares their verified key fingerprints. An alias cannot review a pack
+when it reuses the author key.
+
+Earlier packs whose `authorKeyFingerprint` is `automation:<id>` remain valid
+only for no-receipt or v1 diagnostics. They must be re-exported with an
+externally trusted author public-key fingerprint before any signed v2 receipt
+can be considered for production. The validator never derives or invents that
+fingerprint from `authorId`.
+
+The repository contains no production registry, reviewer identity, private
+key, verdict, or receipt fixture. Missing real receipts remains
+`BLOCKED_BY_INDEPENDENT_REVIEW`.
+
+Validation command after externally managed receipts exist:
+
+```powershell
+python -m pip install cryptography==49.0.0
+python scripts\validate_ark_kb_gold_reviews_v2.py `
+  --pack review_work\ark_kb_gold\query\<packId>\review_pack.json `
+  --receipts <external-receipt-directory> `
+  --registry-v2 <human-managed-registry-v2.json> `
+  --expected-registry-sha256 <out-of-band-registry-sha256> `
+  --expected-pack-author-key-fingerprint <out-of-band-author-key-sha256> `
+  --artifact-root <immutable-review-artifact-root>
+```
+
+The command only validates. It does not freeze, write, commit, or publish
+production Gold.
+
+`--case-id` is a diagnostic filter only. If its required case set is not
+exactly the complete candidate set in the bound pack, validation returns
+`BLOCKED_BY_INDEPENDENT_REVIEW`, `contractComplete=false`,
+`productionGoldEligible=false`, and `FULL_PACK_REVIEW_REQUIRED`.
+
 `ark-kb-gold-review-pack/v1` records:
 
 - the author identity and author key fingerprint;
