@@ -16,8 +16,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -130,6 +132,8 @@ class UpdateWorkspace:
     invalidation_events: list[dict[str, object]] = field(
         default_factory=list
     )
+    base_build_id: str = ""
+    staging_receipt: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -335,13 +339,211 @@ def production_capability_check(
     )
 
 
-def _unavailable_stage(paths: UpdatePaths) -> UpdateWorkspace:
-    del paths
-    raise UpdateBlocked(
-        "SELECTIVE_STAGE_UNAVAILABLE",
-        "Selective staging is not implemented.",
-        full_rebuild_required=True,
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _snapshot_files(root: Path) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for path in sorted(
+        root.rglob("*"),
+        key=lambda value: value.relative_to(root).as_posix(),
+    ):
+        is_junction = bool(
+            getattr(path, "is_junction", lambda: False)()
+        )
+        if path.is_symlink() or is_junction:
+            raise UpdateBlocked(
+                "IMMUTABLE_SNAPSHOT_LINK_UNSAFE",
+                "The immutable snapshot contains a link or junction.",
+                full_rebuild_required=True,
+            )
+        if path.is_file():
+            files.append(path)
+        elif not path.is_dir():
+            raise UpdateBlocked(
+                "IMMUTABLE_SNAPSHOT_SPECIAL_FILE_UNSAFE",
+                "The immutable snapshot contains a special file.",
+                full_rebuild_required=True,
+            )
+    return tuple(files)
+
+
+def _snapshot_tree_digest(root: Path, files: Sequence[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(_sha256_file(path).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _backup_sqlite(source: Path, destination: Path) -> None:
+    source_connection = sqlite3.connect(
+        f"file:{source.resolve().as_posix()}?mode=ro&immutable=1",
+        uri=True,
     )
+    destination_connection = sqlite3.connect(destination)
+    try:
+        source_connection.backup(destination_connection)
+        result = destination_connection.execute(
+            "PRAGMA quick_check"
+        ).fetchone()
+        if result != ("ok",):
+            raise UpdateBlocked(
+                "STAGED_SQLITE_QUICK_CHECK_FAILED",
+                "A staged SQLite backup failed quick_check.",
+                full_rebuild_required=True,
+            )
+    finally:
+        destination_connection.close()
+        source_connection.close()
+
+
+def _staging_receipt(
+    *,
+    build_id: str,
+    source_digest: str,
+    staged_digest: str,
+    sqlite_files: int,
+    regular_files: int,
+) -> dict[str, object]:
+    body: dict[str, object] = {
+        "schema": "ark-kb-incremental-staging-receipt/v1",
+        "baseBuildId": build_id,
+        "copyMethod": "sqlite-backup-and-file-copy",
+        "sourceSnapshotSha256": source_digest,
+        "stagedSnapshotSha256": staged_digest,
+        "sourceVerifiedUnchanged": True,
+        "writableHardlinks": False,
+        "sqliteFiles": sqlite_files,
+        "regularFiles": regular_files,
+    }
+    proof = hashlib.sha256(
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {**body, "proof": f"staging-proof://{proof}"}
+
+
+def stage_current_snapshot(paths: UpdatePaths) -> UpdateWorkspace:
+    """Clone current into same-volume staging without writable hardlinks."""
+
+    paths = paths.resolved()
+    try:
+        current = resolve_current_snapshot(
+            paths.output,
+            allow_legacy=False,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise UpdateBlocked(
+            "CURRENT_IMMUTABLE_SNAPSHOT_UNAVAILABLE",
+            "The current immutable snapshot cannot be staged safely.",
+            full_rebuild_required=True,
+        ) from exc
+    source = current.snapshot_dir.resolve()
+    files = _snapshot_files(source)
+    if any(
+        path.name.endswith(("-wal", "-shm"))
+        and ".sqlite-" in path.name
+        for path in files
+    ):
+        raise UpdateBlocked(
+            "IMMUTABLE_SNAPSHOT_SQLITE_SIDECAR",
+            "The immutable snapshot contains SQLite WAL/SHM sidecars.",
+            full_rebuild_required=True,
+        )
+    source_digest_before = _snapshot_tree_digest(source, files)
+    staging_root = paths.output / ".incremental-staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    temporary_root = staging_root / uuid.uuid4().hex
+    temporary_root.mkdir()
+    snapshot_dir = temporary_root / "snapshot"
+    snapshot_dir.mkdir()
+    try:
+        if temporary_root.stat().st_dev != paths.output.stat().st_dev:
+            raise UpdateBlocked(
+                "STAGING_NOT_ON_TARGET_VOLUME",
+                "Incremental staging is not on the target output volume.",
+                full_rebuild_required=True,
+            )
+        sqlite_files = 0
+        regular_files = 0
+        for source_path in files:
+            relative = source_path.relative_to(source)
+            destination = snapshot_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source_path.suffix.casefold() == ".sqlite":
+                _backup_sqlite(source_path, destination)
+                sqlite_files += 1
+            else:
+                shutil.copy2(source_path, destination)
+                regular_files += 1
+            if os.path.samefile(source_path, destination):
+                raise UpdateBlocked(
+                    "STAGING_WRITABLE_HARDLINK_REJECTED",
+                    "A staged file aliases the immutable source inode.",
+                    full_rebuild_required=True,
+                )
+        source_digest_after = _snapshot_tree_digest(
+            source,
+            _snapshot_files(source),
+        )
+        if source_digest_before != source_digest_after:
+            raise UpdateBlocked(
+                "IMMUTABLE_SNAPSHOT_CHANGED_DURING_STAGE",
+                "The immutable source snapshot changed during staging.",
+                full_rebuild_required=True,
+            )
+        staged_files = _snapshot_files(snapshot_dir)
+        staged_digest = _snapshot_tree_digest(
+            snapshot_dir,
+            staged_files,
+        )
+        workspace = UpdateWorkspace(
+            temporary_root=temporary_root,
+            snapshot_dir=snapshot_dir,
+            core_path=snapshot_dir / "core.sqlite",
+            cache_path=snapshot_dir / "cache.sqlite",
+            projection_dir=snapshot_dir / "domain_exports",
+            base_build_id=current.build_id,
+            staging_receipt=_staging_receipt(
+                build_id=current.build_id,
+                source_digest=source_digest_before,
+                staged_digest=staged_digest,
+                sqlite_files=sqlite_files,
+                regular_files=regular_files,
+            ),
+        )
+        if (
+            not workspace.core_path.is_file()
+            or not workspace.cache_path.is_file()
+            or not workspace.projection_dir.is_dir()
+        ):
+            raise UpdateBlocked(
+                "STAGED_SNAPSHOT_LAYOUT_INCOMPLETE",
+                "The staged snapshot lacks Core, Cache, or projections.",
+                full_rebuild_required=True,
+            )
+        return workspace
+    except Exception:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise
+
+
+def _unavailable_stage(paths: UpdatePaths) -> UpdateWorkspace:
+    """Compatibility hook name; staging itself is now production-safe."""
+
+    return stage_current_snapshot(paths)
 
 
 def _unavailable_plan(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -498,6 +500,132 @@ def test_previous_manifest_is_loaded_only_from_current_immutable_snapshot(
     loaded = update.load_current_source_manifest(paths)
 
     assert loaded == expected
+
+
+def _write_stage_source_snapshot(
+    paths: update.UpdatePaths,
+) -> tuple[Path, bytes]:
+    build_id = "build-stage-source"
+    snapshot = paths.output / "snapshots" / build_id
+    (snapshot / "domain_exports").mkdir(parents=True)
+    for relative in (
+        "catalog.sqlite",
+        "core.sqlite",
+        "search.sqlite",
+        "cache.sqlite",
+        "domain_exports/items.sqlite",
+    ):
+        database = snapshot / relative
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "CREATE TABLE marker(value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO marker VALUES (?)",
+            (relative,),
+        )
+        connection.commit()
+        connection.close()
+    (snapshot / "reports").mkdir()
+    (snapshot / "reports" / "note.json").write_text(
+        '{"sealed":true}\n',
+        encoding="utf-8",
+    )
+    (snapshot / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "ark-kb-vnext-snapshot/v1",
+                "buildId": build_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pointer = json.dumps(
+        {
+            "buildId": build_id,
+            "snapshotRelativePath": f"snapshots/{build_id}",
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    paths.output.mkdir(exist_ok=True)
+    (paths.output / "current.json").write_bytes(pointer)
+    return snapshot, pointer
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_safe_stage_uses_independent_copies_and_preserves_old_snapshot(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    source, pointer = _write_stage_source_snapshot(paths)
+    source_hashes = {
+        path.relative_to(source).as_posix(): _file_sha256(path)
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+
+    workspace = update.stage_current_snapshot(paths)
+
+    try:
+        assert workspace.temporary_root.parent == (
+            paths.output / ".incremental-staging"
+        )
+        assert workspace.base_build_id == "build-stage-source"
+        assert (
+            workspace.staging_receipt["sourceVerifiedUnchanged"]
+            is True
+        )
+        assert (
+            workspace.staging_receipt["copyMethod"]
+            == "sqlite-backup-and-file-copy"
+        )
+        assert workspace.staging_receipt["writableHardlinks"] is False
+        assert str(workspace.staging_receipt["proof"]).startswith(
+            "staging-proof://"
+        )
+        for relative, expected_hash in source_hashes.items():
+            staged = workspace.snapshot_dir / relative
+            original = source / relative
+            assert staged.is_file()
+            assert not os.path.samefile(original, staged)
+            assert _file_sha256(original) == expected_hash
+        staged_core = sqlite3.connect(workspace.core_path)
+        staged_core.execute(
+            "INSERT INTO marker VALUES ('staging-only')"
+        )
+        staged_core.commit()
+        staged_core.close()
+        (workspace.snapshot_dir / "reports" / "note.json").write_text(
+            '{"staging":true}\n',
+            encoding="utf-8",
+        )
+        assert {
+            path.relative_to(source).as_posix(): _file_sha256(path)
+            for path in source.rglob("*")
+            if path.is_file()
+        } == source_hashes
+        assert (paths.output / "current.json").read_bytes() == pointer
+    finally:
+        shutil.rmtree(workspace.temporary_root)
+
+
+def test_safe_stage_rejects_sqlite_sidecars_and_cleans_temporary_copy(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    source, pointer = _write_stage_source_snapshot(paths)
+    (source / "core.sqlite-wal").write_bytes(b"unsafe-sidecar")
+
+    with pytest.raises(update.UpdateBlocked) as caught:
+        update.stage_current_snapshot(paths)
+
+    assert caught.value.gap_code == "IMMUTABLE_SNAPSHOT_SQLITE_SIDECAR"
+    assert (paths.output / "current.json").read_bytes() == pointer
+    staging_root = paths.output / ".incremental-staging"
+    assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
 def test_scan_covers_snapshot_ten_inputs_and_runtime(
