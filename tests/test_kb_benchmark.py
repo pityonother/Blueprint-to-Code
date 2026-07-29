@@ -21,8 +21,11 @@ from blueprint_translator.kb_vnext.benchmark import (  # noqa: E402
     DEFAULT_GOLD_SET_PATH,
     BenchmarkCase,
     build_benchmark_cases,
+    build_query_case_result,
+    build_query_failure_matrix,
     evaluate_benchmark_result,
     load_benchmark_gold_set,
+    query_case_results_jsonl_bytes,
     validate_benchmark_shape,
 )
 from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
@@ -1379,6 +1382,238 @@ class BenchmarkAnswerClassificationTests(unittest.TestCase):
                 missing_revision,
             )["semanticAnswer"]
         )
+
+
+class QueryCaseDiagnosticTests(unittest.TestCase):
+    def _fixtures(
+        self,
+    ) -> tuple[BenchmarkCase, dict[str, object]]:
+        fixtures = BenchmarkAnswerClassificationTests()
+        return fixtures._fact_case(), fixtures._complete_fact_result()
+
+    def test_exact_case_records_auditable_expected_actual_and_latency(self):
+        case, result = self._fixtures()
+
+        diagnostic = build_query_case_result(
+            case,
+            result,
+            latency_spans_ms={
+                "planner": 1.23456,
+                "contextSerialization": 0.34567,
+                "total": 1.58023,
+            },
+        )
+
+        self.assertEqual(
+            diagnostic["schema"],
+            "ark-kb-query-case-result/v1",
+        )
+        self.assertEqual(diagnostic["caseId"], case.query_id)
+        self.assertEqual(diagnostic["category"], "FACT")
+        self.assertEqual(diagnostic["domain"], "item_use")
+        self.assertEqual(
+            diagnostic["expected"]["route"],
+            "DB_SEMANTIC_COMPLETE",
+        )
+        self.assertEqual(
+            diagnostic["actual"]["route"],
+            "DB_SEMANTIC_COMPLETE",
+        )
+        self.assertEqual(
+            diagnostic["expected"]["identity"],
+            "/Game/Gold/Item.Item",
+        )
+        self.assertEqual(
+            diagnostic["actual"]["identity"],
+            "/Game/Gold/Item.Item",
+        )
+        self.assertEqual(diagnostic["factDiff"]["missing"], [])
+        self.assertEqual(diagnostic["factDiff"]["extra"], [])
+        self.assertEqual(diagnostic["factDiff"]["wrongValues"], [])
+        self.assertEqual(
+            diagnostic["relationshipDiff"],
+            {"missing": [], "extra": [], "wrong": []},
+        )
+        self.assertEqual(diagnostic["evidenceUriMismatch"]["missing"], [])
+        self.assertEqual(diagnostic["protocolViolations"], [])
+        self.assertEqual(
+            diagnostic["latencySpansMs"],
+            {
+                "contextSerialization": 0.346,
+                "planner": 1.235,
+                "total": 1.58,
+            },
+        )
+        self.assertEqual(diagnostic["failureClass"], "PASS")
+        self.assertEqual(diagnostic["failureClasses"], [])
+        self.assertTrue(diagnostic["semanticAnswer"])
+
+    def test_wrong_fact_value_is_explicit_and_deterministically_classified(self):
+        case, result = self._fixtures()
+        result["facts"][0]["valueNumber"] = 5.5
+
+        diagnostic = build_query_case_result(
+            case,
+            result,
+            latency_spans_ms={"total": 2.0},
+        )
+
+        self.assertEqual(diagnostic["factDiff"]["missing"], [])
+        self.assertEqual(diagnostic["factDiff"]["extra"], [])
+        self.assertEqual(
+            diagnostic["factDiff"]["wrongValues"],
+            [
+                {
+                    "factType": "ITEM_PROPERTY",
+                    "factName": "BaseItemWeight",
+                    "fields": {
+                        "value": {
+                            "expected": 5.0,
+                            "actual": 5.5,
+                        }
+                    },
+                }
+            ],
+        )
+        self.assertIn("WRONG_ANSWER", diagnostic["failureClasses"])
+        self.assertIn("SEMANTIC_MISMATCH", diagnostic["failureClasses"])
+        self.assertEqual(diagnostic["failureClass"], "WRONG_ANSWER")
+
+    def test_protocol_and_leak_details_use_a_stable_priority(self):
+        case, result = self._fixtures()
+        result["answerMode"] = "RELATIONSHIP"
+        result["facts"][0]["status"] = "CANDIDATE"
+        result["facts"][0]["freshness"] = "STALE"
+        result["evidence"][1]["evidenceUri"] = "existing-kb://legacy/fact"
+
+        diagnostic = build_query_case_result(
+            case,
+            result,
+            latency_spans_ms={"total": 3.0},
+        )
+
+        self.assertEqual(
+            diagnostic["protocolViolations"],
+            ["ANSWER_MODE_MISMATCH"],
+        )
+        self.assertEqual(
+            diagnostic["leakage"],
+            {
+                "stale": True,
+                "candidate": True,
+                "legacy": True,
+            },
+        )
+        self.assertEqual(
+            diagnostic["failureClasses"],
+            [
+                "PROTOCOL_VIOLATION",
+                "WRONG_ANSWER",
+                "STALE_LEAKAGE",
+                "CANDIDATE_LEAKAGE",
+                "LEGACY_LEAKAGE",
+                "SEMANTIC_MISMATCH",
+                "EVIDENCE_URI_MISMATCH",
+            ],
+        )
+        self.assertEqual(
+            diagnostic["failureClass"],
+            "PROTOCOL_VIOLATION",
+        )
+
+    def test_failure_matrix_binds_corpus_and_case_result_digest(self):
+        case, passing_result = self._fixtures()
+        passing = build_query_case_result(
+            case,
+            passing_result,
+            latency_spans_ms={"total": 1.0},
+        )
+        failing_result = deepcopy(passing_result)
+        failing_result["facts"][0]["valueNumber"] = 99.0
+        failing = build_query_case_result(
+            BenchmarkCase(
+                **{
+                    **case.__dict__,
+                    "query_id": "fact-fixed-002",
+                }
+            ),
+            failing_result,
+            latency_spans_ms={"total": 2.0},
+        )
+
+        encoded = query_case_results_jsonl_bytes(
+            [failing, passing]
+        )
+        matrix = build_query_failure_matrix(
+            [failing, passing],
+            build_id="fixture-build",
+            corpus_sha256="a" * 64,
+        )
+
+        encoded_lines = encoded.decode("utf-8").splitlines()
+        self.assertEqual(
+            [
+                json.loads(line)["caseId"]
+                for line in encoded_lines
+            ],
+            ["fact-fixed-001", "fact-fixed-002"],
+        )
+        self.assertTrue(encoded.endswith(b"\n"))
+        self.assertEqual(
+            matrix["schema"],
+            "ark-kb-query-failure-matrix/v1",
+        )
+        self.assertEqual(matrix["buildId"], "fixture-build")
+        self.assertEqual(
+            matrix["corpus"],
+            {"sha256": "a" * 64, "caseCount": 2},
+        )
+        self.assertEqual(
+            matrix["caseResults"]["sha256"],
+            __import__("hashlib").sha256(encoded).hexdigest(),
+        )
+        self.assertEqual(
+            matrix["totals"],
+            {"cases": 2, "passing": 1, "failing": 1},
+        )
+        self.assertEqual(
+            matrix["primaryFailureClassCounts"],
+            {"PASS": 1, "WRONG_ANSWER": 1},
+        )
+        self.assertEqual(
+            matrix["failureClassCounts"],
+            {"SEMANTIC_MISMATCH": 1, "WRONG_ANSWER": 1},
+        )
+        self.assertEqual(
+            matrix["byCategory"]["FACT"]["failing"],
+            1,
+        )
+        self.assertEqual(
+            matrix["byDomain"]["item_use"]["total"],
+            2,
+        )
+        self.assertEqual(
+            matrix["failures"][0]["caseId"],
+            "fact-fixed-002",
+        )
+
+    def test_jsonl_rejects_duplicate_or_wrong_schema_case_records(self):
+        case, result = self._fixtures()
+        diagnostic = build_query_case_result(
+            case,
+            result,
+            latency_spans_ms={"total": 1.0},
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate caseId"):
+            query_case_results_jsonl_bytes(
+                [diagnostic, diagnostic]
+            )
+        wrong_schema = {
+            **diagnostic,
+            "schema": "ark-kb-query-case-result/unknown",
+        }
+        with self.assertRaisesRegex(ValueError, "schema"):
+            query_case_results_jsonl_bytes([wrong_schema])
 
 
 if __name__ == "__main__":

@@ -543,6 +543,33 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
         ]
         self.assertEqual(result["total"], 130)
         self.assertEqual(result["tierCounts"], TIER_COUNTS)
+        self.assertTrue(
+            all(
+                item["schema"]
+                == "ark-kb-query-case-result/v1"
+                and item["caseId"] == item["queryId"]
+                and "latencySpansMs" in item
+                and "failureClass" in item
+                for item in result["results"]
+            )
+        )
+        diagnostics = result["diagnosticArtifacts"]
+        self.assertEqual(
+            diagnostics["schema"],
+            "ark-kb-query-diagnostics/v1",
+        )
+        self.assertEqual(
+            diagnostics["corpusSha256"],
+            result["goldSet"]["sha256"],
+        )
+        self.assertEqual(
+            diagnostics["caseResults"]["count"],
+            result["total"],
+        )
+        self.assertEqual(
+            diagnostics["failureMatrix"]["caseCount"],
+            result["total"],
+        )
         self.assertEqual(len(route_matches), 28)
         self.assertEqual(len(route_mismatches), 102)
         self.assertEqual(

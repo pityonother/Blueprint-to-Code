@@ -37,6 +37,21 @@ from .quality_contract import BENCHMARK_SCHEMA
 
 
 GOLD_SET_SCHEMA = "ark-kb-query-gold-set/v1"
+QUERY_CASE_RESULT_SCHEMA = "ark-kb-query-case-result/v1"
+QUERY_FAILURE_MATRIX_SCHEMA = "ark-kb-query-failure-matrix/v1"
+QUERY_DIAGNOSTICS_SCHEMA = "ark-kb-query-diagnostics/v1"
+QUERY_FAILURE_CLASS_PRIORITY = (
+    "PROTOCOL_VIOLATION",
+    "WRONG_ANSWER",
+    "STALE_LEAKAGE",
+    "CANDIDATE_LEAKAGE",
+    "LEGACY_LEAKAGE",
+    "EXPECTED_GAP_MISMATCH",
+    "IDENTITY_MISMATCH",
+    "SEMANTIC_MISMATCH",
+    "EVIDENCE_URI_MISMATCH",
+    "AMBIGUOUS_ROUTING",
+)
 DEFAULT_GOLD_SET_PATH = (
     Path(__file__).resolve().parents[3]
     / "tests"
@@ -1750,6 +1765,866 @@ def evaluate_benchmark_result(
     }
 
 
+def _stable_mapping_list(
+    values: object,
+) -> list[Mapping[str, object]]:
+    if not isinstance(values, list):
+        return []
+    return [
+        item for item in values if isinstance(item, Mapping)
+    ]
+
+
+def _stable_sort_key(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _normalized_expected_fact(
+    fact: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "factType": str(fact.get("factType") or ""),
+        "factName": str(fact.get("factName") or ""),
+        "valueKind": str(fact.get("valueKind") or "").upper(),
+        "value": fact.get("value"),
+        "status": str(fact.get("status") or "").upper(),
+        "evidenceUri": str(fact.get("evidenceUri") or ""),
+    }
+
+
+def _normalized_actual_fact(
+    fact: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "factId": fact.get("factId"),
+        "factType": str(fact.get("factType") or ""),
+        "factName": str(fact.get("factName") or ""),
+        "valueKind": str(fact.get("valueKind") or "").upper(),
+        "value": _actual_fact_value(fact),
+        "status": str(fact.get("status") or "").upper(),
+        "confidence": str(fact.get("confidence") or "").upper(),
+        "freshness": str(fact.get("freshness") or "").upper(),
+    }
+
+
+def _fact_key(fact: Mapping[str, object]) -> tuple[str, str]:
+    return (
+        str(fact.get("factType") or ""),
+        str(fact.get("factName") or ""),
+    )
+
+
+def _fact_wrong_fields(
+    expected: Mapping[str, object],
+    actual: Mapping[str, object],
+) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    comparisons = (
+        (
+            "valueKind",
+            str(expected.get("valueKind") or "").upper(),
+            str(actual.get("valueKind") or "").upper(),
+        ),
+        ("value", expected.get("value"), _actual_fact_value(actual)),
+        (
+            "status",
+            str(expected.get("status") or "").upper(),
+            str(actual.get("status") or "").upper(),
+        ),
+    )
+    for field, expected_value, actual_value in comparisons:
+        if not _equal_value(expected_value, actual_value):
+            fields[field] = {
+                "expected": expected_value,
+                "actual": actual_value,
+            }
+    actual_confidence = str(actual.get("confidence") or "").upper()
+    if actual_confidence not in COMPLETE_CONFIDENCE:
+        fields["confidence"] = {
+            "expected": sorted(COMPLETE_CONFIDENCE),
+            "actual": actual_confidence,
+        }
+    if not fact_value_is_usable(actual) and "value" not in fields:
+        fields["usableValue"] = {
+            "expected": True,
+            "actual": False,
+        }
+    return fields
+
+
+def _fact_diff(
+    expected_facts: Sequence[Mapping[str, object]],
+    actual_facts: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    unmatched_actual = list(actual_facts)
+    missing: list[dict[str, object]] = []
+    wrong: list[dict[str, object]] = []
+    for expected in expected_facts:
+        exact_index = next(
+            (
+                index
+                for index, actual in enumerate(unmatched_actual)
+                if _fact_matches(expected, actual)
+            ),
+            None,
+        )
+        if exact_index is not None:
+            unmatched_actual.pop(exact_index)
+            continue
+        same_key_index = next(
+            (
+                index
+                for index, actual in enumerate(unmatched_actual)
+                if _fact_key(actual) == _fact_key(expected)
+            ),
+            None,
+        )
+        if same_key_index is None:
+            missing.append(_normalized_expected_fact(expected))
+            continue
+        actual = unmatched_actual.pop(same_key_index)
+        wrong.append(
+            {
+                "factType": _fact_key(expected)[0],
+                "factName": _fact_key(expected)[1],
+                "fields": _fact_wrong_fields(expected, actual),
+            }
+        )
+    extra = [
+        _normalized_actual_fact(actual)
+        for actual in unmatched_actual
+    ]
+    return {
+        "missing": sorted(missing, key=_stable_sort_key),
+        "extra": sorted(extra, key=_stable_sort_key),
+        "wrongValues": sorted(wrong, key=_stable_sort_key),
+    }
+
+
+def _normalized_expected_relationship(
+    relationship: Mapping[str, object],
+) -> dict[str, object]:
+    normalized = {
+        "edgeType": str(relationship.get("edgeType") or ""),
+        "targetUri": str(relationship.get("targetUri") or ""),
+        "status": str(relationship.get("status") or "").upper(),
+        "evidenceUri": str(
+            relationship.get("evidenceUri") or ""
+        ),
+    }
+    for field in (
+        "sourceUri",
+        "freshness",
+        "claimsCompleteMapUsage",
+        "claimsSpawnCoordinates",
+        "evidenceLayer",
+    ):
+        if field in relationship:
+            normalized[field] = relationship.get(field)
+    return normalized
+
+
+def _normalized_actual_relationship(
+    relationship: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "edgeId": relationship.get("edgeId"),
+        "edgeType": str(relationship.get("edgeType") or ""),
+        "sourceUri": str(relationship.get("sourceUri") or ""),
+        "targetUri": str(relationship.get("targetUri") or ""),
+        "status": str(relationship.get("status") or "").upper(),
+        "confidence": str(
+            relationship.get("confidence") or ""
+        ).upper(),
+        "freshness": str(
+            relationship.get("freshness") or ""
+        ).upper(),
+        "evidenceUris": sorted(
+            _relationship_evidence_uris(relationship)
+        ),
+    }
+
+
+def _relationship_key(
+    relationship: Mapping[str, object],
+) -> tuple[str, str]:
+    return (
+        str(relationship.get("edgeType") or ""),
+        str(relationship.get("targetUri") or ""),
+    )
+
+
+def _relationship_wrong_fields(
+    expected: Mapping[str, object],
+    actual: Mapping[str, object],
+) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    for field in (
+        "sourceUri",
+        "status",
+        "freshness",
+        "claimsCompleteMapUsage",
+        "claimsSpawnCoordinates",
+        "evidenceLayer",
+    ):
+        if field not in expected:
+            continue
+        expected_value = expected.get(field)
+        actual_value = actual.get(field)
+        if field in {"status", "freshness"}:
+            expected_value = str(expected_value or "").upper()
+            actual_value = str(actual_value or "").upper()
+        if expected_value != actual_value:
+            fields[field] = {
+                "expected": expected_value,
+                "actual": actual_value,
+            }
+    expected_evidence = str(expected.get("evidenceUri") or "")
+    actual_evidence = sorted(_relationship_evidence_uris(actual))
+    if expected_evidence not in actual_evidence:
+        fields["evidenceUri"] = {
+            "expected": expected_evidence,
+            "actual": actual_evidence,
+        }
+    confidence = str(actual.get("confidence") or "").upper()
+    if confidence not in {"HIGH", "CONFIRMED"}:
+        fields["confidence"] = {
+            "expected": ["CONFIRMED", "HIGH"],
+            "actual": confidence,
+        }
+    if not _has_fresh_source_revision(actual):
+        fields["freshSourceRevision"] = {
+            "expected": True,
+            "actual": False,
+        }
+    return fields
+
+
+def _relationship_diff(
+    expected_relationships: Sequence[Mapping[str, object]],
+    actual_relationships: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    unmatched_actual = list(actual_relationships)
+    missing: list[dict[str, object]] = []
+    wrong: list[dict[str, object]] = []
+    for expected in expected_relationships:
+        exact_index = next(
+            (
+                index
+                for index, actual in enumerate(unmatched_actual)
+                if _relationship_matches(expected, actual)
+            ),
+            None,
+        )
+        if exact_index is not None:
+            unmatched_actual.pop(exact_index)
+            continue
+        same_key_index = next(
+            (
+                index
+                for index, actual in enumerate(unmatched_actual)
+                if _relationship_key(actual)
+                == _relationship_key(expected)
+            ),
+            None,
+        )
+        if same_key_index is None:
+            missing.append(
+                _normalized_expected_relationship(expected)
+            )
+            continue
+        actual = unmatched_actual.pop(same_key_index)
+        wrong.append(
+            {
+                "edgeType": _relationship_key(expected)[0],
+                "targetUri": _relationship_key(expected)[1],
+                "fields": _relationship_wrong_fields(
+                    expected,
+                    actual,
+                ),
+            }
+        )
+    extra = [
+        _normalized_actual_relationship(actual)
+        for actual in unmatched_actual
+    ]
+    return {
+        "missing": sorted(missing, key=_stable_sort_key),
+        "extra": sorted(extra, key=_stable_sort_key),
+        "wrong": sorted(wrong, key=_stable_sort_key),
+    }
+
+
+def _actual_evidence_uris(
+    result: Mapping[str, object],
+) -> set[str]:
+    uris = {
+        str(item.get("evidenceUri") or "")
+        for item in _stable_mapping_list(result.get("evidence"))
+    }
+    for relationship in _stable_mapping_list(
+        result.get("relationships")
+    ):
+        uris.update(_relationship_evidence_uris(relationship))
+    return {uri for uri in uris if uri}
+
+
+def _evidence_uri_mismatch(
+    case: BenchmarkCase,
+    result: Mapping[str, object],
+) -> dict[str, object]:
+    expected_facts = _stable_mapping_list(
+        case.expected.get("facts")
+    )
+    expected_relationships = _stable_mapping_list(
+        case.expected.get("relationships")
+    )
+    expected_uris = {
+        str(item.get("evidenceUri") or "")
+        for item in (*expected_facts, *expected_relationships)
+    }
+    identity_evidence = case.expected.get("identityEvidence")
+    if isinstance(identity_evidence, Mapping):
+        expected_uris.add(
+            str(identity_evidence.get("evidenceUri") or "")
+        )
+    expected_uris.discard("")
+    actual_uris = _actual_evidence_uris(result)
+    wrong_bindings: list[dict[str, object]] = []
+    actual_evidence = _stable_mapping_list(result.get("evidence"))
+    actual_facts = _stable_mapping_list(result.get("facts"))
+    for expected in expected_facts:
+        actual = next(
+            (
+                item
+                for item in actual_facts
+                if _fact_key(item) == _fact_key(expected)
+            ),
+            None,
+        )
+        if actual is None:
+            continue
+        fact_id = actual.get("factId")
+        bound = sorted(
+            {
+                str(item.get("evidenceUri") or "")
+                for item in actual_evidence
+                if item.get("factId") == fact_id
+                and item.get("evidenceUri")
+            }
+        )
+        expected_uri = str(expected.get("evidenceUri") or "")
+        if expected_uri and expected_uri not in bound:
+            wrong_bindings.append(
+                {
+                    "kind": "FACT",
+                    "key": {
+                        "factType": _fact_key(expected)[0],
+                        "factName": _fact_key(expected)[1],
+                    },
+                    "expected": expected_uri,
+                    "actual": bound,
+                }
+            )
+    actual_relationships = _stable_mapping_list(
+        result.get("relationships")
+    )
+    for expected in expected_relationships:
+        actual = next(
+            (
+                item
+                for item in actual_relationships
+                if _relationship_key(item)
+                == _relationship_key(expected)
+            ),
+            None,
+        )
+        if actual is None:
+            continue
+        bound = sorted(_relationship_evidence_uris(actual))
+        expected_uri = str(expected.get("evidenceUri") or "")
+        if expected_uri and expected_uri not in bound:
+            wrong_bindings.append(
+                {
+                    "kind": "RELATIONSHIP",
+                    "key": {
+                        "edgeType": _relationship_key(expected)[0],
+                        "targetUri": _relationship_key(expected)[1],
+                    },
+                    "expected": expected_uri,
+                    "actual": bound,
+                }
+            )
+    return {
+        "missing": sorted(expected_uris - actual_uris),
+        "extra": sorted(actual_uris - expected_uris),
+        "wrongBindings": sorted(
+            wrong_bindings,
+            key=_stable_sort_key,
+        ),
+    }
+
+
+def _payload_has_marker(
+    value: object,
+    *,
+    statuses: set[str] | None = None,
+    freshness: set[str] | None = None,
+    uri_prefixes: tuple[str, ...] = (),
+) -> bool:
+    if isinstance(value, Mapping):
+        status = str(value.get("status") or "").upper()
+        freshness_value = str(
+            value.get("freshness") or ""
+        ).upper()
+        if statuses and status in statuses:
+            return True
+        if freshness and freshness_value in freshness:
+            return True
+        return any(
+            _payload_has_marker(
+                child,
+                statuses=statuses,
+                freshness=freshness,
+                uri_prefixes=uri_prefixes,
+            )
+            for child in value.values()
+        )
+    if isinstance(value, list):
+        return any(
+            _payload_has_marker(
+                child,
+                statuses=statuses,
+                freshness=freshness,
+                uri_prefixes=uri_prefixes,
+            )
+            for child in value
+        )
+    if isinstance(value, str) and uri_prefixes:
+        lowered = value.lower()
+        return any(
+            lowered.startswith(prefix) for prefix in uri_prefixes
+        )
+    return False
+
+
+def _protocol_violations(
+    case: BenchmarkCase,
+    result: Mapping[str, object],
+    classification: Mapping[str, bool],
+) -> list[str]:
+    violations: list[str] = []
+    if str(result.get("answerMode") or "") != str(
+        case.request.get("answerMode") or ""
+    ):
+        violations.append("ANSWER_MODE_MISMATCH")
+    if str(result.get("route") or "") != str(
+        case.expected.get("route") or ""
+    ):
+        violations.append("ROUTE_MISMATCH")
+    semantic_expectation = str(
+        case.expected.get("semanticExpectation") or ""
+    )
+    if (
+        semantic_expectation == "GAP_ONLY"
+        and not classification["expectedGapMatched"]
+    ):
+        violations.append("GAP_CONTRACT_MISMATCH")
+    if (
+        semantic_expectation == "IDENTITY_ONLY"
+        and not classification["identityAnswer"]
+    ):
+        violations.append("IDENTITY_CONTRACT_MISMATCH")
+    if not classification["protocolCompliance"] and not violations:
+        violations.append("RESPONSE_SHAPE_MISMATCH")
+    return violations
+
+
+def build_query_case_result(
+    case: BenchmarkCase,
+    result: Mapping[str, object],
+    *,
+    latency_spans_ms: Mapping[str, float],
+) -> dict[str, object]:
+    """Build a stable, auditable per-case benchmark diagnostic."""
+
+    classification = evaluate_benchmark_result(case, result)
+    expected_facts = _stable_mapping_list(
+        case.expected.get("facts")
+    )
+    actual_facts = _stable_mapping_list(result.get("facts"))
+    expected_relationships = _stable_mapping_list(
+        case.expected.get("relationships")
+    )
+    actual_relationships = _stable_mapping_list(
+        result.get("relationships")
+    )
+    fact_diff = _fact_diff(expected_facts, actual_facts)
+    relationship_diff = _relationship_diff(
+        expected_relationships,
+        actual_relationships,
+    )
+    expected_gap_codes = sorted(
+        str(code)
+        for code in case.expected.get("gapCodes", [])
+    )
+    missing_requirements = _stable_mapping_list(
+        result.get("missingRequirements")
+    )
+    actual_gap_codes = sorted(
+        str(item.get("code") or "")
+        for item in missing_requirements
+        if item.get("code")
+    )
+    evidence_mismatch = _evidence_uri_mismatch(case, result)
+    protocol_violations = _protocol_violations(
+        case,
+        result,
+        classification,
+    )
+    leakage = {
+        "stale": _payload_has_marker(
+            result,
+            statuses={"STALE"},
+            freshness={"STALE"},
+        ),
+        "candidate": _payload_has_marker(
+            result,
+            statuses={"CANDIDATE"},
+        ),
+        "legacy": _payload_has_marker(
+            result,
+            statuses={"LEGACY_UNVERIFIED", "LEGACY"},
+            uri_prefixes=("existing-kb://", "legacy://"),
+        ),
+    }
+    entity = result.get("entity")
+    actual_identity = (
+        str(entity.get("canonicalUri") or "")
+        if isinstance(entity, Mapping)
+        else ""
+    )
+    expected_identity = str(
+        case.expected.get("identityUri") or ""
+    )
+    semantic_expectation = str(
+        case.expected.get("semanticExpectation") or ""
+    )
+    has_fact_diff = any(
+        bool(fact_diff[key])
+        for key in ("missing", "extra", "wrongValues")
+    )
+    has_relationship_diff = any(
+        bool(relationship_diff[key])
+        for key in ("missing", "extra", "wrong")
+    )
+    has_evidence_mismatch = bool(
+        evidence_mismatch["missing"]
+        or evidence_mismatch["wrongBindings"]
+    )
+    present_failure_classes: set[str] = set()
+    if protocol_violations:
+        present_failure_classes.add("PROTOCOL_VIOLATION")
+    if classification["wrongAnswer"]:
+        present_failure_classes.add("WRONG_ANSWER")
+    if leakage["stale"]:
+        present_failure_classes.add("STALE_LEAKAGE")
+    if leakage["candidate"]:
+        present_failure_classes.add("CANDIDATE_LEAKAGE")
+    if leakage["legacy"]:
+        present_failure_classes.add("LEGACY_LEAKAGE")
+    if (
+        semantic_expectation == "GAP_ONLY"
+        and not classification["expectedGapMatched"]
+    ):
+        present_failure_classes.add("EXPECTED_GAP_MISMATCH")
+    if (
+        expected_identity
+        and actual_identity != expected_identity
+    ):
+        present_failure_classes.add("IDENTITY_MISMATCH")
+    if (
+        semantic_expectation == "EXACT"
+        and (
+            has_fact_diff
+            or has_relationship_diff
+            or not classification["semanticAnswer"]
+        )
+    ):
+        present_failure_classes.add("SEMANTIC_MISMATCH")
+    if has_evidence_mismatch:
+        present_failure_classes.add("EVIDENCE_URI_MISMATCH")
+    if classification["ambiguousAnswer"]:
+        present_failure_classes.add("AMBIGUOUS_ROUTING")
+    failure_classes = [
+        name
+        for name in QUERY_FAILURE_CLASS_PRIORITY
+        if name in present_failure_classes
+    ]
+    normalized_spans = {
+        str(name): round(float(value), 3)
+        for name, value in sorted(latency_spans_ms.items())
+    }
+    return {
+        "schema": QUERY_CASE_RESULT_SCHEMA,
+        "caseId": case.query_id,
+        "category": case.category,
+        "tier": case.category,
+        "domain": case.primary_domain,
+        "reviewStatus": case.review_status,
+        "protocolBoundaryOnly": case.protocol_boundary_only,
+        "negativeCase": case.negative_case,
+        "performancePath": case.performance_path,
+        "expected": {
+            "answerMode": str(
+                case.request.get("answerMode") or ""
+            ),
+            "semanticExpectation": semantic_expectation,
+            "route": str(case.expected.get("route") or ""),
+            "identity": expected_identity,
+            "facts": [
+                _normalized_expected_fact(item)
+                for item in expected_facts
+            ],
+            "relationships": [
+                _normalized_expected_relationship(item)
+                for item in expected_relationships
+            ],
+            "gapCodes": expected_gap_codes,
+        },
+        "actual": {
+            "answerMode": str(result.get("answerMode") or ""),
+            "status": str(result.get("status") or ""),
+            "route": str(result.get("route") or ""),
+            "identity": actual_identity,
+            "facts": [
+                _normalized_actual_fact(item)
+                for item in actual_facts
+            ],
+            "relationships": [
+                _normalized_actual_relationship(item)
+                for item in actual_relationships
+            ],
+            "gapCodes": actual_gap_codes,
+            "missingRequirements": [
+                dict(item) for item in missing_requirements
+            ],
+            "recommendedProbes": [
+                dict(item)
+                for item in _stable_mapping_list(
+                    result.get("recommendedProbes")
+                )
+            ],
+        },
+        "factDiff": fact_diff,
+        "relationshipDiff": relationship_diff,
+        "gapCodeDiff": {
+            "expected": expected_gap_codes,
+            "actual": actual_gap_codes,
+            "missing": sorted(
+                set(expected_gap_codes) - set(actual_gap_codes)
+            ),
+            "extra": sorted(
+                set(actual_gap_codes) - set(expected_gap_codes)
+            ),
+        },
+        "evidenceUriMismatch": evidence_mismatch,
+        "leakage": leakage,
+        "protocolViolations": protocol_violations,
+        "latencySpansMs": normalized_spans,
+        "failureClass": (
+            failure_classes[0] if failure_classes else "PASS"
+        ),
+        "failureClasses": failure_classes,
+        **classification,
+    }
+
+
+def query_case_results_jsonl_bytes(
+    case_results: Sequence[Mapping[str, object]],
+) -> bytes:
+    """Serialize per-case diagnostics in stable case-id order."""
+
+    by_case_id: dict[str, Mapping[str, object]] = {}
+    for index, case_result in enumerate(case_results):
+        if (
+            str(case_result.get("schema") or "")
+            != QUERY_CASE_RESULT_SCHEMA
+        ):
+            raise ValueError(
+                f"Query case result {index} has an unknown schema"
+            )
+        case_id = str(case_result.get("caseId") or "")
+        if not case_id:
+            raise ValueError(
+                f"Query case result {index} has no caseId"
+            )
+        if case_id in by_case_id:
+            raise ValueError(
+                f"Query case results contain duplicate caseId {case_id}"
+            )
+        by_case_id[case_id] = case_result
+    return b"".join(
+        (
+            json.dumps(
+                by_case_id[case_id],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        for case_id in sorted(by_case_id)
+    )
+
+
+def _failure_group_summary(
+    case_results: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    primary_counts = Counter(
+        str(item.get("failureClass") or "")
+        for item in case_results
+    )
+    failing = sum(
+        str(item.get("failureClass") or "") != "PASS"
+        for item in case_results
+    )
+    return {
+        "total": len(case_results),
+        "passing": len(case_results) - failing,
+        "failing": failing,
+        "primaryFailureClassCounts": dict(
+            sorted(primary_counts.items())
+        ),
+    }
+
+
+def build_query_failure_matrix(
+    case_results: Sequence[Mapping[str, object]],
+    *,
+    build_id: str,
+    corpus_sha256: str,
+) -> dict[str, object]:
+    """Aggregate deterministic failure classes without hiding case detail."""
+
+    if not build_id:
+        raise ValueError("Query failure matrix requires buildId")
+    if len(corpus_sha256) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in corpus_sha256.lower()
+    ):
+        raise ValueError(
+            "Query failure matrix requires corpus sha256"
+        )
+    encoded_results = query_case_results_jsonl_bytes(case_results)
+    ordered = sorted(
+        case_results,
+        key=lambda item: str(item.get("caseId") or ""),
+    )
+    passing = sum(
+        str(item.get("failureClass") or "") == "PASS"
+        for item in ordered
+    )
+    primary_counts = Counter(
+        str(item.get("failureClass") or "")
+        for item in ordered
+    )
+    all_counts = Counter(
+        str(failure_class)
+        for item in ordered
+        for failure_class in item.get("failureClasses", [])
+    )
+    by_category: dict[str, list[Mapping[str, object]]] = defaultdict(
+        list
+    )
+    by_domain: dict[str, list[Mapping[str, object]]] = defaultdict(
+        list
+    )
+    for item in ordered:
+        by_category[str(item.get("category") or "")].append(item)
+        by_domain[str(item.get("domain") or "")].append(item)
+    failures = [
+        {
+            "caseId": str(item.get("caseId") or ""),
+            "category": str(item.get("category") or ""),
+            "domain": str(item.get("domain") or ""),
+            "failureClass": str(
+                item.get("failureClass") or ""
+            ),
+            "failureClasses": list(
+                item.get("failureClasses", [])
+            ),
+            "protocolViolations": list(
+                item.get("protocolViolations", [])
+            ),
+            "leakage": dict(item.get("leakage", {})),
+            "latencySpansMs": dict(
+                item.get("latencySpansMs", {})
+            ),
+        }
+        for item in ordered
+        if str(item.get("failureClass") or "") != "PASS"
+    ]
+    return {
+        "schema": QUERY_FAILURE_MATRIX_SCHEMA,
+        "buildId": build_id,
+        "corpus": {
+            "sha256": corpus_sha256,
+            "caseCount": len(ordered),
+        },
+        "caseResults": {
+            "schema": QUERY_CASE_RESULT_SCHEMA,
+            "sha256": hashlib.sha256(
+                encoded_results
+            ).hexdigest(),
+            "count": len(ordered),
+        },
+        "totals": {
+            "cases": len(ordered),
+            "passing": passing,
+            "failing": len(ordered) - passing,
+        },
+        "primaryFailureClassCounts": dict(
+            sorted(primary_counts.items())
+        ),
+        "failureClassCounts": dict(sorted(all_counts.items())),
+        "byCategory": {
+            name: _failure_group_summary(values)
+            for name, values in sorted(by_category.items())
+        },
+        "byDomain": {
+            name: _failure_group_summary(values)
+            for name, values in sorted(by_domain.items())
+        },
+        "failures": failures,
+    }
+
+
+def query_failure_matrix_json_bytes(
+    failure_matrix: Mapping[str, object],
+) -> bytes:
+    if (
+        str(failure_matrix.get("schema") or "")
+        != QUERY_FAILURE_MATRIX_SCHEMA
+    ):
+        raise ValueError("Query failure matrix has an unknown schema")
+    return (
+        json.dumps(
+            failure_matrix,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def _metric(
     results: Sequence[Mapping[str, object]],
     key: str,
@@ -2877,6 +3752,22 @@ def run_query_benchmark(
     connection.execute("PRAGMA query_only=ON")
     connection.execute("SELECT 1").fetchone()
     cold_ms = (time.perf_counter() - cold_started) * 1_000
+    build_row = connection.execute(
+        """
+        SELECT value
+        FROM metadata
+        WHERE key='snapshot_build_id'
+        """
+    ).fetchone()
+    if build_row is not None and str(build_row[0] or ""):
+        build_id = str(build_row[0])
+        build_binding = "SNAPSHOT_METADATA"
+    else:
+        build_id = (
+            "unsealed-core-"
+            + hashlib.sha256(core_path.read_bytes()).hexdigest()[:16]
+        )
+        build_binding = "CORE_SHA256_FALLBACK"
     warm_started = time.perf_counter()
     connection.execute("SELECT 1").fetchone()
     warm_ms = (time.perf_counter() - warm_started) * 1_000
@@ -2893,48 +3784,50 @@ def run_query_benchmark(
         for row in rows:
             case = cases_by_id[str(row["query_id"])]
             started = time.perf_counter()
+            planner_started = time.perf_counter()
             result = plan_query(connection, _requirements(case.request))
+            planner_ms = (
+                time.perf_counter() - planner_started
+            ) * 1_000
+            context_started = time.perf_counter()
             context = build_bounded_context_pack(
                 result,
                 budget_tokens=int(case.request["budgetTokens"]),
             )
+            context_ms = (
+                time.perf_counter() - context_started
+            ) * 1_000
             elapsed_ms = (time.perf_counter() - started) * 1_000
             latencies.append(elapsed_ms)
             if case.performance_path:
                 path_latencies[case.performance_path].append(elapsed_ms)
-            classification = evaluate_benchmark_result(case, result)
-            missing = result.get("missingRequirements", [])
-            gap_codes = sorted(
-                {
-                    str(item.get("code"))
-                    for item in missing
-                    if isinstance(item, dict) and item.get("code")
-                }
+            case_result = build_query_case_result(
+                case,
+                result,
+                latency_spans_ms={
+                    "planner": planner_ms,
+                    "contextSerialization": context_ms,
+                    "total": elapsed_ms,
+                },
             )
-            results.append(
+            case_result.update(
                 {
                     "queryId": case.query_id,
-                    "category": case.category,
-                    "tier": case.category,
                     "primaryDomain": case.primary_domain,
-                    "reviewStatus": case.review_status,
-                    "protocolBoundaryOnly": (
-                        case.protocol_boundary_only
-                    ),
-                    "negativeCase": case.negative_case,
-                    "performancePath": case.performance_path,
                     "answerMode": str(result.get("answerMode") or ""),
                     "status": str(result.get("status") or ""),
                     "route": str(result.get("route") or ""),
-                    "gapCodes": gap_codes,
+                    "gapCodes": list(
+                        case_result["actual"]["gapCodes"]
+                    ),
                     "probeCount": len(
                         result.get("recommendedProbes", [])
                     ),
                     "contextTokens": int(context["estimatedTokens"]),
                     "latencyMs": round(elapsed_ms, 3),
-                    **classification,
                 }
             )
+            results.append(case_result)
         degree_latency = _degree_latency(connection)
     finally:
         connection.close()
@@ -3002,7 +3895,16 @@ def run_query_benchmark(
     expected_ambiguous = metrics["expectedAmbiguousAnswer"]
     stale = metrics["staleLeak"]
     candidate = metrics["candidateEdgeComplete"]
-    return {
+    case_results_bytes = query_case_results_jsonl_bytes(results)
+    failure_matrix = build_query_failure_matrix(
+        results,
+        build_id=build_id,
+        corpus_sha256=str(gold["corpusSha256"]),
+    )
+    failure_matrix_bytes = query_failure_matrix_json_bytes(
+        failure_matrix
+    )
+    benchmark = {
         "schema": BENCHMARK_SCHEMA,
         "goldSet": {
             "schema": GOLD_SET_SCHEMA,
@@ -3121,6 +4023,28 @@ def run_query_benchmark(
             "budget": 2_000,
             "withinBudget": context_max <= 2_000,
         },
+        "diagnosticArtifacts": {
+            "schema": QUERY_DIAGNOSTICS_SCHEMA,
+            "buildId": build_id,
+            "buildBinding": build_binding,
+            "corpusSha256": str(gold["corpusSha256"]),
+            "caseResults": {
+                "schema": QUERY_CASE_RESULT_SCHEMA,
+                "uri": "reports/query_case_results.jsonl",
+                "sha256": hashlib.sha256(
+                    case_results_bytes
+                ).hexdigest(),
+                "count": len(results),
+            },
+            "failureMatrix": {
+                "schema": QUERY_FAILURE_MATRIX_SCHEMA,
+                "uri": "reports/query_failure_matrix.json",
+                "sha256": hashlib.sha256(
+                    failure_matrix_bytes
+                ).hexdigest(),
+                "caseCount": len(results),
+            },
+        },
         "results": results,
         # Deprecated v1 aliases: protocol success, never semantic coverage.
         "completeOrBounded": protocol["count"],
@@ -3129,3 +4053,4 @@ def run_query_benchmark(
         "simpleDbOnlyRate": identity["rate"],
         "unresolved": len(results) - int(protocol["count"]),
     }
+    return benchmark
