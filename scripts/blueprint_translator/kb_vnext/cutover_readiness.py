@@ -12,6 +12,8 @@ from typing import Mapping
 
 BURN_IN_ATTESTATION_SCHEMA = "ark-kb-burn-in-attestation/v1"
 BURN_IN_POLICY_VERSION = "ark-kb-burn-in-policy/v1"
+BURN_IN_V1_DIAGNOSTIC_STATUS = "DIAGNOSTIC_ONLY_V1"
+BURN_IN_V2_REQUIRED_GAP = "SIGNED_BURN_IN_V2_REQUIRED"
 MINIMUM_SEALED_BUILDS = 3
 REQUIRED_INCREMENTAL_SCENARIOS = (
     "blueprintModified",
@@ -74,7 +76,7 @@ def _exact_keys(
 def validate_burn_in_attestation(
     value: object,
 ) -> Mapping[str, object]:
-    """Validate operational cutover evidence without inventing its contents."""
+    """Validate legacy v1 diagnostics without granting cutover eligibility."""
 
     attestation = _mapping(value, label="burn-in attestation")
     _exact_keys(

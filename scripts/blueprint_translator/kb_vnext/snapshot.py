@@ -22,6 +22,8 @@ from .class_hierarchy import class_hierarchy_contract_fingerprint
 from .cutover_readiness import (
     BURN_IN_ATTESTATION_SCHEMA,
     BURN_IN_POLICY_VERSION,
+    BURN_IN_V1_DIAGNOSTIC_STATUS,
+    BURN_IN_V2_REQUIRED_GAP,
     validate_burn_in_attestation,
     validate_burn_in_snapshot_history,
 )
@@ -1268,8 +1270,9 @@ def _stage_burn_in_attestation(
     return {
         "schema": BURN_IN_ATTESTATION_SCHEMA,
         "policyVersion": BURN_IN_POLICY_VERSION,
-        "status": "VALID",
+        "status": BURN_IN_V1_DIAGNOSTIC_STATUS,
         "required": True,
+        "gapCode": BURN_IN_V2_REQUIRED_GAP,
         "reportUri": "reports/burn_in_attestation.json",
         "sha256": _sha256_file(report_path),
         "sealedSnapshotCount": (
@@ -1348,7 +1351,9 @@ def _seal_staged_quality_report(
     burn_in_binding = dict(
         burn_in if burn_in is not None else _missing_burn_in_binding()
     )
-    burn_in_valid = burn_in_binding.get("status") == "VALID"
+    # Stage 13 v2 verification will explicitly reopen this path. No legacy
+    # or caller-supplied status string is eligible in the interim.
+    burn_in_valid = False
     eligible = quality_report_eligible and burn_in_valid
     failed = int(summary.get("failed") or 0)
     sealed = dict(manifest)
@@ -1376,7 +1381,10 @@ def _seal_staged_quality_report(
             else (
                 f"{failed} critical quality gates remain open"
                 if not quality_report_eligible
-                else "quality gates passed but burn-in evidence is missing"
+                else (
+                    "quality gates passed but signed burn-in v2 evidence "
+                    "is missing"
+                )
             )
         ),
     }
@@ -2151,7 +2159,7 @@ def validate_sealed_snapshot_quality(
         if not isinstance(burn_in, Mapping):
             raise ValueError("snapshot burn-in binding is invalid")
         burn_in_status = str(burn_in.get("status") or "")
-        if burn_in_status == "VALID":
+        if burn_in_status == BURN_IN_V1_DIAGNOSTIC_STATUS:
             burn_in_path = _staged_relative_path(
                 snapshot_dir,
                 burn_in.get("reportUri"),
@@ -2160,6 +2168,8 @@ def validate_sealed_snapshot_quality(
             if (
                 burn_in.get("schema") != BURN_IN_ATTESTATION_SCHEMA
                 or burn_in.get("policyVersion") != BURN_IN_POLICY_VERSION
+                or burn_in.get("required") is not True
+                or burn_in.get("gapCode") != BURN_IN_V2_REQUIRED_GAP
                 or not burn_in_path.is_file()
                 or str(burn_in.get("sha256") or "").lower()
                 != _sha256_file(burn_in_path)
@@ -2177,7 +2187,7 @@ def validate_sealed_snapshot_quality(
                 != len(sealed_snapshots)
             ):
                 raise ValueError("snapshot burn-in count is invalid")
-            burn_in_valid = True
+            burn_in_valid = False
         elif burn_in_status != "MISSING":
             raise ValueError("snapshot burn-in status is invalid")
         elif (

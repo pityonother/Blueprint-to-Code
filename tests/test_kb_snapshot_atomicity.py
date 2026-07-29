@@ -875,7 +875,9 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             )
             self.assertFalse((root / "snapshots" / new_id).exists())
 
-    def test_active_stale_sources_cannot_be_promoted_as_ready(self) -> None:
+    def test_active_stale_sources_with_v1_burn_in_remain_shadow(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "vnext"
             root.mkdir()
@@ -928,18 +930,27 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 burn_in=burn_in,
             )
 
-            with self.assertRaisesRegex(
-                ValueError,
-                "active stale sources",
-            ):
-                snapshot_module._promote_snapshot(
-                    staging=staging,
-                    output_dir=root,
-                    manifest=manifest,
-                )
+            self.assertEqual(
+                manifest["burnIn"]["status"],
+                "DIAGNOSTIC_ONLY_V1",
+            )
+            self.assertFalse(
+                manifest["qualityGates"]["cutoverEligible"],
+            )
+            self.assertEqual(manifest["cutover"]["mode"], "shadow")
+            self.assertEqual(
+                manifest["cutover"]["defaultQuerySource"],
+                "legacy",
+            )
 
-            self.assertFalse((root / "current.json").exists())
-            self.assertFalse((root / "snapshots" / build_id).exists())
+            snapshot_module._promote_snapshot(
+                staging=staging,
+                output_dir=root,
+                manifest=manifest,
+            )
+
+            self.assertTrue((root / "current.json").is_file())
+            self.assertTrue((root / "snapshots" / build_id).is_dir())
 
     def test_unknown_benchmark_schema_cannot_be_sealed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
