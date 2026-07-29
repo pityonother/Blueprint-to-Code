@@ -14,6 +14,9 @@ if str(SCRIPT_ROOT) not in sys.path:
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     build_vnext_snapshot,
 )
+from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
+    PointerCASUncertainStateError,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -83,22 +86,39 @@ def _absolute(path: Path) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    result = build_vnext_snapshot(
-        project_root=PROJECT_ROOT,
-        discovery_database=_absolute(args.discovery_database),
-        legacy_kb_root=_absolute(args.legacy_kb_root),
-        capture_root=_absolute(args.capture_root),
-        native_root=_absolute(args.native_root),
-        runtime_root=_absolute(args.runtime_root),
-        map_evidence_path=_absolute(args.map_evidence_catalog),
-        output_dir=_absolute(args.output),
-        full_snapshot=args.full_snapshot,
-        burn_in_attestation_path=(
-            _absolute(args.burn_in_attestation)
-            if args.burn_in_attestation is not None
-            else None
-        ),
-    )
+    try:
+        result = build_vnext_snapshot(
+            project_root=PROJECT_ROOT,
+            discovery_database=_absolute(args.discovery_database),
+            legacy_kb_root=_absolute(args.legacy_kb_root),
+            capture_root=_absolute(args.capture_root),
+            native_root=_absolute(args.native_root),
+            runtime_root=_absolute(args.runtime_root),
+            map_evidence_path=_absolute(args.map_evidence_catalog),
+            output_dir=_absolute(args.output),
+            full_snapshot=args.full_snapshot,
+            burn_in_attestation_path=(
+                _absolute(args.burn_in_attestation)
+                if args.burn_in_attestation is not None
+                else None
+            ),
+        )
+    except PointerCASUncertainStateError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "UNCERTAIN",
+                    "pointerUpdated": None,
+                    "pointerCAS": exc.receipt,
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 3
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
