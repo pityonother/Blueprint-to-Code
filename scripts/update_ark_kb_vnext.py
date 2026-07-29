@@ -1,12 +1,10 @@
-"""Fail-closed incremental update orchestration for ARK KB vNext.
+"""Fail-closed incremental update diagnostics for ARK KB vNext.
 
-The command has a deliberately strict production boundary.  It can compare
-the complete semantic input manifest today, but the repository does not yet
-provide a selective source ingestor or a complete selective rebuild backend.
-Changed input therefore stops before the write lock, staging, queue mutation,
-or publication.  A future implementation may inject those capabilities
-through ``UpdateHooks``; its publisher must bind the source manifest into the
-new immutable snapshot in the same atomic operation that switches ``current``.
+Production supports one deliberately narrow slice: a bounded add-only set of
+Blueprint Evidence Stores.  It stages an independent snapshot copy, validates
+and ingests only the manifest-selected sources, and drains the real rebuild
+queue.  Missing downstream backends remain ``BLOCKED_GAP``; narrow gates and
+publication are intentionally unreachable until those gaps are implemented.
 """
 
 from __future__ import annotations
@@ -34,12 +32,20 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from blueprint_translator.kb_vnext.rebuild_worker import (  # noqa: E402
+    CoreMaterializerRebuildBackend,
     RebuildBackend,
     RebuildQueueWorker,
 )
 from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
+    BlueprintIngestResult,
     MAX_EXPLICIT_BLUEPRINT_SOURCES,
+    materialize_blueprint_defaults,
 )
+from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
+    apply_invalidation_plan,
+    plan_invalidation,
+)
+from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     _snapshot_semantic_input_hashes,
     resolve_current_snapshot,
@@ -520,18 +526,27 @@ def stage_current_snapshot(paths: UpdatePaths) -> UpdateWorkspace:
             full_rebuild_required=True,
         ) from exc
     source = current.snapshot_dir.resolve()
-    files = _snapshot_files(source)
-    if any(
-        path.name.endswith(("-wal", "-shm"))
-        and ".sqlite-" in path.name
-        for path in files
-    ):
+    try:
+        files = _snapshot_files(source)
+        if any(
+            path.name.endswith(("-wal", "-shm"))
+            and ".sqlite-" in path.name
+            for path in files
+        ):
+            raise UpdateBlocked(
+                "IMMUTABLE_SNAPSHOT_SQLITE_SIDECAR",
+                "The immutable snapshot contains SQLite WAL/SHM sidecars.",
+                full_rebuild_required=True,
+            )
+        source_digest_before = _snapshot_tree_digest(source, files)
+    except UpdateBlocked:
+        raise
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
         raise UpdateBlocked(
-            "IMMUTABLE_SNAPSHOT_SQLITE_SIDECAR",
-            "The immutable snapshot contains SQLite WAL/SHM sidecars.",
+            "IMMUTABLE_SNAPSHOT_VERIFICATION_FAILED",
+            "The immutable source snapshot could not be read and hashed.",
             full_rebuild_required=True,
-        )
-    source_digest_before = _snapshot_tree_digest(source, files)
+        ) from exc
     staging_root = paths.output / ".incremental-staging"
     staging_root.mkdir(parents=True, exist_ok=True)
     temporary_root = staging_root / uuid.uuid4().hex
@@ -604,9 +619,16 @@ def stage_current_snapshot(paths: UpdatePaths) -> UpdateWorkspace:
                 full_rebuild_required=True,
             )
         return workspace
-    except Exception:
+    except UpdateBlocked:
         shutil.rmtree(temporary_root, ignore_errors=True)
         raise
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise UpdateBlocked(
+            "STAGING_COPY_FAILED",
+            "The immutable snapshot could not be copied and verified.",
+            full_rebuild_required=True,
+        ) from exc
 
 
 def _unavailable_stage(paths: UpdatePaths) -> UpdateWorkspace:
@@ -625,6 +647,248 @@ def _unavailable_plan(
         "Selective invalidation wiring is not implemented.",
         full_rebuild_required=True,
     )
+
+
+def _additive_blueprint_revisions(
+    diff: SourceDiff,
+) -> tuple[SourceRevision, ...]:
+    return tuple(
+        sorted(
+            (
+                change.current
+                for change in diff.added
+                if change.current is not None
+                and change.current.source_kind == "BLUEPRINT_EVIDENCE"
+            ),
+            key=lambda revision: revision.source_id,
+        )
+    )
+
+
+def plan_additive_blueprint_changes(
+    workspace: UpdateWorkspace,
+    diff: SourceDiff,
+) -> Sequence[Mapping[str, object]]:
+    """Bind additive manifest entries to exact entities in staged Core."""
+
+    revisions = _additive_blueprint_revisions(diff)
+    if not revisions:
+        raise UpdateBlocked(
+            "EMPTY_BLUEPRINT_ADDITION_PLAN",
+            "No additive Blueprint Evidence sources reached planning.",
+            full_rebuild_required=True,
+        )
+    connection = sqlite3.connect(workspace.core_path)
+    try:
+        entity_ids: dict[str, int] = {}
+        for revision in revisions:
+            rows = list(
+                connection.execute(
+                    """
+                    SELECT entity_id
+                    FROM entities
+                    WHERE canonical_uri=?
+                    LIMIT 2
+                    """,
+                    (revision.entity_uri,),
+                )
+            )
+            if len(rows) != 1:
+                raise UpdateBlocked(
+                    "BLUEPRINT_ENTITY_NOT_IN_BASE_SNAPSHOT",
+                    "An additive Blueprint source does not map to exactly "
+                    "one entity in the base snapshot.",
+                    full_rebuild_required=True,
+                )
+            entity_ids[revision.source_id] = int(rows[0][0])
+    except sqlite3.DatabaseError as exc:
+        raise UpdateBlocked(
+            "STAGED_CORE_ENTITY_LOOKUP_FAILED",
+            "The staged Core database cannot bind additive Blueprint "
+            "entities.",
+            full_rebuild_required=True,
+        ) from exc
+    finally:
+        connection.close()
+    workspace.invalidation_events.append(
+        {
+            "phase": "PLANNED",
+            "eventKind": "ASSET",
+            "sourceIds": [
+                revision.source_id for revision in revisions
+            ],
+            "entityIds": [
+                entity_ids[revision.source_id]
+                for revision in revisions
+            ],
+        }
+    )
+    return (
+        {
+            "eventKind": "ASSET",
+            "affected": len(entity_ids),
+        },
+    )
+
+
+def _planned_additive_sources(
+    workspace: UpdateWorkspace,
+) -> tuple[list[str], list[int]]:
+    plans = [
+        value
+        for value in workspace.invalidation_events
+        if value.get("phase") == "PLANNED"
+        and value.get("eventKind") == "ASSET"
+    ]
+    if len(plans) != 1:
+        raise UpdateBlocked(
+            "BLUEPRINT_ADDITION_PLAN_NOT_BOUND",
+            "The staged additive Blueprint plan is missing or ambiguous.",
+            full_rebuild_required=True,
+        )
+    source_ids = plans[0].get("sourceIds")
+    entity_ids = plans[0].get("entityIds")
+    if (
+        not isinstance(source_ids, list)
+        or not isinstance(entity_ids, list)
+        or len(source_ids) != len(entity_ids)
+        or not source_ids
+        or any(
+            not isinstance(source_id, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_id)
+            for source_id in source_ids
+        )
+        or any(
+            isinstance(entity_id, bool)
+            or not isinstance(entity_id, int)
+            or entity_id <= 0
+            for entity_id in entity_ids
+        )
+    ):
+        raise UpdateBlocked(
+            "BLUEPRINT_ADDITION_PLAN_NOT_BOUND",
+            "The staged additive Blueprint plan is malformed.",
+            full_rebuild_required=True,
+        )
+    return source_ids, entity_ids
+
+
+def _ingest_receipt(
+    *,
+    revisions: Sequence[SourceRevision],
+    result: BlueprintIngestResult,
+    event_id: str,
+) -> dict[str, object]:
+    body: dict[str, object] = {
+        "schema": "ark-kb-additive-blueprint-ingest-receipt/v1",
+        "verifiedSources": len(revisions),
+        "affectedEntities": len(result.entity_ids),
+        "materializedFacts": len(result.fact_ids),
+        "factEvidence": int(result.counts.get("factEvidence", 0)),
+        "eventId": event_id,
+        "sourceIds": [
+            revision.source_id for revision in revisions
+        ],
+    }
+    proof = hashlib.sha256(
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        **body,
+        "completed": True,
+        "proof": f"ingest-proof://{proof}",
+    }
+
+
+def ingest_additive_blueprint_changes(
+    workspace: UpdateWorkspace,
+    diff: SourceDiff,
+    paths: UpdatePaths,
+) -> Mapping[str, object]:
+    """Validate selected Evidence Stores, then create the real ASSET event."""
+
+    revisions = _additive_blueprint_revisions(diff)
+    planned_source_ids, planned_entity_ids = _planned_additive_sources(
+        workspace
+    )
+    if planned_source_ids != [
+        revision.source_id for revision in revisions
+    ]:
+        raise UpdateBlocked(
+            "BLUEPRINT_ADDITION_PLAN_DRIFT",
+            "The additive Blueprint manifest changed after planning.",
+            full_rebuild_required=True,
+        )
+    discovery = sqlite3.connect(
+        f"file:{paths.discovery_database.as_posix()}?mode=ro",
+        uri=True,
+    )
+    core = sqlite3.connect(workspace.core_path)
+    core.execute("PRAGMA foreign_keys=ON")
+    try:
+        result = materialize_blueprint_defaults(
+            discovery,
+            core,
+            capture_root=paths.capture_root,
+            ontology=load_ontology(PROJECT_ROOT / "ontology"),
+            source_revisions=revisions,
+        )
+        if (
+            len(result.entity_ids) != len(revisions)
+            or sorted(result.entity_ids) != sorted(planned_entity_ids)
+            or int(result.counts.get("freshAssets", 0))
+            != len(revisions)
+        ):
+            raise UpdateBlocked(
+                "BLUEPRINT_ADDITION_INGEST_INCOMPLETE",
+                "The explicit Blueprint subset was not fully materialized.",
+                full_rebuild_required=True,
+            )
+        plan = plan_invalidation(
+            core,
+            event_kind="ASSET",
+            entity_ids=result.entity_ids,
+        )
+        if not plan.downstream:
+            raise UpdateBlocked(
+                "BLUEPRINT_ADDITION_INVALIDATION_EMPTY",
+                "The additive Blueprint ingest produced no rebuild tasks.",
+                full_rebuild_required=True,
+            )
+        applied = apply_invalidation_plan(core, plan)
+        event_id = str(applied.get("eventId") or "")
+        receipt = _ingest_receipt(
+            revisions=revisions,
+            result=result,
+            event_id=event_id,
+        )
+        workspace.invalidation_events.append(
+            {
+                "phase": "APPLIED",
+                "eventKind": "ASSET",
+                "eventId": event_id,
+                "proof": receipt["proof"],
+            }
+        )
+        return receipt
+    except UpdateBlocked:
+        core.rollback()
+        raise
+    except Exception as exc:
+        core.rollback()
+        raise UpdateBlocked(
+            "BLUEPRINT_ADDITION_INGEST_FAILED",
+            "The additive Blueprint Evidence subset failed validation or "
+            "materialization.",
+            full_rebuild_required=True,
+        ) from exc
+    finally:
+        core.close()
+        discovery.close()
 
 
 def _unavailable_ingest(
@@ -668,6 +932,27 @@ def drain_with_rebuild_backend(
         )
     finally:
         connection.close()
+
+
+def drain_production_rebuilds(
+    workspace: UpdateWorkspace,
+    max_items: int,
+) -> object:
+    """Drain with only the production materializers currently implemented."""
+
+    try:
+        return drain_with_rebuild_backend(
+            workspace,
+            max_items,
+            backend=CoreMaterializerRebuildBackend(),
+        )
+    except (sqlite3.DatabaseError, RuntimeError, ValueError) as exc:
+        raise UpdateBlocked(
+            "PRODUCTION_REBUILD_DIAGNOSTIC_FAILED",
+            "The production rebuild worker could not inspect or drain the "
+            "staged queue.",
+            full_rebuild_required=True,
+        ) from exc
 
 
 def _unavailable_gates(workspace: UpdateWorkspace) -> GateResult:
@@ -725,9 +1010,9 @@ def default_hooks() -> UpdateHooks:
         scan_manifest=scan_source_manifest,
         check_capability=production_capability_check,
         stage_snapshot=_unavailable_stage,
-        plan_changes=_unavailable_plan,
-        ingest_changes=_unavailable_ingest,
-        drain_worker=_unavailable_drain,
+        plan_changes=plan_additive_blueprint_changes,
+        ingest_changes=ingest_additive_blueprint_changes,
+        drain_worker=drain_production_rebuilds,
         run_narrow_gates=_unavailable_gates,
         publish_atomic=_unavailable_publish,
         verify_publication=verify_current_publication,
@@ -740,6 +1025,197 @@ def _worker_payload(report: object) -> dict[str, object]:
     if isinstance(report, Mapping):
         return dict(report)
     raise TypeError("worker report must be a dataclass or mapping")
+
+
+def _safe_staging_receipt(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    expected = {
+        "schema": "ark-kb-incremental-staging-receipt/v1",
+        "copyMethod": "sqlite-backup-and-file-copy",
+        "sourceVerifiedUnchanged": True,
+        "writableHardlinks": False,
+    }
+    proof = str(value.get("proof") or "")
+    source_digest = str(value.get("sourceSnapshotSha256") or "")
+    staged_digest = str(value.get("stagedSnapshotSha256") or "")
+    counts = {
+        key: value.get(key)
+        for key in ("sqliteFiles", "regularFiles")
+    }
+    body = {
+        "schema": value.get("schema"),
+        "baseBuildId": value.get("baseBuildId"),
+        "copyMethod": value.get("copyMethod"),
+        "sourceSnapshotSha256": source_digest,
+        "stagedSnapshotSha256": staged_digest,
+        "sourceVerifiedUnchanged": value.get(
+            "sourceVerifiedUnchanged"
+        ),
+        "writableHardlinks": value.get("writableHardlinks"),
+        **counts,
+    }
+    expected_proof = "staging-proof://" + hashlib.sha256(
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        any(
+            value.get(key) != expected_value
+            for key, expected_value in expected.items()
+        )
+        or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._+-]*",
+            str(value.get("baseBuildId") or ""),
+        )
+        or not re.fullmatch(r"staging-proof://[0-9a-f]{64}", proof)
+        or proof != expected_proof
+        or not re.fullmatch(r"[0-9a-f]{64}", source_digest)
+        or not re.fullmatch(r"[0-9a-f]{64}", staged_digest)
+        or any(
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            for count in counts.values()
+        )
+    ):
+        raise UpdateBlocked(
+            "STAGING_RECEIPT_INVALID",
+            "The staging copy did not provide a valid content receipt.",
+            full_rebuild_required=True,
+        )
+    return {
+        "schema": expected["schema"],
+        "baseBuildId": str(value.get("baseBuildId") or ""),
+        "copyMethod": expected["copyMethod"],
+        "sourceSnapshotSha256": source_digest,
+        "stagedSnapshotSha256": staged_digest,
+        "sourceVerifiedUnchanged": True,
+        "writableHardlinks": False,
+        **counts,
+        "proof": proof,
+    }
+
+
+def _safe_ingest_summary(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    if value.get("schema") != (
+        "ark-kb-additive-blueprint-ingest-receipt/v1"
+    ):
+        return {"completed": True}
+    proof = str(value.get("proof") or "")
+    metrics = {
+        key: value.get(key)
+        for key in (
+            "verifiedSources",
+            "affectedEntities",
+            "materializedFacts",
+            "factEvidence",
+        )
+    }
+    source_ids = value.get("sourceIds")
+    event_id = str(value.get("eventId") or "")
+    body = {
+        "schema": value.get("schema"),
+        **metrics,
+        "eventId": event_id,
+        "sourceIds": source_ids,
+    }
+    expected_proof = "ingest-proof://" + hashlib.sha256(
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        value.get("completed") is not True
+        or not re.fullmatch(r"ingest-proof://[0-9a-f]{64}", proof)
+        or proof != expected_proof
+        or not event_id.startswith("invalidation://")
+        or not isinstance(source_ids, list)
+        or not source_ids
+        or any(
+            not isinstance(source_id, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_id)
+            for source_id in source_ids
+        )
+        or any(
+            isinstance(metric, bool)
+            or not isinstance(metric, int)
+            or metric < 0
+            for metric in metrics.values()
+        )
+    ):
+        raise UpdateBlocked(
+            "BLUEPRINT_INGEST_RECEIPT_INVALID",
+            "The Blueprint ingestor returned an invalid content receipt.",
+            full_rebuild_required=True,
+        )
+    return {
+        "completed": True,
+        **metrics,
+        "proof": proof,
+    }
+
+
+def _safe_worker_summary(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    summary = {
+        key: value
+        for key, value in payload.items()
+        if key
+        in {
+            "attempted",
+            "succeeded",
+            "failed",
+            "blocked_gap",
+            "blockedGap",
+            "remaining_pending",
+            "remainingPending",
+            "remaining_running",
+            "remainingRunning",
+            "drained",
+        }
+        and isinstance(value, (bool, int))
+    }
+    receipt_proofs: set[str] = set()
+    succeeded_kinds: set[str] = set()
+    blocked_gap_codes: set[str] = set()
+    outcomes = payload.get("outcomes")
+    if isinstance(outcomes, Sequence) and not isinstance(
+        outcomes, (str, bytes)
+    ):
+        for outcome in outcomes:
+            if not isinstance(outcome, Mapping):
+                continue
+            task = outcome.get("task")
+            task_mapping = task if isinstance(task, Mapping) else {}
+            kind = str(task_mapping.get("downstream_kind") or "")
+            status = str(outcome.get("status") or "")
+            proof = str(outcome.get("proof") or "")
+            gap_code = str(outcome.get("gap_code") or "")
+            if re.fullmatch(r"rebuild-proof://[0-9a-f]{64}", proof):
+                receipt_proofs.add(proof)
+            if status == "SUCCEEDED" and re.fullmatch(
+                r"[A-Z][A-Z0-9_]*", kind
+            ):
+                succeeded_kinds.add(kind)
+            if status == "BLOCKED_GAP" and re.fullmatch(
+                r"[A-Z][A-Z0-9_]*", gap_code
+            ):
+                blocked_gap_codes.add(gap_code)
+    return {
+        **summary,
+        "receiptProofs": sorted(receipt_proofs),
+        "succeededKinds": sorted(succeeded_kinds),
+        "blockedGapCodes": sorted(blocked_gap_codes),
+    }
 
 
 def _worker_blockers(payload: Mapping[str, object]) -> list[str]:
@@ -986,8 +1462,8 @@ def run_incremental_update(
             "reason": "source manifest is unchanged; no publication needed",
         }
     try:
-        # The default check always stops here.  No lock, staging copy, WAL
-        # cache copy, queue mutation, or publisher is reachable in production.
+        # The production check admits only the bounded additive Blueprint
+        # diagnostic slice; every other source change stops before staging.
         hooks.check_capability(previous, diff)
     except UpdateBlocked as exc:
         return _blocked_result(base=base, error=exc)
@@ -999,6 +1475,10 @@ def run_incremental_update(
             workspace = hooks.stage_snapshot(paths)
             _validate_staging_workspace(paths, workspace)
             workspace_is_confined = True
+            if workspace.staging_receipt:
+                base["staging"] = _safe_staging_receipt(
+                    workspace.staging_receipt
+                )
             plans = list(hooks.plan_changes(workspace, diff))
             if not plans:
                 raise UpdateBlocked(
@@ -1007,29 +1487,12 @@ def run_incremental_update(
                     full_rebuild_required=True,
                 )
             base["selectiveInvalidationPlan"] = _safe_plan_summary(plans)
-            hooks.ingest_changes(workspace, diff, paths)
-            base["ingest"] = {"completed": True}
+            ingest = hooks.ingest_changes(workspace, diff, paths)
+            base["ingest"] = _safe_ingest_summary(ingest)
             worker = _worker_payload(
                 hooks.drain_worker(workspace, max_rebuild_items)
             )
-            base["worker"] = {
-                key: value
-                for key, value in worker.items()
-                if key
-                in {
-                    "attempted",
-                    "succeeded",
-                    "failed",
-                    "blocked_gap",
-                    "blockedGap",
-                    "remaining_pending",
-                    "remainingPending",
-                    "remaining_running",
-                    "remainingRunning",
-                    "drained",
-                }
-                and isinstance(value, (bool, int))
-            }
+            base["worker"] = _safe_worker_summary(worker)
             blockers = _worker_blockers(worker)
             if blockers:
                 raise UpdateBlocked(
@@ -1099,18 +1562,16 @@ def run_incremental_update(
             and workspace_is_confined
             and workspace.temporary_root.exists()
         ):
-            # The injected staging implementation owns only this explicit
-            # temporary root.  Default production hooks never reach it.
-            import shutil
-
+            # Staging owns only this explicit temporary root.  A blocked
+            # diagnostic never mutates the immutable snapshot or current.
             shutil.rmtree(workspace.temporary_root, ignore_errors=True)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare ARK KB semantic inputs and fail closed until selective "
-            "ingestion and publication are implemented."
+            "Run the bounded additive Blueprint rebuild diagnostic and fail "
+            "closed without publication when any backend or gate is missing."
         )
     )
     parser.add_argument("--discovery-database", type=Path, required=True)

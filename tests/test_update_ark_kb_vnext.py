@@ -14,8 +14,14 @@ from scripts import update_ark_kb_vnext as update
 from blueprint_translator.kb_vnext import (  # noqa: E402
     source_manifest as source_manifest_module,
 )
+from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
+    BlueprintIngestResult,
+)
 from blueprint_translator.kb_vnext.native_ingest import (  # noqa: E402
     NativeEvidenceSet,
+)
+from blueprint_translator.kb_vnext.storage import (  # noqa: E402
+    FULL_CORE_SCHEMA_SQL,
 )
 
 
@@ -88,6 +94,54 @@ def _workspace(tmp_path: Path) -> update.UpdateWorkspace:
         core_path=core,
         cache_path=snapshot / "cache.sqlite",
         projection_dir=snapshot / "domain_exports",
+    )
+
+
+def _production_workspace(tmp_path: Path) -> update.UpdateWorkspace:
+    root = tmp_path / "output" / ".incremental-staging" / "production"
+    snapshot = root / "snapshot"
+    projection_dir = snapshot / "domain_exports"
+    projection_dir.mkdir(parents=True)
+    core_path = snapshot / "core.sqlite"
+    core = sqlite3.connect(core_path)
+    core.execute("PRAGMA foreign_keys=ON")
+    core.executescript(FULL_CORE_SCHEMA_SQL)
+    core.execute(
+        """
+        INSERT INTO source_revisions VALUES (
+            1, 'discovery', 'discovery://fixture', 'discovery-sha',
+            'fixture', 'v1', '2026-07-28T00:00:00Z', 'FRESH'
+        )
+        """
+    )
+    core.execute(
+        """
+        INSERT INTO entities(
+            entity_id, canonical_uri, entity_kind, status, confidence
+        ) VALUES (
+            1, '/Game/Test/Added.Added', 'BLUEPRINT_ASSET',
+            'CONFIRMED', 'HIGH'
+        )
+        """
+    )
+    core.commit()
+    core.close()
+    cache_path = snapshot / "cache.sqlite"
+    sqlite3.connect(cache_path).close()
+    return update.UpdateWorkspace(
+        temporary_root=root,
+        snapshot_dir=snapshot,
+        core_path=core_path,
+        cache_path=cache_path,
+        projection_dir=projection_dir,
+        base_build_id="fixture-base",
+        staging_receipt=update._staging_receipt(
+            build_id="fixture-base",
+            source_digest="a" * 64,
+            staged_digest="b" * 64,
+            sqlite_files=2,
+            regular_files=1,
+        ),
     )
 
 
@@ -536,6 +590,119 @@ def test_production_preflight_rejects_blueprint_batch_above_bound() -> None:
     assert caught.value.gap_code == "BLUEPRINT_ADDITION_BATCH_TOO_LARGE"
 
 
+def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    previous = _manifest(_semantic("captures", "old"))
+    added = _revision(
+        "added",
+        uri="capture://Added",
+        entity_uri="/Game/Test/Added.Added",
+    )
+    current = _manifest(_semantic("captures", "new"), added)
+    paths = _paths(tmp_path)
+    sqlite3.connect(paths.discovery_database).close()
+    workspace = _production_workspace(tmp_path)
+    monkeypatch.setattr(
+        update,
+        "load_current_source_manifest",
+        lambda candidate_paths: previous,
+    )
+    monkeypatch.setattr(
+        update,
+        "scan_source_manifest",
+        lambda candidate_paths: current,
+    )
+    monkeypatch.setattr(
+        update,
+        "_unavailable_stage",
+        lambda candidate_paths: workspace,
+    )
+
+    def ingest_fixture(
+        discovery: sqlite3.Connection,
+        core: sqlite3.Connection,
+        *,
+        capture_root: Path,
+        ontology: object,
+        source_revisions: tuple[update.SourceRevision, ...],
+    ) -> BlueprintIngestResult:
+        del discovery, capture_root, ontology
+        assert source_revisions == (added,)
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                2, 'blueprint_evidence', 'bp://asset@revision',
+                'blueprint-sha', 'uasset-graph-reader-evidence-v3',
+                'ark.blueprint.evidence.v2',
+                '2026-07-28T00:00:00Z', 'FRESH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO facts(
+                fact_id, subject_entity_id, fact_type, fact_name,
+                scope_kind, declared_on_entity_id, value_kind,
+                value_integer, status, confidence, ontology_version,
+                current, canonical_fact_key
+            ) VALUES (
+                1, 1, 'DECLARED_DEFAULT', 'Rate', 'DECLARED', 1,
+                'INTEGER', 7, 'CONFIRMED', 'HIGH', 'fixture-ontology',
+                1, 'fact://fixture/rate'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO fact_evidence VALUES (
+                1, 2, 'bp://asset/default/Rate', 'DEFAULT_VALUE_ACTUAL'
+            )
+            """
+        )
+        core.commit()
+        return BlueprintIngestResult(
+            counts={
+                "freshAssets": 1,
+                "declaredFacts": 1,
+                "factEvidence": 1,
+            },
+            covered_properties=frozenset(
+                {("/Game/Test/Added.Added", "Rate")}
+            ),
+            freshness_gap_assets=frozenset(),
+            untrusted_assets=frozenset(),
+            fact_ids=frozenset({1}),
+            entity_ids=frozenset({1}),
+        )
+
+    monkeypatch.setattr(
+        update,
+        "materialize_blueprint_defaults",
+        ingest_fixture,
+    )
+
+    result = update.run_incremental_update(paths)
+
+    assert result["status"] == "blocked"
+    assert result["published"] is False
+    assert result["gapCodes"] == ["REBUILD_QUEUE_NOT_DRAINED"]
+    assert "FACT" in result["worker"]["succeededKinds"]
+    assert "BACKEND_NOT_CONFIGURED_EDGE_ENTITY" in (
+        result["worker"]["blockedGapCodes"]
+    )
+    assert any(
+        proof.startswith("rebuild-proof://")
+        for proof in result["worker"]["receiptProofs"]
+    )
+    assert result["ingest"]["verifiedSources"] == 1
+    assert str(result["ingest"]["proof"]).startswith("ingest-proof://")
+    assert result["staging"]["sourceVerifiedUnchanged"] is True
+    assert not workspace.temporary_root.exists()
+    assert not (paths.output / "current.json").exists()
+
+
 def test_default_unchanged_manifest_is_cache_hit_without_write(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -709,6 +876,29 @@ def test_safe_stage_rejects_sqlite_sidecars_and_cleans_temporary_copy(
         update.stage_current_snapshot(paths)
 
     assert caught.value.gap_code == "IMMUTABLE_SNAPSHOT_SQLITE_SIDECAR"
+    assert (paths.output / "current.json").read_bytes() == pointer
+    staging_root = paths.output / ".incremental-staging"
+    assert not staging_root.exists() or not any(staging_root.iterdir())
+
+
+def test_safe_stage_fails_closed_when_source_hash_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    _, pointer = _write_stage_source_snapshot(paths)
+    monkeypatch.setattr(
+        update,
+        "_snapshot_tree_digest",
+        lambda root, files: (_ for _ in ()).throw(
+            OSError("simulated read failure")
+        ),
+    )
+
+    with pytest.raises(update.UpdateBlocked) as caught:
+        update.stage_current_snapshot(paths)
+
+    assert caught.value.gap_code == "IMMUTABLE_SNAPSHOT_VERIFICATION_FAILED"
     assert (paths.output / "current.json").read_bytes() == pointer
     staging_root = paths.output / ".incremental-staging"
     assert not staging_root.exists() or not any(staging_root.iterdir())
