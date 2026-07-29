@@ -229,6 +229,7 @@ def build_update_baseline(
     *,
     snapshot_root: Path,
     candidate_source_manifest: SourceManifest,
+    expected_current_snapshot: CurrentSnapshotBaseline | None = None,
 ) -> UpdateBaseline:
     """Capture and bind a candidate to one strict raw current manifest."""
 
@@ -236,8 +237,22 @@ def build_update_baseline(
         raise TypeError("snapshot root must be a Path")
     if type(candidate_source_manifest) is not SourceManifest:
         raise TypeError("candidate source manifest is required")
+    if (
+        expected_current_snapshot is not None
+        and type(expected_current_snapshot) is not CurrentSnapshotBaseline
+    ):
+        raise TypeError("expected current snapshot baseline is invalid")
     root = snapshot_root.resolve()
     current_snapshot = capture_current_snapshot_baseline(root)
+    if (
+        expected_current_snapshot is not None
+        and current_snapshot != expected_current_snapshot
+    ):
+        raise _gap(
+            "UPDATE_BASELINE_IDENTITY_CHANGED",
+            "current build, raw pointer, or manifest identity changed "
+            "while the update baseline was captured",
+        )
     try:
         base_source_manifest = _base_source_manifest_from_snapshot(
             current_snapshot
@@ -263,11 +278,55 @@ def build_update_baseline(
     )
 
 
+def validate_update_baseline_identity(
+    baseline: UpdateBaseline,
+    *,
+    expected_current_snapshot: CurrentSnapshotBaseline,
+    expected_candidate_source_manifest: SourceManifest,
+) -> UpdateBaseline:
+    """Revalidate one exact pointer, manifest, candidate, and source diff."""
+
+    if type(baseline) is not UpdateBaseline:
+        raise TypeError("update baseline is required")
+    if type(expected_current_snapshot) is not CurrentSnapshotBaseline:
+        raise TypeError("expected current snapshot baseline is required")
+    if type(expected_candidate_source_manifest) is not SourceManifest:
+        raise TypeError("expected candidate source manifest is required")
+    validate_current_snapshot_baseline(
+        snapshot_root=baseline.snapshot_root,
+        baseline=expected_current_snapshot,
+    )
+    observed_diff = compare_source_manifests(
+        baseline.base_source_manifest,
+        expected_candidate_source_manifest,
+    )
+    if (
+        baseline.current_snapshot != expected_current_snapshot
+        or baseline.candidate_source_manifest.fingerprint
+        != expected_candidate_source_manifest.fingerprint
+        or _base_source_manifest_from_snapshot(
+            expected_current_snapshot
+        )
+        != baseline.base_source_manifest
+        or observed_diff != baseline.source_diff
+        or canonical_source_diff_bytes(observed_diff)
+        != baseline.source_diff_bytes
+        or source_diff_sha256(observed_diff)
+        != baseline.source_diff_sha256
+    ):
+        raise _gap(
+            "UPDATE_BASELINE_IDENTITY_CHANGED",
+            "current build, raw pointer, manifest, candidate, or source diff "
+            "no longer matches the locked update baseline",
+        )
+    return baseline
+
+
 def validate_final_source_manifest(
     baseline: UpdateBaseline,
     observed_candidate: SourceManifest,
 ) -> SourceManifest:
-    """Require the final live scan to equal the initial candidate exactly."""
+    """Require the final live scan to keep the initial source identity."""
 
     if type(baseline) is not UpdateBaseline:
         raise TypeError("update baseline is required")
@@ -278,8 +337,8 @@ def validate_final_source_manifest(
         observed_candidate,
     )
     if (
-        observed_candidate.payload()
-        != baseline.candidate_source_manifest.payload()
+        observed_candidate.fingerprint
+        != baseline.candidate_source_manifest.fingerprint
         or canonical_source_diff_bytes(observed_diff)
         != baseline.source_diff_bytes
         or source_diff_sha256(observed_diff)
@@ -527,4 +586,5 @@ __all__ = [
     "inspect_prepublication_delta_receipt",
     "stage_snapshot_from_baseline",
     "validate_final_source_manifest",
+    "validate_update_baseline_identity",
 ]

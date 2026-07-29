@@ -284,6 +284,24 @@ def test_update_baseline_binds_raw_base_and_canonical_diff(
         baseline.base_build_id = "attacker"  # type: ignore[misc]
 
 
+def test_update_baseline_rejects_changed_expected_raw_pointer(
+    tmp_path: Path,
+) -> None:
+    root, expected_current = _captured(tmp_path)
+    (root / "current.json").write_bytes(
+        _pointer_bytes("build-a", indent=2)
+    )
+
+    with pytest.raises(UpdateBaselineBlockedGap) as caught:
+        build_update_baseline(
+            snapshot_root=root,
+            candidate_source_manifest=_base_manifest(),
+            expected_current_snapshot=expected_current,
+        )
+
+    assert caught.value.gap_code == "UPDATE_BASELINE_IDENTITY_CHANGED"
+
+
 def test_update_baseline_cannot_accept_manual_diff_injection(
     tmp_path: Path,
 ) -> None:
@@ -382,7 +400,7 @@ def test_freeze_additive_input_fails_before_any_filesystem_side_effect(
     assert not quarantine_root.exists()
 
 
-def test_final_source_rescan_requires_exact_payload(
+def test_final_source_rescan_requires_exact_source_identity(
     tmp_path: Path,
 ) -> None:
     root, _current = _captured(tmp_path)
@@ -403,11 +421,13 @@ def test_final_source_rescan_requires_exact_payload(
         candidate,
         generated_at="2026-07-30T00:00:01+00:00",
     )
-    with pytest.raises(UpdateBaselineBlockedGap, match="changed"):
+    assert (
         validate_final_source_manifest(
             baseline,
             same_fingerprint_new_timestamp,
         )
+        is same_fingerprint_new_timestamp
+    )
 
 
 def test_receipt_inspection_requires_raw_oob_before_internal_proof(
