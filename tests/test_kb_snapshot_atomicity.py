@@ -84,6 +84,68 @@ def _generated_at(build_id: str) -> str:
     return parsed.isoformat(timespec="seconds")
 
 
+def _valid_fixture_burn_in_attestation() -> dict[str, object]:
+    scenarios = {
+        "blueprintModified": True,
+        "blueprintAdded": True,
+        "blueprintDeleted": True,
+        "registrationTargetChanged": True,
+        "classParentChanged": True,
+        "nativeEvidenceUpdated": True,
+        "runtimeSummaryUpdated": True,
+        "workerCrash": True,
+        "narrowGateFailure": True,
+        "pointerPreSwapCrash": True,
+        "concurrentReaders": True,
+        "unchangedCacheHit": True,
+    }
+    return {
+        "schema": "ark-kb-burn-in-attestation/v1",
+        "policyVersion": "ark-kb-burn-in-policy/v1",
+        "status": "PASSED",
+        "attestedAt": "2026-07-29T00:00:00Z",
+        "toolVersion": "fixture-only/v1",
+        "review": {
+            "reviewerType": "HUMAN_OPERATOR",
+            "reviewerId": "fixture-human-reviewer",
+            "reviewedAt": "2026-07-29T00:00:00Z",
+            "decision": "APPROVED",
+        },
+        "sealedSnapshots": [
+            {
+                "buildId": f"fixture-pass-{index}",
+                "qualityReportSha256": str(index) * 64,
+                "passedAt": f"2026-07-2{index}T00:00:00Z",
+                "qualityReportCutoverEligible": True,
+                "sealedInSnapshotManifest": True,
+            }
+            for index in range(1, 4)
+        ],
+        "legacyVnextDiffDisposition": {
+            "complete": True,
+            "undispositioned": 0,
+            "wrongAnswers": 0,
+            "staleLeaks": 0,
+            "candidateCompletions": 0,
+        },
+        "rollbackDrill": {
+            "passed": True,
+            "fromBuildId": "fixture-pass-3",
+            "toBuildId": "fixture-pass-2",
+            "completedAt": "2026-07-29T00:00:00Z",
+        },
+        "concurrentReaderDrill": {
+            "passed": True,
+            "mixedBuildObservations": 0,
+            "completedAt": "2026-07-29T00:00:00Z",
+        },
+        "incrementalProduction": {
+            "passed": True,
+            "scenarios": scenarios,
+        },
+    }
+
+
 def _staging(
     root: Path,
     build_id: str,
@@ -850,21 +912,21 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 "cutoverEligible": True,
                 "recommendation": "ready_for_default",
             }
-            snapshot_module._write_json(report_path, report)
-            quality = dict(manifest["qualityGates"])
-            quality.update(
-                {
-                    "sha256": snapshot_module._sha256_file(report_path),
-                    "passed": len(report["gates"]),
-                    "failed": 0,
-                    "cutoverEligible": True,
-                }
+            burn_in_source = root / "fixture-burn-in.json"
+            snapshot_module._write_json(
+                burn_in_source,
+                _valid_fixture_burn_in_attestation(),
             )
-            manifest["qualityGates"] = quality
-            manifest["cutover"] = {
-                "mode": "ready",
-                "defaultQuerySource": "vnext",
-            }
+            burn_in = snapshot_module._stage_burn_in_attestation(
+                staging=staging,
+                source_path=burn_in_source,
+            )
+            manifest = snapshot_module._seal_staged_quality_report(
+                staging=staging,
+                manifest=manifest,
+                report=report,
+                burn_in=burn_in,
+            )
 
             with self.assertRaisesRegex(
                 ValueError,

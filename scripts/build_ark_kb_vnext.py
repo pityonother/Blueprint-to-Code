@@ -64,6 +64,15 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=PROJECT_ROOT / "knowledge_base" / "vnext",
     )
+    parser.add_argument(
+        "--burn-in-attestation",
+        type=Path,
+        help=(
+            "Human-approved burn-in evidence. Omit to keep the new "
+            "snapshot fail-closed in shadow/legacy even when all quality "
+            "gates pass."
+        ),
+    )
     parser.add_argument("--full-snapshot", action="store_true")
     return parser
 
@@ -84,6 +93,11 @@ def main(argv: list[str] | None = None) -> int:
         map_evidence_path=_absolute(args.map_evidence_catalog),
         output_dir=_absolute(args.output),
         full_snapshot=args.full_snapshot,
+        burn_in_attestation_path=(
+            _absolute(args.burn_in_attestation)
+            if args.burn_in_attestation is not None
+            else None
+        ),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

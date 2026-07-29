@@ -1749,16 +1749,26 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         self.assertEqual(cutover["defaultQuerySource"], "legacy")
         self.assertEqual(current["qualityGates"]["failed"], 1)
 
-    def test_passing_gate_report_is_only_path_to_vnext_default(self):
+    def test_passing_mutable_report_cannot_switch_vnext_default(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self._manifest_root(root)
+            manifests = self._manifest_root(root)
             cutover = publish_gate_report(
                 snapshot_root=root,
                 report=self._report(eligible=True),
             )
-        self.assertEqual(cutover["mode"], "ready")
-        self.assertEqual(cutover["defaultQuerySource"], "vnext")
+            current = json.loads(
+                (manifests / "current.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(cutover["mode"], "shadow")
+        self.assertEqual(cutover["defaultQuerySource"], "legacy")
+        self.assertTrue(
+            current["qualityGates"]["qualityReportCutoverEligible"]
+        )
+        self.assertFalse(current["qualityGates"]["cutoverEligible"])
+        self.assertFalse(
+            current["qualityGates"]["sealedInSnapshotManifest"]
+        )
 
     def test_immutable_failed_gate_report_never_mutates_snapshot(self):
         with tempfile.TemporaryDirectory() as temporary:

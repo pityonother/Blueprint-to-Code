@@ -19,6 +19,11 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .class_hierarchy import class_hierarchy_contract_fingerprint
+from .cutover_readiness import (
+    BURN_IN_ATTESTATION_SCHEMA,
+    BURN_IN_POLICY_VERSION,
+    validate_burn_in_attestation,
+)
 from .native_ingest import native_evidence_input_sha256
 from .ontology import load_ontology
 from .projections import (
@@ -1228,11 +1233,50 @@ def _evaluate_staged_quality_gates(
     )
 
 
+def _missing_burn_in_binding() -> dict[str, object]:
+    return {
+        "schema": BURN_IN_ATTESTATION_SCHEMA,
+        "policyVersion": BURN_IN_POLICY_VERSION,
+        "status": "MISSING",
+        "required": True,
+        "gapCode": "BURN_IN_ATTESTATION_MISSING",
+    }
+
+
+def _stage_burn_in_attestation(
+    *,
+    staging: Path,
+    source_path: Path | None,
+) -> dict[str, object]:
+    if source_path is None:
+        return _missing_burn_in_binding()
+    attestation = _read_json_object(
+        source_path,
+        label="burn-in attestation",
+    )
+    validate_burn_in_attestation(attestation)
+    report_path = staging / "reports" / "burn_in_attestation.json"
+    _write_json(report_path, attestation)
+    snapshots = attestation.get("sealedSnapshots")
+    return {
+        "schema": BURN_IN_ATTESTATION_SCHEMA,
+        "policyVersion": BURN_IN_POLICY_VERSION,
+        "status": "VALID",
+        "required": True,
+        "reportUri": "reports/burn_in_attestation.json",
+        "sha256": _sha256_file(report_path),
+        "sealedSnapshotCount": (
+            len(snapshots) if isinstance(snapshots, list) else 0
+        ),
+    }
+
+
 def _seal_staged_quality_report(
     *,
     staging: Path,
     manifest: dict[str, object],
     report: Mapping[str, object],
+    burn_in: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     if str(report.get("buildId") or "") != str(
         manifest.get("buildId") or ""
@@ -1293,7 +1337,12 @@ def _seal_staged_quality_report(
                 ),
             )
         )
-    eligible = bool(summary.get("cutoverEligible"))
+    quality_report_eligible = bool(summary.get("cutoverEligible"))
+    burn_in_binding = dict(
+        burn_in if burn_in is not None else _missing_burn_in_binding()
+    )
+    burn_in_valid = burn_in_binding.get("status") == "VALID"
+    eligible = quality_report_eligible and burn_in_valid
     failed = int(summary.get("failed") or 0)
     sealed = dict(manifest)
     sealed["qualityGates"] = {
@@ -1304,17 +1353,24 @@ def _seal_staged_quality_report(
         "benchmarkSha256": benchmark_sha,
         "passed": int(summary.get("passed") or 0),
         "failed": failed,
+        "qualityReportCutoverEligible": quality_report_eligible,
         "cutoverEligible": eligible,
         "sealedInSnapshotManifest": True,
         **diagnostic_quality,
     }
+    sealed["burnIn"] = burn_in_binding
     sealed["cutover"] = {
         "mode": "ready" if eligible else "shadow",
         "defaultQuerySource": "vnext" if eligible else "legacy",
         "reason": (
-            "all critical quality gates passed before publication"
+            "all critical quality gates and burn-in requirements passed "
+            "before publication"
             if eligible
-            else f"{failed} critical quality gates remain open"
+            else (
+                f"{failed} critical quality gates remain open"
+                if not quality_report_eligible
+                else "quality gates passed but burn-in evidence is missing"
+            )
         ),
     }
     _write_json(staging / "manifest.json", sealed)
@@ -2076,9 +2132,58 @@ def validate_sealed_snapshot_quality(
         bool(gate["critical"]) and not bool(gate["passed"])
         for gate in normalized_gates
     )
-    eligible = failed_count == 0
+    quality_report_eligible = failed_count == 0
     expected_recommendation = (
-        "ready_for_default" if eligible else "keep_legacy_shadow"
+        "ready_for_default"
+        if quality_report_eligible
+        else "keep_legacy_shadow"
+    )
+    burn_in = manifest.get("burnIn")
+    burn_in_valid = False
+    if burn_in is not None:
+        if not isinstance(burn_in, Mapping):
+            raise ValueError("snapshot burn-in binding is invalid")
+        burn_in_status = str(burn_in.get("status") or "")
+        if burn_in_status == "VALID":
+            burn_in_path = _staged_relative_path(
+                snapshot_dir,
+                burn_in.get("reportUri"),
+                label="burn-in attestation",
+            )
+            if (
+                burn_in.get("schema") != BURN_IN_ATTESTATION_SCHEMA
+                or burn_in.get("policyVersion") != BURN_IN_POLICY_VERSION
+                or not burn_in_path.is_file()
+                or str(burn_in.get("sha256") or "").lower()
+                != _sha256_file(burn_in_path)
+            ):
+                raise ValueError("snapshot burn-in binding is invalid")
+            attestation = _read_json_object(
+                burn_in_path,
+                label="sealed burn-in attestation",
+            )
+            validate_burn_in_attestation(attestation)
+            sealed_snapshots = attestation.get("sealedSnapshots")
+            if (
+                not isinstance(sealed_snapshots, list)
+                or int(burn_in.get("sealedSnapshotCount") or 0)
+                != len(sealed_snapshots)
+            ):
+                raise ValueError("snapshot burn-in count is invalid")
+            burn_in_valid = True
+        elif burn_in_status != "MISSING":
+            raise ValueError("snapshot burn-in status is invalid")
+        elif (
+            burn_in.get("schema") != BURN_IN_ATTESTATION_SCHEMA
+            or burn_in.get("policyVersion") != BURN_IN_POLICY_VERSION
+            or burn_in.get("required") is not True
+            or burn_in.get("gapCode") != "BURN_IN_ATTESTATION_MISSING"
+        ):
+            raise ValueError("snapshot missing burn-in binding is invalid")
+    eligible = quality_report_eligible and burn_in_valid
+    declared_report_eligible = quality.get(
+        "qualityReportCutoverEligible",
+        summary.get("cutoverEligible"),
     )
     if (
         str(report.get("buildId") or "") != build_id
@@ -2091,15 +2196,18 @@ def validate_sealed_snapshot_quality(
         or int(summary.get("total") or 0) != len(normalized_gates)
         or int(summary.get("passed") or 0) != passed_count
         or int(summary.get("failed") or 0) != failed_count
-        or bool(summary.get("cutoverEligible")) != eligible
+        or bool(summary.get("cutoverEligible"))
+        != quality_report_eligible
         or str(summary.get("recommendation") or "")
         != expected_recommendation
         or int(summary.get("passed") or 0)
         != int(quality.get("passed") or 0)
         or int(summary.get("failed") or 0)
         != int(quality.get("failed") or 0)
-        or bool(summary.get("cutoverEligible"))
-        != bool(quality.get("cutoverEligible"))
+        or bool(declared_report_eligible)
+        != quality_report_eligible
+        or bool(quality.get("cutoverEligible"))
+        != eligible
     ):
         raise ValueError("sealed quality report identity is invalid")
     if (
@@ -2341,6 +2449,73 @@ def _promote_snapshot(
     _write_current_pointer(output_dir, build_id)
 
 
+def rollback_current_snapshot(
+    *,
+    output_dir: Path,
+    target_build_id: str,
+    expected_current_build_id: str,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """Validate an immutable target before atomically rolling back its pointer."""
+
+    output_dir = output_dir.resolve()
+    target_build_id = _safe_build_id(target_build_id)
+    expected_current_build_id = _safe_build_id(
+        expected_current_build_id
+    )
+    current = resolve_current_snapshot(output_dir)
+    if current.build_id != expected_current_build_id:
+        raise ValueError(
+            "expected current build does not match the resolved pointer"
+        )
+
+    target = output_dir / "snapshots" / target_build_id
+    if not target.is_dir():
+        raise FileNotFoundError(
+            f"rollback target snapshot does not exist: {target_build_id}"
+        )
+    manifest = _read_json_object(
+        target / "manifest.json",
+        label="rollback target manifest",
+    )
+    if (
+        manifest.get("schema") != SNAPSHOT_SCHEMA
+        or str(manifest.get("buildId") or "") != target_build_id
+    ):
+        raise ValueError("rollback target manifest identity is invalid")
+    _validate_staged_snapshot_for_promotion(
+        staging=target,
+        manifest=manifest,
+    )
+
+    latest = resolve_current_snapshot(output_dir)
+    if latest.build_id != expected_current_build_id:
+        raise ValueError(
+            "current build changed during rollback validation"
+        )
+    pointer_updated = (
+        not dry_run and target_build_id != expected_current_build_id
+    )
+    if pointer_updated:
+        _write_current_pointer(output_dir, target_build_id)
+        resolved = resolve_current_snapshot(output_dir)
+        if resolved.build_id != target_build_id:
+            raise RuntimeError("rollback pointer verification failed")
+
+    return {
+        "schema": "ark-kb-vnext-rollback/v1",
+        "status": "VALIDATED" if dry_run else "COMPLETED",
+        "completedAt": datetime.now(UTC).isoformat(timespec="seconds"),
+        "fromBuildId": expected_current_build_id,
+        "toBuildId": target_build_id,
+        "dryRun": bool(dry_run),
+        "pointerUpdated": pointer_updated,
+        "immutableSnapshotsModified": False,
+        "snapshotsDeleted": 0,
+        "legacyFallbackPreserved": True,
+    }
+
+
 def build_vnext_snapshot(
     *,
     project_root: Path,
@@ -2353,6 +2528,7 @@ def build_vnext_snapshot(
     generated_at: str | None = None,
     map_evidence_path: Path | None = None,
     runtime_root: Path | None = None,
+    burn_in_attestation_path: Path | None = None,
 ) -> dict[str, object]:
     """Build all four stores in staging, validate, then atomically promote."""
 
@@ -2369,6 +2545,11 @@ def build_vnext_snapshot(
     map_evidence_path = (
         map_evidence_path.resolve()
         if map_evidence_path is not None
+        else None
+    )
+    burn_in_attestation_path = (
+        burn_in_attestation_path.resolve()
+        if burn_in_attestation_path is not None
         else None
     )
     output_dir = output_dir.resolve()
@@ -2414,6 +2595,10 @@ def build_vnext_snapshot(
     )
     ontology = load_ontology(project_root / "ontology")
     try:
+        burn_in_binding = _stage_burn_in_attestation(
+            staging=staging,
+            source_path=burn_in_attestation_path,
+        )
         catalog_counts = build_catalog_database(
             discovery_path=discovery_database,
             output_path=staging / "catalog.sqlite",
@@ -2545,6 +2730,7 @@ def build_vnext_snapshot(
             staging=staging,
             manifest=manifest,
             report=quality_report,
+            burn_in=burn_in_binding,
         )
         # The storage benchmark requires a strictly sealed immutable candidate.
         # Re-evaluate after the provisional seal, then replace it atomically.
@@ -2558,6 +2744,7 @@ def build_vnext_snapshot(
             staging=staging,
             manifest=manifest,
             report=quality_report,
+            burn_in=burn_in_binding,
         )
         final_input_hashes = _snapshot_semantic_input_hashes(
             project_root=project_root,

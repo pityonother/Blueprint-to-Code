@@ -2889,7 +2889,7 @@ def publish_gate_report(
     snapshot_root: Path,
     report: dict[str, object],
 ) -> dict[str, object]:
-    """Publish reports and update cutover atomically without deleting legacy."""
+    """Publish diagnostics without using a mutable report for cutover."""
 
     location = _resolve_quality_snapshot(snapshot_root)
     report_build_id = str(report.get("buildId") or "")
@@ -3009,12 +3009,16 @@ def publish_gate_report(
         "sha256": gate_sha,
         "passed": int(report["summary"]["passed"]),
         "failed": int(report["summary"]["failed"]),
+        "qualityReportCutoverEligible": eligible,
+        "cutoverEligible": False,
+        "sealedInSnapshotManifest": False,
     }
     manifest["cutover"] = {
-        "mode": "ready" if eligible else "shadow",
-        "defaultQuerySource": "vnext" if eligible else "legacy",
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
         "reason": (
-            "all critical quality gates passed"
+            "quality gates passed, but mutable legacy publication cannot "
+            "satisfy sealed burn-in; build a new immutable snapshot"
             if eligible
             else (
                 f"{report['summary']['failed']} critical quality gates "

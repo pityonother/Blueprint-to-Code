@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/kb_burn_in_attestation_v1.schema.json",
+  "title": "ARK KB vNext burn-in attestation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "policyVersion",
+    "status",
+    "attestedAt",
+    "toolVersion",
+    "review",
+    "sealedSnapshots",
+    "legacyVnextDiffDisposition",
+    "rollbackDrill",
+    "concurrentReaderDrill",
+    "incrementalProduction"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ark-kb-burn-in-attestation/v1"
+    },
+    "policyVersion": {
+      "const": "ark-kb-burn-in-policy/v1"
+    },
+    "status": {
+      "const": "PASSED"
+    },
+    "attestedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "toolVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewerType",
+        "reviewerId",
+        "reviewedAt",
+        "decision"
+      ],
+      "properties": {
+        "reviewerType": {
+          "const": "HUMAN_OPERATOR"
+        },
+        "reviewerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision": {
+          "const": "APPROVED"
+        }
+      }
+    },
+    "sealedSnapshots": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "buildId",
+          "qualityReportSha256",
+          "passedAt",
+          "qualityReportCutoverEligible",
+          "sealedInSnapshotManifest"
+        ],
+        "properties": {
+          "buildId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$"
+          },
+          "qualityReportSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "passedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "qualityReportCutoverEligible": {
+            "const": true
+          },
+          "sealedInSnapshotManifest": {
+            "const": true
+          }
+        }
+      }
+    },
+    "legacyVnextDiffDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "undispositioned",
+        "wrongAnswers",
+        "staleLeaks",
+        "candidateCompletions"
+      ],
+      "properties": {
+        "complete": {
+          "const": true
+        },
+        "undispositioned": {
+          "const": 0
+        },
+        "wrongAnswers": {
+          "const": 0
+        },
+        "staleLeaks": {
+          "const": 0
+        },
+        "candidateCompletions": {
+          "const": 0
+        }
+      }
+    },
+    "rollbackDrill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "fromBuildId",
+        "toBuildId",
+        "completedAt"
+      ],
+      "properties": {
+        "passed": {
+          "const": true
+        },
+        "fromBuildId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "toBuildId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "concurrentReaderDrill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "mixedBuildObservations",
+        "completedAt"
+      ],
+      "properties": {
+        "passed": {
+          "const": true
+        },
+        "mixedBuildObservations": {
+          "const": 0
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "incrementalProduction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "scenarios"
+      ],
+      "properties": {
+        "passed": {
+          "const": true
+        },
+        "scenarios": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "blueprintModified",
+            "blueprintAdded",
+            "blueprintDeleted",
+            "registrationTargetChanged",
+            "classParentChanged",
+            "nativeEvidenceUpdated",
+            "runtimeSummaryUpdated",
+            "workerCrash",
+            "narrowGateFailure",
+            "pointerPreSwapCrash",
+            "concurrentReaders",
+            "unchangedCacheHit"
+          ],
+          "properties": {
+            "blueprintModified": { "const": true },
+            "blueprintAdded": { "const": true },
+            "blueprintDeleted": { "const": true },
+            "registrationTargetChanged": { "const": true },
+            "classParentChanged": { "const": true },
+            "nativeEvidenceUpdated": { "const": true },
+            "runtimeSummaryUpdated": { "const": true },
+            "workerCrash": { "const": true },
+            "narrowGateFailure": { "const": true },
+            "pointerPreSwapCrash": { "const": true },
+            "concurrentReaders": { "const": true },
+            "unchangedCacheHit": { "const": true }
+          }
+        }
+      }
+    }
+  }
+}
