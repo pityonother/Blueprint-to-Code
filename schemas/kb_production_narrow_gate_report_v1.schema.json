@@ -1,0 +1,358 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/kb_production_narrow_gate_report_v1.schema.json",
+  "title": "ARK KB production narrow-gate engineering diagnostic report v1",
+  "$comment": "Structural validation only. Authoritative consumers must also use the strict canonical raw-byte Python validator, which rejects duplicate keys and floating JSON number syntax.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "evidenceClass",
+    "updateBaseline",
+    "checks",
+    "summary",
+    "published",
+    "e4Scenario2Complete",
+    "claimsGlobal75",
+    "productionAuthority",
+    "cutoverEligible",
+    "mode",
+    "defaultQuerySource",
+    "proof"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ark-kb-production-narrow-gate-report/v1"
+    },
+    "evidenceClass": {
+      "const": "ENGINEERING_DIAGNOSTIC"
+    },
+    "updateBaseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "baseBuildId",
+        "basePointerSha256",
+        "baseManifestSha256",
+        "baseSourceManifestFingerprint",
+        "candidateSourceManifestFingerprint",
+        "sourceDiffSha256",
+        "deltaReceiptSha256"
+      ],
+      "properties": {
+        "baseBuildId": {
+          "$ref": "#/$defs/buildId"
+        },
+        "basePointerSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "baseManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "baseSourceManifestFingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "candidateSourceManifestFingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceDiffSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deltaReceiptSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.selected_source_diff_exact"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "SELECTED_SOURCE_DIFF_EXACT"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.changed_revisions_fresh"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "CHANGED_REVISIONS_FRESH"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.no_stale_candidate_legacy_promotion"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "NO_STALE_CANDIDATE_LEGACY_PROMOTION"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.no_orphan_rows"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "NO_ORPHAN_ROWS"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.effective_dependencies_exact"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "EFFECTIVE_DEPENDENCIES_EXACT"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.registrations_resolvable"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "REGISTRATIONS_RESOLVABLE"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.projections_core_artifact_match"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "PROJECTIONS_CORE_ARTIFACT_MATCH"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.search_affected_entities_exact"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "SEARCH_AFFECTED_ENTITIES_EXACT"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.cache_old_state_absent"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "CACHE_OLD_STATE_ABSENT"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.sqlite_sealed_integrity"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "SQLITE_SEALED_INTEGRITY"
+                }
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/check",
+          "properties": {
+            "id": {
+              "const": "incremental.current_base_unchanged"
+            },
+            "details": {
+              "properties": {
+                "detailCode": {
+                  "const": "CURRENT_BASE_UNCHANGED"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "items": false
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "passed",
+        "failed"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "const": 11
+        },
+        "passed": {
+          "type": "integer",
+          "const": 11
+        },
+        "failed": {
+          "type": "integer",
+          "const": 0
+        }
+      }
+    },
+    "published": {
+      "const": false
+    },
+    "e4Scenario2Complete": {
+      "const": false
+    },
+    "claimsGlobal75": {
+      "const": false
+    },
+    "productionAuthority": {
+      "const": false
+    },
+    "cutoverEligible": {
+      "const": false
+    },
+    "mode": {
+      "const": "shadow"
+    },
+    "defaultQuerySource": {
+      "const": "legacy"
+    },
+    "proof": {
+      "type": "string",
+      "minLength": 84,
+      "maxLength": 84,
+      "pattern": "^narrow-gate-proof://[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "buildId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$",
+      "not": {
+        "pattern": "[\\u0000-\\u0020\\u007f]"
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "critical",
+        "passed",
+        "details",
+        "digests"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "critical": {
+          "const": true
+        },
+        "passed": {
+          "const": true
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "detailCode",
+            "observationCount"
+          ],
+          "properties": {
+            "detailCode": {
+              "type": "string"
+            },
+            "observationCount": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "digests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "evidenceSha256"
+          ],
+          "properties": {
+            "evidenceSha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    }
+  }
+}
