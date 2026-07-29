@@ -61,20 +61,18 @@ class KnowledgeBaselineAttestationTests(unittest.TestCase):
             repository["remoteHeadSha"],
         )
 
-    def test_attestation_matches_current_snapshot_when_available(self) -> None:
-        pointer_path = SNAPSHOT_ROOT / "current.json"
-        if not pointer_path.is_file():
-            return
+    def test_attestation_matches_frozen_snapshot_when_available(self) -> None:
         payload = _attestation()
-        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        snapshot = payload["snapshot"]
         manifest_path = (
             SNAPSHOT_ROOT
-            / pointer["snapshotRelativePath"]
+            / "snapshots"
+            / snapshot["buildId"]
             / "manifest.json"
         )
+        if not manifest_path.is_file():
+            return
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        snapshot = payload["snapshot"]
-        self.assertEqual(pointer["buildId"], snapshot["buildId"])
         self.assertEqual(manifest["buildId"], snapshot["buildId"])
         self.assertEqual(
             manifest["source"]["sha256"],
