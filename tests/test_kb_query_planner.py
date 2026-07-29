@@ -16,6 +16,9 @@ from blueprint_translator.kb_vnext.fact_store import (  # noqa: E402
     store_fact,
 )
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
+from blueprint_translator.kb_vnext.profiling import (  # noqa: E402
+    SegmentTiming,
+)
 from blueprint_translator.kb_vnext.query_planner import (  # noqa: E402
     QueryRequirements,
     plan_query,
@@ -489,6 +492,46 @@ class KnowledgeQueryPlannerTests(unittest.TestCase):
         self.assertEqual(
             result["entity"]["canonicalUri"],
             "/Game/Test/Item.Item",
+        )
+        search.close()
+        core.close()
+
+    def test_plan_query_emits_opt_in_timing_without_changing_result_shape(self):
+        core = _fixture()
+        search = _search_fixture()
+        timing = SegmentTiming()
+        core.set_trace_callback(timing.record_query)
+        search.set_trace_callback(timing.record_query)
+
+        result = plan_query(
+            core,
+            QueryRequirements(
+                entity_query="Needle Identity",
+                fact_types=("ITEM_PROPERTY",),
+            ),
+            search_connection=search,
+            timing=timing,
+        )
+        report = timing.report()
+
+        self.assertEqual(result["route"], "DB_ONLY_COMPLETE")
+        self.assertNotIn("timing", result)
+        self.assertNotIn("timingDiagnostics", result)
+        for segment in (
+            "plannerTotal",
+            "factRequirementPlanning",
+            "identityLookup",
+            "factQuery",
+            "evidenceHydration",
+        ):
+            self.assertGreater(report["segments"][segment]["samples"], 0)
+        self.assertGreater(
+            report["segments"]["identityLookup"]["queryCount"],
+            0,
+        )
+        self.assertGreater(
+            report["segments"]["factQuery"]["queryCount"],
+            0,
         )
         search.close()
         core.close()

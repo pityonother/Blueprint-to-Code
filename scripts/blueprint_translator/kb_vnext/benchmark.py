@@ -24,6 +24,7 @@ from .gold_review import (
 )
 from .kb_context import build_bounded_context_pack
 from .map_usage import MAP_USAGE_EDGE_TYPES
+from .profiling import SegmentTiming, measure_segment
 from .registrations import GLOBAL_REGISTRATION_EDGE_TYPES
 from .query_planner import (
     COMPLETE_CONFIDENCE,
@@ -2938,6 +2939,7 @@ def _copy_snapshot_for_benchmark(
     isolated_root: Path,
     *,
     allow_unsealed_snapshot: bool = False,
+    timing: SegmentTiming | None = None,
 ) -> bool:
     snapshot_root = snapshot_root.resolve()
     isolated_root = isolated_root.resolve()
@@ -2948,33 +2950,34 @@ def _copy_snapshot_for_benchmark(
         resolve_current_snapshot,
     )
 
-    try:
-        location = resolve_current_snapshot(snapshot_root)
-        source_root = location.snapshot_dir
-        manifest_path = location.manifest_path
-        manifest = location.manifest
-        build_id = location.build_id
-        source_layout = location.layout
-    except FileNotFoundError:
-        manifest_path = snapshot_root / "manifest.json"
-        if not manifest_path.is_file():
-            raise
+    with measure_segment(timing, "pointerManifestResolution"):
         try:
-            raw_manifest = json.loads(
-                manifest_path.read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(
-                "Immutable snapshot manifest is unreadable"
-            ) from exc
-        if not isinstance(raw_manifest, dict):
-            raise ValueError("Snapshot manifest must be an object")
-        manifest = raw_manifest
-        build_id = _safe_build_id(manifest.get("buildId"))
-        if manifest.get("schema") != SNAPSHOT_SCHEMA:
-            raise ValueError("Snapshot manifest schema is unknown")
-        source_root = snapshot_root
-        source_layout = "immutable-v2-direct"
+            location = resolve_current_snapshot(snapshot_root)
+            source_root = location.snapshot_dir
+            manifest_path = location.manifest_path
+            manifest = location.manifest
+            build_id = location.build_id
+            source_layout = location.layout
+        except FileNotFoundError:
+            manifest_path = snapshot_root / "manifest.json"
+            if not manifest_path.is_file():
+                raise
+            try:
+                raw_manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "Immutable snapshot manifest is unreadable"
+                ) from exc
+            if not isinstance(raw_manifest, dict):
+                raise ValueError("Snapshot manifest must be an object")
+            manifest = raw_manifest
+            build_id = _safe_build_id(manifest.get("buildId"))
+            if manifest.get("schema") != SNAPSHOT_SCHEMA:
+                raise ValueError("Snapshot manifest schema is unknown")
+            source_root = snapshot_root
+            source_layout = "immutable-v2-direct"
     databases = manifest.get("databases")
     if not isinstance(databases, Mapping):
         raise ValueError("Snapshot manifest is missing build databases")
@@ -3110,27 +3113,34 @@ def _connection_latency(
     path: Path,
     *,
     sample_count: int,
+    timing: SegmentTiming | None = None,
 ) -> dict[str, object]:
     cold: list[float] = []
     for _ in range(sample_count):
         started = time.perf_counter()
+        with measure_segment(timing, "connectionAcquire"):
+            connection = sqlite3.connect(
+                f"file:{path.resolve().as_posix()}?mode=ro",
+                uri=True,
+            )
+            try:
+                if timing is not None:
+                    connection.set_trace_callback(timing.record_query)
+                connection.execute("SELECT 1").fetchone()
+            finally:
+                connection.close()
+        cold.append((time.perf_counter() - started) * 1_000)
+
+    warm: list[float] = []
+    with measure_segment(timing, "connectionAcquire"):
         connection = sqlite3.connect(
             f"file:{path.resolve().as_posix()}?mode=ro",
             uri=True,
         )
-        try:
-            connection.execute("SELECT 1").fetchone()
-        finally:
-            connection.close()
-        cold.append((time.perf_counter() - started) * 1_000)
-
-    warm: list[float] = []
-    connection = sqlite3.connect(
-        f"file:{path.resolve().as_posix()}?mode=ro",
-        uri=True,
-    )
-    try:
+        if timing is not None:
+            connection.set_trace_callback(timing.record_query)
         connection.execute("SELECT 1").fetchone()
+    try:
         for _ in range(sample_count):
             started = time.perf_counter()
             connection.execute("SELECT 1").fetchone()
@@ -3315,16 +3325,90 @@ def _cache_status(response: Mapping[str, object]) -> str:
     )
 
 
+def _timing_diagnostics(
+    timing: SegmentTiming,
+    *,
+    scope: str,
+) -> dict[str, object]:
+    report = timing.report()
+    report["scope"] = scope
+    if scope == "queryPlanner":
+        report["coverage"] = {
+            "factRequirementPlanning": "MEASURED",
+            "identityLookup": "MEASURED",
+            "factQuery": "MEASURED",
+            "effectiveFactQuery": "MEASURED",
+            "relationshipQuery": "MEASURED",
+            "sourceRevisionValidation": "PARTIAL",
+            "evidenceHydration": "PARTIAL",
+            "answerContextSerialization": "MEASURED",
+        }
+        report["unseparatedSegments"] = {
+            "inlineRevisionAndEvidenceChecks": {
+                "includedIn": [
+                    "factQuery",
+                    "relationshipQuery",
+                    "evidenceHydration",
+                ],
+                "reason": (
+                    "URI, status, confidence, and some freshness checks are "
+                    "intentionally evaluated inline with their fail-closed "
+                    "gate and cannot be isolated without changing semantics."
+                ),
+            },
+            "relationshipEvidenceProjection": {
+                "includedIn": ["relationshipQuery"],
+                "reason": (
+                    "Relationship SQL projection and evidence hydration share "
+                    "one planner operation and are reported together."
+                ),
+            },
+        }
+    else:
+        report["coverage"] = {
+            "pointerManifestResolution": "MEASURED",
+            "connectionAcquire": "MEASURED",
+            "cacheValidation": "MEASURED",
+            "cacheWrite": "MEASURED",
+        }
+        report["unseparatedSegments"] = {
+            "snapshotStructureValidation": {
+                "includedIn": ["cacheValidation"],
+                "reason": (
+                    "Snapshot binding and cache revision validity are nested "
+                    "fail-closed checks; cache validation is inclusive."
+                ),
+            }
+        }
+    return report
+
+
+def _attach_timing_diagnostics(
+    payload: dict[str, object],
+    timing: SegmentTiming | None,
+    *,
+    scope: str,
+) -> dict[str, object]:
+    if timing is not None:
+        payload["timingDiagnostics"] = _timing_diagnostics(
+            timing,
+            scope=scope,
+        )
+    return payload
+
+
 def run_storage_path_benchmark(
     snapshot_root: Path,
     *,
     sample_count: int = PERFORMANCE_SAMPLE_TARGET,
     allow_unsealed_snapshot: bool = False,
+    include_timing: bool = False,
 ) -> dict[str, object]:
     """Exercise Search and Cache through an isolated copy of a real snapshot."""
 
     if sample_count < 1:
         raise ValueError("sample_count must be at least 1")
+    timing = SegmentTiming() if include_timing else None
     empty = {
         "sampleTarget": sample_count,
         "connections": {},
@@ -3365,10 +3449,12 @@ def run_storage_path_benchmark(
                 snapshot_root.resolve(),
                 isolated_root,
                 allow_unsealed_snapshot=allow_unsealed_snapshot,
+                timing=timing,
             )
             service = VNextKnowledgeService(
                 isolated_root,
                 _allow_unsealed_benchmark=copied_unsealed_snapshot,
+                _timing=timing,
             )
             runtime_health = service.health()
             if runtime_health.get("status") == "INVALID":
@@ -3392,6 +3478,7 @@ def run_storage_path_benchmark(
                 name: _connection_latency(
                     active_root / name,
                     sample_count=sample_count,
+                    timing=timing,
                 )
                 for name in (
                     "core.sqlite",
@@ -3427,9 +3514,8 @@ def run_storage_path_benchmark(
             if cold_search_query is not None:
                 cold_search_service = VNextKnowledgeService(
                     isolated_root,
-                    _allow_unsealed_benchmark=(
-                        copied_unsealed_snapshot
-                    ),
+                    _allow_unsealed_benchmark=copied_unsealed_snapshot,
+                    _timing=timing,
                 )
                 started = time.perf_counter()
                 cold_search_service.search_entities(
@@ -3476,6 +3562,7 @@ def run_storage_path_benchmark(
             cache_service = VNextKnowledgeService(
                 isolated_root,
                 _allow_unsealed_benchmark=copied_unsealed_snapshot,
+                _timing=timing,
             )
             started = time.perf_counter()
             first = cache_service.query(request)
@@ -3632,7 +3719,7 @@ def run_storage_path_benchmark(
                     "hitObserved",
                 )
             )
-            return {
+            return _attach_timing_diagnostics({
                 "sampleTarget": sample_count,
                 "connections": connections,
                 "search": {
@@ -3655,7 +3742,7 @@ def run_storage_path_benchmark(
                     "complete": search_complete and cache_complete,
                 },
                 "error": "",
-            }
+            }, timing, scope="storage")
     except (
         OSError,
         ValueError,
@@ -3663,10 +3750,10 @@ def run_storage_path_benchmark(
         TypeError,
         sqlite3.DatabaseError,
     ) as error:
-        return {
+        return _attach_timing_diagnostics({
             **empty,
             "error": f"{type(error).__name__}: {error}",
-        }
+        }, timing, scope="storage")
 
 
 def _runtime_performance_gates(
@@ -3862,7 +3949,9 @@ def run_query_benchmark(
     *,
     gold_set_path: Path = DEFAULT_GOLD_SET_PATH,
     allow_unsealed_snapshot: bool = False,
+    include_timing: bool = False,
 ) -> dict[str, object]:
+    timing = SegmentTiming() if include_timing else None
     gold = load_benchmark_gold_set(gold_set_path)
     cases = list(gold["cases"])
     cases_by_id = {case.query_id: case for case in cases}
@@ -3905,6 +3994,10 @@ def run_query_benchmark(
     connection.execute("SELECT 1").fetchone()
     if search_connection is not None:
         search_connection.execute("SELECT 1").fetchone()
+    if timing is not None:
+        connection.set_trace_callback(timing.record_query)
+        if search_connection is not None:
+            search_connection.set_trace_callback(timing.record_query)
     warm_ms = (time.perf_counter() - warm_started) * 1_000
     results: list[dict[str, object]] = []
     latencies: list[float] = []
@@ -3924,15 +4017,17 @@ def run_query_benchmark(
                 connection,
                 _requirements(case.request),
                 search_connection=search_connection,
+                timing=timing,
             )
             planner_ms = (
                 time.perf_counter() - planner_started
             ) * 1_000
             context_started = time.perf_counter()
-            context = build_bounded_context_pack(
-                result,
-                budget_tokens=int(case.request["budgetTokens"]),
-            )
+            with measure_segment(timing, "answerContextSerialization"):
+                context = build_bounded_context_pack(
+                    result,
+                    budget_tokens=int(case.request["budgetTokens"]),
+                )
             context_ms = (
                 time.perf_counter() - context_started
             ) * 1_000
@@ -3975,6 +4070,7 @@ def run_query_benchmark(
     storage_performance = run_storage_path_benchmark(
         core_path.parent,
         allow_unsealed_snapshot=allow_unsealed_snapshot,
+        include_timing=include_timing,
     )
     performance_gates = _runtime_performance_gates(
         storage_performance,
@@ -4197,4 +4293,8 @@ def run_query_benchmark(
         "simpleDbOnlyRate": identity["rate"],
         "unresolved": len(results) - int(protocol["count"]),
     }
-    return benchmark
+    return _attach_timing_diagnostics(
+        benchmark,
+        timing,
+        scope="queryPlanner",
+    )

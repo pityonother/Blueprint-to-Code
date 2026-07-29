@@ -19,6 +19,7 @@ from .native_gold_set import (
     is_recovered_identifier,
     is_valid_blueprint_graph_evidence_uri,
 )
+from .profiling import SegmentTiming, measure_segment
 from .schema_capabilities import (
     supports_effective_candidate_explanations,
     supports_typed_map_usage_evidence,
@@ -2144,27 +2145,30 @@ def effective_class_evidence_freshness(
     return "FRESH" if complete else "UNKNOWN"
 
 
-def plan_query(
+def _plan_query(
     connection: sqlite3.Connection,
     requirements: QueryRequirements,
     *,
     search_connection: sqlite3.Connection | None = None,
+    timing: SegmentTiming | None = None,
 ) -> dict[str, object]:
     """Plan and answer from Core when every requested evidence gate is closed."""
 
-    evidence_limit = _bounded_limit(requirements.evidence_limit)
-    answer_mode, inferred_answer_mode = _resolved_answer_mode(requirements)
-    contract_gap = _request_contract_gap(requirements, answer_mode)
+    with measure_segment(timing, "factRequirementPlanning"):
+        evidence_limit = _bounded_limit(requirements.evidence_limit)
+        answer_mode, inferred_answer_mode = _resolved_answer_mode(requirements)
+        contract_gap = _request_contract_gap(requirements, answer_mode)
     if contract_gap is not None:
         return _request_gap_result(
             answer_mode=answer_mode,
             gap=contract_gap,
         )
-    candidates = resolve_entities(
-        connection,
-        requirements.entity_query,
-        search_connection=search_connection,
-    )
+    with measure_segment(timing, "identityLookup"):
+        candidates = resolve_entities(
+            connection,
+            requirements.entity_query,
+            search_connection=search_connection,
+        )
     missing: list[dict[str, str]] = []
     if not candidates:
         missing.append(
@@ -2210,9 +2214,10 @@ def plan_query(
         }
     entity = candidates[0]
     identity_source_freshness = str(entity["freshness"]).upper()
-    identity_revision_fresh = source_revision_is_fresh(
-        entity.get("sourceRevision")
-    )
+    with measure_segment(timing, "sourceRevisionValidation"):
+        identity_revision_fresh = source_revision_is_fresh(
+            entity.get("sourceRevision")
+        )
     identity_confirmed = (
         str(entity.get("status") or "").upper()
         in IDENTITY_COMPLETE_STATUSES
@@ -2251,7 +2256,8 @@ def plan_query(
         )
     )
     if answer_mode == "IDENTITY":
-        identity_evidence = _identity_evidence(entity)
+        with measure_segment(timing, "evidenceHydration"):
+            identity_evidence = _identity_evidence(entity)
         identity_missing = [identity_gap] if identity_gap is not None else []
         return {
             "answerMode": answer_mode,
@@ -2282,13 +2288,19 @@ def plan_query(
     facts: list[dict[str, object]] = []
     for fact_type in requirements.fact_types:
         normalized_type = fact_type.upper()
-        gate_matched = _fact_rows(
-            connection,
-            entity_id=entity_id,
-            fact_type=normalized_type,
-            fact_names=requirements.fact_names,
-            limit=None,
+        fact_segment = (
+            "effectiveFactQuery"
+            if normalized_type == "EFFECTIVE_DEFAULT"
+            else "factQuery"
         )
+        with measure_segment(timing, fact_segment):
+            gate_matched = _fact_rows(
+                connection,
+                entity_id=entity_id,
+                fact_type=normalized_type,
+                fact_names=requirements.fact_names,
+                limit=None,
+            )
         matched = gate_matched[:evidence_limit]
         facts.extend(matched)
         matched_names = {
@@ -2377,13 +2389,16 @@ def plan_query(
         for fact in facts
         if fact["factType"] == "EFFECTIVE_DEFAULT"
     ]
-    candidate_explanations = load_effective_candidate_explanations(
-        connection,
-        entity_id=entity_id,
-        fact_names=(
-            str(fact["factName"]) for fact in effective_facts
-        ),
-    )
+    candidate_explanations: dict[str, dict[str, object]] = {}
+    if effective_facts:
+        with measure_segment(timing, "effectiveFactQuery"):
+            candidate_explanations = load_effective_candidate_explanations(
+                connection,
+                entity_id=entity_id,
+                fact_names=(
+                    str(fact["factName"]) for fact in effective_facts
+                ),
+            )
     for fact in effective_facts:
         fact.update(
             candidate_explanations[str(fact["factName"])]
@@ -2402,22 +2417,23 @@ def plan_query(
     if "EFFECTIVE_DEFAULT" in {
         value.upper() for value in requirements.fact_types
     }:
-        open_chain = connection.execute(
-            """
-            SELECT 1
-            FROM asset_class_assignments AS assignment
-            JOIN class_gaps AS gap ON gap.class_id=assignment.class_id
-            WHERE assignment.entity_id=?
-              AND assignment.assignment_kind='GENERATED_CLASS'
-              AND gap.gap_kind IN (
-                'NATIVE_ROOT_NOT_REACHED',
-                'INHERITANCE_CYCLE',
-                'MULTIPLE_PARENT_CANDIDATES'
-              )
-            LIMIT 1
-            """,
-            (entity_id,),
-        ).fetchone()
+        with measure_segment(timing, "effectiveFactQuery"):
+            open_chain = connection.execute(
+                """
+                SELECT 1
+                FROM asset_class_assignments AS assignment
+                JOIN class_gaps AS gap ON gap.class_id=assignment.class_id
+                WHERE assignment.entity_id=?
+                  AND assignment.assignment_kind='GENERATED_CLASS'
+                  AND gap.gap_kind IN (
+                    'NATIVE_ROOT_NOT_REACHED',
+                    'INHERITANCE_CYCLE',
+                    'MULTIPLE_PARENT_CANDIDATES'
+                  )
+                LIMIT 1
+                """,
+                (entity_id,),
+            ).fetchone()
         if open_chain:
             missing.append(
                 {
@@ -2432,17 +2448,18 @@ def plan_query(
     for edge_type in requirements.edge_types:
         normalized_edge_type = edge_type.upper()
         if normalized_edge_type in MAP_USAGE_EDGE_TYPES:
-            (
-                map_relationships,
-                map_evidence,
-                map_missing,
-                map_freshness,
-            ) = _map_usage_requirement(
-                connection,
-                entity_id=entity_id,
-                edge_types=(normalized_edge_type,),
-                limit=evidence_limit,
-            )
+            with measure_segment(timing, "relationshipQuery"):
+                (
+                    map_relationships,
+                    map_evidence,
+                    map_missing,
+                    map_freshness,
+                ) = _map_usage_requirement(
+                    connection,
+                    entity_id=entity_id,
+                    edge_types=(normalized_edge_type,),
+                    limit=evidence_limit,
+                )
             relationships.extend(map_relationships)
             relationship_evidence.extend(map_evidence)
             missing.extend(map_missing)
@@ -2450,40 +2467,43 @@ def plan_query(
             handled_map_edge_types.add(normalized_edge_type)
             continue
         if normalized_edge_type == "ASSET_CLASS":
-            projected_rows = _class_assignment_relationships(
-                connection,
-                entity_id=entity_id,
-            )
-        elif normalized_edge_type in FACT_BACKED_RELATIONSHIP_RULES:
-            projected_rows = _fact_backed_relationships(
-                connection,
-                entity_id=entity_id,
-                edge_type=normalized_edge_type,
-            )
-        else:
-            rows = list(
-                connection.execute(
-                    """
-                    SELECT
-                        edge.edge_id, edge.edge_type, edge.edge_strength,
-                        edge.status, edge.confidence, target.entity_id,
-                        target.canonical_uri, edge.evidence_uri,
-                        revision.revision_id, revision.source_kind,
-                        revision.source_uri, revision.source_fingerprint,
-                        revision.producer_version, revision.schema_version,
-                        revision.generated_at,
-                        revision.freshness_status
-                    FROM edges AS edge
-                    JOIN entities AS target
-                      ON target.entity_id=edge.target_entity_id
-                    JOIN source_revisions AS revision
-                      ON revision.revision_id=edge.source_revision_id
-                    WHERE edge.source_entity_id=? AND edge.edge_type=?
-                    ORDER BY edge.edge_id
-                    """,
-                    (entity_id, normalized_edge_type),
+            with measure_segment(timing, "relationshipQuery"):
+                projected_rows = _class_assignment_relationships(
+                    connection,
+                    entity_id=entity_id,
                 )
-            )
+        elif normalized_edge_type in FACT_BACKED_RELATIONSHIP_RULES:
+            with measure_segment(timing, "relationshipQuery"):
+                projected_rows = _fact_backed_relationships(
+                    connection,
+                    entity_id=entity_id,
+                    edge_type=normalized_edge_type,
+                )
+        else:
+            with measure_segment(timing, "relationshipQuery"):
+                rows = list(
+                    connection.execute(
+                        """
+                        SELECT
+                            edge.edge_id, edge.edge_type, edge.edge_strength,
+                            edge.status, edge.confidence, target.entity_id,
+                            target.canonical_uri, edge.evidence_uri,
+                            revision.revision_id, revision.source_kind,
+                            revision.source_uri, revision.source_fingerprint,
+                            revision.producer_version, revision.schema_version,
+                            revision.generated_at,
+                            revision.freshness_status
+                        FROM edges AS edge
+                        JOIN entities AS target
+                          ON target.entity_id=edge.target_entity_id
+                        JOIN source_revisions AS revision
+                          ON revision.revision_id=edge.source_revision_id
+                        WHERE edge.source_entity_id=? AND edge.edge_type=?
+                        ORDER BY edge.edge_id
+                        """,
+                        (entity_id, normalized_edge_type),
+                    )
+                )
             projected_rows = []
             for row in rows:
                 source_revision = {
@@ -2531,21 +2551,22 @@ def plan_query(
             )
             relationship_gate_freshness.append("UNKNOWN")
             continue
-        usable_rows = [
-            relationship
-            for relationship in projected_rows
-            if str(relationship["status"]).upper()
-            in RELATIONSHIP_COMPLETE_STATUSES
-            and str(relationship["confidence"]).upper()
-            in {"HIGH", "CONFIRMED"}
-            and str(relationship["freshness"]).upper() == "FRESH"
-            and source_revision_is_fresh(
-                relationship.get("sourceRevision")
-            )
-            and is_valid_generic_evidence_uri(
-                relationship["evidenceUri"]
-            )
-        ]
+        with measure_segment(timing, "sourceRevisionValidation"):
+            usable_rows = [
+                relationship
+                for relationship in projected_rows
+                if str(relationship["status"]).upper()
+                in RELATIONSHIP_COMPLETE_STATUSES
+                and str(relationship["confidence"]).upper()
+                in {"HIGH", "CONFIRMED"}
+                and str(relationship["freshness"]).upper() == "FRESH"
+                and source_revision_is_fresh(
+                    relationship.get("sourceRevision")
+                )
+                and is_valid_generic_evidence_uri(
+                    relationship["evidenceUri"]
+                )
+            ]
         if usable_rows:
             returned_usable_rows = usable_rows[:evidence_limit]
             relationships.extend(returned_usable_rows)
@@ -2595,39 +2616,41 @@ def plan_query(
                 "FRESH" if edge_freshness == {"FRESH"} else "UNKNOWN"
             )
     if requirements.requires_native:
-        native_rows = _native_mechanism_rows(
-            connection,
-            entity_id=entity_id,
-        )
+        with measure_segment(timing, "relationshipQuery"):
+            native_rows = _native_mechanism_rows(
+                connection,
+                entity_id=entity_id,
+            )
         projected_native = [
             _native_mechanism_projection(row, entity=entity)
             for row in native_rows
         ]
-        usable_native = [
-            (relationship, evidence_items)
-            for relationship, evidence_items in projected_native
-            if str(relationship["status"]).upper()
-            in RELATIONSHIP_COMPLETE_STATUSES
-            and str(relationship["functionStatus"]).upper()
-            in RELATIONSHIP_COMPLETE_STATUSES
-            and str(relationship["confidence"]).upper()
-            in {"HIGH", "CONFIRMED"}
-            and str(relationship["functionConfidence"]).upper()
-            in {"HIGH", "CONFIRMED"}
-            and str(relationship["freshness"]).upper() == "FRESH"
-            and is_valid_blueprint_graph_evidence_uri(
-                relationship["evidenceUri"]
-            )
-            and is_recovered_identifier(
-                relationship["blueprintFunctionName"]
-            )
-            and bool(str(relationship["nativeEvidenceUri"]).strip())
-            and len(evidence_items) == 2
-            and all(
-                source_revision_is_fresh(item.get("sourceRevision"))
-                for item in evidence_items
-            )
-        ]
+        with measure_segment(timing, "sourceRevisionValidation"):
+            usable_native = [
+                (relationship, evidence_items)
+                for relationship, evidence_items in projected_native
+                if str(relationship["status"]).upper()
+                in RELATIONSHIP_COMPLETE_STATUSES
+                and str(relationship["functionStatus"]).upper()
+                in RELATIONSHIP_COMPLETE_STATUSES
+                and str(relationship["confidence"]).upper()
+                in {"HIGH", "CONFIRMED"}
+                and str(relationship["functionConfidence"]).upper()
+                in {"HIGH", "CONFIRMED"}
+                and str(relationship["freshness"]).upper() == "FRESH"
+                and is_valid_blueprint_graph_evidence_uri(
+                    relationship["evidenceUri"]
+                )
+                and is_recovered_identifier(
+                    relationship["blueprintFunctionName"]
+                )
+                and bool(str(relationship["nativeEvidenceUri"]).strip())
+                and len(evidence_items) == 2
+                and all(
+                    source_revision_is_fresh(item.get("sourceRevision"))
+                    for item in evidence_items
+                )
+            ]
         selected_native = (
             usable_native or projected_native
         )[:evidence_limit]
@@ -2666,13 +2689,14 @@ def plan_query(
             else:
                 relationship_gate_freshness.append("UNKNOWN")
     if requirements.requires_runtime:
-        runtime_gate_rows = _fact_rows(
-            connection,
-            entity_id=entity_id,
-            fact_type="RUNTIME_OBSERVATION",
-            fact_names=requirements.fact_names,
-            limit=None,
-        )
+        with measure_segment(timing, "factQuery"):
+            runtime_gate_rows = _fact_rows(
+                connection,
+                entity_id=entity_id,
+                fact_type="RUNTIME_OBSERVATION",
+                fact_names=requirements.fact_names,
+                limit=None,
+            )
         runtime_rows = runtime_gate_rows[:evidence_limit]
         known_fact_ids = {
             fact["factId"] for fact in facts if fact["factId"] is not None
@@ -2727,31 +2751,33 @@ def plan_query(
                 }
             )
     if requirements.requires_map_evidence and not handled_map_edge_types:
-        (
-            map_relationships,
-            map_evidence,
-            map_missing,
-            map_freshness,
-        ) = _map_usage_requirement(
-            connection,
-            entity_id=entity_id,
-            edge_types=MAP_USAGE_EDGE_TYPES,
-            limit=evidence_limit,
-        )
+        with measure_segment(timing, "relationshipQuery"):
+            (
+                map_relationships,
+                map_evidence,
+                map_missing,
+                map_freshness,
+            ) = _map_usage_requirement(
+                connection,
+                entity_id=entity_id,
+                edge_types=MAP_USAGE_EDGE_TYPES,
+                limit=evidence_limit,
+            )
         relationships.extend(map_relationships)
         relationship_evidence.extend(map_evidence)
         missing.extend(map_missing)
         relationship_gate_freshness.append(map_freshness)
-    evidence, fact_evidence_total = _fact_evidence(
-        connection,
-        (fact["factId"] for fact in facts),
-        limit=evidence_limit,
-    )
-    class_evidence = load_effective_class_evidence(
-        connection,
-        entity_id=entity_id,
-        effective_facts=effective_facts,
-    )
+    with measure_segment(timing, "evidenceHydration"):
+        evidence, fact_evidence_total = _fact_evidence(
+            connection,
+            (fact["factId"] for fact in facts),
+            limit=evidence_limit,
+        )
+        class_evidence = load_effective_class_evidence(
+            connection,
+            entity_id=entity_id,
+            effective_facts=effective_facts,
+        )
     class_gate_freshness: list[str] = []
     resolved_effective_facts = [
         fact
@@ -2760,9 +2786,10 @@ def plan_query(
         and str(fact.get("resolutionStatus") or "").upper() == "RESOLVED"
     ]
     if resolved_effective_facts:
-        class_freshness = effective_class_evidence_freshness(
-            class_evidence
-        )
+        with measure_segment(timing, "sourceRevisionValidation"):
+            class_freshness = effective_class_evidence_freshness(
+                class_evidence
+            )
         if class_freshness == "STALE":
             missing.append(
                 {
@@ -2801,18 +2828,19 @@ def plan_query(
         for fact in facts
         if (fact_id := fact["factId"]) is not None
     }
-    fresh_fact_ids, evidenced_fact_ids = _fact_evidence_freshness(
-        connection,
-        returned_fact_ids,
-    )
-    visible_fresh_fact_evidence = {
-        int(fact_id)
-        for item in evidence
-        if (fact_id := item.get("factId")) is not None
-        and str(item.get("freshness") or "").upper() == "FRESH"
-        and source_revision_is_fresh(item.get("sourceRevision"))
-        and is_valid_generic_evidence_uri(item.get("evidenceUri"))
-    }
+    with measure_segment(timing, "sourceRevisionValidation"):
+        fresh_fact_ids, evidenced_fact_ids = _fact_evidence_freshness(
+            connection,
+            returned_fact_ids,
+        )
+        visible_fresh_fact_evidence = {
+            int(fact_id)
+            for item in evidence
+            if (fact_id := item.get("factId")) is not None
+            and str(item.get("freshness") or "").upper() == "FRESH"
+            and source_revision_is_fresh(item.get("sourceRevision"))
+            and is_valid_generic_evidence_uri(item.get("evidenceUri"))
+        }
     for fact_id in sorted(
         (returned_fact_ids & fresh_fact_ids)
         - visible_fresh_fact_evidence
@@ -2934,3 +2962,21 @@ def plan_query(
         "missingRequirements": missing,
         "recommendedProbes": probes,
     }
+
+
+def plan_query(
+    connection: sqlite3.Connection,
+    requirements: QueryRequirements,
+    *,
+    search_connection: sqlite3.Connection | None = None,
+    timing: SegmentTiming | None = None,
+) -> dict[str, object]:
+    """Plan a query, optionally recording response-private diagnostics."""
+
+    with measure_segment(timing, "plannerTotal"):
+        return _plan_query(
+            connection,
+            requirements,
+            search_connection=search_connection,
+            timing=timing,
+        )

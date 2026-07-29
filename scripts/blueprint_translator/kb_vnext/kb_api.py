@@ -16,6 +16,7 @@ from typing import Mapping
 from urllib.parse import urlencode
 
 from .kb_context import build_bounded_context_pack
+from .profiling import SegmentTiming, measure_segment
 from .query_planner import (
     ANSWER_MODES,
     CANDIDATE_EXPLANATION_SCHEMA_MIGRATION_REQUIRED,
@@ -511,7 +512,9 @@ class VNextKnowledgeService:
         root: Path,
         *,
         _allow_unsealed_benchmark: bool = False,
+        _timing: SegmentTiming | None = None,
     ) -> None:
+        self._timing = _timing
         self.configured_root = root.resolve()
         # Builder-only context for an isolated pre-seal copy. Normal
         # services never set this and continue to require a sealed report.
@@ -521,7 +524,11 @@ class VNextKnowledgeService:
         self._snapshot_resolution_error = ""
         self._snapshot_layout = "unresolved"
         try:
-            location = resolve_current_snapshot(self.configured_root)
+            with measure_segment(
+                self._timing,
+                "pointerManifestResolution",
+            ):
+                location = resolve_current_snapshot(self.configured_root)
         except (OSError, ValueError) as exc:
             self.root = self.configured_root
             self.manifest_path = (
@@ -932,22 +939,25 @@ class VNextKnowledgeService:
                 "KB_VNEXT_SNAPSHOT_INVALID",
                 f"Snapshot runtime binding failed: {binding_error}.",
             )
-        connection = sqlite3.connect(
-            f"file:{self.core_path.as_posix()}?mode=ro",
-            uri=True,
-        )
-        connection.create_function(
-            "source_revision_is_fresh",
-            7,
-            _sql_source_revision_is_fresh,
-        )
-        connection.create_function(
-            "evidence_uri_is_recovered",
-            1,
-            _sql_evidence_uri_is_recovered,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only=ON")
+        with measure_segment(self._timing, "connectionAcquire"):
+            connection = sqlite3.connect(
+                f"file:{self.core_path.as_posix()}?mode=ro",
+                uri=True,
+            )
+            connection.create_function(
+                "source_revision_is_fresh",
+                7,
+                _sql_source_revision_is_fresh,
+            )
+            connection.create_function(
+                "evidence_uri_is_recovered",
+                1,
+                _sql_evidence_uri_is_recovered,
+            )
+            connection.row_factory = sqlite3.Row
+            if self._timing is not None:
+                connection.set_trace_callback(self._timing.record_query)
+            connection.execute("PRAGMA query_only=ON")
         return connection
 
     def _search(
@@ -969,12 +979,15 @@ class VNextKnowledgeService:
                 "KB_VNEXT_SNAPSHOT_INVALID",
                 f"Snapshot runtime binding failed: {binding_error}.",
             )
-        connection = sqlite3.connect(
-            f"file:{self.search_path.as_posix()}?mode=ro",
-            uri=True,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only=ON")
+        with measure_segment(self._timing, "connectionAcquire"):
+            connection = sqlite3.connect(
+                f"file:{self.search_path.as_posix()}?mode=ro",
+                uri=True,
+            )
+            connection.row_factory = sqlite3.Row
+            if self._timing is not None:
+                connection.set_trace_callback(self._timing.record_query)
+            connection.execute("PRAGMA query_only=ON")
         return connection
 
     def _cache_outcome(
@@ -1184,6 +1197,13 @@ class VNextKnowledgeService:
         self,
         request: Mapping[str, object],
     ) -> tuple[dict[str, object] | None, str]:
+        with measure_segment(self._timing, "cacheValidation"):
+            return self._read_cached_query_unprofiled(request)
+
+    def _read_cached_query_unprofiled(
+        self,
+        request: Mapping[str, object],
+    ) -> tuple[dict[str, object] | None, str]:
         if not self.cache_path.is_file():
             return None, "CACHE_UNAVAILABLE"
         request_json, fingerprint = self._cache_request_identity(request)
@@ -1193,6 +1213,8 @@ class VNextKnowledgeService:
                 uri=True,
             )
             cache.row_factory = sqlite3.Row
+            if self._timing is not None:
+                cache.set_trace_callback(self._timing.record_query)
             cache.execute("PRAGMA query_only=ON")
         except sqlite3.DatabaseError:
             return None, "CACHE_UNAVAILABLE"
@@ -2904,6 +2926,7 @@ class VNextKnowledgeService:
                     core,
                     request,
                     search_connection=search,
+                    timing=self._timing,
                 )
             except sqlite3.DatabaseError:
                 if capabilities["compatible"]:
@@ -2984,15 +3007,16 @@ class VNextKnowledgeService:
                         "recommendedProbes": probes,
                     }
                 )
-        pack = build_bounded_context_pack(
-            result, budget_tokens=budget
-        )
-        response = {
-            **result,
-            "contextPack": pack,
-            "nextQuery": "",
-            "gap": result["missingRequirements"],
-        }
+        with measure_segment(self._timing, "answerContextSerialization"):
+            pack = build_bounded_context_pack(
+                result, budget_tokens=budget
+            )
+            response = {
+                **result,
+                "contextPack": pack,
+                "nextQuery": "",
+                "gap": result["missingRequirements"],
+            }
         self._cache_query(body, response)
         response["cache"] = self._cache_outcome(
             hit=False,
@@ -3001,6 +3025,14 @@ class VNextKnowledgeService:
         return response
 
     def _cache_query(
+        self,
+        request: Mapping[str, object],
+        response: Mapping[str, object],
+    ) -> None:
+        with measure_segment(self._timing, "cacheWrite"):
+            self._cache_query_unprofiled(request, response)
+
+    def _cache_query_unprofiled(
         self,
         request: Mapping[str, object],
         response: Mapping[str, object],
@@ -3056,6 +3088,8 @@ class VNextKnowledgeService:
         except sqlite3.DatabaseError:
             return
         try:
+            if self._timing is not None:
+                cache.set_trace_callback(self._timing.record_query)
             if self._cache_snapshot_identity(cache) is None:
                 return
             cache.execute(

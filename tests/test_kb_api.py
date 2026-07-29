@@ -31,6 +31,9 @@ from blueprint_translator.kb_vnext.kb_context import (  # noqa: E402
     build_bounded_context_pack,
 )
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
+from blueprint_translator.kb_vnext.profiling import (  # noqa: E402
+    SegmentTiming,
+)
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
     DOMAIN_PROJECTIONS,
     build_domain_projections,
@@ -2865,6 +2868,34 @@ class KnowledgeApiTests(unittest.TestCase):
                 )
             finally:
                 cache.close()
+
+    def test_internal_timing_never_leaks_into_query_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            _snapshot(root)
+            timing = SegmentTiming()
+            service = VNextKnowledgeService(root, _timing=timing)
+
+            result = service.query(
+                {
+                    "entity": "ItemA",
+                    "factTypes": ["ITEM_PROPERTY"],
+                    "budgetTokens": 500,
+                    "evidenceLimit": 10,
+                }
+            )
+
+        self.assertNotIn("timing", result)
+        self.assertNotIn("timingDiagnostics", result)
+        report = timing.report()
+        for segment in (
+            "pointerManifestResolution",
+            "connectionAcquire",
+            "cacheValidation",
+            "cacheWrite",
+            "answerContextSerialization",
+        ):
+            self.assertGreater(report["segments"][segment]["samples"], 0)
 
     def test_query_answer_mode_contract_is_explicit_and_additive(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -176,6 +176,7 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
             report = run_storage_path_benchmark(
                 root,
                 sample_count=3,
+                include_timing=True,
             )
             original_cache = sqlite3.connect(root / "cache.sqlite")
             try:
@@ -189,6 +190,22 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
 
         self.assertEqual(report["error"], "")
         self.assertTrue(report["coverage"]["complete"])
+        timing = report["timingDiagnostics"]
+        self.assertEqual(timing["schema"], "ark-kb-segment-timing/v1")
+        for segment in (
+            "pointerManifestResolution",
+            "connectionAcquire",
+            "cacheValidation",
+            "cacheWrite",
+        ):
+            metrics = timing["segments"][segment]
+            self.assertGreater(metrics["samples"], 0)
+            self.assertTrue({"p50", "p95", "p99"} <= set(metrics))
+        self.assertGreater(
+            timing["segments"]["cacheValidation"]["queryCount"],
+            0,
+        )
+        self.assertGreater(timing["segments"]["cacheWrite"]["queryCount"], 0)
         self.assertTrue(report["search"]["ftsPlanUsed"])
         self.assertEqual(
             set(report["search"]["paths"]),
@@ -694,6 +711,7 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
             if item["route"] != expected_routes[item["queryId"]]
         ]
         self.assertEqual(result["total"], 130)
+        self.assertNotIn("timingDiagnostics", result)
         self.assertEqual(result["tierCounts"], TIER_COUNTS)
         self.assertTrue(
             all(
