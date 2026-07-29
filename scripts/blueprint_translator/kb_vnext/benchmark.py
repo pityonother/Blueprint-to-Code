@@ -3874,6 +3874,16 @@ def run_query_benchmark(
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     connection.execute("SELECT 1").fetchone()
+    search_path = core_path.with_name("search.sqlite")
+    search_connection: sqlite3.Connection | None = None
+    if search_path.is_file():
+        search_connection = sqlite3.connect(
+            f"file:{search_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        )
+        search_connection.row_factory = sqlite3.Row
+        search_connection.execute("PRAGMA query_only=ON")
+        search_connection.execute("SELECT 1").fetchone()
     cold_ms = (time.perf_counter() - cold_started) * 1_000
     build_row = connection.execute(
         """
@@ -3893,6 +3903,8 @@ def run_query_benchmark(
         build_binding = "CORE_SHA256_FALLBACK"
     warm_started = time.perf_counter()
     connection.execute("SELECT 1").fetchone()
+    if search_connection is not None:
+        search_connection.execute("SELECT 1").fetchone()
     warm_ms = (time.perf_counter() - warm_started) * 1_000
     results: list[dict[str, object]] = []
     latencies: list[float] = []
@@ -3908,7 +3920,11 @@ def run_query_benchmark(
             case = cases_by_id[str(row["query_id"])]
             started = time.perf_counter()
             planner_started = time.perf_counter()
-            result = plan_query(connection, _requirements(case.request))
+            result = plan_query(
+                connection,
+                _requirements(case.request),
+                search_connection=search_connection,
+            )
             planner_ms = (
                 time.perf_counter() - planner_started
             ) * 1_000
@@ -3953,6 +3969,8 @@ def run_query_benchmark(
             results.append(case_result)
         degree_latency = _degree_latency(connection)
     finally:
+        if search_connection is not None:
+            search_connection.close()
         connection.close()
     storage_performance = run_storage_path_benchmark(
         core_path.parent,

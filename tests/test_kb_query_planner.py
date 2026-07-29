@@ -24,6 +24,7 @@ from blueprint_translator.kb_vnext.query_planner import (  # noqa: E402
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     FULL_CORE_SCHEMA_SQL,
+    SEARCH_SCHEMA_SQL,
 )
 
 
@@ -122,6 +123,50 @@ def _fixture() -> sqlite3.Connection:
         )
         """,
         (self_class,),
+    )
+    connection.commit()
+    return connection
+
+
+def _search_fixture() -> sqlite3.Connection:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(SEARCH_SCHEMA_SQL)
+    connection.executemany(
+        """
+        INSERT INTO entity_search_meta(
+            entity_id, canonical_uri, entity_kind, display_name,
+            internal_name, freshness_status
+        ) VALUES (?, ?, 'BLUEPRINT_ASSET', ?, ?, 'FRESH')
+        """,
+        [
+            (1, "/Game/Test/Item.Item", "Test Item", "Item"),
+            (2, "/Game/Test/Other.Other", "Other", "Other"),
+            (3, "/Game/Test/Third.Third", "Third", "Third"),
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO search_aliases(
+            alias, entity_id, alias_kind, language, confidence
+        ) VALUES (?, ?, 'PLAYER_NAME', '', 'HIGH')
+        """,
+        [
+            ("Needle Identity", 1),
+            ("Shared", 2),
+            ("Shared", 3),
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO entities_fts(
+            entity_id, canonical_uri, display_name, internal_name, aliases
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (1, "/Game/Test/Item.Item", "Test Item", "Item", "Needle Identity"),
+            (2, "/Game/Test/Other.Other", "Other", "Other", "Shared"),
+            (3, "/Game/Test/Third.Third", "Third", "Third", "Shared"),
+        ],
     )
     connection.commit()
     return connection
@@ -347,6 +392,106 @@ class KnowledgeQueryPlannerTests(unittest.TestCase):
         )
         self.assertEqual(result[0]["canonicalUri"], "/Game/Test/Item.Item")
         connection.close()
+
+    def test_exact_alias_uses_search_nocase_index(self):
+        core = _fixture()
+        search = _search_fixture()
+        plan = list(
+            search.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT entity_id FROM search_aliases
+                WHERE alias=? COLLATE NOCASE
+                ORDER BY entity_id
+                LIMIT 20
+                """,
+                ("shared",),
+            )
+        )
+        plan_text = " ".join(str(row[3]) for row in plan).upper()
+        self.assertIn("IDX_SEARCH_ALIASES_NOCASE", plan_text)
+
+        result = resolve_entities(
+            core,
+            "shared",
+            search_connection=search,
+        )
+
+        self.assertEqual(
+            [item["canonicalUri"] for item in result],
+            [
+                "/Game/Test/Other.Other",
+                "/Game/Test/Third.Third",
+            ],
+        )
+        search.close()
+        core.close()
+
+    def test_fuzzy_resolution_uses_search_fts_candidates(self):
+        core = _fixture()
+        search = _search_fixture()
+        plan = list(
+            search.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT entity_id FROM entities_fts
+                WHERE entities_fts MATCH '"test" AND "ite"*'
+                LIMIT 20
+                """
+            )
+        )
+        self.assertIn(
+            "VIRTUAL TABLE INDEX",
+            " ".join(str(row[3]) for row in plan).upper(),
+        )
+
+        result = resolve_entities(
+            core,
+            "Test Ite",
+            search_connection=search,
+        )
+
+        self.assertEqual(
+            [item["canonicalUri"] for item in result],
+            ["/Game/Test/Item.Item"],
+        )
+        search.close()
+        core.close()
+
+    def test_explicit_canonical_miss_does_not_fall_back_to_fuzzy_search(self):
+        core = _fixture()
+        search = _search_fixture()
+
+        result = resolve_entities(
+            core,
+            "/Game/Test/Missing.Missing",
+            search_connection=search,
+        )
+
+        self.assertEqual(result, [])
+        search.close()
+        core.close()
+
+    def test_plan_query_can_resolve_search_only_alias(self):
+        core = _fixture()
+        search = _search_fixture()
+
+        result = plan_query(
+            core,
+            QueryRequirements(
+                entity_query="Needle Identity",
+                fact_types=("ITEM_PROPERTY",),
+            ),
+            search_connection=search,
+        )
+
+        self.assertEqual(result["route"], "DB_ONLY_COMPLETE")
+        self.assertEqual(
+            result["entity"]["canonicalUri"],
+            "/Game/Test/Item.Item",
+        )
+        search.close()
+        core.close()
 
     def test_complete_fact_query_returns_db_only_with_evidence(self):
         connection = _fixture()

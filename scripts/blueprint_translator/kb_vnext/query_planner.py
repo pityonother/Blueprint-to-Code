@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Iterable, Mapping
@@ -313,11 +314,118 @@ def _identity_evidence(
     ]
 
 
+def _load_entity_projections(
+    connection: sqlite3.Connection,
+    entity_ids: Iterable[int],
+) -> list[dict[str, object]]:
+    ordered_ids = tuple(
+        dict.fromkeys(int(entity_id) for entity_id in entity_ids)
+    )
+    if not ordered_ids:
+        return []
+    placeholders = ",".join("?" for _ in ordered_ids)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        f"""
+        SELECT
+            entity.entity_id, entity.canonical_uri, entity.entity_kind,
+            entity.display_name, entity.internal_name, entity.status,
+            entity.confidence,
+            revision.revision_id AS identity_revision_id,
+            revision.source_kind AS identity_source_kind,
+            revision.source_uri AS identity_source_uri,
+            revision.source_fingerprint AS identity_source_fingerprint,
+            revision.producer_version AS identity_producer_version,
+            revision.schema_version AS identity_schema_version,
+            revision.generated_at AS identity_generated_at,
+            revision.freshness_status AS identity_freshness
+        FROM entities AS entity
+        LEFT JOIN packages AS package
+          ON package.package_id=entity.package_id
+        LEFT JOIN source_revisions AS revision
+          ON revision.revision_id=package.current_revision_id
+        WHERE entity.entity_id IN ({placeholders})
+        """,
+        ordered_ids,
+    )
+    by_id = {
+        int(row["entity_id"]): _entity_projection(row)
+        for row in rows
+    }
+    return [
+        by_id[entity_id]
+        for entity_id in ordered_ids
+        if entity_id in by_id
+    ]
+
+
+def _search_entity_ids(
+    search: sqlite3.Connection,
+    query: str,
+    *,
+    limit: int,
+) -> list[int]:
+    search.row_factory = sqlite3.Row
+    exact_ids: set[int] = set()
+    for column in ("display_name", "internal_name"):
+        exact_ids.update(
+            int(row["entity_id"])
+            for row in search.execute(
+                f"""
+                SELECT entity_id
+                FROM entity_search_meta
+                WHERE {column}=? COLLATE NOCASE
+                ORDER BY entity_id
+                LIMIT ?
+                """,
+                (query, limit),
+            )
+        )
+    exact_ids.update(
+        int(row["entity_id"])
+        for row in search.execute(
+            """
+            SELECT entity_id
+            FROM search_aliases
+            WHERE alias=? COLLATE NOCASE
+            ORDER BY entity_id
+            LIMIT ?
+            """,
+            (query, limit),
+        )
+    )
+    if exact_ids:
+        return sorted(exact_ids)[:limit]
+
+    terms = tuple(
+        token[:64]
+        for token in re.findall(r"\w+", query, flags=re.UNICODE)[:12]
+        if token
+    )
+    if not terms:
+        return []
+    expression = " AND ".join(f'"{term}"*' for term in terms)
+    return [
+        int(row["entity_id"])
+        for row in search.execute(
+            """
+            SELECT CAST(entity_id AS INTEGER) AS entity_id
+            FROM entities_fts
+            WHERE entities_fts MATCH ?
+            ORDER BY bm25(entities_fts), CAST(entity_id AS INTEGER)
+            LIMIT ?
+            """,
+            (expression, limit),
+        )
+    ]
+
+
 def resolve_entities(
     connection: sqlite3.Connection,
     query: str,
     *,
     limit: int = 20,
+    search_connection: sqlite3.Connection | None = None,
 ) -> list[dict[str, object]]:
     """Resolve exact identities first, then bounded alias/name candidates."""
 
@@ -352,6 +460,17 @@ def resolve_entities(
     ).fetchone()
     if canonical is not None:
         return [_entity_projection(canonical)]
+    if search_connection is not None:
+        if query.startswith("/") or "://" in query:
+            return []
+        return _load_entity_projections(
+            connection,
+            _search_entity_ids(
+                search_connection,
+                query,
+                limit=limit,
+            ),
+        )
     exact = list(
         connection.execute(
             """
@@ -2028,6 +2147,8 @@ def effective_class_evidence_freshness(
 def plan_query(
     connection: sqlite3.Connection,
     requirements: QueryRequirements,
+    *,
+    search_connection: sqlite3.Connection | None = None,
 ) -> dict[str, object]:
     """Plan and answer from Core when every requested evidence gate is closed."""
 
@@ -2039,7 +2160,11 @@ def plan_query(
             answer_mode=answer_mode,
             gap=contract_gap,
         )
-    candidates = resolve_entities(connection, requirements.entity_query)
+    candidates = resolve_entities(
+        connection,
+        requirements.entity_query,
+        search_connection=search_connection,
+    )
     missing: list[dict[str, str]] = []
     if not candidates:
         missing.append(

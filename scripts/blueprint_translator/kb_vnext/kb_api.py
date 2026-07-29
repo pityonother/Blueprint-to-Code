@@ -2897,10 +2897,14 @@ class VNextKnowledgeService:
                 reason=cache_reason,
             )
             return cached_response
-        with closing(self._core()) as core:
+        with closing(self._core()) as core, closing(self._search()) as search:
             capabilities = core_schema_capabilities(core)
             try:
-                result = plan_query(core, request)
+                result = plan_query(
+                    core,
+                    request,
+                    search_connection=search,
+                )
             except sqlite3.DatabaseError:
                 if capabilities["compatible"]:
                     raise

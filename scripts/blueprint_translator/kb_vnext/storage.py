@@ -614,6 +614,13 @@ CREATE TABLE search_aliases(
     PRIMARY KEY(alias, entity_id, alias_kind)
 ) WITHOUT ROWID;
 
+CREATE INDEX idx_entity_search_display_nocase
+    ON entity_search_meta(display_name COLLATE NOCASE, entity_id);
+CREATE INDEX idx_entity_search_internal_nocase
+    ON entity_search_meta(internal_name COLLATE NOCASE, entity_id);
+CREATE INDEX idx_search_aliases_nocase
+    ON search_aliases(alias COLLATE NOCASE, entity_id);
+
 CREATE VIRTUAL TABLE entities_fts USING fts5(
     entity_id UNINDEXED,
     canonical_uri,
