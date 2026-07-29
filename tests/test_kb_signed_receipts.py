@@ -397,6 +397,10 @@ class SignedReceiptTests(unittest.TestCase):
 
             self.assertEqual(verified.receipt_id, "receipt-test-001")
             self.assertEqual(verified.signer_id, "test-reviewer-001")
+            self.assertEqual(
+                verified.public_key_fingerprint,
+                self.registry["reviewers"][0]["publicKeyFingerprint"],
+            )
             self.assertEqual(verified.role, "REVIEWER")
             self.assertEqual(verified.claim["decision"], "CONFIRMED")
             self.assertEqual(verified.artifact_sha256, artifact_sha)

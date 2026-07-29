@@ -148,6 +148,7 @@ class VerifiedSignedReceipt:
 
     receipt_id: str
     signer_id: str
+    public_key_fingerprint: str
     role: str
     nonce: str
     issued_at: datetime
@@ -806,6 +807,7 @@ def verify_signed_receipt(
     return VerifiedSignedReceipt(
         receipt_id=receipt_id,
         signer_id=signer_id,
+        public_key_fingerprint=signer.public_key_fingerprint,
         role=role,
         nonce=nonce,
         issued_at=issued_at,
