@@ -266,6 +266,26 @@ class KnowledgeCutoverBurnInTests(unittest.TestCase):
                     source_path=source,
                 )
 
+    def test_rollback_must_reference_attested_sealed_snapshots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "burn-in.json"
+            attestation = _valid_fixture_attestation()
+            attestation["rollbackDrill"]["toBuildId"] = "not-attested"
+            source.write_text(
+                json.dumps(attestation),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "rollback drill build IDs are invalid",
+            ):
+                _stage_burn_in_attestation(
+                    staging=root / "staging",
+                    source_path=source,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

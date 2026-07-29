@@ -119,6 +119,7 @@ def validate_burn_in_attestation(
     if len(raw_snapshots) < MINIMUM_SEALED_BUILDS:
         raise ValueError("at least three sealed snapshots are required")
     build_ids: set[str] = set()
+    report_hashes: set[str] = set()
     for index, raw_snapshot in enumerate(raw_snapshots):
         snapshot = _mapping(
             raw_snapshot,
@@ -143,8 +144,12 @@ def validate_burn_in_attestation(
             raise ValueError("sealed snapshot build IDs must be valid and unique")
         build_ids.add(build_id)
         report_sha = str(snapshot.get("qualityReportSha256") or "").lower()
-        if not _SHA256.fullmatch(report_sha):
+        if (
+            not _SHA256.fullmatch(report_sha)
+            or report_sha in report_hashes
+        ):
             raise ValueError("sealed snapshot quality report SHA-256 is invalid")
+        report_hashes.add(report_sha)
         _timestamp(
             snapshot.get("passedAt"),
             label=f"sealedSnapshots[{index}].passedAt",
@@ -215,6 +220,8 @@ def validate_burn_in_attestation(
         not _BUILD_ID.fullmatch(from_build)
         or not _BUILD_ID.fullmatch(to_build)
         or from_build == to_build
+        or from_build not in build_ids
+        or to_build not in build_ids
     ):
         raise ValueError("rollback drill build IDs are invalid")
     _timestamp(
