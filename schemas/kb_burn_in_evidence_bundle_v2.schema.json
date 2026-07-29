@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/kb_burn_in_evidence_bundle_v2.schema.json",
+  "title": "ARK KB vNext burn-in evidence bundle v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "policyVersion",
+    "burnInRunId",
+    "candidateBuildId",
+    "previousBuildId",
+    "previousManifestSha256",
+    "sealedSnapshots",
+    "incrementalScenarioReceipts",
+    "rollbackReceipt",
+    "concurrentReaderReceipt",
+    "shadowDiffDispositionReceipt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ark-kb-burn-in-evidence-bundle/v2"
+    },
+    "policyVersion": {
+      "const": "ark-kb-burn-in-policy/v2"
+    },
+    "burnInRunId": {
+      "$ref": "#/$defs/runId"
+    },
+    "candidateBuildId": {
+      "$ref": "#/$defs/buildId"
+    },
+    "previousBuildId": {
+      "$ref": "#/$defs/buildId"
+    },
+    "previousManifestSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "sealedSnapshots": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/sealedSnapshot"
+      }
+    },
+    "incrementalScenarioReceipts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blueprintModified",
+        "blueprintAdded",
+        "blueprintDeleted",
+        "registrationTargetChanged",
+        "classParentChanged",
+        "nativeEvidenceUpdated",
+        "runtimeSummaryUpdated",
+        "workerCrash",
+        "narrowGateFailure",
+        "pointerPreSwapCrash",
+        "concurrentReaders",
+        "unchangedCacheHit"
+      ],
+      "properties": {
+        "blueprintModified": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "blueprintAdded": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "blueprintDeleted": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "registrationTargetChanged": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "classParentChanged": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "nativeEvidenceUpdated": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "runtimeSummaryUpdated": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "workerCrash": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "narrowGateFailure": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "pointerPreSwapCrash": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "concurrentReaders": {
+          "$ref": "#/$defs/signedReceipt"
+        },
+        "unchangedCacheHit": {
+          "$ref": "#/$defs/signedReceipt"
+        }
+      }
+    },
+    "rollbackReceipt": {
+      "$ref": "#/$defs/signedReceipt"
+    },
+    "concurrentReaderReceipt": {
+      "$ref": "#/$defs/signedReceipt"
+    },
+    "shadowDiffDispositionReceipt": {
+      "$ref": "#/$defs/signedReceipt"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "buildId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$"
+    },
+    "artifactUri": {
+      "type": "string",
+      "pattern": "^artifact://[^\\\\%?#:]+(?:/[^\\\\%?#:]+)*$"
+    },
+    "sealedSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "buildId",
+        "manifestSha256",
+        "qualityReportSha256",
+        "previousBuildId",
+        "previousManifestSha256",
+        "qualityReportCutoverEligible",
+        "sealedInSnapshotManifest"
+      ],
+      "properties": {
+        "buildId": {
+          "$ref": "#/$defs/buildId"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "qualityReportSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "previousBuildId": {
+          "$ref": "#/$defs/buildId"
+        },
+        "previousManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "qualityReportCutoverEligible": {
+          "const": true
+        },
+        "sealedInSnapshotManifest": {
+          "const": true
+        }
+      }
+    },
+    "signedReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "signatureAlgorithm",
+        "payload",
+        "signedPayloadSha256",
+        "signatureBase64"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-signed-receipt-envelope/v2"
+        },
+        "signatureAlgorithm": {
+          "const": "Ed25519"
+        },
+        "payload": {
+          "$ref": "#/$defs/signedReceiptPayload"
+        },
+        "signedPayloadSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signatureBase64": {
+          "type": "string",
+          "minLength": 88,
+          "maxLength": 88
+        }
+      }
+    },
+    "signedReceiptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "receiptId",
+        "registryVersionSha256",
+        "trustContext",
+        "signerId",
+        "role",
+        "issuedAt",
+        "nonce",
+        "scope",
+        "artifactUri",
+        "artifactSha256",
+        "claim"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-signed-receipt-payload/v2"
+        },
+        "receiptId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "registryVersionSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "trustContext": {
+          "enum": ["PRODUCTION", "TEST_ONLY"]
+        },
+        "signerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "const": "BURN_IN_OPERATOR"
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 8
+        },
+        "scope": {
+          "type": "object",
+          "required": [
+            "kind",
+            "policyVersion",
+            "burnInRunId",
+            "candidateBuildId"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1
+            },
+            "policyVersion": {
+              "const": "ark-kb-burn-in-policy/v2"
+            },
+            "burnInRunId": {
+              "$ref": "#/$defs/runId"
+            },
+            "candidateBuildId": {
+              "$ref": "#/$defs/buildId"
+            }
+          }
+        },
+        "artifactUri": {
+          "$ref": "#/$defs/artifactUri"
+        },
+        "artifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "claim": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}
