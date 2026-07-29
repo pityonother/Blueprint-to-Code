@@ -30,9 +30,7 @@ from .projections import (
     compute_projection_artifact_content_digest,
 )
 from .benchmark import (
-    QUERY_CASE_RESULT_SCHEMA,
     QUERY_DIAGNOSTICS_SCHEMA,
-    QUERY_FAILURE_MATRIX_SCHEMA,
     query_diagnostic_artifact_bytes,
 )
 from .query_planner import (
