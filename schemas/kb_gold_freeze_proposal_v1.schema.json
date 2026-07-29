@@ -1,0 +1,609 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/kb_gold_freeze_proposal_v1.schema.json",
+  "title": "ARK KB signed Gold freeze proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "proposalReady",
+    "proposalId",
+    "packId",
+    "packSha256",
+    "kind",
+    "sourceManifestSha256",
+    "reviewReceiptSetSha256",
+    "caseChanges",
+    "jsonPatch",
+    "expectedGateDelta",
+    "unresolvedGaps",
+    "adjudicationGaps",
+    "provenance",
+    "applyBlockers",
+    "applyAllowed",
+    "productionGoldWritten"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ark-kb-gold-freeze-proposal/v1"
+    },
+    "status": {
+      "const": "PROPOSAL_READY"
+    },
+    "proposalReady": {
+      "const": true
+    },
+    "proposalId": {
+      "$ref": "#/$defs/sha256"
+    },
+    "packId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "packSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "kind": {
+      "const": "query"
+    },
+    "sourceManifestSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "reviewReceiptSetSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "caseChanges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/caseChange"
+      }
+    },
+    "jsonPatch": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/patchOperation"
+      }
+    },
+    "expectedGateDelta": {
+      "$ref": "#/$defs/expectedGateDelta"
+    },
+    "unresolvedGaps": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "adjudicationGaps": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "applyBlockers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "const": "SIGNED_V2_GOLD_PROVENANCE_CONSUMER_REQUIRED"
+        }
+      ],
+      "items": false
+    },
+    "applyAllowed": {
+      "const": false
+    },
+    "productionGoldWritten": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "caseChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caseId",
+        "caseIndex",
+        "verdict",
+        "artifactSha256",
+        "oldCaseSha256",
+        "newCaseSha256",
+        "reviewStatus",
+        "reviewStatusPreserved"
+      ],
+      "properties": {
+        "caseId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "caseIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verdict": {
+          "enum": [
+            "CONFIRMED",
+            "EXPECTED_GAP"
+          ]
+        },
+        "artifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "oldCaseSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "newCaseSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reviewStatus": {
+          "enum": [
+            "HUMAN_REVIEWED",
+            "EMPIRICAL",
+            "FIXTURE_EXACT"
+          ]
+        },
+        "reviewStatusPreserved": {
+          "const": true
+        }
+      }
+    },
+    "patchOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "path",
+        "value"
+      ],
+      "properties": {
+        "op": {
+          "const": "replace"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/cases/[0-9]+/expected$"
+        },
+        "value": {
+          "$ref": "#/$defs/queryExpected"
+        }
+      }
+    },
+    "queryExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "route",
+        "identityUri",
+        "facts",
+        "relationships",
+        "gapCodes",
+        "mustContainEvidence",
+        "semanticExpectation"
+      ],
+      "properties": {
+        "route": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identityUri": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identityStatus": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identityConfidence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identityEvidence": {
+          "$ref": "#/$defs/identityEvidence"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fact"
+          }
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relationship"
+          }
+        },
+        "gapCodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "mustContainEvidence": {
+          "type": "boolean"
+        },
+        "semanticExpectation": {
+          "enum": [
+            "EXACT",
+            "GAP_ONLY",
+            "IDENTITY_ONLY"
+          ]
+        }
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "factType",
+        "factName",
+        "valueKind",
+        "value",
+        "status",
+        "evidenceUri"
+      ],
+      "properties": {
+        "factType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "factName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "valueKind": {
+          "enum": [
+            "NUMBER",
+            "INTEGER",
+            "BOOLEAN",
+            "TEXT",
+            "ENTITY_REF",
+            "JSON"
+          ]
+        },
+        "value": true,
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidenceUri": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "valueKind": {
+                "const": "NUMBER"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "valueKind": {
+                "const": "INTEGER"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "valueKind": {
+                "const": "BOOLEAN"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "valueKind": {
+                "enum": [
+                  "TEXT",
+                  "ENTITY_REF"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edgeType",
+        "targetUri",
+        "status",
+        "evidenceUri"
+      ],
+      "properties": {
+        "edgeType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "targetUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidenceUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "freshness": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidenceLayer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "claimsCompleteMapUsage": {
+          "type": "boolean"
+        },
+        "claimsSpawnCoordinates": {
+          "type": "boolean"
+        }
+      }
+    },
+    "identityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceUri",
+        "evidenceRole",
+        "freshness",
+        "sourceRevision"
+      ],
+      "properties": {
+        "evidenceUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidenceRole": {
+          "type": "string",
+          "minLength": 1
+        },
+        "freshness": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRevision": {
+          "$ref": "#/$defs/sourceRevision"
+        }
+      }
+    },
+    "sourceRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceKind",
+        "sourceUri",
+        "sourceFingerprint",
+        "producerVersion",
+        "schemaVersion",
+        "freshness"
+      ],
+      "properties": {
+        "sourceKind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceFingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "producerVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schemaVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "freshness": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "expectedGateDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changedCaseCount",
+        "signedV2ReviewedCasesDelta",
+        "signedV2ProvenanceCaseCount",
+        "fixtureExactCasesDelta",
+        "qualityGateEvaluation",
+        "cutoverEligibleClaimed"
+      ],
+      "properties": {
+        "changedCaseCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signedV2ReviewedCasesDelta": {
+          "const": 0
+        },
+        "signedV2ProvenanceCaseCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fixtureExactCasesDelta": {
+          "const": 0
+        },
+        "qualityGateEvaluation": {
+          "const": "PENDING_FULL_SNAPSHOT_REBUILD"
+        },
+        "cutoverEligibleClaimed": {
+          "const": false
+        }
+      }
+    },
+    "artifactBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caseId",
+        "receiptId",
+        "artifactUri",
+        "artifactSha256",
+        "signedPayloadSha256",
+        "reviewerKeyFingerprint",
+        "resolutionRound"
+      ],
+      "properties": {
+        "caseId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "receiptId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifactUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signedPayloadSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reviewerKeyFingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "resolutionRound": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "packId",
+        "packSha256",
+        "sourceManifestSha256",
+        "sourceManifestRawSha256",
+        "targetRelativePath",
+        "targetRawSha256",
+        "expectedTargetRawSha256",
+        "registryVersionSha256",
+        "reviewReceiptSetSha256",
+        "signedV2ProvenanceCaseCount",
+        "caseArtifactBindings"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-gold-freeze-provenance/v1"
+        },
+        "packId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "packSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceManifestRawSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "targetRelativePath": {
+          "const": "tests/fixtures/kb_query_gold_set.v1.json"
+        },
+        "targetRawSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expectedTargetRawSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "registryVersionSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reviewReceiptSetSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signedV2ProvenanceCaseCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "caseArtifactBindings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifactBinding"
+          }
+        }
+      }
+    }
+  }
+}

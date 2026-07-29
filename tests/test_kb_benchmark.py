@@ -27,9 +27,151 @@ from blueprint_translator.kb_vnext.benchmark import (  # noqa: E402
     query_case_results_jsonl_bytes,
     query_diagnostic_artifact_bytes,
     query_failure_matrix_json_bytes,
+    validate_benchmark_gold_payload,
     validate_benchmark_shape,
 )
+
+
 class FixedGoldCorpusTests(unittest.TestCase):
+    def test_in_memory_canonical_gold_payload_validator_rejects_attacks(self):
+        original = json.loads(
+            DEFAULT_GOLD_SET_PATH.read_text(encoding="utf-8")
+        )
+        cases = validate_benchmark_gold_payload(original)
+        self.assertIsInstance(cases, tuple)
+        self.assertEqual(len(cases), len(original["cases"]))
+
+        payload = deepcopy(original)
+        exact = next(
+            case
+            for case in payload["cases"]
+            if case["expected"]["semanticExpectation"] == "EXACT"
+            and case["expected"]["facts"]
+        )
+        exact["expected"]["facts"] = []
+        exact["expected"]["relationships"] = []
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact semantic case has no expected answer",
+        ):
+            validate_benchmark_gold_payload(payload)
+
+        unknown_top = deepcopy(original)
+        unknown_top["currentPlannerAnswer"] = {}
+        integer_id = deepcopy(original)
+        integer_id["cases"][0]["id"] = 7
+        string_boolean = deepcopy(original)
+        string_boolean["cases"][0]["requirements"]["requiresNative"] = "false"
+        integer_evidence = deepcopy(original)
+        fact_case = next(
+            case
+            for case in integer_evidence["cases"]
+            if case["expected"]["facts"]
+        )
+        fact_case["expected"]["facts"][0]["evidenceUri"] = 123
+        string_fact_boolean = deepcopy(original)
+        boolean_case = next(
+            case
+            for case in string_fact_boolean["cases"]
+            if any(
+                fact["valueKind"] == "BOOLEAN"
+                for fact in case["expected"]["facts"]
+            )
+        )
+        boolean_fact = next(
+            fact
+            for fact in boolean_case["expected"]["facts"]
+            if fact["valueKind"] == "BOOLEAN"
+        )
+        boolean_fact["value"] = "false"
+        unexpected_expected = deepcopy(original)
+        unexpected_expected["cases"][0]["expected"]["plannerRoute"] = (
+            "DB_SEMANTIC_COMPLETE"
+        )
+        float_budget = deepcopy(original)
+        float_budget["cases"][0]["requirements"]["budgetTokens"] = 3.7
+        unexpected_fact = deepcopy(original)
+        next(
+            case
+            for case in unexpected_fact["cases"]
+            if case["expected"]["facts"]
+        )["expected"]["facts"][0]["currentConfidence"] = 1.0
+        unexpected_relationship = deepcopy(original)
+        next(
+            case
+            for case in unexpected_relationship["cases"]
+            if case["expected"]["relationships"]
+        )["expected"]["relationships"][0]["currentStatus"] = "CONFIRMED"
+        unexpected_identity = deepcopy(original)
+        identity_case = next(
+            case
+            for case in unexpected_identity["cases"]
+            if "identityEvidence" in case["expected"]
+        )
+        identity_case["expected"]["identityEvidence"]["currentIdentity"] = {}
+        unexpected_revision = deepcopy(original)
+        revision_case = next(
+            case
+            for case in unexpected_revision["cases"]
+            if "identityEvidence" in case["expected"]
+        )
+        revision_case["expected"]["identityEvidence"]["sourceRevision"][
+            "generatedAt"
+        ] = "2026-07-30T00:00:00Z"
+        attacks = (
+            ("unknown-top", unknown_top, "unexpected fields"),
+            ("integer-id", integer_id, "id must be a non-empty string"),
+            (
+                "string-boolean",
+                string_boolean,
+                "requiresNative must be a boolean",
+            ),
+            (
+                "integer-evidence",
+                integer_evidence,
+                "evidenceUri must be a non-empty string",
+            ),
+            (
+                "string-fact-boolean",
+                string_fact_boolean,
+                "BOOLEAN value must be a boolean",
+            ),
+            (
+                "unexpected-expected",
+                unexpected_expected,
+                "expected has unexpected fields",
+            ),
+            (
+                "float-budget",
+                float_budget,
+                "budgetTokens must be a positive integer",
+            ),
+            (
+                "unexpected-fact",
+                unexpected_fact,
+                "fact 1 has unexpected fields",
+            ),
+            (
+                "unexpected-relationship",
+                unexpected_relationship,
+                "relationship 1 has unexpected fields",
+            ),
+            (
+                "unexpected-identity",
+                unexpected_identity,
+                "identityEvidence has unexpected fields",
+            ),
+            (
+                "unexpected-source-revision",
+                unexpected_revision,
+                "sourceRevision has unexpected fields",
+            ),
+        )
+        for attack, attacked_payload, error in attacks:
+            with self.subTest(attack=attack):
+                with self.assertRaisesRegex(ValueError, error):
+                    validate_benchmark_gold_payload(attacked_payload)
+
     def test_checked_in_corpus_is_fixed_and_meets_all_case_quotas(self):
         payload = load_benchmark_gold_set(DEFAULT_GOLD_SET_PATH)
         cases = payload["cases"]
