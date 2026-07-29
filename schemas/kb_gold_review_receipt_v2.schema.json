@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/kb_gold_review_receipt_v2.schema.json",
+  "title": "ARK KB signed Gold review receipt envelope v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "signatureAlgorithm",
+    "payload",
+    "signedPayloadSha256",
+    "signatureBase64"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ark-kb-signed-receipt-envelope/v2"
+    },
+    "signatureAlgorithm": {
+      "const": "Ed25519"
+    },
+    "payload": {
+      "$ref": "#/$defs/payload"
+    },
+    "signedPayloadSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "signatureBase64": {
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "receiptId",
+        "registryVersionSha256",
+        "trustContext",
+        "signerId",
+        "role",
+        "issuedAt",
+        "nonce",
+        "scope",
+        "artifactUri",
+        "artifactSha256",
+        "claim"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-signed-receipt-payload/v2"
+        },
+        "receiptId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "registryVersionSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "trustContext": {
+          "enum": [
+            "PRODUCTION",
+            "TEST_ONLY"
+          ]
+        },
+        "signerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "enum": [
+            "REVIEWER",
+            "ADJUDICATOR"
+          ]
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 8
+        },
+        "scope": {
+          "$ref": "#/$defs/signedScope"
+        },
+        "artifactUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "claim": {
+          "$ref": "#/$defs/signedClaim"
+        }
+      }
+    },
+    "signedScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "packId",
+        "packSha256",
+        "kind",
+        "sourceManifestSha256",
+        "caseId",
+        "candidateSha256",
+        "round"
+      ],
+      "properties": {
+        "contract": {
+          "const": "ark-kb-gold-review/v2"
+        },
+        "packId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "packSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "kind": {
+          "enum": [
+            "query",
+            "registration",
+            "role"
+          ]
+        },
+        "sourceManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "caseId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidateSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "signedClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "artifactSchema"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-gold-review-claim/v2"
+        },
+        "artifactSchema": {
+          "const": "ark-kb-gold-review-artifact/v2"
+        }
+      }
+    }
+  }
+}
