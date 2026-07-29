@@ -66,6 +66,46 @@ class CurrentPointerBaseline:
             )
 
 
+@dataclass(frozen=True)
+class CurrentSnapshotBaseline:
+    """One exact current pointer and manifest; not a whole-tree attestation."""
+
+    pointer: CurrentPointerBaseline
+    snapshot_dir: Path
+    manifest_bytes: bytes
+    manifest_sha256: str
+    tree_validated: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.pointer) is not CurrentPointerBaseline
+            or self.pointer.build_id is None
+            or self.pointer.pointer_sha256 is None
+        ):
+            raise ValueError(
+                "snapshot baseline requires an existing current pointer"
+            )
+        if (
+            type(self.manifest_bytes) is not bytes
+            or not self.manifest_bytes
+            or len(self.manifest_bytes) > _MAX_MANIFEST_BYTES
+            or hashlib.sha256(self.manifest_bytes).hexdigest()
+            != self.manifest_sha256
+            or self.tree_validated is not False
+        ):
+            raise ValueError(
+                "snapshot baseline manifest contract is invalid"
+            )
+        _validate_optional_sha256(
+            self.manifest_sha256,
+            label="snapshot baseline manifest SHA-256",
+        )
+        if self.snapshot_dir.name != self.pointer.build_id:
+            raise ValueError(
+                "snapshot baseline path and buildId differ"
+            )
+
+
 class PointerCASError(RuntimeError):
     """Base class for typed current-pointer write failures."""
 
@@ -183,8 +223,50 @@ def _read_bounded_file(
     maximum_bytes: int,
     label: str,
 ) -> bytes:
-    with path.open("rb") as handle:
-        raw = handle.read(maximum_bytes + 1)
+    try:
+        before = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if (
+        _is_link_junction_or_reparse(path)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+    ):
+        raise ValueError(f"{label} is not a private regular file")
+    try:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino)
+                != (before.st_dev, before.st_ino)
+                or opened.st_size != before.st_size
+                or opened.st_mtime_ns != before.st_mtime_ns
+            ):
+                raise ValueError(f"{label} changed before open")
+            raw = handle.read(maximum_bytes + 1)
+            opened_after = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise ValueError(f"{label} is unreadable") from exc
+    try:
+        after = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"{label} changed during read") from exc
+    if (
+        _is_link_junction_or_reparse(path)
+        or not stat.S_ISREG(after.st_mode)
+        or after.st_nlink != 1
+        or (opened_after.st_dev, opened_after.st_ino)
+        != (opened.st_dev, opened.st_ino)
+        or opened_after.st_size != opened.st_size
+        or opened_after.st_mtime_ns != opened.st_mtime_ns
+        or (after.st_dev, after.st_ino)
+        != (opened.st_dev, opened.st_ino)
+        or after.st_size != opened.st_size
+        or after.st_mtime_ns != opened.st_mtime_ns
+    ):
+        raise ValueError(f"{label} changed during read")
     if not raw or len(raw) > maximum_bytes:
         raise ValueError(f"{label} size is invalid")
     return raw
@@ -192,6 +274,8 @@ def _read_bounded_file(
 
 def _read_pointer_bytes(snapshot_root: Path) -> bytes | None:
     pointer_path = snapshot_root / CURRENT_POINTER_NAME
+    if _is_link_junction_or_reparse(pointer_path):
+        raise ValueError("current snapshot pointer is not a regular file")
     if not pointer_path.exists():
         return None
     if not pointer_path.is_file():
@@ -316,12 +400,12 @@ def _current_pointer_lock(
                 pass
 
 
-def _validate_destination(
+def _read_validated_destination_snapshot(
     snapshot_root: Path,
     target_build_id: str,
     *,
     expected_manifest_sha256: str | None = None,
-) -> str:
+) -> tuple[Path, bytes, str]:
     snapshots_root = snapshot_root / "snapshots"
     if _is_link_junction_or_reparse(snapshots_root):
         raise PointerCASDestinationError(
@@ -403,6 +487,22 @@ def _validate_destination(
         raise PointerCASDestinationError(
             "pointer destination manifest SHA-256 changed"
         )
+    return destination, manifest_bytes, manifest_sha256
+
+
+def _validate_destination(
+    snapshot_root: Path,
+    target_build_id: str,
+    *,
+    expected_manifest_sha256: str | None = None,
+) -> str:
+    _destination, _manifest_bytes, manifest_sha256 = (
+        _read_validated_destination_snapshot(
+            snapshot_root,
+            target_build_id,
+            expected_manifest_sha256=expected_manifest_sha256,
+        )
+    )
     return manifest_sha256
 
 
@@ -563,6 +663,58 @@ def _locked_expected_pointer(
     return observed
 
 
+def capture_current_snapshot_baseline(
+    snapshot_root: Path,
+    *,
+    lock_timeout_seconds: float = _DEFAULT_LOCK_TIMEOUT_SECONDS,
+) -> CurrentSnapshotBaseline:
+    """Freeze current pointer and manifest identity under the shared lock."""
+
+    root = snapshot_root.resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(root)
+    with _current_pointer_lock(
+        root,
+        timeout_seconds=lock_timeout_seconds,
+    ):
+        pointer = _baseline_from_raw(_read_pointer_bytes(root))
+        if pointer.build_id is None:
+            raise PointerCASDestinationError(
+                "current snapshot pointer is not available"
+            )
+        snapshot_dir, manifest_bytes, manifest_sha256 = (
+            _read_validated_destination_snapshot(
+                root,
+                pointer.build_id,
+            )
+        )
+        _locked_expected_pointer(root, pointer)
+        (
+            verified_snapshot_dir,
+            verified_manifest_bytes,
+            verified_manifest_sha256,
+        ) = _read_validated_destination_snapshot(
+            root,
+            pointer.build_id,
+            expected_manifest_sha256=manifest_sha256,
+        )
+        if (
+            verified_snapshot_dir != snapshot_dir
+            or verified_manifest_bytes != manifest_bytes
+            or verified_manifest_sha256 != manifest_sha256
+        ):
+            raise PointerCASDestinationError(
+                "current snapshot manifest changed during capture"
+            )
+        _locked_expected_pointer(root, pointer)
+        return CurrentSnapshotBaseline(
+            pointer=pointer,
+            snapshot_dir=snapshot_dir,
+            manifest_bytes=manifest_bytes,
+            manifest_sha256=manifest_sha256,
+        )
+
+
 def validate_current_pointer_destination(
     *,
     snapshot_root: Path,
@@ -647,6 +799,36 @@ def validate_current_pointer_destination(
             target_manifest_sha256
         )
         return receipt
+
+
+def validate_current_snapshot_baseline(
+    *,
+    snapshot_root: Path,
+    baseline: CurrentSnapshotBaseline,
+    operation: str = "UPDATE_BASELINE_VALIDATION",
+    lock_timeout_seconds: float = _DEFAULT_LOCK_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    """Recheck an exact captured current pointer and manifest without writes."""
+
+    if type(baseline) is not CurrentSnapshotBaseline:
+        raise TypeError("current snapshot baseline is required")
+    root = snapshot_root.resolve()
+    expected_dir = (
+        root / "snapshots" / str(baseline.pointer.build_id)
+    ).resolve()
+    if baseline.snapshot_dir != expected_dir:
+        raise PointerCASDestinationError(
+            "snapshot baseline path does not match the snapshot root"
+        )
+    return validate_current_pointer_destination(
+        snapshot_root=root,
+        target_build_id=str(baseline.pointer.build_id),
+        expected=baseline.pointer,
+        expected_current_manifest_sha256=baseline.manifest_sha256,
+        expected_target_manifest_sha256=baseline.manifest_sha256,
+        operation=operation,
+        lock_timeout_seconds=lock_timeout_seconds,
+    )
 
 
 def compare_and_swap_current_pointer(

@@ -188,6 +188,12 @@ class SourceManifest:
     def __post_init__(self) -> None:
         if self.schema != SOURCE_MANIFEST_SCHEMA:
             raise ValueError("source manifest schema is invalid")
+        if type(self.entries) is not tuple or any(
+            type(item) is not SourceRevision for item in self.entries
+        ):
+            raise ValueError(
+                "source manifest entries must be an immutable revision tuple"
+            )
         _validate_generated_at(self.generated_at)
         if len({item.source_id for item in self.entries}) != len(
             self.entries
@@ -266,6 +272,106 @@ class SourceDiff:
             "changed": [value.payload() for value in self.changed],
             "deleted": [value.payload() for value in self.deleted],
         }
+
+
+def _validate_source_diff_changes(
+    *,
+    label: str,
+    expected_kind: str,
+    changes: object,
+) -> tuple[SourceChange, ...]:
+    if type(changes) is not tuple:
+        raise ValueError(f"source diff {label} must be a tuple")
+    values = changes
+    identifiers: list[str] = []
+    for change in values:
+        if type(change) is not SourceChange:
+            raise ValueError(
+                f"source diff {label} contains an invalid change"
+            )
+        if change.change_kind != expected_kind:
+            raise ValueError(
+                f"source diff {label} requires {expected_kind} changes"
+            )
+        if not _HEX_SHA256.fullmatch(change.source_id):
+            raise ValueError(
+                f"source diff {label} sourceId is invalid"
+            )
+        if expected_kind == "ADDED":
+            valid = (
+                change.previous is None
+                and type(change.current) is SourceRevision
+                and change.current.source_id == change.source_id
+            )
+        elif expected_kind == "DELETED":
+            valid = (
+                type(change.previous) is SourceRevision
+                and change.current is None
+                and change.previous.source_id == change.source_id
+            )
+        else:
+            valid = (
+                type(change.previous) is SourceRevision
+                and type(change.current) is SourceRevision
+                and change.previous.source_id == change.source_id
+                and change.current.source_id == change.source_id
+                and change.previous != change.current
+            )
+        if not valid:
+            raise ValueError(
+                f"source diff {label} {expected_kind} identity is invalid"
+            )
+        identifiers.append(change.source_id)
+    if identifiers != sorted(set(identifiers)):
+        raise ValueError(
+            f"source diff {label} is not in canonical order"
+        )
+    return values
+
+
+def canonical_source_diff_bytes(diff: SourceDiff) -> bytes:
+    """Serialize one fully checked source diff through the sole contract."""
+
+    if type(diff) is not SourceDiff:
+        raise TypeError("source diff is required")
+    if diff.schema != SOURCE_DIFF_SCHEMA:
+        raise ValueError("source diff schema is invalid")
+    added = _validate_source_diff_changes(
+        label="added",
+        expected_kind="ADDED",
+        changes=diff.added,
+    )
+    changed = _validate_source_diff_changes(
+        label="changed",
+        expected_kind="CHANGED",
+        changes=diff.changed,
+    )
+    deleted = _validate_source_diff_changes(
+        label="deleted",
+        expected_kind="DELETED",
+        changes=diff.deleted,
+    )
+    identifiers = [
+        change.source_id
+        for change in (*added, *changed, *deleted)
+    ]
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError(
+            "source diff change groups contain duplicate sourceId"
+        )
+    return json.dumps(
+        diff.payload(),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def source_diff_sha256(diff: SourceDiff) -> str:
+    """Return the SHA-256 of the canonical source-diff bytes."""
+
+    return hashlib.sha256(canonical_source_diff_bytes(diff)).hexdigest()
 
 
 def source_id(source_kind: str, source_uri: str) -> str:
@@ -550,10 +656,12 @@ __all__ = [
     "SourceDiff",
     "SourceManifest",
     "SourceRevision",
+    "canonical_source_diff_bytes",
     "compare_source_manifests",
     "runtime_observations_sha256",
     "scan_source_manifest",
     "source_id",
+    "source_diff_sha256",
     "source_manifest_binding",
     "source_manifest_from_binding",
     "source_manifest_from_payload",
