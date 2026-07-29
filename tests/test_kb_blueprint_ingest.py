@@ -31,6 +31,10 @@ from blueprint_translator.kb_vnext.fact_store import (  # noqa: E402
     materialize_declared_defaults,
 )
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
+from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
+    SourceRevision,
+    source_id,
+)
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     FULL_CORE_SCHEMA_SQL,
 )
@@ -686,6 +690,32 @@ def _discovery(
     return connection
 
 
+def _capture_source_revision(
+    capture_root: Path,
+    revision: str,
+    *,
+    fingerprint: str | None = None,
+) -> SourceRevision:
+    database = capture_root / "BP_Test" / "evidence" / "evidence.sqlite"
+    manifest = database.parent / "manifest.json"
+    digest = hashlib.sha256()
+    for path in (database, manifest):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\n")
+    source_uri = "capture://BP_Test"
+    return SourceRevision(
+        source_id=source_id("BLUEPRINT_EVIDENCE", source_uri),
+        source_kind="BLUEPRINT_EVIDENCE",
+        source_uri=source_uri,
+        fingerprint=fingerprint or digest.hexdigest(),
+        size_bytes=database.stat().st_size,
+        entity_uri=OBJECT_PATH,
+        revision_label=revision,
+    )
+
+
 def _core() -> sqlite3.Connection:
     connection = sqlite3.connect(":memory:")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -939,6 +969,129 @@ class BlueprintIngestTests(unittest.TestCase):
                 for value in row
             )
             self.assertNotIn(r"C:\Users", persisted)
+            core.close()
+            discovery.close()
+
+    def test_explicit_manifest_subset_ingests_new_capture_not_yet_marked_in_discovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            capture_root = root / "captures"
+            revision, database_path, package_fingerprint = _write_capture(
+                capture_root
+            )
+            discovery = _discovery(
+                revision,
+                package_path=database_path.parents[1] / "BP_Test.uasset",
+                package_fingerprint=package_fingerprint,
+            )
+            discovery.execute(
+                """
+                UPDATE assets
+                SET capture_exists=0,
+                    evidence_revision='',
+                    evidence_freshness='NOT_AVAILABLE'
+                """
+            )
+            core = _core()
+            source_revision = _capture_source_revision(
+                capture_root,
+                revision,
+            )
+
+            result = materialize_blueprint_defaults(
+                discovery,
+                core,
+                capture_root=capture_root,
+                ontology=self.ontology,
+                source_revisions=(source_revision,),
+            )
+
+            self.assertEqual(result.counts["freshAssets"], 1)
+            self.assertEqual(
+                core.execute(
+                    """
+                    SELECT value_integer, status
+                    FROM facts
+                    WHERE fact_name='Count'
+                    """
+                ).fetchall(),
+                [(7, "CONFIRMED")],
+            )
+            core.close()
+            discovery.close()
+
+    def test_explicit_empty_subset_never_falls_back_to_full_capture_scan(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            capture_root = root / "captures"
+            revision, database_path, package_fingerprint = _write_capture(
+                capture_root
+            )
+            discovery = _discovery(
+                revision,
+                package_path=database_path.parents[1] / "BP_Test.uasset",
+                package_fingerprint=package_fingerprint,
+            )
+            core = _core()
+
+            result = materialize_blueprint_defaults(
+                discovery,
+                core,
+                capture_root=capture_root,
+                ontology=self.ontology,
+                source_revisions=(),
+            )
+
+            self.assertEqual(result.counts["freshAssets"], 0)
+            self.assertEqual(
+                core.execute("SELECT COUNT(*) FROM facts").fetchone()[0],
+                0,
+            )
+            core.close()
+            discovery.close()
+
+    def test_explicit_subset_rejects_changed_evidence_aggregate_before_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            capture_root = root / "captures"
+            revision, database_path, package_fingerprint = _write_capture(
+                capture_root
+            )
+            discovery = _discovery(
+                revision,
+                package_path=database_path.parents[1] / "BP_Test.uasset",
+                package_fingerprint=package_fingerprint,
+            )
+            core = _core()
+            source_revision = _capture_source_revision(
+                capture_root,
+                revision,
+                fingerprint="f" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "explicit Blueprint subset",
+            ):
+                materialize_blueprint_defaults(
+                    discovery,
+                    core,
+                    capture_root=capture_root,
+                    ontology=self.ontology,
+                    source_revisions=(source_revision,),
+                )
+
+            core.rollback()
+            self.assertEqual(
+                core.execute("SELECT COUNT(*) FROM facts").fetchone()[0],
+                0,
+            )
             core.close()
             discovery.close()
 

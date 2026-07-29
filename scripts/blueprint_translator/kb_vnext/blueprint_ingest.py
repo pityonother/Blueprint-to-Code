@@ -23,11 +23,13 @@ from ..evidence_schema import (
 from ..evidence_writer import DIRECT_PAYLOAD_PARSER_VERSION
 from .fact_store import FactValue, store_fact
 from .ontology import OntologyBundle
+from .source_manifest import SourceRevision
 
 
 MAX_INLINE_CONTAINER_ITEMS = 64
 MAX_INLINE_JSON_BYTES = 4096
 MAX_DECODED_VALUE_BYTES = 8 * 1024 * 1024
+MAX_EXPLICIT_BLUEPRINT_SOURCES = 32
 SQLITE_INTEGER_MIN = -(2**63)
 SQLITE_INTEGER_MAX = 2**63 - 1
 
@@ -107,6 +109,8 @@ class BlueprintIngestResult:
     covered_properties: frozenset[tuple[str, str]]
     freshness_gap_assets: frozenset[str]
     untrusted_assets: frozenset[str]
+    fact_ids: frozenset[int] = frozenset()
+    entity_ids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,16 @@ class _AssetCandidate:
     has_uasset: int
     has_uexp: int
     has_ubulk: int
+    capture_asset_name: str = ""
+
+
+@dataclass(frozen=True)
+class _ExplicitBlueprintSource:
+    source_uri: str
+    entity_uri: str
+    revision_label: str
+    fingerprint: str
+    capture_asset_name: str
 
 
 @dataclass(frozen=True)
@@ -1048,6 +1062,23 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _blueprint_aggregate_fingerprint(database_path: Path) -> str:
+    digest = hashlib.sha256()
+    for path in (
+        database_path,
+        database_path.parent / "manifest.json",
+    ):
+        if not path.is_file():
+            continue
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def _current_package_metadata(path: Path) -> dict[str, object]:
     extension = path.suffix.casefold()
     uexp = path.with_suffix(".uexp") if extension == ".uasset" else None
@@ -1214,8 +1245,54 @@ def _source_revision_id(
     return int(row[0])
 
 
+def _explicit_blueprint_sources(
+    source_revisions: Sequence[SourceRevision] | None,
+) -> dict[str, _ExplicitBlueprintSource] | None:
+    if source_revisions is None:
+        return None
+    if len(source_revisions) > MAX_EXPLICIT_BLUEPRINT_SOURCES:
+        raise ValueError(
+            "explicit Blueprint subset exceeds the reviewed source bound"
+        )
+    result: dict[str, _ExplicitBlueprintSource] = {}
+    source_uris: set[str] = set()
+    for revision in source_revisions:
+        encoded_name = (
+            revision.source_uri[len("capture://") :]
+            if revision.source_uri.startswith("capture://")
+            else ""
+        )
+        capture_asset_name = unquote(encoded_name)
+        if (
+            revision.source_kind != "BLUEPRINT_EVIDENCE"
+            or not encoded_name
+            or "/" in capture_asset_name
+            or "\\" in capture_asset_name
+            or not _SAFE_TOKEN.fullmatch(capture_asset_name)
+            or not _is_canonical_unreal_uri(revision.entity_uri)
+            or not _SAFE_TOKEN.fullmatch(revision.revision_label)
+            or revision.entity_uri in result
+            or revision.source_uri in source_uris
+        ):
+            raise ValueError(
+                "explicit Blueprint subset contains an unsafe or duplicate "
+                "source identity"
+            )
+        source_uris.add(revision.source_uri)
+        result[revision.entity_uri] = _ExplicitBlueprintSource(
+            source_uri=revision.source_uri,
+            entity_uri=revision.entity_uri,
+            revision_label=revision.revision_label,
+            fingerprint=revision.fingerprint,
+            capture_asset_name=capture_asset_name,
+        )
+    return result
+
+
 def _asset_candidates(
     discovery: sqlite3.Connection,
+    *,
+    explicit_sources: Mapping[str, _ExplicitBlueprintSource] | None = None,
 ) -> tuple[list[_AssetCandidate], int]:
     required = {
         "object_path",
@@ -1232,17 +1309,26 @@ def _asset_candidates(
     }
     if not required.issubset(_table_columns(discovery, "assets")):
         return [], 0
+    if explicit_sources is not None and not explicit_sources:
+        return [], 0
+    parameters: tuple[object, ...] = ()
+    selection = "capture_exists=1"
+    if explicit_sources is not None:
+        parameters = tuple(sorted(explicit_sources))
+        placeholders = ",".join("?" for _ in parameters)
+        selection = f"object_path IN ({placeholders})"
     rows = list(
         discovery.execute(
-            """
+            f"""
             SELECT object_path, asset_name, evidence_revision,
                    evidence_freshness, source_fingerprint,
                    file_size_total, source_modified,
                    has_uasset, has_uexp, has_ubulk
             FROM assets
-            WHERE capture_exists=1
+            WHERE {selection}
             ORDER BY object_path
-            """
+            """,
+            parameters,
         )
     )
     candidates: list[_AssetCandidate] = []
@@ -1259,20 +1345,36 @@ def _asset_candidates(
         has_uexp,
         has_ubulk,
     ) in rows:
-        if str(freshness or "").upper() != "FRESH":
+        explicit = (
+            explicit_sources.get(str(object_path or ""))
+            if explicit_sources is not None
+            else None
+        )
+        if explicit_sources is not None and explicit is None:
+            continue
+        if explicit is None and str(freshness or "").upper() != "FRESH":
             stale += 1
             continue
         candidates.append(
             _AssetCandidate(
                 object_path=str(object_path or ""),
                 asset_name=str(asset_name or ""),
-                evidence_revision=str(revision or ""),
+                evidence_revision=(
+                    explicit.revision_label
+                    if explicit is not None
+                    else str(revision or "")
+                ),
                 source_fingerprint=str(source_fingerprint or ""),
                 file_size_total=int(file_size_total or 0),
                 source_modified=str(source_modified or ""),
                 has_uasset=int(has_uasset or 0),
                 has_uexp=int(has_uexp or 0),
                 has_ubulk=int(has_ubulk or 0),
+                capture_asset_name=(
+                    explicit.capture_asset_name
+                    if explicit is not None
+                    else ""
+                ),
             )
         )
     return candidates, stale
@@ -1296,6 +1398,8 @@ def _capture_asset_name(candidate: _AssetCandidate) -> str:
     rejected.
     """
 
+    if candidate.capture_asset_name:
+        return candidate.capture_asset_name
     raw_name = candidate.asset_name.strip().replace("\\", "/")
     if "/" not in raw_name:
         return raw_name
@@ -1317,6 +1421,7 @@ def materialize_blueprint_defaults(
     *,
     capture_root: Path,
     ontology: OntologyBundle,
+    source_revisions: Sequence[SourceRevision] | None = None,
 ) -> BlueprintIngestResult:
     """Read only Discovery-selected FRESH Evidence stores into Core facts.
 
@@ -1324,7 +1429,17 @@ def materialize_blueprint_defaults(
     never enumerates the capture tree and never persists local source paths.
     """
 
-    candidates, stale_assets = _asset_candidates(discovery)
+    explicit_sources = _explicit_blueprint_sources(source_revisions)
+    candidates, stale_assets = _asset_candidates(
+        discovery,
+        explicit_sources=explicit_sources,
+    )
+    if explicit_sources is not None and {
+        candidate.object_path for candidate in candidates
+    } != set(explicit_sources):
+        raise ValueError(
+            "explicit Blueprint subset is not present in Discovery inventory"
+        )
     entity_ids = {
         str(uri): int(entity_id)
         for uri, entity_id in core.execute(
@@ -1335,6 +1450,7 @@ def materialize_blueprint_defaults(
     freshness_gaps: set[str] = set()
     untrusted_assets: set[str] = set()
     fact_ids: set[int] = set()
+    materialized_entity_ids: set[int] = set()
     counts = {
         "freshAssets": 0,
         "staleAssets": stale_assets,
@@ -1360,6 +1476,19 @@ def materialize_blueprint_defaults(
             database_path = asset_root / "evidence" / "evidence.sqlite"
             if not database_path.is_file():
                 raise _RejectedAsset("Evidence database is missing")
+            explicit = (
+                explicit_sources.get(candidate.object_path)
+                if explicit_sources is not None
+                else None
+            )
+            if (
+                explicit is not None
+                and _blueprint_aggregate_fingerprint(database_path)
+                != explicit.fingerprint
+            ):
+                raise _RejectedAsset(
+                    "Evidence aggregate changed after source manifest scan"
+                )
             evidence = sqlite3.connect(
                 f"file:{database_path.resolve().as_posix()}?mode=ro",
                 uri=True,
@@ -1506,6 +1635,7 @@ def materialize_blueprint_defaults(
         counts["freshAssets"] += 1
         counts["packageVerifiedAssets"] += 1
         counts["sourceRevisions"] += 1
+        materialized_entity_ids.add(entity_id)
 
     counts["declaredFacts"] = len(fact_ids)
     if fact_ids:
@@ -1519,10 +1649,23 @@ def materialize_blueprint_defaults(
                 tuple(sorted(fact_ids)),
             ).fetchone()[0]
         )
+    if (
+        explicit_sources is not None
+        and (
+            counts["freshAssets"] != len(explicit_sources)
+            or counts["freshnessGapAssets"]
+            or counts["rejectedAssets"]
+        )
+    ):
+        raise ValueError(
+            "explicit Blueprint subset failed evidence or freshness validation"
+        )
     core.commit()
     return BlueprintIngestResult(
         counts=counts,
         covered_properties=frozenset(covered),
         freshness_gap_assets=frozenset(freshness_gaps),
         untrusted_assets=frozenset(untrusted_assets),
+        fact_ids=frozenset(fact_ids),
+        entity_ids=frozenset(materialized_entity_ids),
     )
