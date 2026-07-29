@@ -473,6 +473,29 @@ class IntegrationBackend(CoreMaterializerRebuildBackend):
             scope.cache.execute(f'DELETE FROM "{table}"')
 
 
+class BindUnassignedNativeGoldBackend(RebuildBackend):
+    def rebuild_native_function(self, scope: RebuildScope) -> None:
+        scope.core.execute(
+            """
+            UPDATE native_functions
+            SET status='CONFIRMED'
+            WHERE native_function_id=?
+            """,
+            (scope.task.downstream_id,),
+        )
+        scope.core.execute(
+            """
+            UPDATE native_gold_targets
+            SET native_function_id=?,
+                status='CONFIRMED',
+                gap_code=''
+            WHERE qualified_symbol='UAsset::Rate'
+              AND expected_rva='0x10'
+            """,
+            (scope.task.downstream_id,),
+        )
+
+
 class NoopRoleBackend(RebuildBackend):
     def rebuild_role_entity(self, scope: RebuildScope) -> None:
         return None
@@ -485,6 +508,49 @@ class TouchOnlyRoleBackend(RebuildBackend):
             UPDATE knowledge_roles
             SET status=status
             WHERE entity_id=?
+            """,
+            (scope.task.downstream_id,),
+        )
+
+
+class MixedScopeRoleBackend(RebuildBackend):
+    def rebuild_role_entity(self, scope: RebuildScope) -> None:
+        scope.core.execute(
+            """
+            UPDATE knowledge_roles
+            SET status='CONFIRMED'
+            WHERE entity_id=?
+            """,
+            (scope.task.downstream_id,),
+        )
+        scope.core.execute(
+            """
+            UPDATE entities
+            SET confidence='LOW'
+            WHERE entity_id=?
+            """,
+            (scope.task.downstream_id,),
+        )
+
+
+class BroadSameTableRoleBackend(RebuildBackend):
+    def rebuild_role_entity(self, scope: RebuildScope) -> None:
+        scope.core.execute(
+            """
+            UPDATE knowledge_roles
+            SET status='CONFIRMED'
+            """
+        )
+
+
+class PartialDomainBackend(RebuildBackend):
+    def rebuild_domain_entity(self, scope: RebuildScope) -> None:
+        scope.core.execute(
+            """
+            UPDATE domain_memberships
+            SET status='CONFIRMED'
+            WHERE entity_id=?
+              AND domain_id='item_use'
             """,
             (scope.task.downstream_id,),
         )
@@ -805,6 +871,27 @@ class SimulatedProcessCrash(BaseException):
 
 
 class RebuildWorkerTests(unittest.TestCase):
+    def test_every_supported_kind_has_exact_row_scope_policy(
+        self,
+    ) -> None:
+        rules = rebuild_worker_module._ROW_SCOPE_RULES
+        expected = rebuild_worker_module.EXPECTED_REBUILD_WRITE_TABLES
+
+        self.assertEqual(
+            set(rules),
+            set(rebuild_worker_module.SUPPORTED_REBUILD_KINDS),
+        )
+        self.assertEqual(set(rules), set(expected))
+        for kind, table_rules in rules.items():
+            self.assertEqual(set(table_rules), set(expected[kind]))
+            for rule in table_rules.values():
+                if not rule.columns:
+                    self.assertEqual(kind, "QUERY_SNAPSHOT")
+                    self.assertEqual(
+                        rule.mode,
+                        "EXPLICIT_WHOLE_CACHE_BATCH",
+                    )
+
     def test_real_schema_backend_rebuilds_all_kinds_and_projections_once(
         self,
     ) -> None:
@@ -889,6 +976,29 @@ class RebuildWorkerTests(unittest.TestCase):
                 for receipt in payload["_rebuildReceipts"].values()
             )
         )
+        query_scope = payload["_rebuildReceipts"][
+            "QUERY_SNAPSHOT:1"
+        ]["verification"]["rowScope"]
+        self.assertEqual(
+            query_scope,
+            {
+                "mode": "EXPLICIT_WHOLE_CACHE_BATCH",
+                "eventId": "event-1",
+                "targetId": 1,
+                "tables": [
+                    "answer_plans",
+                    "context_packs",
+                    "materialized_neighborhoods",
+                    "query_snapshots",
+                ],
+            },
+        )
+        class_scope = payload["_rebuildReceipts"][
+            "CLASS_CLOSURE:11"
+        ]["verification"]["rowScope"]
+        self.assertEqual(class_scope["mode"], "AFFECTED_CLASS_IDS")
+        self.assertEqual(class_scope["rootClassId"], 11)
+        self.assertIn(11, class_scope["classIds"])
 
         repeat = drain_rebuild_queue(
             core,
@@ -900,6 +1010,53 @@ class RebuildWorkerTests(unittest.TestCase):
         self.assertEqual(backend.projection_calls, 1)
         core.close()
         cache.close()
+
+    def test_native_gold_identity_can_bind_null_function_id(
+        self,
+    ) -> None:
+        core = _core()
+        _seed_integration_core(core)
+        core.execute(
+            """
+            UPDATE native_gold_targets
+            SET native_function_id=NULL
+            WHERE target_id='native-target-1'
+            """
+        )
+        core.commit()
+        _queue(core, [("NATIVE_FUNCTION", 21)])
+
+        report = drain_rebuild_queue(
+            core,
+            BindUnassignedNativeGoldBackend(),
+            max_items=1,
+            recover_running=False,
+        )
+
+        self.assertEqual(report.succeeded, 1)
+        self.assertEqual(report.failed, 0)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT native_function_id, status, gap_code
+                FROM native_gold_targets
+                WHERE target_id='native-target-1'
+                """
+            ).fetchone(),
+            (21, "CONFIRMED", ""),
+        )
+        payload = json.loads(
+            core.execute(
+                "SELECT payload_json FROM invalidation_events"
+            ).fetchone()[0]
+        )
+        self.assertEqual(
+            payload["_rebuildReceipts"]["NATIVE_FUNCTION:21"][
+                "verification"
+            ]["rowScope"]["mode"],
+            "NATIVE_FUNCTION_IDENTITY",
+        )
+        core.close()
 
     def test_noop_backend_cannot_self_attest_success(self) -> None:
         core = _core()
@@ -948,6 +1105,138 @@ class RebuildWorkerTests(unittest.TestCase):
                 "SELECT status FROM invalidation_queue"
             ).fetchone()[0],
             "FAILED",
+        )
+        core.close()
+
+    def test_expected_and_unrelated_writes_fail_closed_and_rollback(
+        self,
+    ) -> None:
+        core = _core()
+        _seed_role(core, status="STALE")
+        _queue(core, [("ROLE_ENTITY", 1)])
+
+        report = drain_rebuild_queue(
+            core,
+            MixedScopeRoleBackend(),
+            max_items=1,
+            recover_running=False,
+        )
+
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.succeeded, 0)
+        self.assertEqual(
+            core.execute(
+                "SELECT status FROM invalidation_queue"
+            ).fetchone()[0],
+            "FAILED",
+        )
+        self.assertEqual(
+            core.execute(
+                "SELECT status FROM knowledge_roles"
+            ).fetchone()[0],
+            "STALE",
+        )
+        self.assertEqual(
+            core.execute(
+                "SELECT confidence FROM entities WHERE entity_id=1"
+            ).fetchone()[0],
+            "HIGH",
+        )
+        core.close()
+
+    def test_same_table_write_outside_task_scope_fails_and_rolls_back(
+        self,
+    ) -> None:
+        core = _core()
+        core.execute(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (
+                2, '/Game/Test/Other.Other', 'BLUEPRINT_ASSET',
+                'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+        core.commit()
+        _seed_role(core, status="STALE", entity_id=1)
+        _seed_role(core, status="STALE", entity_id=2)
+        _queue(core, [("ROLE_ENTITY", 1)])
+
+        report = drain_rebuild_queue(
+            core,
+            BroadSameTableRoleBackend(),
+            max_items=1,
+            recover_running=False,
+        )
+
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.succeeded, 0)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT entity_id, status
+                FROM knowledge_roles
+                ORDER BY entity_id
+                """
+            ).fetchall(),
+            [(1, "STALE"), (2, "STALE")],
+        )
+        self.assertEqual(
+            core.execute(
+                "SELECT status FROM invalidation_queue"
+            ).fetchone()[0],
+            "FAILED",
+        )
+        core.close()
+
+    def test_incomplete_gap_rolls_back_partial_canonical_writes(
+        self,
+    ) -> None:
+        core = _core()
+        core.executemany(
+            """
+            INSERT INTO domain_memberships VALUES (
+                1, ?, 'CLASS_ANCESTRY', 'HIGH', 'STALE',
+                ?, 'v1', 1
+            )
+            """,
+            [
+                ("item_use", "class://item"),
+                ("creature_use", "class://creature"),
+            ],
+        )
+        core.commit()
+        _queue(core, [("DOMAIN_ENTITY", 1)])
+
+        report = drain_rebuild_queue(
+            core,
+            PartialDomainBackend(),
+            max_items=1,
+            recover_running=False,
+        )
+
+        self.assertEqual(report.blocked_gap, 1)
+        self.assertEqual(report.succeeded, 0)
+        self.assertEqual(report.failed, 0)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT domain_id, status
+                FROM domain_memberships
+                ORDER BY domain_id
+                """
+            ).fetchall(),
+            [
+                ("creature_use", "STALE"),
+                ("item_use", "STALE"),
+            ],
+        )
+        self.assertEqual(
+            core.execute(
+                "SELECT status FROM invalidation_queue"
+            ).fetchone()[0],
+            BLOCKED_GAP,
         )
         core.close()
 
@@ -1619,6 +1908,47 @@ class RebuildWorkerTests(unittest.TestCase):
                 "SELECT validation_status FROM projection_runs"
             ).fetchone()[0],
             "STALE",
+        )
+        core.close()
+
+    def test_projection_write_cannot_exceed_queued_batch_scope(
+        self,
+    ) -> None:
+        core = _core()
+        for projection_name in DOMAIN_PROJECTIONS:
+            core.execute(
+                """
+                INSERT INTO projection_runs VALUES (
+                    ?, 'v2', 'old-hash', 'v1',
+                    '2026-07-28T00:00:00Z', 0, 'STALE'
+                )
+                """,
+                (projection_name,),
+            )
+        core.commit()
+        _queue(core, [("PROJECTION", 1)])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "projections"
+            output_dir.mkdir()
+            report = drain_rebuild_queue(
+                core,
+                CompleteProjectionBackend(projection_dir=output_dir),
+                max_items=1,
+                recover_running=False,
+            )
+
+            self.assertEqual(report.failed, 1)
+            self.assertEqual(report.succeeded, 0)
+            self.assertEqual(list(output_dir.glob("*.sqlite")), [])
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT DISTINCT source_revision_set_hash
+                FROM projection_runs
+                """
+            ).fetchall(),
+            [("old-hash",)],
         )
         core.close()
 

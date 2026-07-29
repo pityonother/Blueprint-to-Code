@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from .projections import (
@@ -82,48 +83,169 @@ _EXTERNAL_MARKER_SCHEMA: Final = "ark-kb-rebuild-external-marker/v1"
 _RETRYABLE_TERMINAL_STATUSES: Final = frozenset({FAILED, BLOCKED_GAP})
 _MAX_CLASS_CLOSURE_SCOPE: Final = 4096
 
-_EXPECTED_WRITE_TABLES: Final = {
-    "FACT": frozenset({"facts", "fact_evidence"}),
-    "EFFECTIVE_ENTITY": frozenset(
-        {"effective_facts", "effective_fact_candidates"}
-    ),
-    "ROLE_ENTITY": frozenset(
-        {
-            "knowledge_roles",
-            "knowledge_depth_policies",
-            "role_metrics",
-        }
-    ),
-    "DOMAIN_ENTITY": frozenset({"domain_memberships"}),
-    "EDGE_ENTITY": frozenset({"edges"}),
-    "CLASS_CLOSURE": frozenset(
-        {
-            "class_closure",
-            "class_gaps",
-            "class_ancestry_categories",
-        }
-    ),
-    "REGISTRATION_ENTITY": frozenset({"typed_registrations"}),
-    "NATIVE_FUNCTION": frozenset(
-        {
-            "native_functions",
-            "native_field_accesses",
-            "native_gold_targets",
-        }
-    ),
-    "BLUEPRINT_NATIVE_ENTITY": frozenset(
-        {"native_blueprint_links"}
-    ),
-    "PROJECTION": frozenset({"projection_runs"}),
-    "QUERY_SNAPSHOT": frozenset(
-        {
-            "query_snapshots",
-            "context_packs",
-            "answer_plans",
-            "materialized_neighborhoods",
-        }
-    ),
-}
+EXPECTED_REBUILD_WRITE_TABLES: Final[
+    Mapping[str, frozenset[str]]
+] = MappingProxyType(
+    {
+        "FACT": frozenset({"facts", "fact_evidence"}),
+        "EFFECTIVE_ENTITY": frozenset(
+            {"effective_facts", "effective_fact_candidates"}
+        ),
+        "ROLE_ENTITY": frozenset(
+            {
+                "knowledge_roles",
+                "knowledge_depth_policies",
+                "role_metrics",
+            }
+        ),
+        "DOMAIN_ENTITY": frozenset({"domain_memberships"}),
+        "EDGE_ENTITY": frozenset({"edges"}),
+        "CLASS_CLOSURE": frozenset(
+            {
+                "class_closure",
+                "class_gaps",
+                "class_ancestry_categories",
+            }
+        ),
+        "REGISTRATION_ENTITY": frozenset({"typed_registrations"}),
+        "NATIVE_FUNCTION": frozenset(
+            {
+                "native_functions",
+                "native_field_accesses",
+                "native_gold_targets",
+            }
+        ),
+        "BLUEPRINT_NATIVE_ENTITY": frozenset(
+            {"native_blueprint_links"}
+        ),
+        "PROJECTION": frozenset({"projection_runs"}),
+        "QUERY_SNAPSHOT": frozenset(
+            {
+                "query_snapshots",
+                "context_packs",
+                "answer_plans",
+                "materialized_neighborhoods",
+            }
+        ),
+    }
+)
+
+_ROW_SCOPE_GUARD_PREFIX: Final = "ark_kb_rebuild_row_scope_"
+
+
+@dataclass(frozen=True)
+class _RowScopeRule:
+    """Columns whose values must belong to the durable task scope.
+
+    Multiple columns are alternatives.  This is needed for registrations,
+    where either the owner URI or target URI may identify the queued entity.
+    An empty tuple is reserved for an explicitly verified whole-table batch.
+    """
+
+    columns: tuple[str, ...]
+    mode: str = "SCOPED_VALUES"
+
+
+_ROW_SCOPE_RULES: Final[
+    Mapping[str, Mapping[str, _RowScopeRule]]
+] = MappingProxyType(
+    {
+        "FACT": MappingProxyType(
+            {
+                "facts": _RowScopeRule(("fact_id",)),
+                "fact_evidence": _RowScopeRule(("fact_id",)),
+            }
+        ),
+        "EFFECTIVE_ENTITY": MappingProxyType(
+            {
+                "effective_facts": _RowScopeRule(("entity_id",)),
+                "effective_fact_candidates": _RowScopeRule(("entity_id",)),
+            }
+        ),
+        "ROLE_ENTITY": MappingProxyType(
+            {
+                "knowledge_roles": _RowScopeRule(("entity_id",)),
+                "knowledge_depth_policies": _RowScopeRule(("entity_id",)),
+                "role_metrics": _RowScopeRule(("entity_id",)),
+            }
+        ),
+        "DOMAIN_ENTITY": MappingProxyType(
+            {
+                "domain_memberships": _RowScopeRule(("entity_id",)),
+            }
+        ),
+        "EDGE_ENTITY": MappingProxyType(
+            {
+                "edges": _RowScopeRule(("source_entity_id",)),
+            }
+        ),
+        "CLASS_CLOSURE": MappingProxyType(
+            {
+                "class_closure": _RowScopeRule(("descendant_class_id",)),
+                "class_gaps": _RowScopeRule(("class_id",)),
+                "class_ancestry_categories": _RowScopeRule(("class_id",)),
+            }
+        ),
+        "REGISTRATION_ENTITY": MappingProxyType(
+            {
+                "typed_registrations": _RowScopeRule(
+                    ("owner_uri", "target_uri")
+                ),
+            }
+        ),
+        "NATIVE_FUNCTION": MappingProxyType(
+            {
+                "native_functions": _RowScopeRule(
+                    ("native_function_id",)
+                ),
+                "native_field_accesses": _RowScopeRule(
+                    ("native_function_id",)
+                ),
+                "native_gold_targets": _RowScopeRule(
+                    (
+                        "native_function_id",
+                        "qualified_symbol",
+                        "expected_rva",
+                    ),
+                    mode="NATIVE_GOLD_IDENTITY",
+                ),
+            }
+        ),
+        "BLUEPRINT_NATIVE_ENTITY": MappingProxyType(
+            {
+                "native_blueprint_links": _RowScopeRule(
+                    ("blueprint_entity_id",)
+                ),
+            }
+        ),
+        "PROJECTION": MappingProxyType(
+            {
+                "projection_runs": _RowScopeRule(("projection_name",)),
+            }
+        ),
+        "QUERY_SNAPSHOT": MappingProxyType(
+            {
+                # Query invalidation is an explicit all-cache-rows batch.
+                "query_snapshots": _RowScopeRule(
+                    (),
+                    mode="EXPLICIT_WHOLE_CACHE_BATCH",
+                ),
+                "context_packs": _RowScopeRule(
+                    (),
+                    mode="EXPLICIT_WHOLE_CACHE_BATCH",
+                ),
+                "answer_plans": _RowScopeRule(
+                    (),
+                    mode="EXPLICIT_WHOLE_CACHE_BATCH",
+                ),
+                "materialized_neighborhoods": _RowScopeRule(
+                    (),
+                    mode="EXPLICIT_WHOLE_CACHE_BATCH",
+                ),
+            }
+        ),
+    }
+)
 
 
 class RebuildWorkerError(RuntimeError):
@@ -1979,11 +2101,38 @@ def _projection_batch_hit(
     receipts = payload.get(_RECEIPTS_KEY)
     if not isinstance(batch, dict) or not isinstance(receipts, dict):
         return False
+
+    def row_scope_matches(receipt: Mapping[str, object]) -> bool:
+        verification = receipt.get("verification")
+        if not isinstance(verification, dict):
+            return False
+        row_scope = verification.get("rowScope")
+        if not isinstance(row_scope, dict):
+            return False
+        raw_names = row_scope.get("projectionNames")
+        if (
+            row_scope.get("mode") != "EXPLICIT_PROJECTION_BATCH"
+            or not isinstance(raw_names, list)
+            or not raw_names
+            or any(
+                not isinstance(name, str) or name not in _PROJECTION_NAMES
+                for name in raw_names
+            )
+            or len(raw_names) != len(set(raw_names))
+        ):
+            return False
+        scope_ids = {
+            str(_PROJECTION_NAMES.index(name) + 1)
+            for name in raw_names
+        }
+        return scope_ids == set(batch)
+
     batch_proven = any(
         isinstance(receipt, dict)
         and receipt.get("downstreamKind") == "PROJECTION"
         and receipt.get("status") == SUCCEEDED
         and receipt.get("projectionBatch") == batch
+        and row_scope_matches(receipt)
         and _receipt_is_valid(receipt)
         for receipt in receipts.values()
     )
@@ -2224,6 +2373,324 @@ def _claim_next_task(
         raise
 
 
+def _quoted_identifier(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _sql_literal(value: object) -> str:
+    if isinstance(value, bool):
+        raise RebuildVerificationError(
+            "boolean row-scope values are not allowed"
+        )
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str) and value:
+        return "'" + value.replace("'", "''") + "'"
+    raise RebuildVerificationError("invalid row-scope value")
+
+
+def _projection_scope(
+    connection: sqlite3.Connection,
+    task: RebuildTask,
+    seed: object,
+) -> tuple[str, ...]:
+    if not isinstance(seed, str) or seed not in _PROJECTION_NAMES:
+        return ()
+    raw_ids = [
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT downstream_id
+            FROM invalidation_queue
+            WHERE event_id=? AND downstream_kind='PROJECTION'
+            ORDER BY downstream_id
+            """,
+            (task.event_id,),
+        )
+    ]
+    if (
+        not raw_ids
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= len(_PROJECTION_NAMES)
+            for value in raw_ids
+        )
+    ):
+        raise RebuildVerificationError(
+            "projection event batch scope is invalid"
+        )
+    projection_ids = tuple(sorted(set(int(value) for value in raw_ids)))
+    if task.downstream_id not in projection_ids:
+        raise RebuildVerificationError(
+            "projection task is outside its durable event batch"
+        )
+    return tuple(_PROJECTION_NAMES[value - 1] for value in projection_ids)
+
+
+def _row_scope_values(
+    connection: sqlite3.Connection,
+    task: RebuildTask,
+    seed: object,
+) -> tuple[object, ...] | None:
+    kind = task.downstream_kind
+    if kind == "QUERY_SNAPSHOT":
+        # The four declared cache tables form one explicit invalidation batch.
+        return None
+    if kind == "CLASS_CLOSURE":
+        if not isinstance(seed, _ClassClosureSeed):
+            return ()
+        return tuple(seed.affected_class_ids)
+    if kind == "REGISTRATION_ENTITY":
+        uri = _entity_uri(connection, task.downstream_id)
+        return () if uri is None else (uri,)
+    if kind == "PROJECTION":
+        return _projection_scope(connection, task, seed)
+    return (task.downstream_id,)
+
+
+def _row_scope_predicate(
+    rule: _RowScopeRule,
+    values: tuple[object, ...] | None,
+    row_alias: str,
+    task: RebuildTask,
+    seed: object,
+) -> str:
+    if rule.mode == "EXPLICIT_WHOLE_CACHE_BATCH":
+        if (
+            rule.columns
+            or values is not None
+            or task.downstream_kind != "QUERY_SNAPSHOT"
+        ):
+            raise RebuildVerificationError(
+                "whole-cache scope requires the explicit query batch policy"
+            )
+        return "1"
+    if rule.mode == "NATIVE_GOLD_IDENTITY":
+        if (
+            task.downstream_kind != "NATIVE_FUNCTION"
+            or not isinstance(seed, tuple)
+            or len(seed) != 3
+        ):
+            return "0"
+        _canonical_uri, qualified_symbol, expected_rva = seed
+        identity_predicate = (
+            f"{row_alias}.\"native_function_id\" = "
+            f"{_sql_literal(task.downstream_id)}"
+            " OR ("
+            f"{row_alias}.\"qualified_symbol\" = "
+            f"{_sql_literal(str(qualified_symbol))}"
+            " AND "
+            f"{row_alias}.\"expected_rva\" = "
+            f"{_sql_literal(str(expected_rva))}"
+            ")"
+        )
+        return f"COALESCE(({identity_predicate}), 0)"
+    if rule.mode != "SCOPED_VALUES":
+        raise RebuildVerificationError(
+            f"unknown row-scope policy mode: {rule.mode}"
+        )
+    if values is None:
+        raise RebuildVerificationError(
+            "row-scoped table cannot use a whole-table batch"
+        )
+    if not values:
+        return "0"
+    literals = ", ".join(_sql_literal(value) for value in values)
+    predicate = " OR ".join(
+        (
+            f"{row_alias}.{_quoted_identifier(column)} "
+            f"IN ({literals})"
+        )
+        for column in rule.columns
+    )
+    return f"COALESCE(({predicate}), 0)"
+
+
+def _install_row_scope_guards(
+    connection: sqlite3.Connection,
+    task: RebuildTask,
+    seed: object,
+    *,
+    cache_scope: bool,
+) -> None:
+    kind = task.downstream_kind
+    if set(_ROW_SCOPE_RULES) != set(SUPPORTED_REBUILD_KINDS):
+        raise RebuildVerificationError(
+            "row-scope policies do not cover every supported rebuild kind"
+        )
+    rules = _ROW_SCOPE_RULES.get(kind)
+    expected_tables = EXPECTED_REBUILD_WRITE_TABLES.get(kind)
+    if rules is None or expected_tables is None:
+        raise RebuildVerificationError(
+            f"no row-scope policy for supported kind {kind}"
+        )
+    if set(rules) != set(expected_tables):
+        raise RebuildVerificationError(
+            f"row-scope tables differ from canonical write scope for {kind}"
+        )
+    is_cache_kind = kind == "QUERY_SNAPSHOT"
+    if cache_scope != is_cache_kind:
+        return
+    values = _row_scope_values(connection, task, seed)
+    for table, rule in rules.items():
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                f"PRAGMA table_info({_quoted_identifier(table)})"
+            )
+        }
+        if not columns or not set(rule.columns).issubset(columns):
+            raise RebuildVerificationError(
+                f"row-scope columns are missing for {kind}:{table}"
+            )
+        trigger_base = (
+            _ROW_SCOPE_GUARD_PREFIX
+            + kind.lower()
+            + "_"
+            + table.lower()
+        )
+        table_sql = f"main.{_quoted_identifier(table)}"
+        for operation, predicate in (
+            (
+                "insert",
+                _row_scope_predicate(
+                    rule,
+                    values,
+                    "NEW",
+                    task,
+                    seed,
+                ),
+            ),
+            (
+                "delete",
+                _row_scope_predicate(
+                    rule,
+                    values,
+                    "OLD",
+                    task,
+                    seed,
+                ),
+            ),
+            (
+                "update",
+                (
+                    "("
+                    + _row_scope_predicate(
+                        rule,
+                        values,
+                        "OLD",
+                        task,
+                        seed,
+                    )
+                    + ") AND ("
+                    + _row_scope_predicate(
+                        rule,
+                        values,
+                        "NEW",
+                        task,
+                        seed,
+                    )
+                    + ")"
+                ),
+            ),
+        ):
+            trigger_name = f"{trigger_base}_{operation}"
+            connection.execute(
+                f"""
+                CREATE TEMP TRIGGER {_quoted_identifier(trigger_name)}
+                BEFORE {operation.upper()} ON {table_sql}
+                WHEN NOT ({predicate})
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'backend write exceeded durable task row scope'
+                    );
+                END
+                """
+            )
+
+
+def _drop_row_scope_guards(connection: sqlite3.Connection) -> None:
+    names = [
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name
+            FROM sqlite_temp_schema
+            WHERE type='trigger' AND name GLOB ?
+            ORDER BY name
+            """,
+            (_ROW_SCOPE_GUARD_PREFIX + "*",),
+        )
+    ]
+    for name in names:
+        connection.execute(
+            f"DROP TRIGGER IF EXISTS temp.{_quoted_identifier(name)}"
+        )
+
+
+def _row_scope_receipt(
+    connection: sqlite3.Connection,
+    task: RebuildTask,
+    seed: object,
+) -> dict[str, object]:
+    kind = task.downstream_kind
+    if kind == "QUERY_SNAPSHOT":
+        return {
+            "mode": "EXPLICIT_WHOLE_CACHE_BATCH",
+            "eventId": task.event_id,
+            "targetId": task.downstream_id,
+            "tables": sorted(EXPECTED_REBUILD_WRITE_TABLES[kind]),
+        }
+    if kind == "PROJECTION":
+        return {
+            "mode": "EXPLICIT_PROJECTION_BATCH",
+            "eventId": task.event_id,
+            "targetId": task.downstream_id,
+            "projectionNames": list(
+                _projection_scope(connection, task, seed)
+            ),
+        }
+    if kind == "CLASS_CLOSURE":
+        if not isinstance(seed, _ClassClosureSeed):
+            raise RebuildVerificationError(
+                "class closure row scope has no verified affected set"
+            )
+        return {
+            "mode": "AFFECTED_CLASS_IDS",
+            "rootClassId": seed.root_class_id,
+            "classIds": list(seed.affected_class_ids),
+        }
+    if kind == "REGISTRATION_ENTITY":
+        uri = _entity_uri(connection, task.downstream_id)
+        if uri is None:
+            raise RebuildVerificationError(
+                "registration row scope has no entity URI"
+            )
+        return {
+            "mode": "ENTITY_URI",
+            "targetId": task.downstream_id,
+            "entityUri": uri,
+        }
+    if kind == "NATIVE_FUNCTION":
+        if not isinstance(seed, tuple) or len(seed) != 3:
+            raise RebuildVerificationError(
+                "native row scope has no verified function identity"
+            )
+        return {
+            "mode": "NATIVE_FUNCTION_IDENTITY",
+            "targetId": task.downstream_id,
+            "canonicalUri": str(seed[0]),
+            "qualifiedSymbol": str(seed[1]),
+            "rva": str(seed[2]),
+        }
+    return {
+        "mode": "TASK_TARGET_ID",
+        "targetId": task.downstream_id,
+    }
+
+
 class _WriteTracker:
     def __init__(
         self,
@@ -2320,6 +2787,7 @@ def _begin_backend_transactions(
     connection: sqlite3.Connection,
     backend: RebuildBackend,
     task: RebuildTask,
+    seed: object,
 ) -> tuple[sqlite3.Connection | None, _WriteTracker, _WriteTracker]:
     connection.execute("BEGIN IMMEDIATE")
     core_tracker = _WriteTracker(
@@ -2337,7 +2805,6 @@ def _begin_backend_transactions(
         ),
     )
     cache_tracker = _WriteTracker()
-    connection.set_authorizer(core_tracker.authorizer)
     cache = (
         _backend_cache_connection(backend)
         if task.downstream_kind == "QUERY_SNAPSHOT"
@@ -2357,6 +2824,31 @@ def _begin_backend_transactions(
                 "rebuild worker requires the default cache row_factory"
             )
         cache.execute("BEGIN IMMEDIATE")
+    try:
+        _install_row_scope_guards(
+            connection,
+            task,
+            seed,
+            cache_scope=False,
+        )
+        if cache is not None:
+            _install_row_scope_guards(
+                cache,
+                task,
+                seed,
+                cache_scope=True,
+            )
+    except Exception:
+        _drop_row_scope_guards(connection)
+        if cache is not None:
+            _drop_row_scope_guards(cache)
+            if cache.in_transaction:
+                cache.rollback()
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    connection.set_authorizer(core_tracker.authorizer)
+    if cache is not None:
         cache.set_authorizer(cache_tracker.authorizer)
     return cache, core_tracker, cache_tracker
 
@@ -2366,8 +2858,10 @@ def _end_authorizers(
     cache: sqlite3.Connection | None,
 ) -> None:
     connection.set_authorizer(None)
+    _drop_row_scope_guards(connection)
     if cache is not None:
         cache.set_authorizer(None)
+        _drop_row_scope_guards(cache)
 
 
 def _rollback_backend_transactions(
@@ -2767,11 +3261,25 @@ def _projection_staging_dir(
 def _publish_projection_staging(
     staging_dir: Path,
     output_dir: Path,
+    allowed_projection_names: Iterable[str],
 ) -> "_ProjectionPublication":
     output_dir.mkdir(parents=False, exist_ok=True)
+    allowed = frozenset(str(value) for value in allowed_projection_names)
+    staged_projection_names = {
+        path.stem for path in staging_dir.glob("*.sqlite") if path.is_file()
+    }
+    if (
+        not allowed
+        or not allowed.issubset(_PROJECTION_NAMES)
+        or not staged_projection_names.issubset(allowed)
+    ):
+        raise RebuildVerificationError(
+            "staged projection artifacts exceed the durable event batch"
+        )
     sources = [
         staging_dir / f"{projection_name}.sqlite"
         for projection_name in _PROJECTION_NAMES
+        if projection_name in allowed
         if (staging_dir / f"{projection_name}.sqlite").is_file()
     ]
     if not sources:
@@ -2970,6 +3478,7 @@ def _run_task(
             connection,
             backend,
             task,
+            seed,
         )
         before = _inspect_target(
             connection,
@@ -3000,37 +3509,29 @@ def _run_task(
             projection_dir=staging_dir,
         )
         touched = core_tracker.tables | cache_tracker.tables
-        relevant_write = bool(
-            touched & _EXPECTED_WRITE_TABLES[task.downstream_kind]
-        )
+        expected_tables = EXPECTED_REBUILD_WRITE_TABLES[
+            task.downstream_kind
+        ]
+        unexpected_tables = touched - expected_tables
+        if unexpected_tables:
+            raise RebuildVerificationError(
+                "backend touched tables outside canonical write scope: "
+                + ", ".join(sorted(unexpected_tables))
+            )
+        relevant_write = bool(touched)
 
         if not after.complete and after.gap_codes:
             gap_code = after.gap_codes[0]
-            proof = _write_receipt(
-                connection,
-                task,
-                status=BLOCKED_GAP,
-                before=before,
-                after=after,
-                touched_tables=touched,
-                gap_code=gap_code,
-                detail=after.summary,
-            )
-            _set_task_status(
-                connection,
-                task,
-                BLOCKED_GAP,
-                require_running=True,
-            )
-            _commit_backend_transactions(connection, cache)
+            detail = after.summary
+            _rollback_backend_transactions(connection, cache)
             _cleanup_projection_staging(staging_dir)
-            return RebuildTaskOutcome(
-                task=task,
-                status=BLOCKED_GAP,
-                proof=proof,
-                gap_code=gap_code,
-                detail=after.summary,
-                touched_tables=tuple(sorted(touched)),
+            return _finish_gap(
+                connection,
+                backend,
+                task,
+                seed,
+                gap_code,
+                detail,
             )
         if not after.complete:
             raise RebuildVerificationError(
@@ -3070,12 +3571,15 @@ def _run_task(
             "PROJECTION",
             "QUERY_SNAPSHOT",
         }
+        write_operations = (
+            core_tracker.operations | cache_tracker.operations
+        )
         verification: dict[str, object] = {
             "basis": "TARGET_STATE_CHANGED",
             "coreWriteChanges": core_write_changes,
             "writeOperations": [
                 f"{table}:{operation}"
-                for table, operation in sorted(core_tracker.operations)
+                for table, operation in sorted(write_operations)
             ],
         }
         class_revision_verification = (
@@ -3106,14 +3610,25 @@ def _run_task(
         if not verified_work:
             raise RebuildVerificationError(
                 "backend produced no durable target rebuild"
-            )
+        )
         if class_revision_verification is not None:
             verification = class_revision_verification
+        verification["rowScope"] = _row_scope_receipt(
+            connection,
+            task,
+            seed,
+        )
 
         if staging_dir is not None:
+            allowed_projection_names = _projection_scope(
+                connection,
+                task,
+                seed,
+            )
             publication = _publish_projection_staging(
                 staging_dir,
                 _backend_projection_dir(backend),
+                allowed_projection_names,
             )
             after = _inspect_target(
                 connection,
@@ -3139,6 +3654,20 @@ def _run_task(
             if task.downstream_kind == "PROJECTION"
             else None
         )
+        if projection_batch is not None:
+            queued_projection_names = _projection_scope(
+                connection,
+                task,
+                seed,
+            )
+            required_projection_ids = {
+                str(_PROJECTION_NAMES.index(name) + 1)
+                for name in queued_projection_names
+            }
+            if not required_projection_ids.issubset(projection_batch):
+                raise RebuildVerificationError(
+                    "projection batch did not verify every queued projection"
+                )
         proof = _write_receipt(
             connection,
             task,
@@ -3373,6 +3902,7 @@ RebuildWorker = RebuildQueueWorker
 __all__ = [
     "BLOCKED_GAP",
     "CoreMaterializerRebuildBackend",
+    "EXPECTED_REBUILD_WRITE_TABLES",
     "FAILED",
     "PENDING_REBUILD",
     "QUEUE_STATUSES",

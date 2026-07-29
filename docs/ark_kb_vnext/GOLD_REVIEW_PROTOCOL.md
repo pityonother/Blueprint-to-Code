@@ -79,6 +79,13 @@ python scripts\validate_ark_kb_gold_reviews_v2.py `
 The command only validates. It does not freeze, write, commit, or publish
 production Gold.
 
+The separate Stage 13C proposal-only boundary is documented in
+`GOLD_FREEZE_PROPOSAL.md`. It reuses this validator and never substitutes a
+fixture, v1 receipt, subset result, or automated identity for a production
+review. It preserves original `reviewStatus` values and records signed-v2
+artifact provenance separately; no signed-v2 receipt is relabeled as legacy
+`HUMAN_REVIEWED`.
+
 `--case-id` is a diagnostic filter only. If its required case set is not
 exactly the complete candidate set in the bound pack, validation returns
 `BLOCKED_BY_INDEPENDENT_REVIEW`, `contractComplete=false`,

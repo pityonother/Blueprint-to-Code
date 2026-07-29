@@ -18,6 +18,7 @@ from .class_hierarchy import (
     _graph,
 )
 from .projections import DOMAIN_PROJECTIONS
+from .query_planner import is_valid_generic_evidence_uri
 
 
 CHANGE_KINDS = {
@@ -53,6 +54,25 @@ _NATIVE_ROOT_PROOF_FIELDS = {
 }
 RevisionIdentity = tuple[str, str, str, str, str, str, str]
 _MAX_EFFECTIVE_DEPENDENCY_CLASSES = 4096
+_ADDITIVE_REQUIRED_DERIVED_KINDS = {
+    "ROLE_ENTITY",
+    "DOMAIN_ENTITY",
+    "PROJECTION",
+    "QUERY_SNAPSHOT",
+}
+_ADDITIVE_ALLOWED_DEPENDENCY_KINDS = {
+    "CLASS_CLOSURE",
+    "REGISTRATION_ENTITY",
+    "FACT",
+    "EDGE_ENTITY",
+    "NATIVE_FUNCTION",
+    "BLUEPRINT_NATIVE_ENTITY",
+    "EFFECTIVE_ENTITY",
+    "ROLE_ENTITY",
+    "DOMAIN_ENTITY",
+    "PROJECTION",
+    "QUERY_SNAPSHOT",
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +88,16 @@ class InvalidationPlan:
     @property
     def affected_count(self) -> int:
         return sum(len(values) for values in self.downstream.values())
+
+
+class InvalidationBlockedGap(ValueError):
+    """A selective plan cannot safely represent the observed durable delta."""
+
+    status = "BLOCKED_GAP"
+
+    def __init__(self, gap_code: str, message: str) -> None:
+        super().__init__(message)
+        self.gap_code = gap_code
 
 
 def _table_exists(
@@ -1291,6 +1321,272 @@ def plan_invalidation(
         },
         reasons=reasons,
         class_closure_scopes=class_closure_scopes,
+    )
+
+
+def plan_additive_asset_invalidation(
+    connection: sqlite3.Connection,
+    *,
+    fact_ids: Iterable[int],
+    entity_ids: Iterable[int],
+    source_revision_ids: Iterable[int],
+    actual_write_tables: Iterable[str],
+) -> InvalidationPlan:
+    """Plan only dependencies proven by an add-only Blueprint fact delta.
+
+    This deliberately requires exact materialized role, domain, projection,
+    and query dependency coverage instead of treating the event kind alone as
+    proof that a broad generic ASSET plan is complete.
+    """
+
+    def strict_ids(values: Iterable[int], field: str) -> set[int]:
+        raw = tuple(values)
+        if (
+            not raw
+            or any(type(value) is not int or value < 1 for value in raw)
+            or len(raw) != len(set(raw))
+        ):
+            raise InvalidationBlockedGap(
+                "ADDITIVE_ASSET_WRITE_SCOPE_UNSUPPORTED",
+                f"add-only ASSET {field} must contain unique positive "
+                "integer IDs",
+            )
+        return set(raw)
+
+    facts = strict_ids(fact_ids, "fact scope")
+    entities = strict_ids(entity_ids, "entity scope")
+    revisions = strict_ids(source_revision_ids, "revision scope")
+    raw_tables = tuple(actual_write_tables)
+    if any(type(value) is not str for value in raw_tables):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_WRITE_SCOPE_UNSUPPORTED",
+            "add-only ASSET write table scope is not textual",
+        )
+    tables = set(raw_tables)
+    allowed_tables = {"source_revisions", "facts", "fact_evidence"}
+    required_tables = {"source_revisions", "fact_evidence"}
+    if (
+        not facts
+        or not entities
+        or not revisions
+        or not required_tables.issubset(tables)
+        or not tables.issubset(allowed_tables)
+    ):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_WRITE_SCOPE_UNSUPPORTED",
+            "add-only ASSET invalidation requires exact source, fact, "
+            "evidence, and entity scope",
+        )
+
+    fact_placeholders = ",".join("?" for _ in facts)
+    fact_rows = list(
+        connection.execute(
+            f"""
+            SELECT fact_id, subject_entity_id, fact_type, scope_kind,
+                   status, confidence, current
+            FROM facts
+            WHERE fact_id IN ({fact_placeholders})
+            ORDER BY fact_id
+            """,
+            tuple(sorted(facts)),
+        )
+    )
+    if (
+        any(
+            type(row[0]) is not int
+            or type(row[1]) is not int
+            or type(row[6]) is not int
+            for row in fact_rows
+        )
+        or {row[0] for row in fact_rows} != facts
+        or any(
+            row[1] not in entities
+            or str(row[2]).upper() != "DECLARED_DEFAULT"
+            or str(row[3]).upper() != "DECLARED"
+            for row in fact_rows
+        )
+    ):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_FACT_SCOPE_INVALID",
+            "fact scope is missing, unrelated, or not a declared default",
+        )
+    if any(
+        str(row[4]).upper() != "CONFIRMED"
+        or str(row[5]).upper() != "HIGH"
+        or row[6] != 1
+        for row in fact_rows
+    ):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_FACT_QUALITY_INVALID",
+            "new facts must be current CONFIRMED/HIGH facts",
+        )
+
+    revision_placeholders = ",".join("?" for _ in revisions)
+    evidence_rows = list(
+        connection.execute(
+            f"""
+            SELECT evidence.fact_id, evidence.source_revision_id,
+                   evidence.evidence_uri, evidence.evidence_role,
+                   revision.source_uri
+            FROM fact_evidence AS evidence
+            JOIN source_revisions AS revision
+              ON revision.revision_id=evidence.source_revision_id
+            WHERE evidence.fact_id IN ({fact_placeholders})
+              AND evidence.source_revision_id IN ({revision_placeholders})
+              AND LOWER(revision.source_kind)='blueprint_evidence'
+              AND UPPER(revision.freshness_status)='FRESH'
+            ORDER BY evidence.fact_id, evidence.source_revision_id
+            """,
+            (*sorted(facts), *sorted(revisions)),
+        )
+    )
+    if (
+        any(
+            type(row[0]) is not int or type(row[1]) is not int
+            for row in evidence_rows
+        )
+        or {row[0] for row in evidence_rows} != facts
+    ):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_FACT_EVIDENCE_MISSING",
+            "each fact must bind a fresh added Blueprint source revision",
+        )
+    if any(
+        str(row[3]).upper() != "DEFAULT_VALUE_ACTUAL"
+        or not is_valid_generic_evidence_uri(row[2])
+        or not str(row[2]).startswith(str(row[4]) + "/")
+        for row in evidence_rows
+    ):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_FACT_EVIDENCE_INVALID",
+            "fact evidence must use the bound Blueprint URI and actual role",
+        )
+
+    descendant_entities = _descendant_entities(
+        connection,
+        _entity_classes(connection, entities),
+    )
+    effective_entities = tuple(sorted(entities | descendant_entities))
+    raw_dependency_rows = list(
+        connection.execute(
+            f"""
+            SELECT upstream_revision_id, typeof(upstream_revision_id),
+                   downstream_kind, typeof(downstream_kind),
+                   downstream_id, typeof(downstream_id),
+                   dependency_reason, typeof(dependency_reason)
+            FROM invalidation_dependencies
+            WHERE upstream_revision_id IN ({revision_placeholders})
+            ORDER BY upstream_revision_id, downstream_kind,
+                     downstream_id, dependency_reason
+            """,
+            tuple(sorted(revisions)),
+        )
+    )
+    dependency_rows: list[tuple[int, str, int, str]] = []
+    for (
+        revision_id,
+        revision_id_type,
+        kind,
+        kind_type,
+        target_id,
+        target_id_type,
+        reason,
+        reason_type,
+    ) in raw_dependency_rows:
+        if (
+            type(revision_id) is not int
+            or revision_id_type != "integer"
+            or type(kind) is not str
+            or kind_type != "text"
+            or type(target_id) is not int
+            or target_id_type != "integer"
+            or type(reason) is not str
+            or reason_type != "text"
+        ):
+            raise InvalidationBlockedGap(
+                "ADDITIVE_ASSET_DERIVED_DEPENDENCIES_INVALID",
+                "derived dependency graph contains non-canonical types",
+            )
+        dependency_rows.append(
+            (revision_id, kind, target_id, reason)
+        )
+    if any(
+        kind not in _ADDITIVE_ALLOWED_DEPENDENCY_KINDS
+        or target_id < 1
+        or not reason.strip()
+        for _revision_id, kind, target_id, reason in dependency_rows
+    ):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_DERIVED_DEPENDENCIES_INVALID",
+            "derived dependency graph contains an unsupported target",
+        )
+
+    required_targets = {
+        "ROLE_ENTITY": set(entities),
+        "DOMAIN_ENTITY": set(entities),
+        "PROJECTION": _all_projection_ids(),
+    }
+    by_revision_kind: dict[tuple[int, str], set[int]] = {}
+    for revision_id, kind, target_id, _reason in dependency_rows:
+        by_revision_kind.setdefault((revision_id, kind), set()).add(target_id)
+    incomplete: list[str] = []
+    for revision_id in sorted(revisions):
+        expected_by_kind = {
+            kind: (
+                {revision_id}
+                if kind == "QUERY_SNAPSHOT"
+                else required_targets[kind]
+            )
+            for kind in _ADDITIVE_REQUIRED_DERIVED_KINDS
+        }
+        for kind, expected in expected_by_kind.items():
+            if by_revision_kind.get((revision_id, kind), set()) != expected:
+                incomplete.append(f"{revision_id}:{kind}")
+    if incomplete:
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_DERIVED_DEPENDENCIES_UNPROVEN",
+            "derived dependency completeness is unproven for "
+            + ", ".join(incomplete),
+        )
+
+    downstream: dict[str, set[int]] = {
+        "EFFECTIVE_ENTITY": set(effective_entities),
+        "FACT": set(facts),
+    }
+    reasons: dict[str, str] = {
+        "EFFECTIVE_ENTITY": "ADDED_DECLARED_DEFAULT_OR_PARENT",
+        "FACT": "ADDED_BLUEPRINT_FACT_EVIDENCE",
+    }
+    dependency_reasons: dict[str, set[str]] = {}
+    for _revision_id, kind, target_id, reason in dependency_rows:
+        if kind in {"FACT", "EFFECTIVE_ENTITY"}:
+            continue
+        downstream.setdefault(kind, set()).add(target_id)
+        dependency_reasons.setdefault(kind, set()).add(reason)
+    ambiguous = {
+        kind: values
+        for kind, values in dependency_reasons.items()
+        if len(values) != 1
+    }
+    if ambiguous:
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_DERIVED_DEPENDENCIES_AMBIGUOUS",
+            "derived dependency reasons cannot be represented exactly",
+        )
+    reasons.update(
+        {
+            kind: next(iter(values))
+            for kind, values in dependency_reasons.items()
+        }
+    )
+    return InvalidationPlan(
+        event_kind="ASSET",
+        upstream_revision_id=None,
+        downstream={
+            kind: tuple(sorted(values))
+            for kind, values in sorted(downstream.items())
+        },
+        reasons=dict(sorted(reasons.items())),
     )
 
 
