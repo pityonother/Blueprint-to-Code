@@ -1,8 +1,26 @@
 # ADR: vNext burn-in 与最终切换
 
-- 状态：Accepted
+- 状态：Amended by Stage 13
 - 日期：2026-07-29
 - 适用版本：`ark-kb-burn-in-policy/v1`
+
+## Stage 13 安全修订
+
+`ark-kb-burn-in-attestation/v1` 只验证可重算的 hash、人工身份字符串和
+布尔场景，不能证明签名人持有受信私钥，也没有把 drill claims 绑定到独立
+artifact。它现在只允许作为只读 diagnostics compatibility：
+
+```text
+status=DIAGNOSTIC_ONLY_V1
+gapCode=SIGNED_BURN_IN_V2_REQUIRED
+mode=shadow
+defaultQuerySource=legacy
+```
+
+即使 v1 attestation 的字段、历史 snapshot 和质量报告 hash 全部通过，
+也不能使 `qualityGates.cutoverEligible=true`。后续只有完成签名并绑定
+artifact 的 v2 合同后，才会重新开放 cutover evaluation。不得把旧 v1
+attestation 透明升级为 v2。
 
 ## 背景
 
@@ -24,13 +42,17 @@ defaultQuerySource=legacy
 
 ## 决策
 
-新的 immutable snapshot 只有同时满足以下两层条件，才能密封为
-`ready/vnext`：
+原始 Stage 12 决策要求新的 immutable snapshot 同时满足以下两层条件，
+才能密封为 `ready/vnext`：
 
 1. 质量报告包含完整且未削弱的 75 门，所有 critical gates 通过。
 2. 构建时显式提供、校验并复制一份
    `ark-kb-burn-in-attestation/v1`，其 SHA-256 密封进同一个
    snapshot manifest。
+
+Stage 13 安全修订后，第 2 条不再足以授权切换；v1 只能密封为 diagnostic
+artifact。签名 v2 合同完成前，构建器不存在可生成 `ready/vnext` 的
+attestation 路径。
 
 没有 attestation 时，即使质量报告为 `75/75`，manifest 也必须记录：
 
@@ -52,9 +74,9 @@ defaultQuerySource=legacy
 ```
 
 可变或事后生成的 gate report 只能作为 diagnostics，不能切换默认来源。
-最终切换必须重新执行 full snapshot build，并通过
-`--burn-in-attestation` 在发布前密封证据；禁止修改旧 manifest 或 current
-指向的 snapshot 内容。
+最终切换仍必须重新执行 full snapshot build，并在发布前密封 v2 证据；
+当前 `--burn-in-attestation` 接受的 v1 文件只形成 diagnostic binding。
+禁止修改旧 manifest 或 current 指向的 snapshot 内容。
 
 ## Burn-in 合同
 

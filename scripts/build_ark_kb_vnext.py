@@ -68,9 +68,9 @@ def _parser() -> argparse.ArgumentParser:
         "--burn-in-attestation",
         type=Path,
         help=(
-            "Human-approved burn-in evidence. Omit to keep the new "
-            "snapshot fail-closed in shadow/legacy even when all quality "
-            "gates pass."
+            "Legacy v1 burn-in diagnostics. V1 is sealed read-only but "
+            "cannot enable cutover; signed artifact-bound v2 evidence is "
+            "required. Omit to record the evidence as missing."
         ),
     )
     parser.add_argument("--full-snapshot", action="store_true")

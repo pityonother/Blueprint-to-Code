@@ -198,7 +198,7 @@ class KnowledgeCutoverBurnInTests(unittest.TestCase):
             "legacy",
         )
 
-    def test_valid_burn_in_is_hash_bound_before_ready_cutover(self):
+    def test_v1_burn_in_is_hash_bound_but_diagnostics_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             staging = root / "staging"
@@ -227,12 +227,19 @@ class KnowledgeCutoverBurnInTests(unittest.TestCase):
                 manifest=sealed,
             )
 
-            self.assertTrue(sealed["qualityGates"]["cutoverEligible"])
-            self.assertEqual(sealed["burnIn"]["status"], "VALID")
-            self.assertEqual(sealed["cutover"]["mode"], "ready")
+            self.assertFalse(sealed["qualityGates"]["cutoverEligible"])
+            self.assertEqual(
+                sealed["burnIn"]["status"],
+                "DIAGNOSTIC_ONLY_V1",
+            )
+            self.assertEqual(
+                sealed["burnIn"]["gapCode"],
+                "SIGNED_BURN_IN_V2_REQUIRED",
+            )
+            self.assertEqual(sealed["cutover"]["mode"], "shadow")
             self.assertEqual(
                 sealed["cutover"]["defaultQuerySource"],
-                "vnext",
+                "legacy",
             )
 
             burn_in_path = staging / "reports" / "burn_in_attestation.json"
@@ -250,6 +257,26 @@ class KnowledgeCutoverBurnInTests(unittest.TestCase):
                     snapshot_dir=staging,
                     manifest=sealed,
                 )
+
+    def test_unverified_v2_status_string_cannot_enable_cutover(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            staging = Path(temporary)
+            sealed = _seal_staged_quality_report(
+                staging=staging,
+                manifest={
+                    "schema": "ark-kb-vnext-snapshot/v1",
+                    "buildId": "fixture-build",
+                },
+                report=_passing_report(),
+                burn_in={"status": "VALID_V2"},
+            )
+
+        self.assertFalse(sealed["qualityGates"]["cutoverEligible"])
+        self.assertEqual(sealed["cutover"]["mode"], "shadow")
+        self.assertEqual(
+            sealed["cutover"]["defaultQuerySource"],
+            "legacy",
+        )
 
     def test_incomplete_incremental_scenarios_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
