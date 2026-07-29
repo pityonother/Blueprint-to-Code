@@ -10,8 +10,8 @@ performs the distinct rebuild phase:
 * it writes a content-addressed rebuild receipt into the event payload; and
 * it replays orphaned ``RUNNING`` work without duplicating a completed result.
 
-Only two selective materializers exist in the current package:
-``CLASS_CLOSURE`` and ``EFFECTIVE_ENTITY``.  They are wired by
+Only three selective materializers exist in the current package:
+``FACT``, ``CLASS_CLOSURE``, and ``EFFECTIVE_ENTITY``.  They are wired by
 :class:`CoreMaterializerRebuildBackend`.  Update orchestration must subclass it
 and provide the remaining source-, cache-, and projection-aware operations.
 An operation that is not configured becomes ``BLOCKED_GAP`` with a stable gap
@@ -466,7 +466,20 @@ def _backend_cache_connection(
 
 
 class CoreMaterializerRebuildBackend(RebuildBackend):
-    """Default bindings for the two currently selective core materializers."""
+    """Default bindings for the currently selective core materializers."""
+
+    def rebuild_fact(self, scope: RebuildScope) -> None:
+        from .fact_store import materialize_blueprint_fact
+
+        if not materialize_blueprint_fact(
+            scope.core,  # type: ignore[arg-type]
+            fact_id=scope.task.downstream_id,
+        ):
+            raise RebuildBlockedGap(
+                "FACT_SOURCE_NOT_MATERIALIZABLE",
+                "The fact lacks a fresh, revision-bound Blueprint Evidence "
+                "source that the production materializer can reactivate.",
+            )
 
     def rebuild_class_closure(self, scope: RebuildScope) -> None:
         from .class_hierarchy import rebuild_class_closure

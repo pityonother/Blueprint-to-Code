@@ -188,6 +188,81 @@ def store_fact(
     return fact_id
 
 
+def materialize_blueprint_fact(
+    connection: sqlite3.Connection,
+    *,
+    fact_id: int,
+) -> bool:
+    """Reactivate one ingested fact only from fresh Blueprint Evidence.
+
+    Selective source ingestion performs the expensive Evidence Store
+    validation first and persists its revision-bound fact/evidence rows.  The
+    rebuild worker then calls this narrow materializer after invalidation has
+    marked that exact fact non-current.
+    """
+
+    from .query_planner import (
+        is_valid_generic_evidence_uri,
+        source_revision_is_fresh,
+    )
+
+    rows = list(
+        connection.execute(
+            """
+            SELECT
+                fact.fact_type, fact.status, fact.current,
+                evidence.evidence_uri,
+                revision.revision_id, revision.source_kind,
+                revision.source_uri, revision.source_fingerprint,
+                revision.producer_version, revision.schema_version,
+                revision.generated_at, revision.freshness_status
+            FROM facts AS fact
+            LEFT JOIN fact_evidence AS evidence
+              ON evidence.fact_id=fact.fact_id
+            LEFT JOIN source_revisions AS revision
+              ON revision.revision_id=evidence.source_revision_id
+            WHERE fact.fact_id=?
+            ORDER BY evidence.source_revision_id, evidence.evidence_uri
+            """,
+            (int(fact_id),),
+        )
+    )
+    if not rows:
+        return False
+    fact_type = str(rows[0][0] or "").upper()
+    status = str(rows[0][1] or "").upper()
+    if fact_type != "DECLARED_DEFAULT" or status == "STALE":
+        return False
+    has_fresh_blueprint_evidence = any(
+        str(row[5] or "").upper() == "BLUEPRINT_EVIDENCE"
+        and is_valid_generic_evidence_uri(row[3])
+        and source_revision_is_fresh(
+            {
+                "revisionId": row[4],
+                "sourceKind": row[5],
+                "sourceUri": row[6],
+                "sourceFingerprint": row[7],
+                "producerVersion": row[8],
+                "schemaVersion": row[9],
+                "generatedAt": row[10],
+                "freshness": row[11],
+            }
+        )
+        for row in rows
+    )
+    if not has_fresh_blueprint_evidence:
+        return False
+    cursor = connection.execute(
+        """
+        UPDATE facts
+        SET current=1
+        WHERE fact_id=? AND current=0
+        """,
+        (int(fact_id),),
+    )
+    return cursor.rowcount == 1
+
+
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
     return (
         connection.execute(

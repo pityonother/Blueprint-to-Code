@@ -1341,6 +1341,88 @@ class RebuildWorkerTests(unittest.TestCase):
                 self.assertEqual(report.failed, 1)
                 core.close()
 
+    def test_core_materializer_reactivates_fresh_blueprint_fact_with_receipt(
+        self,
+    ) -> None:
+        core = _core()
+        _seed_integration_core(core)
+        core.execute(
+            """
+            UPDATE source_revisions
+            SET source_kind='blueprint_evidence',
+                source_uri='bp://asset@revision',
+                source_fingerprint='source-sha',
+                producer_version='uasset-graph-reader-evidence-v3',
+                schema_version='ark.blueprint.evidence.v2',
+                freshness_status='FRESH'
+            WHERE revision_id=1
+            """
+        )
+        core.commit()
+        _queue(core, [("FACT", 1)])
+
+        report = drain_rebuild_queue(
+            core,
+            CoreMaterializerRebuildBackend(),
+            max_items=1,
+            recover_running=False,
+        )
+
+        self.assertEqual(report.succeeded, 1)
+        self.assertEqual(report.blocked_gap, 0)
+        self.assertEqual(
+            core.execute(
+                "SELECT current FROM facts WHERE fact_id=1"
+            ).fetchone()[0],
+            1,
+        )
+        payload = json.loads(
+            core.execute(
+                """
+                SELECT payload_json
+                FROM invalidation_events
+                WHERE event_id='event-1'
+                """
+            ).fetchone()[0]
+        )
+        receipt = payload["_rebuildReceipts"]["FACT:1"]
+        self.assertEqual(receipt["status"], "SUCCEEDED")
+        self.assertNotEqual(
+            receipt["beforeDigest"],
+            receipt["afterDigest"],
+        )
+        self.assertEqual(receipt["touchedTables"], ["facts"])
+        self.assertTrue(receipt["proof"].startswith("rebuild-proof://"))
+        core.close()
+
+    def test_core_materializer_keeps_non_blueprint_fact_as_blocked_gap(
+        self,
+    ) -> None:
+        core = _core()
+        _seed_integration_core(core)
+        _queue(core, [("FACT", 1)])
+
+        report = drain_rebuild_queue(
+            core,
+            CoreMaterializerRebuildBackend(),
+            max_items=1,
+            recover_running=False,
+        )
+
+        self.assertEqual(report.succeeded, 0)
+        self.assertEqual(report.blocked_gap, 1)
+        self.assertEqual(
+            core.execute(
+                "SELECT current FROM facts WHERE fact_id=1"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            report.outcomes[0].gap_code,
+            "FACT_SOURCE_NOT_MATERIALIZABLE",
+        )
+        core.close()
+
     def test_backend_commit_is_suppressed_and_failure_rolls_back(
         self,
     ) -> None:
