@@ -420,9 +420,7 @@ def test_default_deleted_source_requires_full_rebuild_before_stage(
         current=_manifest(),
     )
 
-    assert result["gapCodes"] == [
-        "DELETED_SOURCE_FULL_REBUILD_REQUIRED"
-    ]
+    assert result["gapCodes"] == ["BLUEPRINT_DELETE_NOT_SUPPORTED"]
     assert result["fullRebuildRequired"] is True
     assert len(result["sourceChanges"]["deleted"]) == 1
     assert calls == []
@@ -442,12 +440,100 @@ def test_default_selective_asset_change_reports_missing_capability_pre_stage(
         current=current,
     )
 
-    assert result["gapCodes"] == [
-        "SELECTIVE_UPDATE_CAPABILITY_UNAVAILABLE"
-    ]
+    assert result["gapCodes"] == ["BLUEPRINT_UPDATE_NOT_SUPPORTED"]
     assert result["fullRebuildRequired"] is True
     assert calls == []
     assert not _paths(tmp_path).output.exists()
+
+
+def test_production_preflight_allows_only_bounded_additive_blueprint_diff(
+) -> None:
+    capture_old = _semantic("captures", "old")
+    capture_new = _semantic("captures", "new")
+    added = _revision(
+        "added",
+        uri="capture://Added",
+        entity_uri="/Game/Test/Added.Added",
+    )
+    previous = _manifest(capture_old)
+    current = _manifest(capture_new, added)
+    diff = update.compare_source_manifests(previous, current)
+
+    update.production_capability_check(previous, diff)
+
+
+def test_production_preflight_rejects_rename_with_specific_gap() -> None:
+    previous_source = _revision(
+        "old",
+        uri="capture://OldName",
+        entity_uri="/Game/Test/Same.Same",
+    )
+    current_source = _revision(
+        "new",
+        uri="capture://NewName",
+        entity_uri="/Game/Test/Same.Same",
+    )
+    previous = _manifest(
+        _semantic("captures", "old"),
+        previous_source,
+    )
+    current = _manifest(
+        _semantic("captures", "new"),
+        current_source,
+    )
+    diff = update.compare_source_manifests(previous, current)
+
+    with pytest.raises(update.UpdateBlocked) as caught:
+        update.production_capability_check(previous, diff)
+
+    assert caught.value.gap_code == "BLUEPRINT_RENAME_NOT_SUPPORTED"
+
+
+def test_production_preflight_rejects_addition_without_capture_aggregate(
+) -> None:
+    stable_capture = _semantic("captures", "same")
+    previous = _manifest(stable_capture)
+    current = _manifest(
+        stable_capture,
+        _revision(
+            "new",
+            uri="capture://Added",
+            entity_uri="/Game/Test/Added.Added",
+        ),
+    )
+    diff = update.compare_source_manifests(previous, current)
+
+    with pytest.raises(update.UpdateBlocked) as caught:
+        update.production_capability_check(previous, diff)
+
+    assert (
+        caught.value.gap_code
+        == "BLUEPRINT_CAPTURE_AGGREGATE_BINDING_REQUIRED"
+    )
+
+
+def test_production_preflight_rejects_blueprint_batch_above_bound() -> None:
+    previous = _manifest(_semantic("captures", "old"))
+    additions = tuple(
+        _revision(
+            f"added-{index}",
+            uri=f"capture://Added{index}",
+            entity_uri=f"/Game/Test/Added{index}.Added{index}",
+        )
+        for index in range(
+            update.MAX_ADDITIVE_BLUEPRINT_SOURCES + 1
+        )
+    )
+    current = _manifest(
+        _semantic("captures", "new"),
+        *additions,
+    )
+    diff = update.compare_source_manifests(previous, current)
+
+    with pytest.raises(update.UpdateBlocked) as caught:
+        update.production_capability_check(previous, diff)
+
+    assert caught.value.gap_code == "BLUEPRINT_ADDITION_BATCH_TOO_LARGE"
 
 
 def test_default_unchanged_manifest_is_cache_hit_without_write(

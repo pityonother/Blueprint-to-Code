@@ -37,6 +37,9 @@ from blueprint_translator.kb_vnext.rebuild_worker import (  # noqa: E402
     RebuildBackend,
     RebuildQueueWorker,
 )
+from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
+    MAX_EXPLICIT_BLUEPRINT_SOURCES,
+)
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     _snapshot_semantic_input_hashes,
     resolve_current_snapshot,
@@ -59,6 +62,9 @@ from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
 
 
 UPDATE_RESULT_SCHEMA: Final = "ark-kb-incremental-update/v2"
+MAX_ADDITIVE_BLUEPRINT_SOURCES: Final = (
+    MAX_EXPLICIT_BLUEPRINT_SOURCES
+)
 _FULL_REBUILD_INPUTS: Final = frozenset(
     {
         "discovery",
@@ -306,7 +312,7 @@ def production_capability_check(
     previous: SourceManifest | None,
     diff: SourceDiff,
 ) -> None:
-    """Fail before any write because selective production APIs are absent."""
+    """Allow only the reviewed, bounded additive Blueprint slice."""
 
     if previous is None:
         raise UpdateBlocked(
@@ -314,29 +320,92 @@ def production_capability_check(
             "The current immutable snapshot has no bound source baseline.",
             full_rebuild_required=True,
         )
-    if diff.deleted:
-        raise UpdateBlocked(
-            "DELETED_SOURCE_FULL_REBUILD_REQUIRED",
-            "Deleted sources are not closed by the selective pipeline.",
-            full_rebuild_required=True,
-        )
     semantic_changes = {
         _semantic_key(change)
         for change in diff.all_changes
         if _semantic_key(change)
     }
-    if semantic_changes & _FULL_REBUILD_INPUTS:
+    if (
+        semantic_changes & _FULL_REBUILD_INPUTS
+        or semantic_changes - {"captures"}
+    ):
         raise UpdateBlocked(
             "NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED",
             "A non-selective semantic input changed.",
             full_rebuild_required=True,
         )
-    raise UpdateBlocked(
-        "SELECTIVE_UPDATE_CAPABILITY_UNAVAILABLE",
-        "Selective source ingestion and the complete rebuild backend are "
-        "not implemented; no staging or publication was attempted.",
-        full_rebuild_required=True,
+    added_blueprints = tuple(
+        change.current
+        for change in diff.added
+        if change.current is not None
+        and change.current.source_kind == "BLUEPRINT_EVIDENCE"
     )
+    changed_blueprints = tuple(
+        change
+        for change in diff.changed
+        if (
+            change.current is not None
+            and change.current.source_kind == "BLUEPRINT_EVIDENCE"
+        )
+        or (
+            change.previous is not None
+            and change.previous.source_kind == "BLUEPRINT_EVIDENCE"
+        )
+    )
+    deleted_blueprints = tuple(
+        change.previous
+        for change in diff.deleted
+        if change.previous is not None
+        and change.previous.source_kind == "BLUEPRINT_EVIDENCE"
+    )
+    added_entities = {
+        revision.entity_uri for revision in added_blueprints
+    }
+    deleted_entities = {
+        revision.entity_uri for revision in deleted_blueprints
+    }
+    if added_entities & deleted_entities:
+        raise UpdateBlocked(
+            "BLUEPRINT_RENAME_NOT_SUPPORTED",
+            "Blueprint capture rename requires a reviewed rename backend.",
+            full_rebuild_required=True,
+        )
+    if changed_blueprints:
+        raise UpdateBlocked(
+            "BLUEPRINT_UPDATE_NOT_SUPPORTED",
+            "Blueprint Evidence updates are not closed by the additive slice.",
+            full_rebuild_required=True,
+        )
+    if deleted_blueprints:
+        raise UpdateBlocked(
+            "BLUEPRINT_DELETE_NOT_SUPPORTED",
+            "Blueprint Evidence deletion requires a reviewed delete backend.",
+            full_rebuild_required=True,
+        )
+    nonsemantic_changes = tuple(
+        change
+        for change in diff.all_changes
+        if _semantic_key(change) == ""
+    )
+    if len(nonsemantic_changes) != len(added_blueprints):
+        raise UpdateBlocked(
+            "SELECTIVE_SOURCE_KIND_NOT_SUPPORTED",
+            "Only additive Blueprint Evidence sources are supported.",
+            full_rebuild_required=True,
+        )
+    if not added_blueprints or semantic_changes != {"captures"}:
+        raise UpdateBlocked(
+            "BLUEPRINT_CAPTURE_AGGREGATE_BINDING_REQUIRED",
+            "Additive Blueprint Evidence must be the only source change and "
+            "must update the captures aggregate fingerprint.",
+            full_rebuild_required=True,
+        )
+    if len(added_blueprints) > MAX_ADDITIVE_BLUEPRINT_SOURCES:
+        raise UpdateBlocked(
+            "BLUEPRINT_ADDITION_BATCH_TOO_LARGE",
+            "The additive Blueprint batch exceeds the reviewed bound.",
+            full_rebuild_required=False,
+        )
 
 
 def _sha256_file(path: Path) -> str:
