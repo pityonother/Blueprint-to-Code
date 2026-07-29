@@ -5,7 +5,9 @@
   "oneOf": [
     {"$ref": "#/$defs/reviewPack"},
     {"$ref": "#/$defs/reviewReceipt"},
-    {"$ref": "#/$defs/validationResult"}
+    {"$ref": "#/$defs/validationResult"},
+    {"$ref": "#/$defs/reviewerRegistry"},
+    {"$ref": "#/$defs/queryReviewProvenance"}
   ],
   "$defs": {
     "sha256": {
@@ -174,6 +176,51 @@
           "type": "array",
           "uniqueItems": true,
           "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "reviewerRegistry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "reviewers"],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-trusted-reviewer-registry/v1"
+        },
+        "reviewers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "reviewerId",
+              "reviewerKeyFingerprint"
+            ],
+            "properties": {
+              "reviewerId": {"type": "string", "minLength": 1},
+              "reviewerKeyFingerprint": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "queryReviewProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "pack", "reviews"],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-query-review-provenance/v1"
+        },
+        "pack": {"$ref": "#/$defs/reviewPack"},
+        "reviews": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"$ref": "#/$defs/reviewReceipt"}
         }
       }
     }

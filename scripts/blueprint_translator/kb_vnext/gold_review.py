@@ -13,11 +13,14 @@ import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from pathlib import Path
 
 
 PACK_SCHEMA = "ark-kb-gold-review-pack/v1"
 REVIEW_SCHEMA = "ark-kb-gold-review/v1"
 VALIDATION_SCHEMA = "ark-kb-gold-review-validation/v1"
+QUERY_REVIEW_PROVENANCE_SCHEMA = "ark-kb-query-review-provenance/v1"
+REVIEWER_REGISTRY_SCHEMA = "ark-kb-trusted-reviewer-registry/v1"
 READY_TO_FREEZE = "READY_TO_FREEZE"
 BLOCKED_BY_INDEPENDENT_REVIEW = "BLOCKED_BY_INDEPENDENT_REVIEW"
 
@@ -71,6 +74,7 @@ _VERDICTS = frozenset(
 _EVIDENCE_FRESHNESS = frozenset(
     {"FRESH", "STALE", "NOT_RECOVERED"}
 )
+_PACK_KINDS = frozenset({"query", "registration", "role"})
 _LEAKAGE_PREFIXES = (
     "expected",
     "route",
@@ -220,6 +224,71 @@ def review_content_sha256(review: Mapping[str, object]) -> str:
     )
 
 
+def _evidence_uris(value: object) -> list[str]:
+    found: set[str] = set()
+
+    def visit(current: object) -> None:
+        if isinstance(current, Mapping):
+            for key, child in current.items():
+                if _normalized_key(key) == "evidenceuri":
+                    uri = str(child or "").strip()
+                    if uri:
+                        found.add(uri)
+                else:
+                    visit(child)
+        elif isinstance(current, list):
+            for child in current:
+                visit(child)
+
+    visit(value)
+    return sorted(found)
+
+
+def query_candidate_from_gold_case(
+    raw_case: Mapping[str, object],
+) -> dict[str, object]:
+    """Project one fixed query case into a prediction-free review candidate."""
+
+    if not isinstance(raw_case, Mapping):
+        raise GoldReviewError("query gold case must be an object")
+    case_id = _required_text(raw_case.get("id"), field="query case id")
+    requirements = raw_case.get("requirements")
+    expected = raw_case.get("expected")
+    if not isinstance(requirements, Mapping):
+        raise GoldReviewError(
+            f"query case {case_id} requirements must be an object"
+        )
+    if not isinstance(expected, Mapping):
+        raise GoldReviewError(
+            f"query case {case_id} expected must be an object"
+        )
+    payload = {
+        "question": _required_text(
+            raw_case.get("question"),
+            field=f"query case {case_id} question",
+        ),
+        "category": _required_text(
+            raw_case.get("category"),
+            field=f"query case {case_id} category",
+        ),
+        "primaryDomain": _required_text(
+            raw_case.get("primaryDomain"),
+            field=f"query case {case_id} primaryDomain",
+        ),
+        "entity": _required_text(
+            raw_case.get("entity"),
+            field=f"query case {case_id} entity",
+        ),
+        "requirements": copy.deepcopy(dict(requirements)),
+        "evidenceUris": _evidence_uris(expected),
+    }
+    _reject_prediction_leakage(
+        payload,
+        path=f"queryCase[{case_id}]",
+    )
+    return {"caseId": case_id, "payload": payload}
+
+
 def build_review_pack(
     *,
     kind: str,
@@ -235,6 +304,10 @@ def build_review_pack(
     """Build one deterministic prediction-free review pack."""
 
     normalized_kind = _required_text(kind, field="kind").casefold()
+    if normalized_kind not in _PACK_KINDS:
+        raise GoldReviewError(
+            f"unsupported review kind: {normalized_kind}"
+        )
     normalized_author = _required_text(author_id, field="authorId")
     normalized_author_key = _required_text(
         author_key_fingerprint,
@@ -314,6 +387,66 @@ def build_review_pack(
     return pack
 
 
+def build_query_review_pack(
+    *,
+    gold_set_path: Path,
+    author_id: str,
+    author_key_fingerprint: str,
+    seed: str,
+    created_at: str,
+    tool_version: str,
+) -> dict[str, object]:
+    """Export every manually fixed query as a deterministic blind candidate."""
+
+    try:
+        source_bytes = gold_set_path.read_bytes()
+        raw = json.loads(source_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GoldReviewError(
+            f"cannot read query gold set: {gold_set_path}"
+        ) from error
+    if (
+        not isinstance(raw, Mapping)
+        or raw.get("schema") != "ark-kb-query-gold-set/v1"
+        or raw.get("selectionMode") != "MANUAL_FIXED"
+        or raw.get("generatedFromCore") is not False
+    ):
+        raise GoldReviewError(
+            "query review export requires the manually fixed gold corpus"
+        )
+    raw_cases = raw.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise GoldReviewError("query gold corpus requires cases")
+    candidates = [
+        query_candidate_from_gold_case(raw_case)
+        for raw_case in raw_cases
+        if isinstance(raw_case, Mapping)
+    ]
+    if len(candidates) != len(raw_cases):
+        raise GoldReviewError("query gold corpus contains a malformed case")
+    candidates.sort(
+        key=lambda candidate: (
+            hashlib.sha256(
+                (
+                    f"{seed}\0{candidate['caseId']}"
+                ).encode("utf-8")
+            ).hexdigest(),
+            str(candidate["caseId"]),
+        )
+    )
+    return build_review_pack(
+        kind="query",
+        author_id=author_id,
+        author_key_fingerprint=author_key_fingerprint,
+        seed=seed,
+        selection_rule="MANUAL_FIXED_ALL_CASES",
+        source_manifest_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        candidates=candidates,
+        created_at=created_at,
+        tool_version=tool_version,
+    )
+
+
 def validate_review_pack(
     pack: Mapping[str, object],
 ) -> dict[str, object]:
@@ -326,6 +459,8 @@ def validate_review_pack(
     if pack.get("schema") != PACK_SCHEMA:
         raise GoldReviewError("unexpected review pack schema")
     kind = _required_text(pack.get("kind"), field="kind").casefold()
+    if kind not in _PACK_KINDS:
+        raise GoldReviewError(f"unsupported review kind: {kind}")
     _required_text(pack.get("authorId"), field="authorId")
     _required_text(
         pack.get("authorKeyFingerprint"),
@@ -389,6 +524,56 @@ def validate_review_pack(
     if pack.get("packSha256") != pack_content_sha256(pack):
         raise GoldReviewError("review pack SHA-256 mismatch")
     return copy.deepcopy(dict(pack))
+
+
+def load_trusted_reviewer_registry(path: Path) -> dict[str, str]:
+    """Load a human-managed reviewer ID to key-fingerprint registry."""
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise GoldReviewError(
+            f"cannot read trusted reviewer registry: {path}"
+        ) from error
+    if (
+        not isinstance(raw, Mapping)
+        or set(raw) != {"schema", "reviewers"}
+        or raw.get("schema") != REVIEWER_REGISTRY_SCHEMA
+        or not isinstance(raw.get("reviewers"), list)
+    ):
+        raise GoldReviewError("trusted reviewer registry is malformed")
+    reviewers: dict[str, str] = {}
+    key_owners: dict[str, str] = {}
+    for item in raw["reviewers"]:
+        if (
+            not isinstance(item, Mapping)
+            or set(item)
+            != {"reviewerId", "reviewerKeyFingerprint"}
+        ):
+            raise GoldReviewError(
+                "trusted reviewer registry entry is malformed"
+            )
+        reviewer_id = _required_text(
+            item.get("reviewerId"),
+            field="trusted reviewerId",
+        )
+        reviewer_key = _required_text(
+            item.get("reviewerKeyFingerprint"),
+            field="trusted reviewerKeyFingerprint",
+        )
+        if reviewer_id in reviewers:
+            raise GoldReviewError(
+                f"duplicate trusted reviewerId: {reviewer_id}"
+            )
+        if reviewer_key in key_owners:
+            raise GoldReviewError(
+                "trusted reviewer key fingerprint is not unique"
+            )
+        reviewers[reviewer_id] = reviewer_key
+        key_owners[reviewer_key] = reviewer_id
+    if not reviewers:
+        raise GoldReviewError("trusted reviewer registry is empty")
+    return reviewers
 
 
 def _validate_evidence(
@@ -633,17 +818,128 @@ def validate_review_set(
     }
 
 
+def validate_query_review_provenance(
+    raw_case: Mapping[str, object],
+    provenance: Mapping[str, object],
+    *,
+    trusted_reviewers: Mapping[str, str],
+) -> dict[str, object]:
+    """Bind one EMPIRICAL query answer to its blind pack and reviews."""
+
+    if (
+        not isinstance(provenance, Mapping)
+        or set(provenance) != {"schema", "pack", "reviews"}
+        or provenance.get("schema") != QUERY_REVIEW_PROVENANCE_SCHEMA
+        or not isinstance(provenance.get("pack"), Mapping)
+        or not isinstance(provenance.get("reviews"), list)
+    ):
+        raise GoldReviewError(
+            "EMPIRICAL requires validated review provenance"
+        )
+    pack = provenance["pack"]
+    reviews = provenance["reviews"]
+    validation = validate_review_set(
+        pack,
+        reviews,
+        trusted_reviewers=trusted_reviewers,
+    )
+    if (
+        validation["status"] != READY_TO_FREEZE
+        or pack.get("kind") != "query"
+    ):
+        raise GoldReviewError(
+            "EMPIRICAL requires validated review provenance"
+        )
+
+    expected_candidate = query_candidate_from_gold_case(raw_case)
+    case_id = str(expected_candidate["caseId"])
+    candidate = next(
+        (
+            item
+            for item in pack["candidates"]
+            if isinstance(item, Mapping)
+            and item.get("caseId") == case_id
+        ),
+        None,
+    )
+    if (
+        not isinstance(candidate, Mapping)
+        or candidate.get("candidateSha256")
+        != candidate_content_sha256(expected_candidate)
+    ):
+        raise GoldReviewError(
+            "query review candidate does not match the gold case"
+        )
+
+    case_reviews = [
+        review
+        for review in reviews
+        if isinstance(review, Mapping)
+        and review.get("caseId") == case_id
+    ]
+    primary = [
+        review
+        for review in case_reviews
+        if review.get("reviewerRole") == "REVIEWER"
+    ]
+    primary_answers = {
+        _review_answer_identity(review): review.get("answer")
+        for review in primary
+    }
+    if len(primary_answers) == 1:
+        resolved_answer = next(iter(primary_answers.values()))
+    else:
+        adjudicators = [
+            review
+            for review in case_reviews
+            if review.get("reviewerRole") == "ADJUDICATOR"
+        ]
+        resolved_answer = (
+            adjudicators[0].get("answer")
+            if len(adjudicators) == 1
+            else None
+        )
+    if _sha256_json(resolved_answer) != _sha256_json(
+        raw_case.get("expected")
+    ):
+        raise GoldReviewError(
+            "reviewed query answer does not match expected gold"
+        )
+
+    empirical_evidence = [
+        item
+        for review in case_reviews
+        for item in review.get("evidence", [])
+        if isinstance(item, Mapping)
+        and str(item.get("freshness") or "").upper() == "FRESH"
+        and str(item.get("uri") or "").startswith(
+            ("runtime://", "empirical://")
+        )
+    ]
+    if not empirical_evidence:
+        raise GoldReviewError(
+            "EMPIRICAL review requires fresh runtime evidence"
+        )
+    return validation
+
+
 __all__ = [
     "BLOCKED_BY_INDEPENDENT_REVIEW",
     "PACK_SCHEMA",
+    "QUERY_REVIEW_PROVENANCE_SCHEMA",
     "READY_TO_FREEZE",
     "REVIEW_SCHEMA",
+    "REVIEWER_REGISTRY_SCHEMA",
     "VALIDATION_SCHEMA",
     "GoldReviewError",
+    "build_query_review_pack",
     "build_review_pack",
     "candidate_content_sha256",
+    "load_trusted_reviewer_registry",
     "pack_content_sha256",
+    "query_candidate_from_gold_case",
     "review_content_sha256",
+    "validate_query_review_provenance",
     "validate_review_pack",
     "validate_review_set",
 ]

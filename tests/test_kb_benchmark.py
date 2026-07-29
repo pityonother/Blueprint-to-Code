@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -23,6 +24,12 @@ from blueprint_translator.kb_vnext.benchmark import (  # noqa: E402
     evaluate_benchmark_result,
     load_benchmark_gold_set,
     validate_benchmark_shape,
+)
+from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
+    build_query_review_pack,
+    build_review_pack,
+    query_candidate_from_gold_case,
+    review_content_sha256,
 )
 
 
@@ -219,6 +226,137 @@ class FixedGoldCorpusTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "trust root"):
                 load_benchmark_gold_set(path)
+
+    def test_empirical_label_requires_validated_review_provenance(self):
+        payload = json.loads(DEFAULT_GOLD_SET_PATH.read_text(encoding="utf-8"))
+        unreviewed = next(
+            case
+            for case in payload["cases"]
+            if case["reviewStatus"] == "FIXTURE_EXACT"
+        )
+        unreviewed["reviewStatus"] = "EMPIRICAL"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "false-empirical-review.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "EMPIRICAL requires validated review provenance",
+            ):
+                load_benchmark_gold_set(path)
+
+    def test_empirical_case_accepts_two_trusted_reviews_with_runtime_evidence(
+        self,
+    ):
+        payload = json.loads(DEFAULT_GOLD_SET_PATH.read_text(encoding="utf-8"))
+        reviewed_case = next(
+            case
+            for case in payload["cases"]
+            if case["reviewStatus"] == "FIXTURE_EXACT"
+            and case["expected"]["facts"]
+        )
+        reviewed_case["reviewStatus"] = "EMPIRICAL"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "empirical-review.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            pack = build_review_pack(
+                kind="query",
+                author_id="query-pack-author",
+                author_key_fingerprint="author-key",
+                seed="stage10-query-v1",
+                selection_rule="MANUAL_FIXED_REVIEWED_CASE",
+                source_manifest_sha256=hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest(),
+                candidates=[query_candidate_from_gold_case(reviewed_case)],
+                created_at="2026-07-29T00:00:00+00:00",
+                tool_version="ark-kb-gold-review/v1",
+            )
+            candidate = next(
+                candidate
+                for candidate in pack["candidates"]
+                if candidate["caseId"] == reviewed_case["id"]
+            )
+
+            reviews = []
+            for round_number, reviewer_id, reviewer_key in (
+                (1, "reviewer-a", "key-a"),
+                (2, "reviewer-b", "key-b"),
+            ):
+                review = {
+                    "schema": "ark-kb-gold-review/v1",
+                    "packId": pack["packId"],
+                    "packSha256": pack["packSha256"],
+                    "caseId": reviewed_case["id"],
+                    "candidateSha256": candidate["candidateSha256"],
+                    "reviewerId": reviewer_id,
+                    "reviewerKeyFingerprint": reviewer_key,
+                    "reviewerRole": "REVIEWER",
+                    "round": round_number,
+                    "reviewedAt":
+                        f"2026-07-29T0{round_number}:00:00+00:00",
+                    "verdict": "CONFIRMED",
+                    "answer": reviewed_case["expected"],
+                    "evidence": [
+                        {
+                            "uri": "runtime://fixture/observation-001",
+                            "sourceRevisionSha256": "c" * 64,
+                            "freshness": "FRESH",
+                        }
+                    ],
+                    "rationale": "Confirmed from a fresh runtime observation.",
+                    "toolVersion": "manual-review/v1",
+                }
+                review["contentSha256"] = review_content_sha256(review)
+                reviews.append(review)
+
+            reviewed_case["reviewProvenance"] = {
+                "schema": "ark-kb-query-review-provenance/v1",
+                "pack": pack,
+                "reviews": reviews,
+            }
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            registry = root / "trusted-reviewers.json"
+            registry.write_text(
+                json.dumps(
+                    {
+                        "schema": "ark-kb-trusted-reviewer-registry/v1",
+                        "reviewers": [
+                            {
+                                "reviewerId": "reviewer-a",
+                                "reviewerKeyFingerprint": "key-a",
+                            },
+                            {
+                                "reviewerId": "reviewer-b",
+                                "reviewerKeyFingerprint": "key-b",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_benchmark_gold_set(
+                path,
+                trusted_reviewer_registry_path=registry,
+            )
+
+        self.assertEqual(
+            sum(
+                case.review_status == "EMPIRICAL"
+                for case in loaded["cases"]
+            ),
+            1,
+        )
 
     def test_validator_rejects_a_gap_case_that_claims_semantic_success(self):
         connection = sqlite3.connect(":memory:")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +17,7 @@ from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
     BLOCKED_BY_INDEPENDENT_REVIEW,
     READY_TO_FREEZE,
     GoldReviewError,
+    build_query_review_pack,
     build_review_pack,
     review_content_sha256,
     validate_review_pack,
@@ -110,6 +113,76 @@ def _receipt(
 
 
 class GoldReviewPackTests(unittest.TestCase):
+    def test_query_pack_covers_fixed_cases_without_answer_leakage(self):
+        gold_path = (
+            PROJECT_ROOT / "tests" / "fixtures" / "kb_query_gold_set.v1.json"
+        )
+        raw_gold = json.loads(gold_path.read_text(encoding="utf-8"))
+
+        first = build_query_review_pack(
+            gold_set_path=gold_path,
+            author_id="query-pack-author",
+            author_key_fingerprint="author-key",
+            seed="stage10-query-v1",
+            created_at="2026-07-29T00:00:00+00:00",
+            tool_version="ark-kb-gold-review/v1",
+        )
+        second = build_query_review_pack(
+            gold_set_path=gold_path,
+            author_id="query-pack-author",
+            author_key_fingerprint="author-key",
+            seed="stage10-query-v1",
+            created_at="2026-07-29T00:00:00+00:00",
+            tool_version="ark-kb-gold-review/v1",
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first["candidates"]), 130)
+        self.assertEqual(
+            {candidate["caseId"] for candidate in first["candidates"]},
+            {case["id"] for case in raw_gold["cases"]},
+        )
+        self.assertEqual(
+            first["sourceManifestSha256"],
+            hashlib.sha256(gold_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            first["selectionRule"],
+            "MANUAL_FIXED_ALL_CASES",
+        )
+
+        def keys(value: object) -> set[str]:
+            if isinstance(value, dict):
+                return {
+                    str(key).casefold()
+                    for key in value
+                } | {
+                    nested
+                    for child in value.values()
+                    for nested in keys(child)
+                }
+            if isinstance(value, list):
+                return {
+                    nested
+                    for child in value
+                    for nested in keys(child)
+                }
+            return set()
+
+        reviewer_keys = {
+            key
+            for candidate in first["candidates"]
+            for key in keys(candidate["payload"])
+        }
+        for forbidden in (
+            "expected",
+            "route",
+            "prediction",
+            "confidence",
+            "reviewstatus",
+        ):
+            self.assertNotIn(forbidden, reviewer_keys)
+
     def test_pack_is_deterministic_and_blind(self):
         first = _pack()
         second = _pack()
@@ -157,6 +230,23 @@ class GoldReviewPackTests(unittest.TestCase):
                 selection_rule="manual-fixed-all-cases",
                 source_manifest_sha256=SOURCE_SHA256,
                 candidates=[_candidate(), _candidate()],
+                created_at="2026-07-29T00:00:00+00:00",
+                tool_version="ark-kb-gold-review/v1",
+            )
+
+    def test_pack_rejects_unsupported_review_kind(self):
+        with self.assertRaisesRegex(
+            GoldReviewError,
+            "unsupported review kind",
+        ):
+            build_review_pack(
+                kind="classifier-generated",
+                author_id="query-pack-author",
+                author_key_fingerprint="author-key",
+                seed="stage10-query-v1",
+                selection_rule="manual-fixed-all-cases",
+                source_manifest_sha256=SOURCE_SHA256,
+                candidates=[_candidate()],
                 created_at="2026-07-29T00:00:00+00:00",
                 tool_version="ark-kb-gold-review/v1",
             )

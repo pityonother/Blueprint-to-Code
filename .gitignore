@@ -57,6 +57,7 @@ release/*.zip
 tests/native_fixture/build/
 
 # Local review/session notes are preserved on this workstation, not published.
+review_work/
 docs/GPT_PRO_*.md
 !docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md
 docs/SESSION_HANDOFF_zh.md

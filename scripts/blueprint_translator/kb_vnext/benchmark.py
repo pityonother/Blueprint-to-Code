@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from .gold_review import (
+    GoldReviewError,
+    load_trusted_reviewer_registry,
+    validate_query_review_provenance,
+)
 from .kb_context import build_bounded_context_pack
 from .map_usage import MAP_USAGE_EDGE_TYPES
 from .registrations import GLOBAL_REGISTRATION_EDGE_TYPES
@@ -42,6 +47,12 @@ DEFAULT_PROJECTION_REVIEW_PATH = (
     Path(__file__).resolve().parents[3]
     / "ontology"
     / "projection_review.v1.json"
+)
+DEFAULT_TRUSTED_REVIEWER_REGISTRY_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "tests"
+    / "fixtures"
+    / "kb_trusted_reviewer_registry.v1.json"
 )
 CATEGORY_MINIMUMS = {
     "FACT": 30,
@@ -877,10 +888,50 @@ def _validate_human_reviewed_cases(
                 )
 
 
+def _validate_empirical_cases(
+    raw_cases: Sequence[object],
+    *,
+    trusted_reviewer_registry_path: Path | None,
+) -> None:
+    empirical_cases = [
+        raw_case
+        for raw_case in raw_cases
+        if isinstance(raw_case, Mapping)
+        and raw_case.get("reviewStatus") == "EMPIRICAL"
+    ]
+    if not empirical_cases:
+        return
+    registry_path = (
+        trusted_reviewer_registry_path
+        or DEFAULT_TRUSTED_REVIEWER_REGISTRY_PATH
+    )
+    if not registry_path.is_file():
+        raise ValueError(
+            "EMPIRICAL requires validated review provenance and a "
+            "trusted reviewer registry"
+        )
+    try:
+        trusted_reviewers = load_trusted_reviewer_registry(registry_path)
+        for raw_case in empirical_cases:
+            provenance = raw_case.get("reviewProvenance")
+            if not isinstance(provenance, Mapping):
+                raise GoldReviewError(
+                    "EMPIRICAL requires validated review provenance"
+                )
+            validate_query_review_provenance(
+                raw_case,
+                provenance,
+                trusted_reviewers=trusted_reviewers,
+            )
+    except GoldReviewError as error:
+        raise ValueError(str(error)) from error
+
+
 def load_benchmark_gold_set(
     path: Path = DEFAULT_GOLD_SET_PATH,
     *,
     projection_review_path: Path = DEFAULT_PROJECTION_REVIEW_PATH,
+    trusted_reviewer_registry_path: Path | None = None,
 ) -> dict[str, object]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -894,6 +945,10 @@ def load_benchmark_gold_set(
     raw_cases = raw.get("cases")
     if not isinstance(raw_cases, list):
         raise ValueError("Benchmark gold corpus cases must be a list")
+    _validate_empirical_cases(
+        raw_cases,
+        trusted_reviewer_registry_path=trusted_reviewer_registry_path,
+    )
     cases = [
         _parse_case(value, index=index)
         for index, value in enumerate(raw_cases, start=1)
