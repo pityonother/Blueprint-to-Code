@@ -1008,6 +1008,49 @@ def _probe(
     }
 
 
+def _aggregate_reference_closure_missing(
+    missing: list[dict[str, object]],
+    edge_types: Iterable[str],
+) -> list[dict[str, object]]:
+    reference_items = [
+        item
+        for item in missing
+        if item.get("code") == "REFERENCE_CLOSURE_OPEN"
+    ]
+    if len(reference_items) <= 1:
+        return missing
+    reference_requirements = {
+        str(item.get("requirement") or "")
+        for item in reference_items
+    }
+    ordered_missing_edges: list[str] = []
+    for edge_type in edge_types:
+        normalized = str(edge_type).upper()
+        requirement = f"{normalized}:confirmed edge evidence"
+        if (
+            requirement in reference_requirements
+            and normalized not in ordered_missing_edges
+        ):
+            ordered_missing_edges.append(normalized)
+    if len(ordered_missing_edges) <= 1:
+        return missing
+    retained = [
+        item
+        for item in missing
+        if item.get("code") != "REFERENCE_CLOSURE_OPEN"
+    ]
+    retained.append(
+        {
+            "code": "REFERENCE_CLOSURE_OPEN",
+            "requirement": (
+                f"{', '.join(ordered_missing_edges)}:"
+                "confirmed edge evidence"
+            ),
+        }
+    )
+    return retained
+
+
 def _resolved_answer_mode(
     requirements: QueryRequirements,
 ) -> tuple[str | None, bool]:
@@ -2684,6 +2727,10 @@ def plan_query(
                 ),
             }
         )
+    missing = _aggregate_reference_closure_missing(
+        missing,
+        requirements.edge_types,
+    )
     missing = [
         dict(item)
         for item in {

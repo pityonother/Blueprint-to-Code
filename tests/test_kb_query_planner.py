@@ -970,6 +970,44 @@ class KnowledgeQueryPlannerTests(unittest.TestCase):
         self.assertEqual(result["recommendedProbes"], [])
         connection.close()
 
+    def test_missing_multi_edge_requirement_is_aggregated_once(self):
+        connection = _fixture()
+
+        result = plan_query(
+            connection,
+            QueryRequirements(
+                entity_query="/Game/Test/Item.Item",
+                edge_types=("USES_ITEM", "OWNS_COMPONENT"),
+                answer_mode="RELATIONSHIP",
+            ),
+        )
+
+        reference_gaps = [
+            item
+            for item in result["missingRequirements"]
+            if item["code"] == "REFERENCE_CLOSURE_OPEN"
+        ]
+        self.assertEqual(
+            reference_gaps,
+            [
+                {
+                    "code": "REFERENCE_CLOSURE_OPEN",
+                    "requirement": (
+                        "USES_ITEM, OWNS_COMPONENT:"
+                        "confirmed edge evidence"
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(
+            [
+                probe["reason"]
+                for probe in result["recommendedProbes"]
+            ],
+            ["REFERENCE_CLOSURE_OPEN"],
+        )
+        connection.close()
+
     def test_fact_requires_recovered_evidence_uri(self):
         for evidence_uri in ("UNKNOWN", "not-a-uri", "ftp://fixture/fact"):
             with self.subTest(evidence_uri=evidence_uri):
