@@ -1,23 +1,155 @@
-"""Compact, evidence-aware ARK harvesting comparison helpers.
+"""Compact, evidence-aware ARK harvesting yield helpers.
 
-The module intentionally does not claim to reproduce runtime resource yield.
-It builds a bounded comparison index from values recovered from creature attack
-structs and harvest-component structs, while keeping incompatible and missing
-facts distinct from numeric zero.
+The primary ranking metric estimates the target resource obtained from one
+fresh, complete harvest node under a normalized static profile.  Cadence stays
+available as a diagnostic, but it never changes the complete-node yield order.
+Unknown runtime Blueprint hooks remain explicit instead of becoming zeroes.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any, Iterable
 
 
 CONFIRMED = "CONFIRMED"
 NOT_RECOVERED = "NOT_RECOVERED"
 
-_INFORMATIONAL_QUANTITY_GAPS = {
-    "DAMAGE_TYPE_MIN_QUANTITY_OVERRIDE_NOT_RECOVERED",
-    "DAMAGE_TYPE_MAX_QUANTITY_OVERRIDE_NOT_RECOVERED",
-}
+YIELD_MODEL_VERSION = "harvest-estimated-yield-per-node/v1-native-static-profile"
+YIELD_SCORE_BASIS = "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE"
+NORMALIZED_HARVEST_AMOUNT_SCALE = 2.0
+UNCLAMPED_FINAL_HIT_HEALTH_MULTIPLIER = 3.5
+
+_INFORMATIONAL_QUANTITY_GAPS: set[str] = set()
+
+
+def estimate_complete_node_yield(
+    *,
+    base_damage: float,
+    damage_multiplier: float,
+    harvest_quantity_multiplier: float,
+    max_harvest_health: float,
+    harvest_health_give_resource_interval: float,
+    resource_weight_share: float,
+    minimum_quantity: float,
+    maximum_quantity: float,
+    quantity_random_power: float = 1.0,
+    clamp_resource_harvest_damage: bool = False,
+    harvest_amount_scale: float = NORMALIZED_HARVEST_AMOUNT_SCALE,
+) -> dict[str, float | int | bool | str]:
+    """Estimate target-resource units from one fresh, completely harvested node.
+
+    The hit loop mirrors the recovered native static path: damage is bounded by
+    remaining harvest health (or 3.5x remaining health for the native unclamped
+    branch), interval units are converted to integer grant calls per hit, and a
+    successful grant clears the accumulator including its remainder.  Runtime
+    Blueprint, buff, gene, mission, and server hooks are deliberately outside
+    this normalized profile.
+
+    The current DevKit component corpus serializes a linear quantity random
+    power of 1.0 for every resource entry.  Non-linear powers fail closed until
+    their native discrete distribution is implemented exactly.
+    """
+
+    values = {
+        "base_damage": base_damage,
+        "damage_multiplier": damage_multiplier,
+        "harvest_quantity_multiplier": harvest_quantity_multiplier,
+        "max_harvest_health": max_harvest_health,
+        "harvest_health_give_resource_interval": harvest_health_give_resource_interval,
+        "resource_weight_share": resource_weight_share,
+        "minimum_quantity": minimum_quantity,
+        "maximum_quantity": maximum_quantity,
+        "quantity_random_power": quantity_random_power,
+        "harvest_amount_scale": harvest_amount_scale,
+    }
+    if not all(math.isfinite(float(value)) for value in values.values()):
+        raise ValueError("Complete-node yield inputs must be finite numbers.")
+    if base_damage <= 0 or damage_multiplier <= 0:
+        raise ValueError("Complete-node yield requires positive harvest damage.")
+    if harvest_quantity_multiplier < 0:
+        raise ValueError("HarvestQuantityMultiplier cannot be negative.")
+    if max_harvest_health <= 0 or harvest_health_give_resource_interval <= 0:
+        raise ValueError("Complete-node yield requires positive node health and interval.")
+    if resource_weight_share <= 0 or resource_weight_share > 1:
+        raise ValueError("Resource weight share must be in (0, 1].")
+    if maximum_quantity < minimum_quantity or minimum_quantity < 0:
+        raise ValueError("Resource quantity bounds are invalid.")
+    if not math.isclose(quantity_random_power, 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise ValueError("Only the recovered linear quantity distribution is supported.")
+    if harvest_amount_scale <= 0:
+        raise ValueError("Normalized harvest amount scale must be positive.")
+
+    remaining_health = float(max_harvest_health)
+    interval_threshold = float(harvest_health_give_resource_interval) / float(
+        harvest_amount_scale
+    )
+    damage_per_hit = float(base_damage) * float(damage_multiplier)
+    damage_accumulator = 0.0
+    grant_calls = 0
+    hit_count = 0
+    # A positive hit always removes at least its own damage until the final hit,
+    # so this guard is far above the number of iterations valid assets need.
+    max_iterations = max(1, int(math.ceil(max_harvest_health / damage_per_hit)) + 2)
+    while remaining_health > 1e-9:
+        hit_count += 1
+        if hit_count > max_iterations:
+            raise ValueError("Complete-node hit simulation did not converge.")
+        credited_health_loss = min(
+            damage_per_hit,
+            remaining_health
+            if clamp_resource_harvest_damage
+            else UNCLAMPED_FINAL_HIT_HEALTH_MULTIPLIER * remaining_health,
+        )
+        damage_accumulator += credited_health_loss
+        raw_grant_units = int(math.floor(damage_accumulator / interval_threshold + 1e-9))
+        calls_this_hit = int(float(harvest_quantity_multiplier) * raw_grant_units)
+        if calls_this_hit > 0:
+            grant_calls += calls_this_hit
+            damage_accumulator = 0.0
+        remaining_health = max(0.0, remaining_health - credited_health_loss)
+
+    expected_quantity_per_selection = (
+        float(minimum_quantity) + float(maximum_quantity)
+    ) / 2.0
+    estimated_yield = (
+        float(grant_calls)
+        * float(resource_weight_share)
+        * expected_quantity_per_selection
+    )
+    return {
+        "estimatedYieldPerNode": estimated_yield,
+        "estimatedGrantCallsPerNode": grant_calls,
+        "estimatedHitsToDepleteNode": hit_count,
+        "expectedQuantityPerSelection": expected_quantity_per_selection,
+        "quantityRandomPower": float(quantity_random_power),
+        "clampResourceHarvestDamage": bool(clamp_resource_harvest_damage),
+        "normalizedHarvestAmountScale": float(harvest_amount_scale),
+        "yieldModelVersion": YIELD_MODEL_VERSION,
+        "yieldModelBasis": "NATIVE_STATIC_COMPLETE_NODE_HIT_SIMULATION",
+    }
+
+
+def normalize_unreal_object_identity(value: object) -> str:
+    """Normalize short and full Unreal object references to one comparable name.
+
+    ARK DevKit builds may expose the same class as either ``Foo_C`` or
+    ``/Game/Path/Foo.Foo_C``.  Raw string equality would make recovered
+    harvest overrides disappear after such a serialization-format change.
+    """
+
+    text = str(value or "").strip().replace("\\", "/")
+    if "'" in text:
+        quoted = text.split("'", 1)[1]
+        text = quoted.rsplit("'", 1)[0]
+    text = text.strip().strip("\"'")
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text.strip().strip("\"'")
 
 
 def _semantic_property_value(prop: dict[str, Any]) -> Any:
@@ -67,7 +199,14 @@ def extract_creature_attacks(properties: Iterable[dict[str, Any]]) -> list[dict[
                 return _semantic_property_value(fields[name]) if name in fields else None
 
             attack_name = value("AttackName")
-            damage_type = value("MeleeDamageType")
+            damage_type_property = fields.get("MeleeDamageType")
+            damage_type_reference = value("MeleeDamageType")
+            damage_type_object_path = (
+                damage_type_property.get("object_path")
+                if isinstance(damage_type_property, dict)
+                else None
+            )
+            damage_type = normalize_unreal_object_identity(damage_type_reference)
             base_damage = value("MeleeDamageAmount")
             attack_interval = value("AttackInterval")
             missing: list[str] = []
@@ -84,8 +223,27 @@ def extract_creature_attacks(properties: Iterable[dict[str, Any]]) -> list[dict[
                     "attackIndex": int(element.get("index", ordinal)),
                     "attackName": attack_name,
                     "damageType": damage_type,
+                    "damageTypeObjectPath": (
+                        damage_type_object_path
+                        if isinstance(damage_type_object_path, str)
+                        and damage_type_object_path
+                        else damage_type_reference
+                        if isinstance(damage_type_reference, str)
+                        else None
+                    ),
                     "baseDamage": base_damage,
                     "attackInterval": attack_interval,
+                    "riderAttackInterval": value("RiderAttackInterval"),
+                    "skipTamed": value("bSkipTamed"),
+                    "skipAI": value("bSkipAI"),
+                    "onlyOnWildDinos": value("bOnlyOnWildDinos"),
+                    "preventWithRider": value("bPreventWithRider"),
+                    "useBlueprintCanRiderAttack": value(
+                        "bUseBlueprintCanRiderAttack"
+                    ),
+                    "useBlueprintAdjustOutputDamage": value(
+                        "bUseBlueprintAdjustOutputDamage"
+                    ),
                     "meleeSwingRadius": value("MeleeSwingRadius"),
                     "basicAttack": value("bBasicAttack"),
                     "animations": value("AttackAnimations") or [],
@@ -123,7 +281,7 @@ def _aligned_override_map(
         gaps.append(gap_code)
         return {}
     return {
-        str(damage_type): value
+        normalize_unreal_object_identity(damage_type): value
         for damage_type, value in zip(damage_types, values)
         if isinstance(damage_type, str) and damage_type
     }
@@ -156,7 +314,13 @@ def extract_harvest_component(
                 continue
             nested = element.get("properties")
             fields = _property_map(nested if isinstance(nested, list) else [])
-            resource = _semantic_property_value(fields["ResourceItem"]) if "ResourceItem" in fields else None
+            raw_resource = _semantic_property_value(fields["ResourceItem"]) if "ResourceItem" in fields else None
+            resource = normalize_unreal_object_identity(raw_resource)
+            resource_object_path = (
+                str(fields["ResourceItem"].get("object_path") or "")
+                if isinstance(fields.get("ResourceItem"), dict)
+                else ""
+            )
             damage_types = _decoded_array(fields.get("DamageTypeEntryValuesOverrides"))
             entry_gaps: list[str] = []
             weight_overrides = _aligned_override_map(
@@ -193,6 +357,7 @@ def extract_harvest_component(
                 {
                     "entryIndex": element.get("index"),
                     "resource": resource,
+                    "resourceObjectPath": resource_object_path,
                     "entryWeight": _semantic_property_value(fields["EntryWeight"])
                     if "EntryWeight" in fields
                     else None,
@@ -206,6 +371,11 @@ def extract_harvest_component(
                     else None,
                     "overrideQuantityMax": _semantic_property_value(fields["OverrideQuantityMax"])
                     if "OverrideQuantityMax" in fields
+                    else None,
+                    "overrideQuantityRandomPower": _semantic_property_value(
+                        fields["OverrideQuantityRandomPower"]
+                    )
+                    if "OverrideQuantityRandomPower" in fields
                     else None,
                     "weightOverrides": weight_overrides,
                     "minQuantityOverrides": min_overrides,
@@ -233,7 +403,7 @@ def extract_harvest_component(
             nested = element.get("properties")
             fields = _property_map(nested if isinstance(nested, list) else [])
             damage_type_parent = (
-                _semantic_property_value(fields["DamageTypeParent"])
+                normalize_unreal_object_identity(_semantic_property_value(fields["DamageTypeParent"]))
                 if "DamageTypeParent" in fields
                 else None
             )
@@ -284,6 +454,26 @@ def extract_harvest_component(
         )
         if "HarvestHealthGiveResourceInterval" in top
         else None,
+        "clampResourceHarvestDamage": bool(
+            _semantic_property_value(top["bClampResourceHarvestDamage"])
+        )
+        if "bClampResourceHarvestDamage" in top
+        else False,
+        "clampResourceHarvestDamageSource": (
+            "SERIALIZED_EFFECTIVE_DEFAULT"
+            if "bClampResourceHarvestDamage" in top
+            else "NATIVE_DEFAULT_FALSE"
+        ),
+        "isSingleUnitHarvest": bool(
+            _semantic_property_value(top["bIsSingleUnitHarvest"])
+        )
+        if "bIsSingleUnitHarvest" in top
+        else False,
+        "isSingleUnitHarvestSource": (
+            "SERIALIZED_EFFECTIVE_DEFAULT"
+            if "bIsSingleUnitHarvest" in top
+            else "NATIVE_DEFAULT_FALSE"
+        ),
         "gaps": sorted(set(gaps)),
         "rankingGaps": sorted(set(ranking_gaps)),
         "informationalGaps": sorted(set(informational_gaps)),
@@ -309,25 +499,34 @@ def extract_resource_damage_overrides(
     if len(items) != len(replacements):
         gaps.append("RESOURCE_DAMAGE_OVERRIDE_LENGTH_MISMATCH")
         return {"damageType": damage_type, "overrides": {}, "gaps": gaps}
+    normalized_damage_type = normalize_unreal_object_identity(damage_type)
     overrides = {
-        (damage_type, str(resource)): str(replacement)
+        (
+            normalized_damage_type,
+            normalize_unreal_object_identity(resource),
+        ): normalize_unreal_object_identity(replacement)
         for resource, replacement in zip(items, replacements)
         if isinstance(resource, str)
         and resource
         and isinstance(replacement, str)
         and replacement
     }
-    return {"damageType": damage_type, "overrides": overrides, "gaps": gaps}
+    return {"damageType": normalized_damage_type, "overrides": overrides, "gaps": gaps}
 
 
 def damage_type_chain(damage_type: str, parents: dict[str, str]) -> list[str]:
     chain: list[str] = []
-    current = str(damage_type or "")
+    normalized_parents = {
+        normalize_unreal_object_identity(child): normalize_unreal_object_identity(parent)
+        for child, parent in parents.items()
+        if normalize_unreal_object_identity(child)
+    }
+    current = normalize_unreal_object_identity(damage_type)
     seen: set[str] = set()
     while current and current not in seen:
         chain.append(current)
         seen.add(current)
-        current = str(parents.get(current) or "")
+        current = normalized_parents.get(current, "")
     return chain
 
 
@@ -336,9 +535,15 @@ def _nearest_override(
     chain: list[str],
     fallback: Any,
 ) -> tuple[Any, str | None]:
+    normalized_overrides = {
+        normalize_unreal_object_identity(key): value
+        for key, value in overrides.items()
+        if normalize_unreal_object_identity(key)
+    }
     for damage_type in chain:
-        if damage_type in overrides:
-            return overrides[damage_type], damage_type
+        identity = normalize_unreal_object_identity(damage_type)
+        if identity in normalized_overrides:
+            return normalized_overrides[identity], identity
     return fallback, None
 
 
@@ -366,10 +571,11 @@ def _unranked_row(
         "reasonCode": reason_code,
         "missingFacts": flattened,
         "missingFactsByScope": scoped,
+        "estimatedYieldPerNode": None,
         "engineComparisonIndex": None,
         "harvestPressurePerSecond": None,
         "observedYieldPerSecond": None,
-        "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+        "scoreBasis": YIELD_SCORE_BASIS,
     }
 
 
@@ -380,18 +586,20 @@ def evaluate_attack_resource(
     attack: dict[str, Any],
     component: dict[str, Any],
     resource: str,
+    resource_entry_index: int | None = None,
     damage_type_parents: dict[str, str],
     resource_damage_overrides: dict[tuple[str, str], str],
     damage_type_gaps: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate one attack against one resource-bearing harvest component.
+    """Estimate one attack's target-resource yield from one complete node."""
 
-    ``engineComparisonIndex`` is intentionally dimensionless. It combines the
-    recovered attack cadence, damage/quantity multipliers, and the target's
-    normalized selection weight. It is not resources per hit or per second.
-    """
-
-    source_damage_type = attack.get("damageType")
+    source_damage_type = normalize_unreal_object_identity(attack.get("damageType"))
+    target_resource = normalize_unreal_object_identity(resource)
+    target_entry_index = (
+        int(resource_entry_index)
+        if isinstance(resource_entry_index, int) and not isinstance(resource_entry_index, bool)
+        else None
+    )
     base: dict[str, Any] = {
         "creature": creature,
         "creatureObjectPath": creature_object_path,
@@ -400,20 +608,24 @@ def evaluate_attack_resource(
         "sourceDamageType": source_damage_type,
         "component": component.get("component"),
         "componentObjectPath": component.get("objectPath"),
-        "resource": resource,
+        "resource": target_resource,
+        "resourceEntryIndex": target_entry_index,
+        "estimatedYieldPerNode": None,
         "observedYieldPerSecond": None,
     }
     component_warnings = sorted(set(component.get("informationalGaps") or []))
     if component_warnings:
         base["warnings"] = component_warnings
         base["warningsByScope"] = {"component": component_warnings}
-    missing = list(attack.get("gaps") or [])
-    if not isinstance(source_damage_type, str) or not source_damage_type:
+    missing = [
+        str(gap)
+        for gap in attack.get("gaps") or []
+        if str(gap) != "AttackInterval"
+    ]
+    if not source_damage_type:
         missing.append("MeleeDamageType")
     if not isinstance(attack.get("baseDamage"), (int, float)):
         missing.append("MeleeDamageAmount")
-    if not isinstance(attack.get("attackInterval"), (int, float)):
-        missing.append("AttackInterval")
     if missing:
         return _unranked_row(
             base,
@@ -446,20 +658,53 @@ def evaluate_attack_resource(
             scope="component",
         )
 
-    attack_interval_value = float(attack["attackInterval"])
+    attack_interval_value = (
+        float(attack["attackInterval"])
+        if isinstance(attack.get("attackInterval"), (int, float))
+        else None
+    )
     base_damage_value = float(attack["baseDamage"])
     base.update(
         {
             "baseDamage": base_damage_value,
             "attackInterval": attack_interval_value,
             "potentialAttackRate": (
-                base_damage_value / attack_interval_value if attack_interval_value > 0 else None
+                base_damage_value / attack_interval_value
+                if isinstance(attack_interval_value, float)
+                and attack_interval_value > 0
+                else None
             ),
         }
     )
+    if base_damage_value <= 0:
+        return {
+            **base,
+            "rankingStatus": "INCOMPATIBLE",
+            "reasonCode": "NON_POSITIVE_HARVEST_DAMAGE",
+            "missingFacts": [],
+            "estimatedYieldPerNode": None,
+            "engineComparisonIndex": None,
+            "harvestPressurePerSecond": None,
+            "observedYieldPerSecond": None,
+            "scoreBasis": YIELD_SCORE_BASIS,
+        }
+    if attack.get("useBlueprintAdjustOutputDamage") is True:
+        return _unranked_row(
+            base,
+            "BLUEPRINT_OUTPUT_DAMAGE_NOT_RECOVERED",
+            ["BlueprintAdjustOutputDamage"],
+            scope="attack",
+        )
 
-    effective_damage_type = resource_damage_overrides.get(
-        (source_damage_type, resource), source_damage_type
+    normalized_resource_overrides = {
+        (
+            normalize_unreal_object_identity(source),
+            normalize_unreal_object_identity(candidate_resource),
+        ): normalize_unreal_object_identity(replacement)
+        for (source, candidate_resource), replacement in resource_damage_overrides.items()
+    }
+    effective_damage_type = normalized_resource_overrides.get(
+        (source_damage_type, target_resource), source_damage_type
     )
     chain = damage_type_chain(effective_damage_type, damage_type_parents)
     base.update(
@@ -469,7 +714,10 @@ def evaluate_attack_resource(
             "damageTypeChain": chain,
         }
     )
-    damage_type_gaps = damage_type_gaps or {}
+    damage_type_gaps = {
+        normalize_unreal_object_identity(key): list(value)
+        for key, value in (damage_type_gaps or {}).items()
+    }
     direct_damage_type_gaps = [
         gap
         for damage_type in {source_damage_type, effective_damage_type}
@@ -491,11 +739,23 @@ def evaluate_attack_resource(
             ["HarvestResourceEntries"],
             scope="component",
         )
+    has_indexed_resource_entries = any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("entryIndex"), int)
+        and not isinstance(entry.get("entryIndex"), bool)
+        for entry in resource_entries
+    )
     target_entry = next(
         (
             entry
             for entry in resource_entries
-            if isinstance(entry, dict) and str(entry.get("resource") or "") == resource
+            if isinstance(entry, dict)
+            and normalize_unreal_object_identity(entry.get("resource")) == target_resource
+            and (
+                target_entry_index is None
+                or not has_indexed_resource_entries
+                or entry.get("entryIndex") == target_entry_index
+            )
         ),
         None,
     )
@@ -518,10 +778,11 @@ def evaluate_attack_resource(
             "rankingStatus": "INCOMPATIBLE",
             "reasonCode": "RESOURCE_NOT_IN_COMPONENT",
             "missingFacts": [],
+            "estimatedYieldPerNode": None,
             "engineComparisonIndex": None,
             "harvestPressurePerSecond": None,
             "observedYieldPerSecond": None,
-            "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+            "scoreBasis": YIELD_SCORE_BASIS,
         }
     target_warnings = sorted(
         set(target_entry.get("informationalGaps") or [])
@@ -549,7 +810,8 @@ def evaluate_attack_resource(
             (
                 entry
                 for entry in damage_entries
-                if isinstance(entry, dict) and str(entry.get("damageTypeParent") or "") == candidate
+                if isinstance(entry, dict)
+                and normalize_unreal_object_identity(entry.get("damageTypeParent")) == candidate
             ),
             None,
         )
@@ -594,10 +856,11 @@ def evaluate_attack_resource(
             "reasonCode": "DAMAGE_TYPE_NOT_ACCEPTED",
             "missingFacts": [],
             "damageTypeMatch": None,
+            "estimatedYieldPerNode": None,
             "engineComparisonIndex": None,
             "harvestPressurePerSecond": None,
             "observedYieldPerSecond": None,
-            "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+            "scoreBasis": YIELD_SCORE_BASIS,
         }
 
     weighted_entries: list[tuple[dict[str, Any], float | None, str | None]] = []
@@ -610,7 +873,10 @@ def evaluate_attack_resource(
             "DAMAGE_TYPE_WEIGHT_OVERRIDE_NOT_RECOVERED" in entry_gaps
             and (
                 not isinstance(override_types, list)
-                or any(candidate in override_types for candidate in chain)
+                or any(
+                    normalize_unreal_object_identity(candidate) in chain
+                    for candidate in override_types
+                )
             )
         )
         if weight_override_unknown:
@@ -626,7 +892,11 @@ def evaluate_attack_resource(
             weight = float(value) if isinstance(value, (int, float)) else None
         weighted_entries.append((entry, weight, matched))
     target_weight_row = next(
-        (row for row in weighted_entries if str(row[0].get("resource") or "") == resource),
+        (
+            row
+            for row in weighted_entries
+            if row[0] is target_entry
+        ),
         None,
     )
     if target_weight_row is None or target_weight_row[1] is None:
@@ -651,10 +921,11 @@ def evaluate_attack_resource(
             "reasonCode": "ZERO_RESOURCE_WEIGHT",
             "missingFacts": [],
             "resourceWeightShare": 0.0,
+            "estimatedYieldPerNode": None,
             "engineComparisonIndex": None,
             "harvestPressurePerSecond": None,
             "observedYieldPerSecond": None,
-            "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+            "scoreBasis": YIELD_SCORE_BASIS,
         }
     unknown_competing_weights = [
         f"EntryWeight:{entry.get('resource') or '#' + str(entry.get('entryIndex'))}"
@@ -685,22 +956,58 @@ def evaluate_attack_resource(
     damage_multiplier = damage_entry.get("damageMultiplier")
     quantity_multiplier = damage_entry.get("harvestQuantityMultiplier")
     component_coefficients: list[str] = []
-    attack_coefficients: list[str] = []
     if not isinstance(damage_multiplier, (int, float)):
         component_coefficients.append("DamageMultiplier")
     if not isinstance(quantity_multiplier, (int, float)):
         component_coefficients.append("HarvestQuantityMultiplier")
-    attack_interval = attack_interval_value
-    if attack_interval <= 0:
-        attack_coefficients.append("AttackInterval>0")
-    if component_coefficients or attack_coefficients:
+    max_harvest_health = component.get("maxHarvestHealth")
+    give_resource_interval = component.get("harvestHealthGiveResourceInterval")
+    if not isinstance(max_harvest_health, (int, float)):
+        component_coefficients.append("MaxHarvestHealth")
+    if not isinstance(give_resource_interval, (int, float)):
+        component_coefficients.append("HarvestHealthGiveResourceInterval")
+    if component_coefficients:
         return _unranked_row(
             base,
             "REQUIRED_COEFFICIENT_NOT_RECOVERED",
-            missing_by_scope={
-                "attack": attack_coefficients,
-                "component": component_coefficients,
-            },
+            missing_by_scope={"component": component_coefficients},
+        )
+    if component.get("isSingleUnitHarvest") is True:
+        return _unranked_row(
+            base,
+            "SINGLE_UNIT_HARVEST_MODEL_NOT_RECOVERED",
+            ["bIsSingleUnitHarvest"],
+            scope="component",
+        )
+
+    target_entry_gaps = set(
+        target_entry.get("rankingGaps") or target_entry.get("gaps") or []
+    )
+    target_override_types = target_entry.get("damageTypeEntryValues")
+
+    def relevant_quantity_override_gap(gap_code: str) -> bool:
+        return gap_code in target_entry_gaps and (
+            not isinstance(target_override_types, list)
+            or any(
+                normalize_unreal_object_identity(candidate) in chain
+                for candidate in target_override_types
+            )
+        )
+
+    unresolved_quantity_overrides = [
+        gap_code
+        for gap_code in (
+            "DAMAGE_TYPE_MIN_QUANTITY_OVERRIDE_NOT_RECOVERED",
+            "DAMAGE_TYPE_MAX_QUANTITY_OVERRIDE_NOT_RECOVERED",
+        )
+        if relevant_quantity_override_gap(gap_code)
+    ]
+    if unresolved_quantity_overrides:
+        return _unranked_row(
+            base,
+            "RESOURCE_QUANTITY_MODEL_NOT_RECOVERED",
+            unresolved_quantity_overrides,
+            scope="target",
         )
 
     min_quantity, min_match = _nearest_override(
@@ -717,32 +1024,121 @@ def evaluate_attack_resource(
         chain,
         target_entry.get("overrideQuantityMax"),
     )
+    quantity_random_power = target_entry.get("overrideQuantityRandomPower")
+    if quantity_random_power is None:
+        # Legacy component reports predate this field.  The native struct and
+        # every resource entry in the current DevKit corpus use the linear 1.0
+        # default, so the compatibility assumption is explicit in the output.
+        quantity_random_power = 1.0
+        random_power_source = "NATIVE_LINEAR_DEFAULT_FOR_LEGACY_REPORT"
+    else:
+        random_power_source = "RECOVERED_COMPONENT_VALUE"
+    quantity_facts: list[str] = []
+    if not isinstance(min_quantity, (int, float)):
+        quantity_facts.append("OverrideQuantityMin")
+    if not isinstance(max_quantity, (int, float)):
+        quantity_facts.append("OverrideQuantityMax")
+    if not isinstance(quantity_random_power, (int, float)):
+        quantity_facts.append("OverrideQuantityRandomPower")
+    if quantity_facts:
+        return _unranked_row(
+            base,
+            "RESOURCE_QUANTITY_MODEL_NOT_RECOVERED",
+            quantity_facts,
+            scope="target",
+        )
+    additional_effectiveness = damage_entry.get(
+        "damageHarvestAdditionalEffectiveness"
+    )
+    if additional_effectiveness is None:
+        additional_effectiveness = 0.0
+    if not isinstance(additional_effectiveness, (int, float)):
+        return _unranked_row(
+            base,
+            "HARVEST_EFFECTIVENESS_MODEL_NOT_RECOVERED",
+            ["DamageHarvestAdditionalEffectiveness"],
+            scope="component",
+        )
+    if not math.isclose(
+        float(additional_effectiveness), 0.0, rel_tol=0.0, abs_tol=1e-9
+    ):
+        return _unranked_row(
+            base,
+            "NONZERO_HARVEST_EFFECTIVENESS_MODEL_NOT_IMPLEMENTED",
+            ["DamageHarvestAdditionalEffectiveness=0"],
+            scope="component",
+        )
     weight_share = resource_weight / total_positive_weight
+    try:
+        yield_estimate = estimate_complete_node_yield(
+            base_damage=base_damage_value,
+            damage_multiplier=float(damage_multiplier),
+            harvest_quantity_multiplier=float(quantity_multiplier),
+            max_harvest_health=float(max_harvest_health),
+            harvest_health_give_resource_interval=float(give_resource_interval),
+            resource_weight_share=weight_share,
+            minimum_quantity=float(min_quantity),
+            maximum_quantity=float(max_quantity),
+            quantity_random_power=float(quantity_random_power),
+            clamp_resource_harvest_damage=bool(
+                component.get("clampResourceHarvestDamage")
+            ),
+        )
+    except ValueError as exc:
+        return _unranked_row(
+            base,
+            "COMPLETE_NODE_YIELD_MODEL_NOT_APPLICABLE",
+            [str(exc)],
+            scope="yieldModel",
+        )
+    attack_interval = attack_interval_value
     pressure = (
         base_damage_value
         / attack_interval
         * float(damage_multiplier)
         * float(quantity_multiplier)
+        if isinstance(attack_interval, float) and attack_interval > 0
+        else None
     )
+    legacy_index = pressure * weight_share if pressure is not None else None
+    estimated_yield = float(yield_estimate["estimatedYieldPerNode"])
     return {
         **base,
+        **yield_estimate,
         "rankingStatus": "RANKED",
-        "reasonCode": "ENGINE_COEFFICIENTS_RECOVERED",
+        "reasonCode": "COMPLETE_NODE_YIELD_ESTIMATED",
         "missingFacts": [],
         "baseDamage": base_damage_value,
         "attackInterval": attack_interval,
         "damageMultiplier": float(damage_multiplier),
         "harvestQuantityMultiplier": float(quantity_multiplier),
+        "damageHarvestAdditionalEffectiveness": float(additional_effectiveness),
         "resourceWeightShare": weight_share,
         "overrideQuantityMin": min_quantity,
         "overrideQuantityMax": max_quantity,
+        "overrideQuantityRandomPower": float(quantity_random_power),
+        "quantityRandomPowerSource": random_power_source,
         "quantityOverrideMatch": min_match or max_match,
-        "maxHarvestHealth": component.get("maxHarvestHealth"),
-        "harvestHealthGiveResourceInterval": component.get("harvestHealthGiveResourceInterval"),
+        "maxHarvestHealth": float(max_harvest_health),
+        "harvestHealthGiveResourceInterval": float(give_resource_interval),
         "harvestPressurePerSecond": pressure,
-        "engineComparisonIndex": pressure * weight_share,
+        "estimatedYieldPerNode": estimated_yield,
+        # One-release compatibility alias.  It intentionally equals the new
+        # yield metric so an old renderer cannot show a score that contradicts
+        # the order returned by the API.
+        "engineComparisonIndex": estimated_yield,
+        "legacyDiagnostics": {
+            "harvestPressurePerSecond": pressure,
+            "engineComparisonIndex": legacy_index,
+            "scoreBasis": "DEPRECATED_ATTACK_CADENCE_COEFFICIENT",
+        },
         "observedYieldPerSecond": None,
-        "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
+        "scoreBasis": YIELD_SCORE_BASIS,
+        "yieldModelStatus": "STATIC_NORMALIZED_PROFILE",
+        "yieldModelCaveats": [
+            "RUNTIME_BLUEPRINT_BUFF_GENE_MISSION_AND_SERVER_HOOKS_NOT_APPLIED",
+            "STANDARD_BASE_MELEE_DAMAGE_PROFILE",
+        ],
     }
 
 
@@ -751,13 +1147,8 @@ def rank_harvest_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
     def key(row: dict[str, Any]) -> tuple[Any, ...]:
         status = str(row.get("rankingStatus") or "UNRANKED")
-        score = row.get("engineComparisonIndex")
-        fallback = row.get("potentialAttackRate")
-        numeric_score = (
-            float(score)
-            if isinstance(score, (int, float))
-            else (float(fallback) if isinstance(fallback, (int, float)) else float("-inf"))
-        )
+        score = row.get("estimatedYieldPerNode")
+        numeric_score = float(score) if isinstance(score, (int, float)) else float("-inf")
         return (
             status_order.get(status, 9),
             -numeric_score,

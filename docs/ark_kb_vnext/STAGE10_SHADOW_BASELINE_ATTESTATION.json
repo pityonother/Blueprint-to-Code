@@ -1,0 +1,118 @@
+{
+  "schema": "ark-kb-shadow-baseline-attestation/v1",
+  "recordedAt": "2026-07-29T19:03:11+08:00",
+  "repository": {
+    "remote": "pityonother/Blueprint-to-Code",
+    "branch": "codex/fix-partner-devkit-root",
+    "commitSha": "0cfed0feb8b2ff3048fa25667ce68504149be0ab",
+    "remoteHeadSha": "0cfed0feb8b2ff3048fa25667ce68504149be0ab",
+    "pullRequest": {
+      "number": 2,
+      "state": "OPEN",
+      "draft": true,
+      "mergeState": "CLEAN",
+      "checks": {
+        "quality": "SUCCESS",
+        "public-native-fixture": "SUCCESS"
+      }
+    },
+    "supersededPullRequest": 1
+  },
+  "snapshot": {
+    "buildId": "20260727T222549-a2d56bd7fed8",
+    "generatedAt": "2026-07-27T22:25:49+00:00",
+    "sourceSha256": "a2d56bd7fed88edd1098915ea3723da0fdef0b0a263567b56f46bae074f385cd",
+    "discoverySha256": "028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f",
+    "currentPointerSha256": "0eb61d518162b281806d96da818c44d07f8000f4bff8c897f6bbebfaab4a3c0f",
+    "manifestSha256": "3504749b23ef317596ee11ea8046b044211a697197379a75ba747347f5eaa780",
+    "qualityReportSha256": "57a27d27af5a795638b084be3230cf796d461a040ac89f04233a0bd6d874bdb4",
+    "benchmarkReportSha256": "fc20fd1972673840afd03b22f9ee4fdd725b8cac2b13ea9cf31c5f43e0cb9891",
+    "qualityGates": {
+      "total": 75,
+      "passed": 58,
+      "failed": 17,
+      "cutoverEligible": false,
+      "sealedInSnapshotManifest": true
+    },
+    "goldCounts": {
+      "queryHumanReviewed": 5,
+      "registrationRelationships": 0,
+      "roleCanonicalEntities": 0
+    },
+    "cutover": {
+      "mode": "shadow",
+      "defaultQuerySource": "legacy"
+    }
+  },
+  "validation": {
+    "pythonSuite": {
+      "command": "python -m pytest -q",
+      "result": "PASS",
+      "testsPassed": 1133,
+      "subtestsPassed": 596,
+      "warnings": 2
+    },
+    "frontendContracts": {
+      "commands": [
+        "node tests/api_frontend_contract.mjs",
+        "node tests/frontend_core_contract.mjs",
+        "node tests/harvest_frontend_contract.mjs"
+      ],
+      "result": "PASS"
+    },
+    "frontendBuild": {
+      "command": "npm run build",
+      "result": "PASS"
+    },
+    "whitespace": {
+      "command": "git diff --check",
+      "result": "PASS"
+    },
+    "documentIdentity": {
+      "command": "python -m pytest tests/test_kb_document_identity.py -q",
+      "result": "PASS"
+    },
+    "apiSmoke": {
+      "healthAvailable": true,
+      "healthStatus": "READY",
+      "freshness": "FRESH",
+      "searchQuery": "Buff",
+      "searchItems": 25,
+      "result": "PASS"
+    },
+    "storage": {
+      "databaseCount": 10,
+      "integrityCheck": "ok",
+      "foreignKeyViolations": 0,
+      "journalMode": "delete",
+      "walSidecars": 0,
+      "shmSidecars": 0,
+      "result": "PASS"
+    },
+    "fullRebuildAttempt": {
+      "candidateBuildId": "20260729T100838-26012705e0ab",
+      "result": "BLOCKED_BY_PRESEAL_BENCHMARK_REGRESSION",
+      "error": "Immutable benchmark snapshot has no sealed quality report",
+      "candidatePassed": 49,
+      "candidateFailed": 26,
+      "published": false,
+      "currentPointerChanged": false,
+      "followUpStage": "C"
+    },
+    "unchangedUpdate": {
+      "result": "BLOCKED_BY_NON_SELECTIVE_LOCAL_INPUT_DRIFT",
+      "gapCode": "NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED",
+      "published": false,
+      "currentPointerChanged": false
+    }
+  },
+  "status": {
+    "baselineFrozen": true,
+    "readyForDefault": false,
+    "blockers": [
+      "BLOCKED_BY_INDEPENDENT_REVIEW",
+      "BLOCKED_BY_INCOMPLETE_PRODUCTION_INCREMENTAL",
+      "BLOCKED_BY_MISSING_BURN_IN_EVIDENCE"
+    ]
+  }
+}

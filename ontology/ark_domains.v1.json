@@ -1,0 +1,266 @@
+{
+  "schema": "ark-kb-domain-ontology/v1",
+  "version": "ark-domains/v1",
+  "domains": [
+    {
+      "id": "global_registration",
+      "label": "Global registration",
+      "classCategories": [],
+      "registrationTypes": ["global_asset_reference"],
+      "componentCategories": [],
+      "functionTokens": ["register", "remap"],
+      "propertyTokens": ["additional", "remap"],
+      "pathTokens": ["primalgamedata", "gamemode", "worldsettings"]
+    },
+    {
+      "id": "class_inheritance",
+      "label": "Class inheritance",
+      "classCategories": ["CLASS_IDENTITY"],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": ["parentclass", "nativeparentclass"],
+      "propertyTokens": ["parentclass", "nativeparentclass"],
+      "pathTokens": []
+    },
+    {
+      "id": "creature_definition",
+      "label": "Creature definition",
+      "classCategories": ["CREATURE"],
+      "registrationTypes": ["creature_registration"],
+      "componentCategories": [],
+      "functionTokens": ["dino", "creature"],
+      "propertyTokens": ["dinonametag", "descriptive_name_base"],
+      "pathTokens": ["dinos", "creature"]
+    },
+    {
+      "id": "taming",
+      "label": "Taming",
+      "classCategories": [],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": ["taming", "istamed", "dotame"],
+      "propertyTokens": ["taming", "tameable"],
+      "pathTokens": ["taming"]
+    },
+    {
+      "id": "breeding_growth_imprinting_genetics",
+      "label": "Breeding, growth, imprinting, and genetics",
+      "classCategories": [],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": ["mating", "breeding", "imprint", "gestation", "mutation"],
+      "propertyTokens": ["mating", "baby", "imprint", "gestation", "mutation"],
+      "pathTokens": ["baby", "breeding", "gene"]
+    },
+    {
+      "id": "status_component",
+      "label": "Status component",
+      "classCategories": ["STATUS_COMPONENT"],
+      "registrationTypes": [],
+      "componentCategories": ["STATUS_COMPONENT"],
+      "functionTokens": ["statusvalue", "statuscomponent"],
+      "propertyTokens": ["maxstatusvalues", "statusvaluemodifier"],
+      "pathTokens": ["statuscomponent"]
+    },
+    {
+      "id": "damage_resistance",
+      "label": "Damage and resistance",
+      "classCategories": ["DAMAGE_TYPE"],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": ["damage", "resistance", "modifydamage"],
+      "propertyTokens": ["damagemultiplier", "resistance"],
+      "pathTokens": ["damagetype", "damage"]
+    },
+    {
+      "id": "buff",
+      "label": "Buff",
+      "classCategories": ["BUFF"],
+      "registrationTypes": ["buff_registration"],
+      "componentCategories": [],
+      "functionTokens": ["addbuff", "deactivatebuff", "buff"],
+      "propertyTokens": ["buff", "statusvalueindex"],
+      "pathTokens": ["buff"]
+    },
+    {
+      "id": "inventory",
+      "label": "Inventory",
+      "classCategories": ["INVENTORY"],
+      "registrationTypes": [],
+      "componentCategories": ["INVENTORY"],
+      "functionTokens": ["additem", "removeitem", "inventory"],
+      "propertyTokens": ["inventorycomponent", "inventoryitems"],
+      "pathTokens": ["inventory"]
+    },
+    {
+      "id": "item_use",
+      "label": "Item definition and use",
+      "classCategories": ["ITEM"],
+      "registrationTypes": ["item_registration"],
+      "componentCategories": [],
+      "functionTokens": ["useitem", "consumeitem"],
+      "propertyTokens": ["itemdescription", "itemweight"],
+      "pathTokens": ["primalitem", "items"]
+    },
+    {
+      "id": "crafting_engram",
+      "label": "Crafting and engrams",
+      "classCategories": ["ENGRAM"],
+      "registrationTypes": ["engram_registration", "engram_remap"],
+      "componentCategories": [],
+      "functionTokens": ["craft", "engram"],
+      "propertyTokens": ["basecraftingresourcecost", "engram"],
+      "pathTokens": ["engram", "crafting"]
+    },
+    {
+      "id": "loot_quality_reward",
+      "label": "Loot quality and rewards",
+      "classCategories": ["SUPPLY_CRATE", "LOOT_ITEM_SET"],
+      "registrationTypes": ["loot_registration", "reward_registration"],
+      "componentCategories": [],
+      "functionTokens": ["generatecrateitems", "itemrating", "reward"],
+      "propertyTokens": ["itemsets", "minquality", "maxquality", "reward"],
+      "pathTokens": ["supplycrate", "loot", "reward", "itemset"]
+    },
+    {
+      "id": "harvest",
+      "label": "Harvest",
+      "classCategories": ["HARVEST_COMPONENT"],
+      "registrationTypes": ["harvest_registration"],
+      "componentCategories": ["HARVEST_COMPONENT"],
+      "functionTokens": ["harvest", "gather"],
+      "propertyTokens": ["harvestresource", "damagetypeentry"],
+      "pathTokens": ["harvest", "resource"]
+    },
+    {
+      "id": "ai_combat_riding",
+      "label": "AI, combat, and riding",
+      "classCategories": ["AI_CONTROLLER"],
+      "registrationTypes": [],
+      "componentCategories": ["AI_CONTROLLER"],
+      "functionTokens": ["aicontroller", "attack", "riding", "mount"],
+      "propertyTokens": ["aicontrollerclass", "attackinfos"],
+      "pathTokens": ["ai", "attack", "riding"]
+    },
+    {
+      "id": "weapon_projectile",
+      "label": "Weapons and projectiles",
+      "classCategories": ["WEAPON", "PROJECTILE"],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": ["fireweapon", "projectile", "ammo"],
+      "propertyTokens": ["ammotemplate", "weapondamage", "projectileclass"],
+      "pathTokens": ["weapon", "projectile", "ammo"]
+    },
+    {
+      "id": "structure",
+      "label": "Structures",
+      "classCategories": ["STRUCTURE"],
+      "registrationTypes": ["structure_registration"],
+      "componentCategories": [],
+      "functionTokens": ["structure", "placement"],
+      "propertyTokens": ["structure", "placement"],
+      "pathTokens": ["structures"]
+    },
+    {
+      "id": "mission_world_event",
+      "label": "Missions and world events",
+      "classCategories": ["MISSION", "WORLD_EVENT"],
+      "registrationTypes": ["mission_registration", "world_event_registration"],
+      "componentCategories": [],
+      "functionTokens": ["mission", "task", "worldevent"],
+      "propertyTokens": ["mission", "task", "event"],
+      "pathTokens": ["mission", "worldevent", "quest"]
+    },
+    {
+      "id": "map_world",
+      "label": "Maps and worlds",
+      "classCategories": ["MAP", "WORLD"],
+      "registrationTypes": ["map_registration"],
+      "componentCategories": [],
+      "functionTokens": ["worldsettings", "level"],
+      "propertyTokens": ["worldsettings", "level"],
+      "pathTokens": ["maps", "world"]
+    },
+    {
+      "id": "pcg_world_partition",
+      "label": "PCG and World Partition",
+      "classCategories": ["PCG", "WORLD_PARTITION"],
+      "registrationTypes": ["pcg_registration", "world_partition_registration"],
+      "componentCategories": ["PCG"],
+      "functionTokens": ["pcg", "worldpartition"],
+      "propertyTokens": ["pcg", "worldpartition"],
+      "pathTokens": ["pcg", "worldpartition"]
+    },
+    {
+      "id": "spawn_ecology",
+      "label": "Spawning and ecology",
+      "classCategories": ["SPAWNER", "NPC_ZONE", "BIOME"],
+      "registrationTypes": ["spawn_registration", "biome_registration"],
+      "componentCategories": [],
+      "functionTokens": ["spawn", "npczone", "biome"],
+      "propertyTokens": ["spawnentries", "npcspawnentries", "biome"],
+      "pathTokens": ["spawn", "npczone", "biome"]
+    },
+    {
+      "id": "ui_runtime",
+      "label": "Runtime UI",
+      "classCategories": ["USER_WIDGET"],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": ["widget", "hud", "ui"],
+      "propertyTokens": ["widgetclass", "hud"],
+      "pathTokens": ["ui", "hud", "widgets"]
+    },
+    {
+      "id": "network_replication",
+      "label": "Network replication",
+      "classCategories": [],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": ["server", "client", "multicast", "repnotify"],
+      "propertyTokens": ["replicated", "repnotify"],
+      "pathTokens": ["network"]
+    },
+    {
+      "id": "save_persistence_transfer",
+      "label": "Save, persistence, and transfer",
+      "classCategories": [],
+      "registrationTypes": ["save_registration", "transfer_registration"],
+      "componentCategories": [],
+      "functionTokens": ["save", "load", "transfer", "upload"],
+      "propertyTokens": ["savegame", "transfer", "upload"],
+      "pathTokens": ["save", "transfer"]
+    },
+    {
+      "id": "native_runtime",
+      "label": "Native runtime implementation",
+      "classCategories": ["NATIVE_FUNCTION"],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": [],
+      "propertyTokens": [],
+      "pathTokens": []
+    },
+    {
+      "id": "runtime_validation",
+      "label": "Runtime validation",
+      "classCategories": ["RUNTIME_PROBE"],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": ["debug", "probe", "validate"],
+      "propertyTokens": ["runtimeobserved"],
+      "pathTokens": ["probe", "runtime"]
+    },
+    {
+      "id": "evidence_boundary",
+      "label": "Evidence boundary",
+      "classCategories": ["EVIDENCE_GAP"],
+      "registrationTypes": [],
+      "componentCategories": [],
+      "functionTokens": [],
+      "propertyTokens": [],
+      "pathTokens": []
+    }
+  ]
+}

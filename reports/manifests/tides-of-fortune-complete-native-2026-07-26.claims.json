@@ -1,0 +1,221 @@
+{
+  "schema": "blueprint-to-code-report-claims/v1",
+  "reportId": "tides-of-fortune-complete-native-2026-07-26",
+  "reportPath": "reports/TIDES_OF_FORTUNE_COMPLETE_NATIVE_2026-07-26.md",
+  "generatedAtUtc": "2026-07-26T18:13:23Z",
+  "generator": {
+    "repositoryCommit": "WORKTREE_UNCOMMITTED",
+    "dirty": true
+  },
+  "dependencies": {
+    "blueprintAssets": [
+      {
+        "manifestPath": "reports/evidence_manifests/tides-crate-base-2026-07-26.blueprint.json",
+        "assetId": "a96a6271ae6e14a7226f4edc",
+        "revisionId": "c15d544170b3228882ed0c6f",
+        "sourceFingerprint": "3b9213904176a0b8e821c3f4cb3d1addcf4a272cf0bcfb48d22fb4424cca3a51"
+      },
+      {
+        "manifestPath": "reports/evidence_manifests/tides-crate-primitive-2026-07-26.blueprint.json",
+        "assetId": "87d9b483f8405fd34d11cb18",
+        "revisionId": "a77382808376fb8d88fcbc22",
+        "sourceFingerprint": "ca2b6eebf025b25bd713f1d3e520b06d15a1068d5e2cc6cc9c1de23f175b8dc6"
+      },
+      {
+        "manifestPath": "reports/evidence_manifests/tides-crate-ramshackle-2026-07-26.blueprint.json",
+        "assetId": "63eb94ca0c84005ff41d5426",
+        "revisionId": "52cddd57343fb11fbd35a49e",
+        "sourceFingerprint": "ec03e94a254f57aa2d61e4e3f62887a6477e4aa8550d3e80d8d6e19effaac5d9"
+      },
+      {
+        "manifestPath": "reports/evidence_manifests/tides-crate-apprentice-2026-07-26.blueprint.json",
+        "assetId": "cbf0a08f96f7237f92761ad7",
+        "revisionId": "cf973a577a8065094bc278d6",
+        "sourceFingerprint": "c2aa6690ca42fb5dd62fdc1070a2afa6af104fb8a560446315154e03db2050d9"
+      },
+      {
+        "manifestPath": "reports/evidence_manifests/tides-crate-journeyman-2026-07-26.blueprint.json",
+        "assetId": "2a2196927277c8f6c35984f2",
+        "revisionId": "c8c250f2ae5e7f4a69e98fef",
+        "sourceFingerprint": "b03ce6cbf3901531009f3ee26b781f88a32b91a8009940227514868908676a1c"
+      },
+      {
+        "manifestPath": "reports/evidence_manifests/tides-crate-mastercraft-2026-07-26.blueprint.json",
+        "assetId": "14c3112355111a772189a3db",
+        "revisionId": "a2079a39d4cca4e6e55029a4",
+        "sourceFingerprint": "a23f0677e122d57be58f5b20f5bcaae2fb4a1bc6cb16d7910f49845023c2ee35"
+      },
+      {
+        "manifestPath": "reports/evidence_manifests/tides-crate-ascendant-2026-07-26.blueprint.json",
+        "assetId": "07e37b277c098fb4794a9ba8",
+        "revisionId": "993e8cf3feff566eab2be132",
+        "sourceFingerprint": "d4bcbf11e6651f4e2f00a1294a1369178cf92b3b34a118929eece6aa2b40f8c8"
+      }
+    ],
+    "nativeEvidenceSets": [
+      {
+        "manifestPath": "reports/evidence_manifests/shooter-game-native-legacy-2026-07-26.native.json",
+        "evidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "pdbSha256": "5285ae571d09fde9183a491f6bdef6e10a143857dd8b7fa5f9e6755b9c01bc16",
+        "recipeId": "UNRECOVERED_LEGACY_RECIPE",
+        "recipeSha256": "",
+        "generatorScriptSha256": {}
+      }
+    ],
+    "runtimeObservationSets": []
+  },
+  "claims": [
+    {
+      "claimId": "claim://tides-of-fortune/item-set-count-distribution",
+      "summary": "With MinItemSets=1, MaxItemSets=4, and NumItemSetsPower=1, the crate selects one to four item sets with probabilities 1/6, 2/6, 2/6, and 1/6.",
+      "status": "HYBRID_STATIC",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "bp://a96a6271ae6e14a7226f4edc@c15d544170b3228882ed0c6f/default/MaxItemSets",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0xAEA7E0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0xAEBA50",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x13A1420",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x13A55E0"
+      ],
+      "assumptions": [
+        "No SetQuantityWeights/SetQuantityValues override is active."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE",
+        "blueprintSourceFingerprint": "3b9213904176a0b8e821c3f4cb3d1addcf4a272cf0bcfb48d22fb4424cca3a51"
+      },
+      "invalidationConditions": [
+        "ShooterGame binary hash changed",
+        "crate defaults or inherited asset values changed",
+        "a formal recipe rebuild contradicts the legacy target"
+      ],
+      "reportMarkers": [
+        "漂流瓶不是固定抽 4 个子奖池。"
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    },
+    {
+      "claimId": "claim://tides-of-fortune/hierarchical-relative-weights",
+      "summary": "SetWeight=1 is a relative weight, and each crate, entry, and item layer normalizes against the sum of weights at that layer.",
+      "status": "STATIC_REVERSED",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x13A1420",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0xB65B60"
+      ],
+      "assumptions": [
+        "The legacy target names and RVAs resolve to the same binary identified by the manifest."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE"
+      },
+      "invalidationConditions": [
+        "ShooterGame binary hash changed",
+        "weight-selection implementation changed",
+        "a formal recipe rebuild contradicts the legacy target"
+      ],
+      "reportMarkers": [
+        "`SetWeight=1` 不是 100%。"
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    },
+    {
+      "claimId": "claim://tides-of-fortune/effective-crate-quality-range",
+      "summary": "The default AboveOneExtraQualityMultiplier of 1.2 transforms a crate-quality input range of 2.0 to 4.0 into an effective range of 2.2 to 4.6 before other modifiers.",
+      "status": "HYBRID_STATIC",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "bp://87d9b483f8405fd34d11cb18@a77382808376fb8d88fcbc22/default/MinQualityMultiplier",
+        "bp://87d9b483f8405fd34d11cb18@a77382808376fb8d88fcbc22/default/MaxQualityMultiplier",
+        "bp://63eb94ca0c84005ff41d5426@52cddd57343fb11fbd35a49e/default/MinQualityMultiplier",
+        "bp://63eb94ca0c84005ff41d5426@52cddd57343fb11fbd35a49e/default/MaxQualityMultiplier",
+        "bp://cbf0a08f96f7237f92761ad7@cf973a577a8065094bc278d6/default/MinQualityMultiplier",
+        "bp://cbf0a08f96f7237f92761ad7@cf973a577a8065094bc278d6/default/MaxQualityMultiplier",
+        "bp://2a2196927277c8f6c35984f2@c8c250f2ae5e7f4a69e98fef/default/MinQualityMultiplier",
+        "bp://2a2196927277c8f6c35984f2@c8c250f2ae5e7f4a69e98fef/default/MaxQualityMultiplier",
+        "bp://14c3112355111a772189a3db@a2079a39d4cca4e6e55029a4/default/MinQualityMultiplier",
+        "bp://14c3112355111a772189a3db@a2079a39d4cca4e6e55029a4/default/MaxQualityMultiplier",
+        "bp://07e37b277c098fb4794a9ba8@993e8cf3feff566eab2be132/default/MinQualityMultiplier",
+        "bp://07e37b277c098fb4794a9ba8@993e8cf3feff566eab2be132/default/MaxQualityMultiplier",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0xAEA7E0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0xAEBA50"
+      ],
+      "assumptions": [
+        "No server or temporary quality modifier changes the default path."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE",
+        "blueprintSourceFingerprints": [
+          "ca2b6eebf025b25bd713f1d3e520b06d15a1068d5e2cc6cc9c1de23f175b8dc6",
+          "ec03e94a254f57aa2d61e4e3f62887a6477e4aa8550d3e80d8d6e19effaac5d9",
+          "c2aa6690ca42fb5dd62fdc1070a2afa6af104fb8a560446315154e03db2050d9",
+          "b03ce6cbf3901531009f3ee26b781f88a32b91a8009940227514868908676a1c",
+          "a23f0677e122d57be58f5b20f5bcaae2fb4a1bc6cb16d7910f49845023c2ee35",
+          "d4bcbf11e6651f4e2f00a1294a1369178cf92b3b34a118929eece6aa2b40f8c8"
+        ]
+      },
+      "invalidationConditions": [
+        "ShooterGame binary hash changed",
+        "crate quality defaults changed",
+        "a formal recipe rebuild contradicts the legacy target"
+      ],
+      "reportMarkers": [
+        "`AboveOneExtraQualityMultiplier=1.2`"
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    },
+    {
+      "claimId": "claim://tides-of-fortune/item-rating-clamps-and-quality-index",
+      "summary": "Generated item stats and aggregate rating can be clamped, and the resulting ItemRating is converted to ItemQualityIndex through the game-data quality thresholds.",
+      "status": "STATIC_REVERSED",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1414E60",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1422930",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14223E0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x12EA8F0",
+        "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1453B10"
+      ],
+      "assumptions": [
+        "The current GameData supplies the quality thresholds referenced by the binary."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+        "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+        "recipeSha256": "",
+        "provenanceStatus": "PROVENANCE_INCOMPLETE"
+      },
+      "invalidationConditions": [
+        "ShooterGame binary hash changed",
+        "GameData quality thresholds changed",
+        "a formal recipe rebuild contradicts the legacy target"
+      ],
+      "reportMarkers": [
+        "`UPrimalItem::ClampItemRating`"
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    }
+  ]
+}

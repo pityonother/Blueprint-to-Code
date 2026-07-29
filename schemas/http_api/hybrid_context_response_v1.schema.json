@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/hybrid-context-response/v1",
+  "title": "Hybrid evidence context response",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "question",
+    "queryTerms",
+    "requestedBudget",
+    "effectiveBudget",
+    "estimatedTokens",
+    "blueprintRevisionId",
+    "blueprintSourceFingerprint",
+    "nativeEvidenceSetId",
+    "nativeSourceFingerprint",
+    "nativeTrust",
+    "hybridSourceFingerprint",
+    "blueprintConfirmedFacts",
+    "nativeConfirmedFacts",
+    "resolvedCrossSourceEdges",
+    "assumptions",
+    "blueprintGaps",
+    "nativeGaps",
+    "runtimeOnlyGaps",
+    "staleProvenanceWarnings"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code-hybrid-context-pack/v1"
+    },
+    "question": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "queryTerms": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string"
+      }
+    },
+    "requestedBudget": {
+      "type": "integer",
+      "minimum": 500
+    },
+    "effectiveBudget": {
+      "type": "integer",
+      "minimum": 500,
+      "maximum": 8000
+    },
+    "estimatedTokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "blueprintRevisionId": {
+      "type": "string"
+    },
+    "blueprintSourceFingerprint": {
+      "type": "string"
+    },
+    "nativeEvidenceSetId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nativeSourceFingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nativeTrust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "formalValidation"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "formalValidation": {
+          "type": "boolean"
+        }
+      }
+    },
+    "hybridSourceFingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "blueprintConfirmedFacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "nativeConfirmedFacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "resolvedCrossSourceEdges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "blueprintGaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "nativeGaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "runtimeOnlyGaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "staleProvenanceWarnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  }
+}

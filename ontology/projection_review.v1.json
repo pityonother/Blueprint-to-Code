@@ -1,0 +1,72 @@
+{
+  "schema": "ark-kb-projection-review/v1",
+  "version": "ark-kb-projection-review/2026-07-27",
+  "projections": {
+    "buff_effects": [
+      {
+        "reviewId": "buff-archelon-dry-land-duration",
+        "canonicalUri": "/Game/ASA/Dinos/Archelon/Dinos/Buffs/Buff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA",
+        "factType": "STATUS_EFFECT",
+        "factName": "DeactivateAfterTime",
+        "valueKind": "NUMBER",
+        "valueNumber": 150.0,
+        "evidenceUri": "bp://1672632593b6d99f2ac50fcb@39f5796b13f8e89978c6aaa0/default/DeactivateAfterTime"
+      }
+    ],
+    "loot_entries": [
+      {
+        "reviewId": "loot-shoulder-dragon-min-item-sets",
+        "canonicalUri": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+        "factType": "LOOT_ENTRY",
+        "factName": "MinItemSets",
+        "valueKind": "NUMBER",
+        "valueNumber": 3.0,
+        "evidenceUri": "bp://2cd1e058d707f90a43576ce8@9a30ecf3c31b159a87dff0bf/default/MinItemSets"
+      }
+    ],
+    "item_properties": [
+      {
+        "reviewId": "item-ambergris-weight",
+        "canonicalUri": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+        "factType": "ITEM_PROPERTY",
+        "factName": "BaseItemWeight",
+        "valueKind": "NUMBER",
+        "valueNumber": 5.0,
+        "evidenceUri": "bp://6c1bb745f3c38ada28b02ff2@f29f912a4578a36dbb015017/default/BaseItemWeight"
+      }
+    ],
+    "status_values": [
+      {
+        "reviewId": "status-dino-moving-stamina-recovery",
+        "canonicalUri": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+        "factType": "STATUS_VALUE",
+        "factName": "MovingStaminaRecoveryRateMultiplier",
+        "valueKind": "NUMBER",
+        "valueNumber": 0.5,
+        "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/MovingStaminaRecoveryRateMultiplier"
+      }
+    ],
+    "harvest_rules": [
+      {
+        "reviewId": "harvest-giant-turtle-component-link",
+        "canonicalUri": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+        "factType": "HARVEST_RULE",
+        "factName": "DeathHarvestingComponent",
+        "valueKind": "ENTITY_REF",
+        "valueText": "/Game/Genesis/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Hugest_GiantTurtle.DinoDeathHarvestingComponent_Hugest_GiantTurtle_C",
+        "evidenceUri": "bp://7102dbf65d33102501cd71f0@ed6ab1db480e4f280253d37c/default/DeathHarvestingComponent"
+      }
+    ],
+    "mission_rewards": [
+      {
+        "reviewId": "mission-ocean-gather-hexagons",
+        "canonicalUri": "/Game/Genesis/Missions/GatherNodes/MissionType_Gather_Nodes_Ocean.MissionType_Gather_Nodes_Ocean",
+        "factType": "MISSION_REWARD",
+        "factName": "number of hexagons to reward upon gathering items",
+        "valueKind": "INTEGER",
+        "valueInteger": 500,
+        "evidenceUri": "bp://bacc8a05bb299574553f77e5@9b68dccc651acfe123e7b5e4/default/number%20of%20hexagons%20to%20reward%20upon%20gathering%20items"
+      }
+    ]
+  }
+}

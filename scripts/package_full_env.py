@@ -11,12 +11,13 @@ import subprocess
 import sys
 import zipfile
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
 ARCHIVE_ROOT = "BlueprintToCode"
+SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _BLOCKED_PREFIXES = (
     ".claude/",
     ".git/",
@@ -78,6 +79,16 @@ def resolve_npm_executable() -> str:
     return executable
 
 
+def read_project_version(root: Path) -> str:
+    """Read and validate the repository's single release-version source."""
+
+    version_path = root.resolve() / "VERSION"
+    version = version_path.read_text(encoding="utf-8-sig").strip()
+    if not SEMVER_PATTERN.fullmatch(version):
+        raise ValueError(f"VERSION must contain one SemVer value: {version!r}")
+    return version
+
+
 def sanitize_repository_url(url: str) -> str:
     """Remove HTTP(S) userinfo before recording a Git remote in a release."""
 
@@ -91,6 +102,25 @@ def sanitize_repository_url(url: str) -> str:
     if parsed.port is not None:
         host = f"{host}:{parsed.port}"
     return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+
+
+def build_devkit_content_root_config(value: str) -> bytes:
+    """Validate and serialize a target-machine DevKit Content root."""
+
+    cleaned = str(value or "").strip().strip("\"'")
+    if not cleaned or any(character in cleaned for character in ("\x00", "\r", "\n")):
+        raise ValueError("DevKit Content root must be one non-empty line")
+    path = PureWindowsPath(cleaned)
+    suffix = tuple(part.casefold() for part in path.parts[-3:])
+    if (
+        not path.is_absolute()
+        or any(part in {".", ".."} for part in path.parts)
+        or suffix != ("projects", "shootergame", "content")
+    ):
+        raise ValueError(
+            r"DevKit Content root must be an absolute ...\Projects\ShooterGame\Content path"
+        )
+    return (str(path) + "\n").encode("utf-8")
 
 
 def discover_harvest_reports(report_root: Path) -> list[tuple[str, Path, Path, Path]]:
@@ -125,9 +155,13 @@ def build_package_manifest(
     sample_asset: str,
     sample_revision: str = "",
     harvest_reports: list[str] | None = None,
+    devkit_content_root_configured: bool = False,
+    version: str | None = None,
 ) -> dict[str, object]:
+    resolved_version = version or read_project_version(Path(__file__).resolve().parents[1])
     return {
         "schema": "blueprint-to-code.full-env-package.v2",
+        "version": resolved_version,
         "packageType": "full-environment-internal-beta",
         "repository": repository_url,
         "branch": branch,
@@ -138,6 +172,7 @@ def build_package_manifest(
         "sampleAsset": sample_asset,
         "sampleRevision": sample_revision,
         "harvestReports": list(harvest_reports or []),
+        "devkitContentRootConfigured": bool(devkit_content_root_configured),
         "sourceVerification": {
             "sampleEvidence": "validate_evidence_store.py:full",
             "harvestReports": "verify_ark_harvest_report.py",
@@ -254,6 +289,11 @@ def _verify_archive(
         manifest = json.loads(archive.read(f"{ARCHIVE_ROOT}/PACKAGE_MANIFEST.json"))
         if int(manifest.get("fileCount") or -1) != len(names):
             raise ValueError("PACKAGE_MANIFEST.json fileCount does not match ZIP entries")
+        configured_name = f"{ARCHIVE_ROOT}/devkit_content_root.txt"
+        if bool(manifest.get("devkitContentRootConfigured")) != (configured_name in names):
+            raise ValueError(
+                "PACKAGE_MANIFEST.json DevKit root flag does not match the ZIP entries"
+            )
 
 
 def _resolve_input(root: Path, value: Path) -> Path:
@@ -311,6 +351,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--sample-asset-dir", type=Path, required=True)
     parser.add_argument("--harvest-report-dir", type=Path, required=True)
+    parser.add_argument(
+        "--devkit-content-root",
+        help=r"Target machine's absolute ...\Projects\ShooterGame\Content path.",
+    )
     return parser.parse_args(argv)
 
 
@@ -339,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
             _run(root, "git", "remote", "get-url", "origin")
         )
         generated_at = datetime.now(timezone.utc)
+        version = read_project_version(root)
         entries: dict[str, Path | bytes] = {}
 
         sample_root = _resolve_input(root, args.sample_asset_dir)
@@ -352,6 +397,14 @@ def main(argv: list[str] | None = None) -> int:
         for path in sorted(dist_dir.rglob("*")):
             if path.is_file():
                 _add_entry(entries, path.relative_to(root).as_posix(), path)
+
+        devkit_root_configured = bool(args.devkit_content_root)
+        if args.devkit_content_root:
+            _add_entry(
+                entries,
+                "devkit_content_root.txt",
+                build_devkit_content_root_config(args.devkit_content_root),
+            )
 
         sample_asset = sample_root.name
         sample_files = (
@@ -396,6 +449,8 @@ def main(argv: list[str] | None = None) -> int:
             sample_asset=sample_asset,
             sample_revision=str(sample_validation["revisionId"]),
             harvest_reports=verified_reports,
+            devkit_content_root_configured=devkit_root_configured,
+            version=version,
         )
         manifest_bytes = (
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -418,7 +473,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         stamp = generated_at.astimezone().strftime("%Y%m%d-%H%M%S")
-        output_path = output_dir / f"BlueprintToCode_full_env_{stamp}_{short_commit}.zip"
+        output_path = (
+            output_dir
+            / f"BlueprintToCode_v{version}_full_env_{stamp}_{short_commit}.zip"
+        )
         temporary_output = output_path.with_suffix(".tmp.zip")
         if temporary_output.exists():
             temporary_output.unlink()
@@ -451,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
             "archiveVerified": True,
             "sampleEvidenceVerified": True,
             "harvestReportsVerified": verified_reports,
+            "devkitContentRootConfigured": devkit_root_configured,
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 0

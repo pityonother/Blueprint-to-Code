@@ -16,14 +16,31 @@ __pycache__/
 # Generated Blueprint captures and reports
 captures/
 output/
+.tmp/
 .tmp_*/
-knowledge_base/
+knowledge_base/*
+!knowledge_base/discovery_bundle.zip
 analysis/
 .playwright-cli/
+
+# Generated per-analysis comparison packages; root-level reports are durable docs
+reports/*/
+!reports/manifests/
+!reports/manifests/*.json
+!reports/evidence_manifests/
+!reports/evidence_manifests/*.json
 
 # Machine-local ARK DevKit configuration
 devkit_content_root.txt
 devkit_path_mappings.txt
+
+# Machine-local Ghidra projects, logs, and exported native evidence
+native_analysis/runtime/
+native_evidence/
+!tests/fixtures/native_evidence/
+!tests/fixtures/native_evidence/*.json
+*.gpr
+*.rep/
 
 # Unreal plugin build output
 devkit_plugins/**/Binaries/
@@ -37,9 +54,12 @@ dist-ssr
 
 # Reproducible release packages are generated locally, not committed.
 release/*.zip
+tests/native_fixture/build/
 
 # Local review/session notes are preserved on this workstation, not published.
+review_work/
 docs/GPT_PRO_*.md
+!docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md
 docs/SESSION_HANDOFF_zh.md
 docs/NEXT_CHAT_HANDOFF_zh.md
 docs/*_OPTIMIZED_REPORT_zh.md

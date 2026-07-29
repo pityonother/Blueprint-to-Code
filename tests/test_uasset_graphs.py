@@ -1,8 +1,11 @@
+import json
+import os
 import sys
 import tempfile
 import unittest
 import struct
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -15,6 +18,9 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
     node_info_from_export,
     mine_graph_candidates,
     normalize_blueprint_object_path,
+    object_ref_path,
+    extract_member_parent_reference,
+    extract_pin_type_object_reference,
     object_path_to_uasset_path,
     parse_custom_pins,
     read_uasset_class_defaults,
@@ -26,9 +32,97 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
     synthesize_boundary_pins_from_incoming_links,
     is_complete_empty_graph,
 )
+from blueprint_translator import uasset_graphs as uasset_graphs_module  # noqa: E402
 
 
 class UAssetGraphCandidateTests(unittest.TestCase):
+    def test_script_import_path_and_member_parent_are_preserved(self):
+        imports = [
+            {
+                "object_name": "/Script/ShooterGame",
+                "class_name": "Package",
+                "outer_index": 0,
+            },
+            {
+                "object_name": "PrimalInventoryComponent",
+                "class_name": "Class",
+                "outer_index": -1,
+            },
+        ]
+        names = ["MemberParent", "ObjectProperty"]
+        block = (
+            struct.pack("<ii", 0, 0)
+            + struct.pack("<ii", 1, 0)
+            + struct.pack("<q", 4)
+            + b"\x00"
+            + struct.pack("<i", -2)
+        )
+
+        parent = extract_member_parent_reference(block, names, imports, [])
+
+        self.assertEqual(
+            object_ref_path(-2, imports, []),
+            "/Script/ShooterGame.PrimalInventoryComponent",
+        )
+        self.assertEqual(parent["package_index"], -2)
+        self.assertEqual(
+            parent["object_path"],
+            "/Script/ShooterGame.PrimalInventoryComponent",
+        )
+
+    def test_pin_type_object_reference_uses_structural_category_offset(self):
+        imports = [
+            {
+                "object_name": "/Script/ShooterGame",
+                "class_name": "Package",
+                "outer_index": 0,
+            },
+            {
+                "object_name": "PrimalItem",
+                "class_name": "Class",
+                "outer_index": -1,
+            },
+        ]
+        names = ["object", "None"]
+        region = (
+            struct.pack("<ii", 0, 0)
+            + struct.pack("<ii", 1, 0)
+            + struct.pack("<i", -2)
+            + b"\x00" * 12
+        )
+
+        reference = extract_pin_type_object_reference(
+            region,
+            names,
+            imports,
+            [],
+        )
+
+        self.assertEqual(reference["package_index"], -2)
+        self.assertEqual(
+            reference["object_path"],
+            "/Script/ShooterGame.PrimalItem",
+        )
+
+    def test_object_property_reference_preserves_full_import_object_path(self):
+        imports = [
+            {
+                "object_name": "/Game/DLC/DamageTypes/DmgType_Shared",
+                "class_name": "Package",
+                "outer_index": 0,
+            },
+            {
+                "object_name": "DmgType_Shared_C",
+                "class_name": "BlueprintGeneratedClass",
+                "outer_index": -1,
+            },
+        ]
+
+        self.assertEqual(
+            object_ref_path(-2, imports, []),
+            "/Game/DLC/DamageTypes/DmgType_Shared.DmgType_Shared_C",
+        )
+
     def test_object_path_maps_to_devkit_uasset(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             content_root = Path(temp_dir) / "Content"
@@ -43,6 +137,166 @@ class UAssetGraphCandidateTests(unittest.TestCase):
 
         self.assertEqual(found, asset)
         self.assertIn(str(asset), attempted)
+
+    def test_epic_manifest_discovers_custom_akd_devkit_install(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            program_data = temp_root / "ProgramData"
+            manifest_dir = program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+            manifest_dir.mkdir(parents=True)
+            install_root = temp_root / "AKD" / "ARKDevkit"
+            content_root = install_root / "Projects" / "ShooterGame" / "Content"
+            asset = content_root / "PrimalEarth" / "CoreBlueprints" / "Projectiles" / "ProjGrenadeTek.uasset"
+            asset.parent.mkdir(parents=True)
+            asset.write_bytes(b"EventGraph\x00")
+            (manifest_dir / "ARKDevKit.item").write_text(
+                json.dumps(
+                    {
+                        "InstallLocation": str(install_root),
+                        "MandatoryAppFolderName": "ARKDevkit",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            empty_config = temp_root / "missing-devkit-content-root.txt"
+            environment = {
+                "PROGRAMDATA": str(program_data),
+                "ARK_DEVKIT_CONTENT_ROOT": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT": "",
+                "ARK_DEVKIT_ROOT": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_ROOT": "",
+                "ARK_DEVKIT_PATH_MAPPINGS": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_PATH_MAPPINGS": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(uasset_graphs_module, "DEVKIT_CONTENT_ROOT_FILE", empty_config),
+                patch.object(
+                    uasset_graphs_module,
+                    "DEVKIT_PATH_MAPPINGS_FILE",
+                    temp_root / "missing-devkit-path-mappings.txt",
+                ),
+                patch.object(uasset_graphs_module, "DEFAULT_CONTENT_ROOTS", ()),
+            ):
+                found, attempted = object_path_to_uasset_path(
+                    "/Game/PrimalEarth/CoreBlueprints/Projectiles/ProjGrenadeTek"
+                )
+
+        self.assertEqual(found, asset)
+        self.assertEqual(attempted, [str(asset)])
+
+    def test_epic_manifest_discovery_ignores_corrupt_and_unrelated_items(self):
+        from blueprint_translator.devkit_paths import discover_epic_launcher_content_roots
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_dir = temp_root / "Manifests"
+            manifest_dir.mkdir()
+            install_root = temp_root / "AKD" / "ARKDevkit"
+            content_root = install_root / "Projects" / "ShooterGame" / "Content"
+            content_root.mkdir(parents=True)
+            (manifest_dir / "broken.item").write_text("{not-json", encoding="utf-8")
+            (manifest_dir / "unrelated.item").write_text(
+                json.dumps(
+                    {
+                        "InstallLocation": str(temp_root / "Fortnite"),
+                        "MandatoryAppFolderName": "Fortnite",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (manifest_dir / "ark.item").write_text(
+                json.dumps(
+                    {
+                        "InstallLocation": str(install_root),
+                        "MandatoryAppFolderName": "ARKDevkit",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            discovered = discover_epic_launcher_content_roots(manifest_dir)
+
+        self.assertEqual(discovered, [content_root])
+
+    def test_explicit_content_root_precedes_epic_manifest_discovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            explicit_root = temp_root / "Explicit" / "Projects" / "ShooterGame" / "Content"
+            explicit_root.mkdir(parents=True)
+            program_data = temp_root / "ProgramData"
+            manifest_dir = program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+            manifest_dir.mkdir(parents=True)
+            install_root = temp_root / "AKD" / "ARKDevkit"
+            discovered_root = install_root / "Projects" / "ShooterGame" / "Content"
+            discovered_root.mkdir(parents=True)
+            (manifest_dir / "ARKDevKit.item").write_text(
+                json.dumps(
+                    {
+                        "InstallLocation": str(install_root),
+                        "MandatoryAppFolderName": "ARKDevkit",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            environment = {
+                "PROGRAMDATA": str(program_data),
+                "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT": str(explicit_root),
+                "ARK_DEVKIT_CONTENT_ROOT": "",
+                "ARK_DEVKIT_ROOT": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_ROOT": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(
+                    uasset_graphs_module,
+                    "DEVKIT_CONTENT_ROOT_FILE",
+                    temp_root / "missing-devkit-content-root.txt",
+                ),
+                patch.object(uasset_graphs_module, "DEFAULT_CONTENT_ROOTS", ()),
+            ):
+                roots = uasset_graphs_module.content_roots()
+
+        self.assertEqual(roots, [explicit_root, discovered_root])
+
+    def test_deeply_corrupt_manifest_does_not_block_explicit_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            explicit_root = temp_root / "Explicit" / "Projects" / "ShooterGame" / "Content"
+            explicit_root.mkdir(parents=True)
+            program_data = temp_root / "ProgramData"
+            manifest_dir = program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "deeply-corrupt.item").write_text(
+                "[" * 20000 + "]" * 20000,
+                encoding="utf-8",
+            )
+            (manifest_dir / "oversized-integer.item").write_text(
+                '{"value": ' + "9" * 5000 + "}",
+                encoding="utf-8",
+            )
+
+            environment = {
+                "PROGRAMDATA": str(program_data),
+                "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT": str(explicit_root),
+                "ARK_DEVKIT_CONTENT_ROOT": "",
+                "ARK_DEVKIT_ROOT": "",
+                "BLUEPRINT_TO_CODE_DEVKIT_ROOT": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(
+                    uasset_graphs_module,
+                    "DEVKIT_CONTENT_ROOT_FILE",
+                    temp_root / "missing-devkit-content-root.txt",
+                ),
+                patch.object(uasset_graphs_module, "DEFAULT_CONTENT_ROOTS", ()),
+            ):
+                roots = uasset_graphs_module.content_roots()
+
+        self.assertEqual(roots, [explicit_root])
 
     def test_normalize_accepts_mod_relative_reference(self):
         raw = "Kaminan_server/SkinBuff/SkinBuffHuman/MetalShield/BuffSkin_MetalShield.BuffSkin_MetalShield"
@@ -311,6 +565,273 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(properties["TreasureSupplyCrateClass"]["object"], "/Game/Fixture/SupplyCrate.SupplyCrate_C")
         self.assertIn("MinStoredXPForTreasure", report)
 
+    def test_cdo_soft_object_array_recovers_inline_fname_paths(self):
+        damage_type_paths = [
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/DmgType_Melee_Dino_Herbivore.DmgType_Melee_Dino_Herbivore_C",
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/DmgType_Melee_SickleHarvest.DmgType_Melee_SickleHarvest_C",
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/DmgType_Melee_BigfootHarvest.DmgType_Melee_BigfootHarvest_C",
+        ]
+        names = [
+            "None",
+            "DamageTypeEntryValuesOverrides",
+            "ArrayProperty",
+            "SoftObjectProperty",
+            *damage_type_paths,
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        array_value = struct.pack("<i", len(damage_type_paths)) + b"".join(
+            fname(path) + struct.pack("<i", 0) for path in damage_type_paths
+        )
+        cdo_data = b"".join(
+            [
+                fname("DamageTypeEntryValuesOverrides"),
+                fname("ArrayProperty"),
+                struct.pack("<ii", len(array_value), 0),
+                fname("SoftObjectProperty"),
+                array_value,
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        prop = {item["name"]: item for item in payload["properties"]}[
+            "DamageTypeEntryValuesOverrides"
+        ]
+
+        self.assertTrue(prop["array_parse"]["parsed"], prop)
+        self.assertEqual(prop["array_parse"]["count"], 3)
+        self.assertEqual(prop["objects"], damage_type_paths)
+        self.assertEqual(prop["object_paths"], damage_type_paths)
+        self.assertEqual(
+            [element["object_path"] for element in prop["array_parse"]["elements"]],
+            damage_type_paths,
+        )
+
+    def test_cdo_inline_soft_object_array_fails_closed_on_malformed_elements(self):
+        valid_path = "/Game/Fixture/Damage.Damage_C"
+        names = [
+            "None",
+            "DamageTypeEntryValuesOverrides",
+            "ArrayProperty",
+            "SoftObjectProperty",
+            valid_path,
+            "NotAnObjectPath",
+        ]
+
+        def fname(name: str, number: int = 0) -> bytes:
+            return struct.pack("<ii", names.index(name), number)
+
+        def parse(array_value: bytes):
+            cdo_data = b"".join(
+                [
+                    fname("DamageTypeEntryValuesOverrides"),
+                    fname("ArrayProperty"),
+                    struct.pack("<ii", len(array_value), 0),
+                    fname("SoftObjectProperty"),
+                    array_value,
+                    fname("None"),
+                ]
+            )
+            package = {
+                "uasset_data": cdo_data,
+                "uexp_data": b"",
+                "names": names,
+                "imports": [],
+                "exports": [
+                    {
+                        "object_name": "Default__Fixture_C",
+                        "serial_location": {
+                            "file": "uasset",
+                            "offset": 0,
+                            "size": len(cdo_data),
+                            "available": True,
+                        },
+                    }
+                ],
+                "soft_object_paths": [],
+            }
+            payload = read_uasset_class_defaults(package, "Fixture")
+            return {item["name"]: item for item in payload["properties"]}[
+                "DamageTypeEntryValuesOverrides"
+            ]
+
+        malformed_values = {
+            "ansi fstring missing null terminator": (
+                struct.pack("<i", 1)
+                + fname(valid_path)
+                + struct.pack("<i", 1)
+                + b"X"
+            ),
+            "utf16 fstring missing null terminator": (
+                struct.pack("<i", 1)
+                + fname(valid_path)
+                + struct.pack("<i", -1)
+                + b"X\x00"
+            ),
+            "invalid utf16 fstring encoding": (
+                struct.pack("<i", 1)
+                + fname(valid_path)
+                + struct.pack("<i", -2)
+                + b"\x00\xd8\x00\x00"
+            ),
+            "trailing byte": (
+                struct.pack("<i", 1)
+                + fname(valid_path)
+                + struct.pack("<i", 0)
+                + b"\xff"
+            ),
+            "numbered fname": (
+                struct.pack("<i", 1)
+                + fname(valid_path, number=1)
+                + struct.pack("<i", 0)
+            ),
+            "non-object path": (
+                struct.pack("<i", 1)
+                + fname("NotAnObjectPath")
+                + struct.pack("<i", 0)
+            ),
+        }
+
+        for label, array_value in malformed_values.items():
+            with self.subTest(label=label):
+                prop = parse(array_value)
+                self.assertFalse(prop["array_parse"]["parsed"], prop)
+                self.assertEqual(prop["objects"], [])
+                self.assertEqual(prop["object_paths"], [])
+
+    def test_cdo_soft_object_array_preserves_confirmed_zero_count(self):
+        names = [
+            "None",
+            "DamageTypeEntryValuesOverrides",
+            "ArrayProperty",
+            "SoftObjectProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        array_value = struct.pack("<i", 0)
+        cdo_data = b"".join(
+            [
+                fname("DamageTypeEntryValuesOverrides"),
+                fname("ArrayProperty"),
+                struct.pack("<ii", len(array_value), 0),
+                fname("SoftObjectProperty"),
+                array_value,
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        prop = {item["name"]: item for item in payload["properties"]}[
+            "DamageTypeEntryValuesOverrides"
+        ]
+
+        self.assertTrue(prop["array_parse"]["parsed"], prop)
+        self.assertEqual(prop["array_parse"]["count"], 0)
+        self.assertEqual(prop["objects"], [])
+        self.assertEqual(prop["object_paths"], [])
+
+    def test_cdo_soft_object_array_preserves_path_table_indices(self):
+        soft_object_paths = [
+            {"object_path": "/Game/Fixture/First.First_C"},
+            {"object_path": "/Game/Fixture/Second.Second_C"},
+        ]
+        names = [
+            "None",
+            "DamageTypeEntryValuesOverrides",
+            "ArrayProperty",
+            "SoftObjectProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        indices = [1, 0]
+        array_value = struct.pack("<i", len(indices)) + b"".join(
+            struct.pack("<i", index) for index in indices
+        )
+        cdo_data = b"".join(
+            [
+                fname("DamageTypeEntryValuesOverrides"),
+                fname("ArrayProperty"),
+                struct.pack("<ii", len(array_value), 0),
+                fname("SoftObjectProperty"),
+                array_value,
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": soft_object_paths,
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        prop = {item["name"]: item for item in payload["properties"]}[
+            "DamageTypeEntryValuesOverrides"
+        ]
+        expected = [
+            soft_object_paths[index]["object_path"] for index in indices
+        ]
+
+        self.assertTrue(prop["array_parse"]["parsed"], prop)
+        self.assertEqual(prop["array_parse"]["count"], 2)
+        self.assertEqual(prop["objects"], expected)
+        self.assertEqual(prop["object_paths"], expected)
+
     def test_cdo_array_and_unparsed_struct_keep_parser_metadata(self):
         names = [
             "/Game/Fixture",
@@ -465,7 +986,7 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(payload["property_count"], 2)
         self.assertNotIn("EntryWeight", properties)
         self.assertEqual(properties["MaxHarvestHealth"]["value"], 620.0)
-        self.assertTrue(entries["array_parse"]["parsed"])
+        self.assertTrue(entries["array_parse"]["parsed"], entries)
         self.assertEqual(entries["array_parse"]["element_kind"], "StructProperty")
         self.assertEqual(entries["array_parse"]["count"], 2)
         self.assertEqual(entries["value"][0]["OverrideQuantityMax"], 3)
@@ -676,6 +1197,111 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(
             properties["OverrideDamageForResourceHarvestingItems"]["array_parse"]["count"],
             3,
+        )
+
+    def test_cdo_compact_guid_struct_array_skips_the_struct_envelope(self):
+        names = [
+            "None",
+            "HarvestResourceEntries",
+            "ArrayProperty",
+            "StructProperty",
+            "HarvestResourceEntry",
+            "EntryWeight",
+            "FloatProperty",
+            "ResourceItem",
+            "ObjectProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def guid_tag(
+            name: str,
+            type_name: str,
+            value: bytes,
+            *,
+            type_meta: bytes = b"",
+            property_guid: bytes | None = None,
+        ) -> bytes:
+            return (
+                fname(name)
+                + fname(type_name)
+                + struct.pack("<ii", len(value), 0)
+                + type_meta
+                + (b"\x00" if property_guid is None else b"\x01" + property_guid)
+                + value
+            )
+
+        def entry(weight: float, resource_index: int) -> bytes:
+            return b"".join(
+                [
+                    guid_tag("EntryWeight", "FloatProperty", struct.pack("<f", weight)),
+                    guid_tag(
+                        "ResourceItem",
+                        "ObjectProperty",
+                        struct.pack("<i", resource_index),
+                    ),
+                    fname("None"),
+                ]
+            )
+
+        element_stream = entry(1.0, -1) + entry(0.5, -2)
+        envelope = guid_tag(
+            "HarvestResourceEntries",
+            "StructProperty",
+            element_stream,
+            type_meta=fname("HarvestResourceEntry") + bytes(16),
+        )
+        outer_value = struct.pack("<i", 2) + envelope
+        cdo_data = b"".join(
+            [
+                guid_tag(
+                    "HarvestResourceEntries",
+                    "ArrayProperty",
+                    outer_value,
+                    type_meta=fname("StructProperty"),
+                    property_guid=b"\xff" * 16,
+                ),
+                fname("None"),
+            ]
+        )
+        package = {
+            "uasset_data": cdo_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [
+                {"object_name": "PrimalItemResource_Wood_C"},
+                {"object_name": "PrimalItemResource_Thatch_C"},
+            ],
+            "exports": [
+                {
+                    "object_name": "Default__Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(cdo_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = read_uasset_class_defaults(package, "Fixture")
+        properties = {item["name"]: item for item in payload["properties"]}
+        entries = properties["HarvestResourceEntries"]
+
+        self.assertTrue(entries["array_parse"]["parsed"], entries)
+        self.assertEqual(entries["array_parse"]["count"], 2)
+        self.assertEqual(entries["value"][0]["EntryWeight"], 1.0)
+        self.assertEqual(entries["value"][1]["EntryWeight"], 0.5)
+        self.assertEqual(
+            entries["array_parse"]["elements"][0]["properties"][1]["object"],
+            "PrimalItemResource_Wood_C",
+        )
+        self.assertEqual(
+            entries["array_parse"]["elements"][1]["properties"][1]["object"],
+            "PrimalItemResource_Thatch_C",
         )
 
     def test_cdo_compact_guid_bool_consumes_marker_before_following_float(self):

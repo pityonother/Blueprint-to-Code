@@ -15,9 +15,7 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
-import uuid
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,8 +38,21 @@ from blueprint_translator.capture import (
     write_capture_manifest,
 )
 from blueprint_translator.artifact_modes import normalize_artifact_mode
+from blueprint_translator.devkit_paths import first_existing_devkit_content_root
 from blueprint_translator.graph_queue import graph_queue_summary, graph_queue_text_for_mode
 from blueprint_translator.evidence_repository import open_asset_repository
+from blueprint_translator.harvest_node_repository import (
+    HarvestDatasetInvalid,
+    HarvestDatasetNotBuilt,
+    HarvestNodeRepository,
+)
+from blueprint_translator.harvest_build_jobs import (
+    HarvestBuildAlreadyRunning,
+    HarvestBuildArgumentError,
+    HarvestBuildJobManager,
+    HarvestBuildJobNotFound,
+)
+from blueprint_translator.resource_nodes import NODE_PAGE_MAX_LIMIT
 from blueprint_translator.report_query import (
     DEFAULT_REPORT_QUERY_BUDGET,
     MAX_REPORT_CONTEXT_LINES,
@@ -60,36 +71,98 @@ from blueprint_translator.uasset_graphs import (
     write_graph_candidate_files,
     write_uasset_graph_read_files,
 )
+from blueprint_translator.kb_vnext.kb_api import (
+    KnowledgeApiError,
+    VNextKnowledgeService,
+)
+from blueprint_translator.kb_vnext.shadow_compare import (
+    LegacyVNextComparator,
+)
+from blueprint_server.jobs import (
+    JOB_TIMEOUT_SECONDS,
+    cancel_job,
+    create_background_job,
+    get_job,
+)
+from blueprint_server.request import (
+    ApiProblem,
+    discard_bounded_body,
+    read_json_object,
+)
+from blueprint_server.responses import (
+    encode_json_response,
+    error_payload,
+    prepare_json_response,
+    static_content_type,
+)
+from blueprint_server.routes_state import StateRoute, state_route_payload
+from blueprint_server.security import SecurityPolicy, redact_sensitive_text
+from package_full_env import read_project_version
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_VERSION = read_project_version(PROJECT_ROOT)
 CAPTURE_ROOT = PROJECT_ROOT / "captures"
 DIST_ROOT = PROJECT_ROOT / "dist"
 KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge_base"
+KB_VNEXT_SERVICE = VNextKnowledgeService(KNOWLEDGE_ROOT / "vnext")
+KB_SHADOW_COMPARATOR = LegacyVNextComparator(
+    vnext=KB_VNEXT_SERVICE,
+    legacy_root=KNOWLEDGE_ROOT / "db",
+)
 EXPORT_SCRIPT = PROJECT_ROOT / "scripts" / "devkit_exporters" / "export_current_blueprint_defaults.py"
 DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
+HARVEST_CATALOG_PATH = (
+    PROJECT_ROOT / "analysis" / "harvest_nodes" / "resource_node_catalog.json"
+)
+HARVEST_IMAGE_ROOT = PROJECT_ROOT / "analysis" / "harvest_nodes" / "images"
+HARVEST_RANKING_PATH = (
+    PROJECT_ROOT
+    / "analysis"
+    / "harvest_rankings"
+    / "harvest_ranking_all_resources.query.json"
+)
+HARVEST_EVALUATION_CATALOG_PATH = (
+    PROJECT_ROOT
+    / "analysis"
+    / "harvest_rankings"
+    / "harvest_evaluation_catalog.json"
+)
+HARVEST_SQLITE_CATALOG_PATH = (
+    PROJECT_ROOT / "analysis" / "harvest_nodes" / "harvest_catalog.sqlite"
+)
+HARVEST_REPOSITORY = HarvestNodeRepository(
+    HARVEST_CATALOG_PATH,
+    HARVEST_RANKING_PATH,
+    evaluation_catalog_path=HARVEST_EVALUATION_CATALOG_PATH,
+    sqlite_catalog_path=(
+        HARVEST_SQLITE_CATALOG_PATH
+        if HARVEST_SQLITE_CATALOG_PATH.is_file()
+        else None
+    ),
+)
+HARVEST_BUILD_MANAGER = HarvestBuildJobManager(project_root=PROJECT_ROOT)
+
+def resolve_harvest_image_path(image_identity: str, image_root: Path = HARVEST_IMAGE_ROOT) -> Path:
+    """Resolve one immutable image by lowercase SHA-256 identity only."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", str(image_identity or "")) is None:
+        raise ValueError("Invalid harvest image identity.")
+    resolved_root = Path(image_root).resolve()
+    candidate = (resolved_root / f"{image_identity}.jpg").resolve()
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError("Harvest image resolves outside the cache root.") from exc
+    if not candidate.is_file():
+        raise FileNotFoundError("Harvest image was not found.")
+    return candidate
 
 
 def configured_devkit_content_root() -> Path | None:
-    for env_name in ("ARK_DEVKIT_CONTENT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT"):
-        value = os.environ.get(env_name)
-        if value and value.strip():
-            return Path(value.strip().strip("\"'")).expanduser()
-    if DEVKIT_CONTENT_ROOT_FILE.is_file():
-        try:
-            for line in DEVKIT_CONTENT_ROOT_FILE.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-                value = line.strip().strip("\"'")
-                if value and not value.startswith("#"):
-                    return Path(value).expanduser()
-        except OSError:
-            return None
-    return None
+    return first_existing_devkit_content_root(config_file=DEVKIT_CONTENT_ROOT_FILE)
 
-
-_CONFIGURED_DEVKIT_CONTENT_ROOT = configured_devkit_content_root()
-if _CONFIGURED_DEVKIT_CONTENT_ROOT:
-    os.environ.setdefault("BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT", str(_CONFIGURED_DEVKIT_CONTENT_ROOT))
 
 REPORT_TARGETS = {
     **REPORT_FILES,
@@ -124,202 +197,6 @@ KNOWLEDGE_TARGETS = {
 }
 
 DEFAULT_COMPARE_ROOT = CAPTURE_ROOT / "_compare_reports"
-JOB_TIMEOUT_SECONDS = 1800
-JOB_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
-JOBS: dict[str, dict[str, object]] = {}
-JOBS_LOCK = threading.Lock()
-
-
-class ApiProblem(Exception):
-    def __init__(self, status: HTTPStatus, payload: dict[str, object]):
-        super().__init__(str(payload.get("error") or status.phrase))
-        self.status = status
-        self.payload = payload
-
-
-def now_iso() -> str:
-    return _dt.datetime.now().isoformat(timespec="seconds")
-
-
-def public_job(job: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in job.items()
-        if key not in {"process", "thread", "cancelRequested", "onComplete"}
-    }
-
-
-def get_job(job_id: str) -> dict[str, object]:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            raise ApiProblem(
-                HTTPStatus.NOT_FOUND,
-                {"ok": False, "code": "job_not_found", "error": f"任务不存在：{job_id}"},
-            )
-        return public_job(dict(job))
-
-
-def append_job_stream(job_id: str, key: str, text: str) -> None:
-    if not text:
-        return
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return
-        job[key] = str(job.get(key) or "") + text
-
-
-def read_job_stream(job_id: str, stream: object, key: str) -> None:
-    try:
-        for line in iter(stream.readline, ""):  # type: ignore[attr-defined]
-            append_job_stream(job_id, key, line)
-    finally:
-        try:
-            stream.close()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
-
-def prune_finished_jobs(limit: int = 60) -> None:
-    with JOBS_LOCK:
-        finished = [
-            (str(job.get("finishedAt") or ""), job_id)
-            for job_id, job in JOBS.items()
-            if str(job.get("status")) in JOB_TERMINAL_STATUSES
-        ]
-        finished.sort()
-        for _finished_at, job_id in finished[: max(0, len(finished) - limit)]:
-            JOBS.pop(job_id, None)
-
-
-def run_background_job(
-    job_id: str,
-    command: list[str],
-    on_complete: object,
-) -> None:
-    started = time.time()
-    process: subprocess.Popen[str] | None = None
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return
-        if bool(job.get("cancelRequested")):
-            job["status"] = "cancelled"
-            job["finishedAt"] = now_iso()
-            return
-        job["status"] = "running"
-        job["startedAt"] = now_iso()
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(PROJECT_ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id]["process"] = process
-        readers: list[threading.Thread] = []
-        if process.stdout:
-            readers.append(threading.Thread(target=read_job_stream, args=(job_id, process.stdout, "stdout"), daemon=True))
-        if process.stderr:
-            readers.append(threading.Thread(target=read_job_stream, args=(job_id, process.stderr, "stderr"), daemon=True))
-        for reader in readers:
-            reader.start()
-        try:
-            return_code = process.wait(timeout=JOB_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            return_code = process.wait()
-            with JOBS_LOCK:
-                if job_id in JOBS:
-                    JOBS[job_id]["status"] = "timed_out"
-                    JOBS[job_id]["error"] = f"任务超过 {JOB_TIMEOUT_SECONDS // 60} 分钟后超时。"
-        for reader in readers:
-            reader.join(timeout=2)
-        duration = round(time.time() - started, 2)
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if not job:
-                return
-            cancel_requested = bool(job.get("cancelRequested"))
-            if str(job.get("status")) != "timed_out":
-                job["status"] = "cancelled" if cancel_requested else "succeeded" if return_code == 0 else "failed"
-            job["returnCode"] = return_code
-            job["durationSeconds"] = duration
-            job["finishedAt"] = now_iso()
-        result: dict[str, object] = {}
-        if callable(on_complete):
-            result = on_complete(return_code)  # type: ignore[misc]
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id]["result"] = result
-    except Exception as exc:
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id]["status"] = "failed"
-                JOBS[job_id]["error"] = str(exc)
-                JOBS[job_id]["durationSeconds"] = round(time.time() - started, 2)
-                JOBS[job_id]["finishedAt"] = now_iso()
-    finally:
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id].pop("process", None)
-
-
-def create_background_job(
-    kind: str,
-    title: str,
-    command: list[str],
-    on_complete: object,
-) -> dict[str, object]:
-    prune_finished_jobs()
-    job_id = uuid.uuid4().hex[:12]
-    job: dict[str, object] = {
-        "id": job_id,
-        "kind": kind,
-        "title": title,
-        "status": "queued",
-        "command": " ".join(command),
-        "stdout": "",
-        "stderr": "",
-        "returnCode": None,
-        "durationSeconds": 0,
-        "createdAt": now_iso(),
-        "startedAt": "",
-        "finishedAt": "",
-        "error": "",
-        "result": {},
-        "cancelRequested": False,
-    }
-    thread = threading.Thread(target=run_background_job, args=(job_id, command, on_complete), daemon=True)
-    job["thread"] = thread
-    with JOBS_LOCK:
-        JOBS[job_id] = job
-    thread.start()
-    return public_job(job)
-
-
-def cancel_job(job_id: str) -> dict[str, object]:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            raise ApiProblem(
-                HTTPStatus.NOT_FOUND,
-                {"ok": False, "code": "job_not_found", "error": f"任务不存在：{job_id}"},
-            )
-        job["cancelRequested"] = True
-        process = job.get("process")
-        if str(job.get("status")) == "queued":
-            job["status"] = "cancelled"
-            job["finishedAt"] = now_iso()
-    if isinstance(process, subprocess.Popen):
-        process.terminate()
-    return get_job(job_id)
 
 
 def is_within(path: Path, parent: Path) -> bool:
@@ -1437,51 +1314,557 @@ def resolve_knowledge_target(target: str) -> Path:
     return path
 
 
-def api_state() -> dict[str, object]:
-    return {
-        "projectRoot": str(PROJECT_ROOT),
-        "captureRoot": str(CAPTURE_ROOT),
-        "assets": list_assets(),
-        "knowledgeBase": knowledge_base_summary(),
-        "devkitRequestPath": str(DEVKIT_REQUEST_PATH),
-        "devkitAssetPath": read_devkit_request(),
-        "devkitPythonCommand": devkit_python_command(),
-        "devkitOutputLogCommand": devkit_output_log_command(),
+def _harvest_dataset_problem(exc: Exception) -> ApiProblem:
+    if isinstance(exc, HarvestDatasetNotBuilt):
+        return ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "ok": False,
+                "code": exc.code,
+                "error": "资源节点索引尚未生成，请先运行 build_ark_resource_node_catalog.py。",
+            },
+        )
+    if isinstance(exc, HarvestDatasetInvalid):
+        return ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "ok": False,
+                "code": exc.code,
+                "error": "资源节点索引无效，请重新生成。",
+            },
+        )
+    raise exc
+
+
+def query_harvest_nodes_for_request(query: str) -> dict[str, object]:
+    values = parse_qs(query)
+    try:
+        offset = max(
+            0,
+            parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
+        )
+        limit = min(
+            NODE_PAGE_MAX_LIMIT,
+            max(
+                1,
+                parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
+            ),
+        )
+        return HARVEST_REPOSITORY.list_nodes(
+            q=values.get("q", [""])[0],
+            map_name=values.get("map", [""])[0],
+            only_map_family=values.get("onlyMapFamily", [""])[0],
+            resource=values.get("resource", [""])[0],
+            offset=offset,
+            limit=limit,
+        )
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+    except ValueError as exc:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_NODE_FILTER",
+                "error": "Invalid resource-node filter.",
+            },
+        ) from exc
+
+
+def query_harvest_node_for_request(node_id: str) -> dict[str, object]:
+    if not node_id:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {"ok": False, "code": "RESOURCE_NODE_ID_REQUIRED", "error": "缺少资源节点 ID。"},
+        )
+    try:
+        return HARVEST_REPOSITORY.get_node(node_id)
+    except KeyError as exc:
+        raise ApiProblem(
+            HTTPStatus.NOT_FOUND,
+            {"ok": False, "code": "RESOURCE_NODE_NOT_FOUND", "error": "资源节点不存在。"},
+        ) from exc
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def query_harvest_ranking_for_request(query: str) -> dict[str, object]:
+    values = parse_qs(query)
+    node_id = values.get("nodeId", [""])[0].strip()
+    node_resource_id = values.get("nodeResourceId", [""])[0].strip()
+    if not node_id or not node_resource_id:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "NODE_RESOURCE_ID_REQUIRED",
+                "error": "排名查询必须同时提供 nodeId 和 nodeResourceId。",
+            },
+        )
+    limit = min(
+        10,
+        max(
+            1,
+            parse_report_query_int(values.get("limit", [""])[0], "limit", 10),
+        ),
+    )
+    try:
+        return HARVEST_REPOSITORY.rankings(
+            node_id,
+            node_resource_id,
+            limit=limit,
+        )
+    except KeyError as exc:
+        code = str(exc).strip("'")
+        raise ApiProblem(
+            HTTPStatus.NOT_FOUND,
+            {"ok": False, "code": code, "error": "资源节点或资源条目不存在。"},
+        ) from exc
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def query_harvest_creatures_for_request(query: str) -> dict[str, object]:
+    values = parse_qs(query)
+    offset = max(
+        0,
+        parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
+    )
+    limit = min(
+        100,
+        max(
+            1,
+            parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
+        ),
+    )
+    try:
+        return HARVEST_REPOSITORY.list_creatures(
+            q=values.get("q", [""])[0],
+            offset=offset,
+            limit=limit,
+        )
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def query_harvest_creature_specialties_for_request(
+    species_key: str,
+    query: str,
+) -> dict[str, object]:
+    if not species_key:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "HARVEST_SPECIES_KEY_REQUIRED",
+                "error": "A creature species key is required.",
+            },
+        )
+    values = parse_qs(query)
+    offset = max(
+        0,
+        parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
+    )
+    limit = min(
+        100,
+        max(
+            1,
+            parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
+        ),
+    )
+    try:
+        return HARVEST_REPOSITORY.creature_specialties(
+            species_key,
+            offset=offset,
+            limit=limit,
+        )
+    except KeyError as exc:
+        raise ApiProblem(
+            HTTPStatus.NOT_FOUND,
+            {
+                "ok": False,
+                "code": "HARVEST_SPECIES_NOT_FOUND",
+                "error": "The requested creature species was not found.",
+            },
+        ) from exc
+    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
+        raise _harvest_dataset_problem(exc) from exc
+
+
+def _harvest_build_problem(exc: Exception) -> ApiProblem:
+    if isinstance(exc, HarvestBuildArgumentError):
+        status = HTTPStatus.BAD_REQUEST
+        message = "Invalid harvest build request."
+    elif isinstance(exc, HarvestBuildAlreadyRunning):
+        status = HTTPStatus.CONFLICT
+        message = "A harvest build is already running."
+    elif isinstance(exc, HarvestBuildJobNotFound):
+        status = HTTPStatus.NOT_FOUND
+        message = "The harvest build job was not found."
+    else:
+        raise exc
+    payload: dict[str, object] = {
+        "ok": False,
+        "code": exc.code,
+        "error": message,
     }
+    job_id = getattr(exc, "job_id", None)
+    if job_id:
+        payload["jobId"] = job_id
+    return ApiProblem(status, payload)
+
+
+def query_harvest_build_for_request(query: str) -> dict[str, object] | None:
+    values = parse_qs(query)
+    job_id = values.get("jobId", [""])[0].strip() or None
+    try:
+        return HARVEST_BUILD_MANAGER.get(job_id)
+    except HarvestBuildJobNotFound as exc:
+        if job_id is None and exc.job_id is None:
+            return None
+        raise _harvest_build_problem(exc) from exc
+    except (
+        HarvestBuildArgumentError,
+        HarvestBuildAlreadyRunning,
+    ) as exc:
+        raise _harvest_build_problem(exc) from exc
+
+
+def start_harvest_build_for_request(body: dict[str, object]) -> dict[str, object]:
+    if set(body) != {"options"}:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_REQUEST_INVALID",
+                "error": "The harvest build request must contain only an options object.",
+            },
+        )
+    options = body.get("options")
+    if not isinstance(options, dict):
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_REQUEST_INVALID",
+                "error": "The harvest build options value must be an object.",
+            },
+        )
+    if options:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "HARVEST_BUILD_OPTIONS_FORBIDDEN",
+                "error": "Public harvest builds do not accept configuration overrides.",
+            },
+        )
+    try:
+        return HARVEST_BUILD_MANAGER.start(options)
+    except (
+        HarvestBuildArgumentError,
+        HarvestBuildAlreadyRunning,
+        HarvestBuildJobNotFound,
+    ) as exc:
+        raise _harvest_build_problem(exc) from exc
+
+
+def cancel_harvest_build_for_request(job_id: str) -> dict[str, object]:
+    if not job_id:
+        raise _harvest_build_problem(
+            HarvestBuildArgumentError("A harvest build job id is required.")
+        )
+    try:
+        return HARVEST_BUILD_MANAGER.cancel(job_id)
+    except (
+        HarvestBuildArgumentError,
+        HarvestBuildAlreadyRunning,
+        HarvestBuildJobNotFound,
+    ) as exc:
+        raise _harvest_build_problem(exc) from exc
+
+
+STATE_ROUTE = StateRoute(
+    version=PROJECT_VERSION,
+    project_root=PROJECT_ROOT,
+    capture_root=CAPTURE_ROOT,
+    devkit_request_path=DEVKIT_REQUEST_PATH,
+    list_assets=lambda: list_assets(),
+    knowledge_base_summary=lambda: knowledge_base_summary(),
+    read_devkit_request=lambda: read_devkit_request(),
+    devkit_python_command=lambda: devkit_python_command(),
+    devkit_output_log_command=lambda: devkit_output_log_command(),
+)
+
+
+def api_state() -> dict[str, object]:
+    """Compatibility entry for callers that imported the legacy server module."""
+
+    return STATE_ROUTE.state()
+
+
+def _kb_api_problem(exc: KnowledgeApiError) -> ApiProblem:
+    return ApiProblem(
+        exc.status,
+        {
+            "ok": False,
+            "code": exc.code,
+            "error": exc.message,
+        },
+    )
+
+
+def _kb_query_value(
+    values: dict[str, list[str]], key: str, default: str = ""
+) -> str:
+    raw = values.get(key, [default])
+    return raw[0] if raw else default
+
+
+def kb_get_payload(path: str, query: str) -> dict[str, object] | None:
+    try:
+        values = parse_qs(query, keep_blank_values=True)
+        if path == "/api/kb/health":
+            return KB_VNEXT_SERVICE.health()
+        if path == "/api/kb/entities/search":
+            return KB_VNEXT_SERVICE.search_entities(
+                query=_kb_query_value(values, "q"),
+                limit=_kb_query_value(values, "limit", "25"),
+                cursor=_kb_query_value(values, "cursor", "0"),
+            )
+        prefix = "/api/kb/entities/"
+        if path.startswith(prefix):
+            remainder = unquote(path.removeprefix(prefix)).strip("/")
+            parts = remainder.split("/")
+            if not parts[0].isdigit() or int(parts[0]) <= 0:
+                raise KnowledgeApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "REQUEST_INVALID",
+                    "Entity id must be a positive integer.",
+                )
+            entity_id = int(parts[0])
+            if len(parts) == 1:
+                return KB_VNEXT_SERVICE.entity(entity_id)
+            if len(parts) == 2 and parts[1] in {
+                "facts",
+                "relationships",
+                "coverage",
+                "effective-defaults",
+            }:
+                return KB_VNEXT_SERVICE.entity_collection(
+                    entity_id,
+                    kind=parts[1],
+                    limit=_kb_query_value(values, "limit", "50"),
+                    cursor=_kb_query_value(values, "cursor", "0"),
+                )
+            raise KnowledgeApiError(
+                HTTPStatus.NOT_FOUND,
+                "API_ENDPOINT_NOT_FOUND",
+                "Unknown knowledge endpoint.",
+            )
+        if path.startswith("/api/kb/jobs/"):
+            job_id = unquote(path.removeprefix("/api/kb/jobs/")).strip("/")
+            return {
+                "job": get_job(job_id),
+                "returned": 1,
+                "omitted": 0,
+                "nextQuery": "",
+                "freshness": "FRESH",
+                "evidence": [],
+                "gap": [],
+            }
+        return None
+    except KnowledgeApiError as exc:
+        raise _kb_api_problem(exc) from exc
+
+
+_UNREAD_BODY_PROBLEM_CODES = frozenset(
+    {
+        "HOST_FORBIDDEN",
+        "REQUEST_HEADERS_INVALID",
+        "JSON_CONTENT_TYPE_REQUIRED",
+        "SESSION_TOKEN_REQUIRED",
+        "SESSION_TOKEN_INVALID",
+        "ORIGIN_FORBIDDEN",
+        "ORIGIN_REQUIRED",
+        "REMOTE_AUTH_REQUIRED",
+        "TRANSFER_ENCODING_UNSUPPORTED",
+        "CONTENT_LENGTH_REQUIRED",
+        "CONTENT_LENGTH_INVALID",
+        "REQUEST_BODY_REQUIRED",
+        "REQUEST_BODY_TOO_LARGE",
+    }
+)
 
 
 class ControlCenterHandler(BaseHTTPRequestHandler):
     server_version = "BlueprintToolControlCenter/1.0"
 
+    def security_policy(self) -> SecurityPolicy:
+        policy = getattr(self.server, "security_policy", None)
+        if not isinstance(policy, SecurityPolicy):
+            raise RuntimeError("Control-center security policy is not configured.")
+        return policy
+
     def log_message(self, format: str, *args: object) -> None:
-        sys.stderr.write("[BlueprintTool] " + (format % args) + "\n")
+        message = format % args
+        policy = getattr(self.server, "security_policy", None)
+        if isinstance(policy, SecurityPolicy):
+            message = policy.redact(message, PROJECT_ROOT)
+        else:
+            message = redact_sensitive_text(
+                message,
+                path_roots=(PROJECT_ROOT,),
+            )
+        sys.stderr.write("[BlueprintTool] " + message + "\n")
+
+    def end_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+            "object-src 'none'; connect-src 'self'; img-src 'self' data:; "
+            "script-src 'self'; style-src 'self' 'unsafe-inline'",
+        )
+        super().end_headers()
 
     def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
-        encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
+        response = prepare_json_response(
+            payload,
+            status,
+            close_connection=bool(self.close_connection),
+        )
+        self.send_response(response.status)
+        for header, value in response.headers:
+            self.send_header(header, value)
         self.end_headers()
-        self.wfile.write(encoded)
+        self.wfile.write(response.body)
 
     def send_error_json(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
-        self.send_json({"ok": False, "error": message}, status)
+        self.send_json(error_payload(message), status)
+
+    def send_harvest_image(self, filename: str) -> None:
+        identity = filename.removesuffix(".jpg") if filename.endswith(".jpg") else ""
+        try:
+            image_path = resolve_harvest_image_path(identity)
+        except (ValueError, FileNotFoundError):
+            self.send_error_json("Harvest image was not found.", HTTPStatus.NOT_FOUND)
+            return
+        etag = f'"{identity}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            return
+        data = image_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(data)
 
     def read_json_body(self) -> dict[str, object]:
-        length = int(self.headers.get("Content-Length") or "0")
-        if length <= 0:
-            return {}
-        raw = self.rfile.read(length).decode("utf-8-sig")
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise ValueError("Request body must be a JSON object.")
-        return data
+        return read_json_object(
+            self.rfile,
+            self.headers,
+            max_body_bytes=self.security_policy().max_body_bytes,
+        )
+
+    def discard_rejected_request_body(self) -> None:
+        """Briefly drain a rejected bounded body before closing on Windows."""
+
+        try:
+            self.wfile.flush()
+        except OSError:
+            return
+        previous_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(0.25)
+            discard_bounded_body(
+                self.rfile,
+                self.headers,
+                max_body_bytes=self.security_policy().max_body_bytes,
+            )
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                self.connection.settimeout(previous_timeout)
+            except OSError:
+                pass
 
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
-            if parsed.path == "/api/state":
-                self.send_json({"ok": True, **api_state()})
+            if parsed.path.startswith("/api/"):
+                self.security_policy().validate_get_request(
+                    self.headers,
+                    server_port=int(self.server.server_address[1]),
+                )
+            if parsed.path == "/api/session":
+                policy = self.security_policy()
+                self.send_json(
+                    {
+                        "ok": True,
+                        "sessionToken": policy.session_token,
+                    }
+                )
+                return
+            kb_payload = kb_get_payload(parsed.path, parsed.query)
+            if kb_payload is not None:
+                self.send_json({"ok": True, **kb_payload})
+                return
+            state_payload = state_route_payload(parsed.path, api_state)
+            if state_payload is not None:
+                self.send_json(state_payload)
+                return
+            if parsed.path == "/api/harvest/nodes":
+                self.send_json({"ok": True, **query_harvest_nodes_for_request(parsed.query)})
+                return
+            if parsed.path.startswith("/api/harvest/nodes/"):
+                node_id = unquote(parsed.path.removeprefix("/api/harvest/nodes/"))
+                self.send_json({"ok": True, "node": query_harvest_node_for_request(node_id)})
+                return
+            if parsed.path == "/api/harvest/rankings":
+                self.send_json({"ok": True, **query_harvest_ranking_for_request(parsed.query)})
+                return
+            if parsed.path == "/api/harvest/creatures":
+                self.send_json(
+                    {"ok": True, **query_harvest_creatures_for_request(parsed.query)}
+                )
+                return
+            if (
+                parsed.path.startswith("/api/harvest/creatures/")
+                and parsed.path.endswith("/specialties")
+            ):
+                species_key = unquote(
+                    parsed.path[
+                        len("/api/harvest/creatures/") : -len("/specialties")
+                    ]
+                ).strip("/")
+                self.send_json(
+                    {
+                        "ok": True,
+                        **query_harvest_creature_specialties_for_request(
+                            species_key,
+                            parsed.query,
+                        ),
+                    }
+                )
+                return
+            if parsed.path == "/api/harvest/build":
+                self.send_json(
+                    {"ok": True, "job": query_harvest_build_for_request(parsed.query)}
+                )
+                return
+            if parsed.path.startswith("/api/harvest/images/"):
+                filename = unquote(parsed.path.removeprefix("/api/harvest/images/"))
+                self.send_harvest_image(filename)
                 return
             if parsed.path == "/api/report":
                 self.handle_report(parsed.query)
@@ -1558,8 +1941,75 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             self.send_error_json(str(exc))
 
     def do_POST(self) -> None:
+        is_harvest_build_request = self.path == "/api/harvest/build"
+        is_harvest_cancel_request = (
+            self.path.startswith("/api/harvest/build/")
+            and self.path.endswith("/cancel")
+        )
         try:
+            self.security_policy().validate_post_request(
+                self.headers,
+                server_port=int(self.server.server_address[1]),
+            )
             body = self.read_json_body()
+            if self.path == "/api/kb/compare":
+                try:
+                    result = KB_SHADOW_COMPARATOR.compare(body)
+                except KnowledgeApiError as exc:
+                    raise _kb_api_problem(exc) from exc
+                self.send_json({"ok": True, **result})
+                return
+            if self.path in {"/api/kb/query", "/api/kb/plan"}:
+                try:
+                    result = KB_VNEXT_SERVICE.query(body)
+                except KnowledgeApiError as exc:
+                    raise _kb_api_problem(exc) from exc
+                self.send_json({"ok": True, **result})
+                return
+            if (
+                self.path.startswith("/api/kb/jobs/")
+                and self.path.endswith("/cancel")
+            ):
+                job_id = unquote(
+                    self.path[
+                        len("/api/kb/jobs/") : -len("/cancel")
+                    ]
+                ).strip("/")
+                self.send_json(
+                    {
+                        "ok": True,
+                        "job": cancel_job(job_id),
+                        "returned": 1,
+                        "omitted": 0,
+                        "nextQuery": "",
+                        "freshness": "FRESH",
+                        "evidence": [],
+                        "gap": [],
+                    }
+                )
+                return
+            if self.path == "/api/harvest/build":
+                self.send_json(
+                    {"ok": True, "job": start_harvest_build_for_request(body)},
+                    HTTPStatus.ACCEPTED,
+                )
+                return
+            if (
+                self.path.startswith("/api/harvest/build/")
+                and self.path.endswith("/cancel")
+            ):
+                job_id = unquote(
+                    self.path[
+                        len("/api/harvest/build/") : -len("/cancel")
+                    ]
+                ).strip("/")
+                self.send_json(
+                    {
+                        "ok": True,
+                        "job": cancel_harvest_build_for_request(job_id),
+                    }
+                )
+                return
             if self.path == "/api/analyze":
                 asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
                 job = start_report_generation_job(asset_dir, str(body.get("reportLevel") or "standard"))
@@ -1672,13 +2122,62 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 )
                 self.send_json({"ok": True, **result, "items": missing_functions_from_report(asset_dir)})
                 return
-            self.send_error_json("Unknown API endpoint.", HTTPStatus.NOT_FOUND)
+            self.send_json(
+                {
+                    "ok": False,
+                    "code": "API_ENDPOINT_NOT_FOUND",
+                    "error": "Unknown API endpoint.",
+                },
+                HTTPStatus.NOT_FOUND,
+            )
         except subprocess.TimeoutExpired:
-            self.send_error_json("Analyzer timed out after 30 minutes.", HTTPStatus.REQUEST_TIMEOUT)
+            self.send_json(
+                {
+                    "ok": False,
+                    "code": "ANALYZER_TIMEOUT",
+                    "error": "Analyzer timed out after 30 minutes.",
+                },
+                HTTPStatus.REQUEST_TIMEOUT,
+            )
         except ApiProblem as exc:
+            body_is_unread = (
+                str(exc.payload.get("code") or "")
+                in _UNREAD_BODY_PROBLEM_CODES
+            )
+            if body_is_unread:
+                self.close_connection = True
             self.send_json(exc.payload, exc.status)
+            if body_is_unread:
+                self.discard_rejected_request_body()
+        except (TypeError, ValueError):
+            self.send_json(
+                {
+                    "ok": False,
+                    "code": "REQUEST_INVALID",
+                    "error": "Request arguments are invalid.",
+                },
+                HTTPStatus.BAD_REQUEST,
+            )
         except Exception as exc:
-            self.send_error_json(str(exc))
+            self.log_message("POST request failed: %s", exc)
+            if is_harvest_build_request or is_harvest_cancel_request:
+                self.send_json(
+                    {
+                        "ok": False,
+                        "code": "HARVEST_BUILD_FAILED",
+                        "error": "Harvest build request failed.",
+                    },
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            else:
+                self.send_json(
+                    {
+                        "ok": False,
+                        "code": "REQUEST_FAILED",
+                        "error": "Request failed.",
+                    },
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
     def handle_report(self, query: str) -> None:
         values = parse_qs(query)
@@ -1747,25 +2246,64 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         mime_type, _encoding = mimetypes.guess_type(str(static_path))
         data = static_path.read_bytes()
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", mime_type or "application/octet-stream")
+        self.send_header("Content-Type", static_content_type(mime_type))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+def create_control_center_server(
+    host: str,
+    port: int,
+    *,
+    allow_remote: bool = False,
+    auth_token: str | None = None,
+) -> ThreadingHTTPServer:
+    policy = SecurityPolicy(
+        bind_host=host,
+        allow_remote=allow_remote,
+        auth_token=auth_token,
+    )
+    server = ThreadingHTTPServer((host, port), ControlCenterHandler)
+    server.security_policy = policy  # type: ignore[attr-defined]
+    return server
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the local Blueprint translator web control center.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow an explicit non-loopback bind. Requires --auth-token.",
+    )
+    parser.add_argument(
+        "--auth-token",
+        help="Bearer token required for every remote API request.",
+    )
     parser.add_argument("--open", action="store_true", help="Open the control center in the default browser.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    server = ThreadingHTTPServer((args.host, args.port), ControlCenterHandler)
+    try:
+        server = create_control_center_server(
+            args.host,
+            args.port,
+            allow_remote=args.allow_remote,
+            auth_token=args.auth_token,
+        )
+    except ValueError as exc:
+        print(f"Cannot start Blueprint Tool Control Center: {exc}", file=sys.stderr)
+        return 2
     url = f"http://{args.host}:{args.port}/"
     print(f"Blueprint Tool Control Center: {url}")
+    if server.security_policy.remote:  # type: ignore[attr-defined]
+        print(
+            "WARNING: remote access is enabled; bearer authentication is required."
+        )
     print("Press Ctrl+C to stop.")
     if args.open:
         webbrowser.open(url)

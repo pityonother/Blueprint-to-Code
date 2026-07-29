@@ -1,0 +1,103 @@
+{
+  "schema": "blueprint-to-code-native-analysis-recipe/v1",
+  "recipeId": "ark-harvest-native/v1",
+  "description": "Version-bound ARK harvesting damage, resource grant, damage-type acceptance, and Blueprint modification boundaries identified from the current PDB.",
+  "binaryModule": "ShooterGameEditor-ShooterGame.dll",
+  "requirements": {
+    "pdbRequired": true,
+    "formalProvenanceRequired": true
+  },
+  "targets": [
+    {
+      "id": "attached-harvest-apply-damage-entry",
+      "selector": {
+        "qualifiedName": "FAttachedInstancedHarvestingElement::ApplyHarvestDamageEntryDamage"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "harvest-component-give-resource",
+      "selector": {
+        "qualifiedName": "UPrimalHarvestingComponent::GiveHarvestResource"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "harvest-component-valid-damage-type",
+      "selector": {
+        "qualifiedName": "UPrimalHarvestingComponent::IsValidHarvestingDamageType"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "harvest-component-direct-point-damage",
+      "selector": {
+        "qualifiedName": "UPrimalHarvestingComponent::DealDirectHarvestPointDamage"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "dino-blueprint-modify-harvest-damage",
+      "selector": {
+        "qualifiedName": "APrimalDinoCharacter::BPModifyHarvestDamage_Implementation"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    }
+  ],
+  "fieldQueries": [],
+  "vtableQueries": [],
+  "budgets": {
+    "maxFunctions": 100,
+    "maxCallEdges": 4000,
+    "maxFieldAccesses": 4000,
+    "maxConstants": 8000,
+    "maxVtableMatches": 128,
+    "maxDecompiledCharactersPerFunction": 40000,
+    "maxTotalDecompiledCharacters": 500000
+  }
+}

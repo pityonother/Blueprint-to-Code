@@ -1,0 +1,5322 @@
+{
+  "schema": "ark-kb-query-gold-set/v1",
+  "version": "ark-kb-query-gold-set/2026-07-27",
+  "selectionMode": "MANUAL_FIXED",
+  "generatedFromCore": false,
+  "authoredFrom": [
+    "ontology/projection_review.v1.json",
+    "checked-in Blueprint evidence URIs",
+    "checked-in class assignment evidence",
+    "confirmed typed map-usage registry references",
+    "explicit fail-closed protocol boundaries"
+  ],
+  "semanticCoverageLimitations": [
+    {
+      "categories": [
+        "REGISTRATION"
+      ],
+      "caseIds": [
+        "registration-001-unverified-owner-target",
+        "registration-002-unverified-owner-target",
+        "registration-003-unverified-owner-target",
+        "registration-004-unverified-owner-target",
+        "registration-005-unverified-owner-target",
+        "registration-006-unverified-owner-target",
+        "registration-007-unverified-owner-target",
+        "registration-008-unverified-owner-target",
+        "registration-009-unverified-owner-target",
+        "registration-010-unverified-owner-target"
+      ],
+      "limitation": "No reviewed global owner-target registrations are available yet; these cases only prove legacy/candidate rows cannot close a query."
+    },
+    {
+      "categories": [
+        "NATIVE"
+      ],
+      "caseIds": [
+        "native-001-callsite-required",
+        "native-002-callsite-required",
+        "native-003-callsite-required",
+        "native-004-callsite-required",
+        "native-005-callsite-required",
+        "native-006-callsite-required",
+        "native-007-callsite-required",
+        "native-008-callsite-required",
+        "native-009-callsite-required",
+        "native-010-callsite-required"
+      ],
+      "limitation": "Exact native symbols alone are insufficient; these cases remain unresolved until Blueprint callsite evidence exists."
+    },
+    {
+      "categories": [
+        "RUNTIME"
+      ],
+      "caseIds": [
+        "runtime-001-observation-required",
+        "runtime-002-observation-required",
+        "runtime-003-observation-required",
+        "runtime-004-observation-required",
+        "runtime-005-observation-required",
+        "runtime-006-observation-required",
+        "runtime-007-observation-required",
+        "runtime-008-observation-required",
+        "runtime-009-observation-required",
+        "runtime-010-observation-required"
+      ],
+      "limitation": "The required corpus is runtime gaps; synthetic runtime fixtures are not accepted as empirical semantic answers."
+    },
+    {
+      "categories": [
+        "FACT",
+        "EFFECTIVE",
+        "RELATIONSHIP",
+        "MAP"
+      ],
+      "limitation": "Only cases explicitly marked HUMAN_REVIEWED count as human gold. Other exact cases are frozen evidence fixtures and do not increase humanGoldCases."
+    }
+  ],
+  "cases": [
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-001-item-ambergris-weight",
+      "question": "What is Ambergris base item weight?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "BaseItemWeight"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "BaseItemWeight",
+            "valueKind": "NUMBER",
+            "value": 5,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://6c1bb745f3c38ada28b02ff2@f29f912a4578a36dbb015017/default/BaseItemWeight"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "HUMAN_REVIEWED",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-002-item-ambergris-name",
+      "question": "What is the frozen display name of Ambergris?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "DescriptiveNameBase"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "DescriptiveNameBase",
+            "valueKind": "TEXT",
+            "value": "Ambergris",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://6c1bb745f3c38ada28b02ff2@f29f912a4578a36dbb015017/default/DescriptiveNameBase"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-003-item-ambergris-spoil",
+      "question": "What is Ambergris spoiling time?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "SpoilingTime"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "SpoilingTime",
+            "valueKind": "NUMBER",
+            "value": 1200,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://6c1bb745f3c38ada28b02ff2@f29f912a4578a36dbb015017/default/SpoilingTime"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-004-item-ambergris-stack",
+      "question": "What is Ambergris maximum item quantity?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "MaxItemQuantity"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "MaxItemQuantity",
+            "valueKind": "INTEGER",
+            "value": 1,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://6c1bb745f3c38ada28b02ff2@f29f912a4578a36dbb015017/default/MaxItemQuantity"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-005-item-tek-launcher-weight",
+      "question": "What is Tek Grenade Launcher base item weight?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/Genesis/Weapons/TekGrenadeLauncher/PrimalItem_WeaponTekGrenadeLauncher.PrimalItem_WeaponTekGrenadeLauncher",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "BaseItemWeight"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Weapons/TekGrenadeLauncher/PrimalItem_WeaponTekGrenadeLauncher.PrimalItem_WeaponTekGrenadeLauncher",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "BaseItemWeight",
+            "valueKind": "NUMBER",
+            "value": 12,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://ee233e864298b92277d8ab02@9e39fbfa5da88332b7e58989/default/BaseItemWeight"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-006-item-tek-launcher-name",
+      "question": "What is the Tek Grenade Launcher display name?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/Genesis/Weapons/TekGrenadeLauncher/PrimalItem_WeaponTekGrenadeLauncher.PrimalItem_WeaponTekGrenadeLauncher",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "DescriptiveNameBase"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Weapons/TekGrenadeLauncher/PrimalItem_WeaponTekGrenadeLauncher.PrimalItem_WeaponTekGrenadeLauncher",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "DescriptiveNameBase",
+            "valueKind": "TEXT",
+            "value": "Tek Grenade Launcher",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://ee233e864298b92277d8ab02@9e39fbfa5da88332b7e58989/default/DescriptiveNameBase"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-007-item-fish-basket-weight",
+      "question": "What is Filled Fish Basket base item weight?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/Items/PrimalItem_FishBasketFilled.PrimalItem_FishBasketFilled",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "BaseItemWeight"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/Items/PrimalItem_FishBasketFilled.PrimalItem_FishBasketFilled",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "BaseItemWeight",
+            "valueKind": "NUMBER",
+            "value": 15,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://39cefee33dc90a92a27c587d@5cb7a9a284345822f5038972/default/BaseItemWeight"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-008-item-fish-basket-spoil",
+      "question": "What is Filled Fish Basket spoiling time?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/Items/PrimalItem_FishBasketFilled.PrimalItem_FishBasketFilled",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "SpoilingTime"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/Items/PrimalItem_FishBasketFilled.PrimalItem_FishBasketFilled",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "SpoilingTime",
+            "valueKind": "NUMBER",
+            "value": 2400,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://39cefee33dc90a92a27c587d@5cb7a9a284345822f5038972/default/SpoilingTime"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-009-item-cluster-stack",
+      "question": "What is Cluster Grenade maximum item quantity?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/ScorchedEarth/WeaponClusterGrenade/PrimalItem_WeaponClusterGrenade.PrimalItem_WeaponClusterGrenade",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "MaxItemQuantity"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ScorchedEarth/WeaponClusterGrenade/PrimalItem_WeaponClusterGrenade.PrimalItem_WeaponClusterGrenade",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "MaxItemQuantity",
+            "valueKind": "INTEGER",
+            "value": 100,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://a595f0feb8ffaa26da05affa@c343db1c21ca11403c6ffaac/default/MaxItemQuantity"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-010-item-generic-weapon-name",
+      "question": "What is the generic weapon display name?",
+      "category": "FACT",
+      "primaryDomain": "item_use",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/Weapons/PrimalItemWeaponGeneric.PrimalItemWeaponGeneric",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "ITEM_PROPERTY"
+        ],
+        "factNames": [
+          "DescriptiveNameBase"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/Weapons/PrimalItemWeaponGeneric.PrimalItemWeaponGeneric",
+        "facts": [
+          {
+            "factType": "ITEM_PROPERTY",
+            "factName": "DescriptiveNameBase",
+            "valueKind": "TEXT",
+            "value": "Generic Weapon",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://17b3c53d13202c863d6dab9e@ff2bc9ab7f4cc3377e85dae4/default/DescriptiveNameBase"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-011-status-moving-recovery",
+      "question": "What is the moving stamina recovery multiplier?",
+      "category": "FACT",
+      "primaryDomain": "status_component",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_VALUE"
+        ],
+        "factNames": [
+          "MovingStaminaRecoveryRateMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+        "facts": [
+          {
+            "factType": "STATUS_VALUE",
+            "factName": "MovingStaminaRecoveryRateMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.5,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/MovingStaminaRecoveryRateMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "HUMAN_REVIEWED",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-012-status-running-consumption",
+      "question": "What is the running stamina consumption rate?",
+      "category": "FACT",
+      "primaryDomain": "status_component",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_VALUE"
+        ],
+        "factNames": [
+          "RunningStaminaConsumptionRate"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+        "facts": [
+          {
+            "factType": "STATUS_VALUE",
+            "factName": "RunningStaminaConsumptionRate",
+            "valueKind": "NUMBER",
+            "value": -4,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/RunningStaminaConsumptionRate"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-013-status-max-experience",
+      "question": "What is the maximum experience points default?",
+      "category": "FACT",
+      "primaryDomain": "status_component",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_VALUE"
+        ],
+        "factNames": [
+          "MaxExperiencePoints"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+        "facts": [
+          {
+            "factType": "STATUS_VALUE",
+            "factName": "MaxExperiencePoints",
+            "valueKind": "NUMBER",
+            "value": 22213970,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/MaxExperiencePoints"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-014-status-injured-speed",
+      "question": "What is the injured speed modifier?",
+      "category": "FACT",
+      "primaryDomain": "status_component",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_VALUE"
+        ],
+        "factNames": [
+          "InjuredSpeedModifier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+        "facts": [
+          {
+            "factType": "STATUS_VALUE",
+            "factName": "InjuredSpeedModifier",
+            "valueKind": "NUMBER",
+            "value": 0.6700000166893005,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/InjuredSpeedModifier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-015-buff-yiling-max-stacks",
+      "question": "What is Yi Ling feathered maximum stack count?",
+      "category": "FACT",
+      "primaryDomain": "buff",
+      "entity": "/Game/ASA/Dinos/YiLing/Feathers/Buff_YiLingFeathered.Buff_YiLingFeathered",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_EFFECT"
+        ],
+        "factNames": [
+          "MaxStacks"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/YiLing/Feathers/Buff_YiLingFeathered.Buff_YiLingFeathered",
+        "facts": [
+          {
+            "factType": "STATUS_EFFECT",
+            "factName": "MaxStacks",
+            "valueKind": "INTEGER",
+            "value": 100,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://a5ee0e61e05fd6f544ad7857@840a911e3cd578d7b22d3b65/default/MaxStacks"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-016-buff-yiling-duration",
+      "question": "What is Yi Ling feathered deactivation time?",
+      "category": "FACT",
+      "primaryDomain": "buff",
+      "entity": "/Game/ASA/Dinos/YiLing/Feathers/Buff_YiLingFeathered.Buff_YiLingFeathered",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_EFFECT"
+        ],
+        "factNames": [
+          "DeactivateAfterTime"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/YiLing/Feathers/Buff_YiLingFeathered.Buff_YiLingFeathered",
+        "facts": [
+          {
+            "factType": "STATUS_EFFECT",
+            "factName": "DeactivateAfterTime",
+            "valueKind": "NUMBER",
+            "value": 60,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://a5ee0e61e05fd6f544ad7857@840a911e3cd578d7b22d3b65/default/DeactivateAfterTime"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-017-buff-yiling-poison-stack",
+      "question": "What is Yi Ling poison damage per stack?",
+      "category": "FACT",
+      "primaryDomain": "buff",
+      "entity": "/Game/ASA/Dinos/YiLing/Feathers/Buff_YiLingFeathered.Buff_YiLingFeathered",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_EFFECT"
+        ],
+        "factNames": [
+          "PoisonDamagePerStack"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/YiLing/Feathers/Buff_YiLingFeathered.Buff_YiLingFeathered",
+        "facts": [
+          {
+            "factType": "STATUS_EFFECT",
+            "factName": "PoisonDamagePerStack",
+            "valueKind": "NUMBER",
+            "value": 3,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://a5ee0e61e05fd6f544ad7857@840a911e3cd578d7b22d3b65/default/PoisonDamagePerStack"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-018-buff-gigantoraptor-damage-stack",
+      "question": "What is Gigantoraptor pride extra damage per stack?",
+      "category": "FACT",
+      "primaryDomain": "buff",
+      "entity": "/Game/ASA/Dinos/Gigantoraptor/Buffs/Buff_GigantoraptorPride.Buff_GigantoraptorPride",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_EFFECT"
+        ],
+        "factNames": [
+          "ExDamagePerStack"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Gigantoraptor/Buffs/Buff_GigantoraptorPride.Buff_GigantoraptorPride",
+        "facts": [
+          {
+            "factType": "STATUS_EFFECT",
+            "factName": "ExDamagePerStack",
+            "valueKind": "NUMBER",
+            "value": 0.02,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://f3456ae35c1439d6bf6fb89b@f23d0afd3c6874b1c1a1571f/default/ExDamagePerStack"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-019-buff-gigantoraptor-fury-move",
+      "question": "What is Gigantoraptor pride fury movement multiplier?",
+      "category": "FACT",
+      "primaryDomain": "buff",
+      "entity": "/Game/ASA/Dinos/Gigantoraptor/Buffs/Buff_GigantoraptorPride.Buff_GigantoraptorPride",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_EFFECT"
+        ],
+        "factNames": [
+          "FuryMovementMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Gigantoraptor/Buffs/Buff_GigantoraptorPride.Buff_GigantoraptorPride",
+        "facts": [
+          {
+            "factType": "STATUS_EFFECT",
+            "factName": "FuryMovementMultiplier",
+            "valueKind": "NUMBER",
+            "value": 1.1,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://f3456ae35c1439d6bf6fb89b@f23d0afd3c6874b1c1a1571f/default/FuryMovementMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-020-buff-archelon-reset-time",
+      "question": "Does the Archelon baby dry-land buff reset its time when added?",
+      "category": "FACT",
+      "primaryDomain": "buff",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/Buffs/Buff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_EFFECT"
+        ],
+        "factNames": [
+          "bAddResetsBuffTime"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Buffs/Buff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA",
+        "facts": [
+          {
+            "factType": "STATUS_EFFECT",
+            "factName": "bAddResetsBuffTime",
+            "valueKind": "BOOLEAN",
+            "value": true,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://1672632593b6d99f2ac50fcb@39f5796b13f8e89978c6aaa0/default/bAddResetsBuffTime"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-021-loot-shoulder-min-sets",
+      "question": "What is Shoulder Dragon buried treasure minimum item sets?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "LOOT_ENTRY"
+        ],
+        "factNames": [
+          "MinItemSets"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+        "facts": [
+          {
+            "factType": "LOOT_ENTRY",
+            "factName": "MinItemSets",
+            "valueKind": "NUMBER",
+            "value": 3,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://2cd1e058d707f90a43576ce8@9a30ecf3c31b159a87dff0bf/default/MinItemSets"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "HUMAN_REVIEWED",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-022-loot-shoulder-max-sets",
+      "question": "What is Shoulder Dragon buried treasure maximum item sets?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "LOOT_ENTRY"
+        ],
+        "factNames": [
+          "MaxItemSets"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+        "facts": [
+          {
+            "factType": "LOOT_ENTRY",
+            "factName": "MaxItemSets",
+            "valueKind": "NUMBER",
+            "value": 3,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://2cd1e058d707f90a43576ce8@9a30ecf3c31b159a87dff0bf/default/MaxItemSets"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-023-loot-shoulder-give-chance",
+      "question": "What is Shoulder Dragon buried treasure give-item chance?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "LOOT_ENTRY"
+        ],
+        "factNames": [
+          "ChanceToActuallyGiveItem"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+        "facts": [
+          {
+            "factType": "LOOT_ENTRY",
+            "factName": "ChanceToActuallyGiveItem",
+            "valueKind": "NUMBER",
+            "value": 1,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://2cd1e058d707f90a43576ce8@9a30ecf3c31b159a87dff0bf/default/ChanceToActuallyGiveItem"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-024-loot-shoulder-random-without-replacement",
+      "question": "Does Shoulder Dragon buried treasure choose items without replacement?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "LOOT_ENTRY"
+        ],
+        "factNames": [
+          "bItemsRandomWithoutReplacement"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+        "facts": [
+          {
+            "factType": "LOOT_ENTRY",
+            "factName": "bItemsRandomWithoutReplacement",
+            "valueKind": "BOOLEAN",
+            "value": true,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://2cd1e058d707f90a43576ce8@9a30ecf3c31b159a87dff0bf/default/bItemsRandomWithoutReplacement"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-025-loot-bottle-min-sets",
+      "question": "What is treasure bottle supply crate minimum item sets?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/Packs/TidesOfFortune/Items/Tools/TreasureMapBottle/Gameplay/SupplyCrate_Bottle.SupplyCrate_Bottle",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "LOOT_ENTRY"
+        ],
+        "factNames": [
+          "MinItemSets"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Packs/TidesOfFortune/Items/Tools/TreasureMapBottle/Gameplay/SupplyCrate_Bottle.SupplyCrate_Bottle",
+        "facts": [
+          {
+            "factType": "LOOT_ENTRY",
+            "factName": "MinItemSets",
+            "valueKind": "NUMBER",
+            "value": 1,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://3a7223893006fc282b303a48@44715444f81c7e03d73febed/default/MinItemSets"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-026-loot-pirate-max-sets",
+      "question": "What is pirate buried treasure base maximum item sets?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/Packs/TidesOfFortune/Structures/PirateChest/SupplyCrate_BuriedTreasurePirate_BASE.SupplyCrate_BuriedTreasurePirate_BASE",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "LOOT_ENTRY"
+        ],
+        "factNames": [
+          "MaxItemSets"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Packs/TidesOfFortune/Structures/PirateChest/SupplyCrate_BuriedTreasurePirate_BASE.SupplyCrate_BuriedTreasurePirate_BASE",
+        "facts": [
+          {
+            "factType": "LOOT_ENTRY",
+            "factName": "MaxItemSets",
+            "valueKind": "NUMBER",
+            "value": 4,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://a96a6271ae6e14a7226f4edc@c15d544170b3228882ed0c6f/default/MaxItemSets"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-027-mission-ocean-gather-hexagons",
+      "question": "How many hexagons are rewarded upon gathering items in the Ocean gather mission?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/Genesis/Missions/GatherNodes/MissionType_Gather_Nodes_Ocean.MissionType_Gather_Nodes_Ocean",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "MISSION_REWARD"
+        ],
+        "factNames": [
+          "number of hexagons to reward upon gathering items"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Missions/GatherNodes/MissionType_Gather_Nodes_Ocean.MissionType_Gather_Nodes_Ocean",
+        "facts": [
+          {
+            "factType": "MISSION_REWARD",
+            "factName": "number of hexagons to reward upon gathering items",
+            "valueKind": "INTEGER",
+            "value": 500,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://bacc8a05bb299574553f77e5@9b68dccc651acfe123e7b5e4/default/number%20of%20hexagons%20to%20reward%20upon%20gathering%20items"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "HUMAN_REVIEWED",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-028-mission-vrbattle-alpha-hexagons",
+      "question": "What is Alpha VRBattle completion hexagon reward?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/Genesis/Missions/VRBattle/AlphaMissions/MissionType_VRBattle_Alpha_FinalStage.MissionType_VRBattle_Alpha_FinalStage",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "MISSION_REWARD"
+        ],
+        "factNames": [
+          "HexagonsOnCompletion"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Missions/VRBattle/AlphaMissions/MissionType_VRBattle_Alpha_FinalStage.MissionType_VRBattle_Alpha_FinalStage",
+        "facts": [
+          {
+            "factType": "MISSION_REWARD",
+            "factName": "HexagonsOnCompletion",
+            "valueKind": "INTEGER",
+            "value": 34560,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://0c2a4962a57175ec452bc528@4596a02966c35b9810f11550/default/HexagonsOnCompletion"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-029-mission-vrbattle-beta-hexagons",
+      "question": "What is Beta VRBattle completion hexagon reward?",
+      "category": "FACT",
+      "primaryDomain": "loot_quality_reward",
+      "entity": "/Game/Genesis/Missions/VRBattle/BetaMissions/MissionType_VRBattle_Beta_FinalStage.MissionType_VRBattle_Beta_FinalStage",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "MISSION_REWARD"
+        ],
+        "factNames": [
+          "HexagonsOnCompletion"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Missions/VRBattle/BetaMissions/MissionType_VRBattle_Beta_FinalStage.MissionType_VRBattle_Beta_FinalStage",
+        "facts": [
+          {
+            "factType": "MISSION_REWARD",
+            "factName": "HexagonsOnCompletion",
+            "valueKind": "INTEGER",
+            "value": 12960,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://df1c6473bad8ea89ca9d1658@ebafdf65ab13be3fb72ccf3c/default/HexagonsOnCompletion"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "fact-030-buff-archelon-dry-duration",
+      "question": "How long until the Archelon baby dry-land buff deactivates?",
+      "category": "FACT",
+      "primaryDomain": "buff",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/Buffs/Buff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "STATUS_EFFECT"
+        ],
+        "factNames": [
+          "DeactivateAfterTime"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Buffs/Buff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA",
+        "facts": [
+          {
+            "factType": "STATUS_EFFECT",
+            "factName": "DeactivateAfterTime",
+            "valueKind": "NUMBER",
+            "value": 150,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://1672632593b6d99f2ac50fcb@39f5796b13f8e89978c6aaa0/default/DeactivateAfterTime"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "HUMAN_REVIEWED",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-001-acro-basefoodconsumptionrate",
+      "question": "What is the effective BaseFoodConsumptionRate for acro?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "BaseFoodConsumptionRate"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "BaseFoodConsumptionRate",
+            "valueKind": "NUMBER",
+            "value": -0.009999999776482582,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/BaseFoodConsumptionRate"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-002-acro-craftearnxpmultiplier",
+      "question": "What is the effective CraftEarnXPMultiplier for acro?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "CraftEarnXPMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "CraftEarnXPMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.25,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/CraftEarnXPMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-003-acro-dinoriderweightmultiplier",
+      "question": "What is the effective DinoRiderWeightMultiplier for acro?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "DinoRiderWeightMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "DinoRiderWeightMultiplier",
+            "valueKind": "NUMBER",
+            "value": 1,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/DinoRiderWeightMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-004-acro-injuredspeedmodifier",
+      "question": "What is the effective InjuredSpeedModifier for acro?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "InjuredSpeedModifier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "InjuredSpeedModifier",
+            "valueKind": "NUMBER",
+            "value": 0.6700000166893005,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/InjuredSpeedModifier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-005-acro-movingstaminarecoveryratemultiplier",
+      "question": "What is the effective MovingStaminaRecoveryRateMultiplier for acro?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "MovingStaminaRecoveryRateMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "MovingStaminaRecoveryRateMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.5,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/MovingStaminaRecoveryRateMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-006-archelon-basefoodconsumptionrate",
+      "question": "What is the effective BaseFoodConsumptionRate for archelon?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "BaseFoodConsumptionRate"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "BaseFoodConsumptionRate",
+            "valueKind": "NUMBER",
+            "value": -0.009999999776482582,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/BaseFoodConsumptionRate"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-007-archelon-craftearnxpmultiplier",
+      "question": "What is the effective CraftEarnXPMultiplier for archelon?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "CraftEarnXPMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "CraftEarnXPMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.25,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/CraftEarnXPMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-008-archelon-dinoriderweightmultiplier",
+      "question": "What is the effective DinoRiderWeightMultiplier for archelon?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "DinoRiderWeightMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "DinoRiderWeightMultiplier",
+            "valueKind": "NUMBER",
+            "value": 1,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/DinoRiderWeightMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-009-archelon-injuredspeedmodifier",
+      "question": "What is the effective InjuredSpeedModifier for archelon?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "InjuredSpeedModifier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "InjuredSpeedModifier",
+            "valueKind": "NUMBER",
+            "value": 0.6700000166893005,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/InjuredSpeedModifier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-010-archelon-movingstaminarecoveryratemultiplier",
+      "question": "What is the effective MovingStaminaRecoveryRateMultiplier for archelon?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "MovingStaminaRecoveryRateMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "MovingStaminaRecoveryRateMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.5,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/MovingStaminaRecoveryRateMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-011-bison-basefoodconsumptionrate",
+      "question": "What is the effective BaseFoodConsumptionRate for bison?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "BaseFoodConsumptionRate"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "BaseFoodConsumptionRate",
+            "valueKind": "NUMBER",
+            "value": -0.009999999776482582,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/BaseFoodConsumptionRate"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-012-bison-craftearnxpmultiplier",
+      "question": "What is the effective CraftEarnXPMultiplier for bison?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "CraftEarnXPMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "CraftEarnXPMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.25,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/CraftEarnXPMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-013-bison-dinoriderweightmultiplier",
+      "question": "What is the effective DinoRiderWeightMultiplier for bison?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "DinoRiderWeightMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "DinoRiderWeightMultiplier",
+            "valueKind": "NUMBER",
+            "value": 1,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/DinoRiderWeightMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-014-bison-injuredspeedmodifier",
+      "question": "What is the effective InjuredSpeedModifier for bison?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "InjuredSpeedModifier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "InjuredSpeedModifier",
+            "valueKind": "NUMBER",
+            "value": 0.6700000166893005,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/InjuredSpeedModifier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-015-bison-movingstaminarecoveryratemultiplier",
+      "question": "What is the effective MovingStaminaRecoveryRateMultiplier for bison?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "MovingStaminaRecoveryRateMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "MovingStaminaRecoveryRateMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.5,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/MovingStaminaRecoveryRateMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-016-cat-basefoodconsumptionrate",
+      "question": "What is the effective BaseFoodConsumptionRate for cat?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "BaseFoodConsumptionRate"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "BaseFoodConsumptionRate",
+            "valueKind": "NUMBER",
+            "value": -0.009999999776482582,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/BaseFoodConsumptionRate"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-017-cat-craftearnxpmultiplier",
+      "question": "What is the effective CraftEarnXPMultiplier for cat?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "CraftEarnXPMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "CraftEarnXPMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.25,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/CraftEarnXPMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-018-cat-dinoriderweightmultiplier",
+      "question": "What is the effective DinoRiderWeightMultiplier for cat?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "DinoRiderWeightMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "DinoRiderWeightMultiplier",
+            "valueKind": "NUMBER",
+            "value": 1,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/DinoRiderWeightMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-019-cat-injuredspeedmodifier",
+      "question": "What is the effective InjuredSpeedModifier for cat?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "InjuredSpeedModifier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "InjuredSpeedModifier",
+            "valueKind": "NUMBER",
+            "value": 0.6700000166893005,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/InjuredSpeedModifier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "effective-020-cat-movingstaminarecoveryratemultiplier",
+      "question": "What is the effective MovingStaminaRecoveryRateMultiplier for cat?",
+      "category": "EFFECTIVE",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "EFFECTIVE_DEFAULT"
+        ],
+        "factNames": [
+          "MovingStaminaRecoveryRateMultiplier"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+        "facts": [
+          {
+            "factType": "EFFECTIVE_DEFAULT",
+            "factName": "MovingStaminaRecoveryRateMultiplier",
+            "valueKind": "NUMBER",
+            "value": 0.5,
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://c3c785b66a647834dbd96ad1@bf2eb48afe2e12437fd33395/default/MovingStaminaRecoveryRateMultiplier"
+          }
+        ],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-001-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/Dragontopia/Dragons/Base/Draco_Character_BP.Draco_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Dragontopia/Dragons/Base/Draco_Character_BP.Draco_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/Dragontopia/Dragons/Base/DinoDeathHarvestingComponent_Draco.DinoDeathHarvestingComponent_Draco_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://47c5ccbe9dabded18a965aa0@2f307eb128f0ef1f9b95f849/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-002-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/Genesis/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Hugest_GiantTurtle.DinoDeathHarvestingComponent_Hugest_GiantTurtle_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://7102dbf65d33102501cd71f0@ed6ab1db480e4f280253d37c/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-003-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/Genesis/Dinos/Shapeshifter/Shapeshifter_Small/Shapeshifter_Small_Character_BP.Shapeshifter_Small_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/Shapeshifter/Shapeshifter_Small/Shapeshifter_Small_Character_BP.Shapeshifter_Small_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/ScorchedEarth/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Tiny_LotsHide.DinoDeathHarvestingComponent_Tiny_LotsHide_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://f66149335e0fefb4dad91f76@678888f577bb49fd826ff2df/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-004-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/Genesis/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Huge_SpaceWhale.DinoDeathHarvestingComponent_Huge_SpaceWhale_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://f8d69cb868ba35f9557653de@670108e1851b199ceaec55ec/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-005-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/Packs/TidesOfFortune/Dinos/Axolotl/Axolotl_Small/Axolotl_Small_Character_BP.Axolotl_Small_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Packs/TidesOfFortune/Dinos/Axolotl/Axolotl_Small/Axolotl_Small_Character_BP.Axolotl_Small_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Tiny.DinoDeathHarvestingComponent_Tiny_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://e36e4d9b60dbf09e8dbf6461@aa1a1a9fe678f7bd514a7281/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-006-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/Packs/TidesOfFortune/Dinos/Parrot/Parrot_Character_BP.Parrot_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Packs/TidesOfFortune/Dinos/Parrot/Parrot_Character_BP.Parrot_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Tiny.DinoDeathHarvestingComponent_Tiny_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://d770309af1107a76484d891f@f0cd78673edfce16dde6619a/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-007-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/PrimalEarth/Dinos/Anglerfish/Angler_Character_BP.Angler_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/Dinos/Anglerfish/Angler_Character_BP.Angler_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Medium_AnglerFuel.DinoDeathHarvestingComponent_Medium_AnglerFuel_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://e89f45a9dbe6ed1997bf60a8@b6f9df21f5847686bdd6a5c2/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-008-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/PrimalEarth/Dinos/Carno/Carno_Character_BP.Carno_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/Dinos/Carno/Carno_Character_BP.Carno_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Large_LessKeratin.DinoDeathHarvestingComponent_Large_LessKeratin_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://35f90633ca772d35ec9cd733@a030cadb3517124f2cd966f2/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-009-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/PrimalEarth/Dinos/Manta/Manta_Character_BP.Manta_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/Dinos/Manta/Manta_Character_BP.Manta_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Medium_MeatOnly_Fish.DinoDeathHarvestingComponent_Medium_MeatOnly_Fish_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://e50133eff8e78f05ad15212b@05762cd90d2d92053748e263/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-010-harvest-component",
+      "question": "Which death harvesting component is owned by this creature?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "harvest",
+      "entity": "/Game/PrimalEarth/Dinos/Thylacoleo/Thylacoleo_Character_BP.Thylacoleo_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "OWNS_COMPONENT"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/PrimalEarth/Dinos/Thylacoleo/Thylacoleo_Character_BP.Thylacoleo_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "OWNS_COMPONENT",
+            "targetUri": "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/DinoDeathHarvestingComponent_Medium_KeratinAndHide.DinoDeathHarvestingComponent_Medium_KeratinAndHide_C",
+            "status": "CONFIRMED",
+            "evidenceUri": "bp://3ecec3d059ca31805ac2f53b@78e223f3daf92baff649be71/default/DeathHarvestingComponent"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-011-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Acrocanthosaurus/Buffs/Buff_AcroAdrenaline.Buff_AcroAdrenaline",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Acrocanthosaurus/Buffs/Buff_AcroAdrenaline.Buff_AcroAdrenaline",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FAcrocanthosaurus%2FBuffs%2FBuff_AcroAdrenaline.Buff_AcroAdrenaline#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-012-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Acrocanthosaurus/DinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FAcrocanthosaurus%2FDinoCharacterStatusComponent_BP_Acrocanthosaurus.DinoCharacterStatusComponent_BP_Acrocanthosaurus#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-013-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/Buffs/Buff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Buffs/Buff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FArchelon%2FDinos%2FBuffs%2FBuff_Archelon_BabyDryLand_ASA.Buff_Archelon_BabyDryLand_ASA#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-014-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/DinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FArchelon%2FDinos%2FDinoCharacterStatus_BP_Archelon_ASA.DinoCharacterStatus_BP_Archelon_ASA#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-015-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Bison/Abilities/Buff_BisonHeadLaunch.Buff_BisonHeadLaunch",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Bison/Abilities/Buff_BisonHeadLaunch.Buff_BisonHeadLaunch",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FBison%2FAbilities%2FBuff_BisonHeadLaunch.Buff_BisonHeadLaunch#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-016-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Bison/DinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FBison%2FDinoCharacterStatusComponent_BP_Bison.DinoCharacterStatusComponent_BP_Bison#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-017-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Cat/Buff_CatAggro.Buff_CatAggro",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Cat/Buff_CatAggro.Buff_CatAggro",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FCat%2FBuff_CatAggro.Buff_CatAggro#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-018-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Cat/DinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FCat%2FDinoCharacterStatusComponent_BP_Cat.DinoCharacterStatusComponent_BP_Cat#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-019-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Ceratosaurus/Dinos/Buffs/Buff_BloodDrunk_ASA.Buff_BloodDrunk_ASA",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Ceratosaurus/Dinos/Buffs/Buff_BloodDrunk_ASA.Buff_BloodDrunk_ASA",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FCeratosaurus%2FDinos%2FBuffs%2FBuff_BloodDrunk_ASA.Buff_BloodDrunk_ASA#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "relationship-020-asset-class",
+      "question": "What exact Unreal asset class is assigned to this Blueprint asset?",
+      "category": "RELATIONSHIP",
+      "primaryDomain": "class_inheritance",
+      "entity": "/Game/ASA/Dinos/Ceratosaurus/Dinos/DinoCharacterStatusComponent_BP_Ceratosaurus_ASA.DinoCharacterStatusComponent_BP_Ceratosaurus_ASA",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "ASSET_CLASS"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/Ceratosaurus/Dinos/DinoCharacterStatusComponent_BP_Ceratosaurus_ASA.DinoCharacterStatusComponent_BP_Ceratosaurus_ASA",
+        "facts": [],
+        "relationships": [
+          {
+            "edgeType": "ASSET_CLASS",
+            "targetUri": "/Script/Engine.Blueprint",
+            "status": "CONFIRMED",
+            "evidenceUri": "discovery://asset/%2FGame%2FASA%2FDinos%2FCeratosaurus%2FDinos%2FDinoCharacterStatusComponent_BP_Ceratosaurus_ASA.DinoCharacterStatusComponent_BP_Ceratosaurus_ASA#asset-class"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-001-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/COREMEDIA_PrimalGameData_BP.COREMEDIA_PrimalGameData_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/COREMEDIA_PrimalGameData_BP.COREMEDIA_PrimalGameData_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-002-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/PrimalGameDataARKNX_BP.PrimalGameDataARKNX_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/PrimalGameDataARKNX_BP.PrimalGameDataARKNX_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-003-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/BASE_PrimalGameData_BP.BASE_PrimalGameData_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/BASE_PrimalGameData_BP.BASE_PrimalGameData_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-004-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/CORE_PrimalGameData.CORE_PrimalGameData",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/CORE_PrimalGameData.CORE_PrimalGameData",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-005-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/Structures/FishBasket.FishBasket",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/PrimalEarth/Structures/FishBasket.FishBasket",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-006-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-007-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/Packs/TidesOfFortune/Dinos/Axolotl/Axolotl_Small/Axolotl_Small_Character_BP.Axolotl_Small_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Packs/TidesOfFortune/Dinos/Axolotl/Axolotl_Small/Axolotl_Small_Character_BP.Axolotl_Small_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-008-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/ASA/Dinos/ShoulderDragon/ShoulderDragon_Character_BP.ShoulderDragon_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/ASA/Dinos/ShoulderDragon/ShoulderDragon_Character_BP.ShoulderDragon_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-009-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "legacy_registration_is_not_confirmed",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "registration-010-unverified-owner-target",
+      "question": "Return only a globally verified registration owned by this asset.",
+      "category": "REGISTRATION",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_CREATURE",
+          "REGISTERS_ENGRAM",
+          "REGISTERS_GAME_MODE",
+          "REGISTERS_ITEM",
+          "REGISTERS_SPAWNER",
+          "REGISTERS_STRUCTURE",
+          "REGISTERS_WORLD_EVENT",
+          "REMAPS_ENGRAM",
+          "REMAPS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-001-the-island-direct-reference",
+      "question": "Which confirmed map directly references the base minimap data asset?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/ASA/Minimap/Core/MinimapData_Base.MinimapData_Base",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Minimap/Core/MinimapData_Base.MinimapData_Base",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Maps/TheIslandSubMaps/TheIsland_WP.TheIsland_WP",
+            "targetUri": "/Game/ASA/Minimap/Core/MinimapData_Base.MinimapData_Base",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://fc45a6cffc5919514416b533"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-002-genesis-direct-reference",
+      "question": "Which confirmed map directly references the Genesis minimap data asset?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/ASA/Minimap/Core/MinimapData_GEN1.MinimapData_GEN1",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Minimap/Core/MinimapData_GEN1.MinimapData_GEN1",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Maps/Genesis/Genesis_WP.Genesis_WP",
+            "targetUri": "/Game/ASA/Minimap/Core/MinimapData_GEN1.MinimapData_GEN1",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://1ec853646b5ac982aa11d37a"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-003-aberration-day-cycle-reference",
+      "question": "Which confirmed map directly references the Aberration day-cycle asset?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/Aberration/CoreBlueprints/AberrationDayCycle.AberrationDayCycle",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Aberration/CoreBlueprints/AberrationDayCycle.AberrationDayCycle",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Maps/Aberration/Aberration_WP.Aberration_WP",
+            "targetUri": "/Game/Aberration/CoreBlueprints/AberrationDayCycle.AberrationDayCycle",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://cab6d703315a86a4185f5290"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-004-scorched-earth-direct-reference",
+      "question": "Which confirmed map directly references the Scorched Earth minimap data asset?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/ASA/Minimap/Core/MinimapData_SE.MinimapData_SE",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Minimap/Core/MinimapData_SE.MinimapData_SE",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Maps/ScorchedEarth/ScorchedEarth_WP.ScorchedEarth_WP",
+            "targetUri": "/Game/ASA/Minimap/Core/MinimapData_SE.MinimapData_SE",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://402e91bd0f867a332113a924"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-005-extinction-day-cycle-reference",
+      "question": "Which confirmed map directly references the Extinction day-cycle asset?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/Extinction/CoreBlueprints/ExtinctionDayCycle.ExtinctionDayCycle",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Extinction/CoreBlueprints/ExtinctionDayCycle.ExtinctionDayCycle",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Maps/Extinction/Extinction_WP.Extinction_WP",
+            "targetUri": "/Game/Extinction/CoreBlueprints/ExtinctionDayCycle.ExtinctionDayCycle",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://c066182f38851cbe220230a9"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-006-ragnarok-world-settings-reference",
+      "question": "Which confirmed map directly references the Ragnarok world-settings override?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/WorldSettingsOverrides/WorldSettingsEventOverrides_Ragnarok.WorldSettingsEventOverrides_Ragnarok",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/WorldSettingsOverrides/WorldSettingsEventOverrides_Ragnarok.WorldSettingsEventOverrides_Ragnarok",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Mods/Ragnarok/Ragnarok_WP.Ragnarok_WP",
+            "targetUri": "/Game/WorldSettingsOverrides/WorldSettingsEventOverrides_Ragnarok.WorldSettingsEventOverrides_Ragnarok",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_SOFT_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://865253863be0fe17dd0db668"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-007-the-center-hlod-reference",
+      "question": "Which confirmed map directly references The Center HLOD layer?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/Mods/TheCenter/TheCenter_HLODLayer_Instanced.TheCenter_HLODLayer_Instanced",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Mods/TheCenter/TheCenter_HLODLayer_Instanced.TheCenter_HLODLayer_Instanced",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Mods/TheCenter/TheCenter_WP.TheCenter_WP",
+            "targetUri": "/Game/Mods/TheCenter/TheCenter_HLODLayer_Instanced.TheCenter_HLODLayer_Instanced",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://24cbf42804223587b1a7bec2"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-008-lost-colony-snow-monster-reference",
+      "question": "Which confirmed map directly references the Lost Colony snow-monster asset?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/LostColony/Dinos/SnowMonster/SnowMonster_Character_BP.SnowMonster_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/LostColony/Dinos/SnowMonster/SnowMonster_Character_BP.SnowMonster_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Maps/LostColony/LostColony_WP.LostColony_WP",
+            "targetUri": "/Game/LostColony/Dinos/SnowMonster/SnowMonster_Character_BP.SnowMonster_Character_BP",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_SOFT_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://eb561bb3e3ab02dfaa51e2ee"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-009-valguero-chalk-golem-reference",
+      "question": "Which confirmed map directly references the Chalk Golem asset?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/ASA/Dinos/ChalkGolem/ChalkGolem_Character_BP.ChalkGolem_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/ASA/Dinos/ChalkGolem/ChalkGolem_Character_BP.ChalkGolem_Character_BP",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Mods/Valguero/Valguero_WP.Valguero_WP",
+            "targetUri": "/Game/ASA/Dinos/ChalkGolem/ChalkGolem_Character_BP.ChalkGolem_Character_BP",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_SOFT_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://561a0fc216b0248869531697"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "map-010-genesis-two-bog-root-reference",
+      "question": "Which confirmed Genesis 2 submap directly references this bog-root asset?",
+      "category": "MAP",
+      "primaryDomain": "map_world",
+      "entity": "/Game/Genesis/Environment/Bog/Cave/MudTunnels/Roots/Root_Small_A.Root_Small_A",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_SEMANTIC_COMPLETE",
+        "identityUri": "/Game/Genesis/Environment/Bog/Cave/MudTunnels/Roots/Root_Small_A.Root_Small_A",
+        "facts": [],
+        "relationships": [
+          {
+            "sourceUri": "/Game/Maps/Genesis2/B2_Near_Gardens_2.B2_Near_Gardens_2",
+            "targetUri": "/Game/Genesis/Environment/Bog/Cave/MudTunnels/Roots/Root_Small_A.Root_Small_A",
+            "edgeType": "MAP_DIRECT_REFERENCE",
+            "status": "CONFIRMED",
+            "freshness": "FRESH",
+            "evidenceLayer": "ASSET_REGISTRY_HARD_PACKAGE_DEPENDENCY",
+            "claimsCompleteMapUsage": false,
+            "claimsSpawnCoordinates": false,
+            "evidenceUri": "registry-reference://b2645aa951ceefaa22ee6abb"
+          }
+        ],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "EXACT"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-001-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-002-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/Packs/TidesOfFortune/Structures/PirateChest/SupplyCrate_BuriedTreasurePirate_BASE.SupplyCrate_BuriedTreasurePirate_BASE",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Packs/TidesOfFortune/Structures/PirateChest/SupplyCrate_BuriedTreasurePirate_BASE.SupplyCrate_BuriedTreasurePirate_BASE",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-003-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/Genesis/Weapons/TekGrenadeLauncher/PrimalItem_WeaponTekGrenadeLauncher.PrimalItem_WeaponTekGrenadeLauncher",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Weapons/TekGrenadeLauncher/PrimalItem_WeaponTekGrenadeLauncher.PrimalItem_WeaponTekGrenadeLauncher",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-004-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-005-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-006-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-007-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/PrimalEarth/Dinos/Carno/Carno_Character_BP.Carno_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/PrimalEarth/Dinos/Carno/Carno_Character_BP.Carno_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-008-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/PrimalEarth/Dinos/Anglerfish/Angler_Character_BP.Angler_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/PrimalEarth/Dinos/Anglerfish/Angler_Character_BP.Angler_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-009-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "native_symbol_is_not_confirmed_callsite",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "native-010-callsite-required",
+      "question": "Return a confirmed Blueprint-to-native callsite or the exact unresolved boundary.",
+      "category": "NATIVE",
+      "primaryDomain": "native_boundary",
+      "entity": "/Game/Genesis/Missions/GatherNodes/MissionType_Gather_Nodes_Ocean.MissionType_Gather_Nodes_Ocean",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": true,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Missions/GatherNodes/MissionType_Gather_Nodes_Ocean.MissionType_Gather_Nodes_Ocean",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NATIVE_BOUNDARY_UNRESOLVED"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-001-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-002-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/SpaceWhale_Character_BP.SpaceWhale_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-003-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/Archelon_Character_BP_ASA.Archelon_Character_BP_ASA",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Archelon_Character_BP_ASA.Archelon_Character_BP_ASA",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-004-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/ASA/Dinos/YiLing/Feathers/Buff_YiLingFeathered.Buff_YiLingFeathered",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/ASA/Dinos/YiLing/Feathers/Buff_YiLingFeathered.Buff_YiLingFeathered",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-005-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/ASA/Dinos/ShoulderDragon/Chest/SupplyCrate_BuriedTreasure_ShoulderDragon.SupplyCrate_BuriedTreasure_ShoulderDragon",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-006-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-007-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/Genesis/Missions/GatherNodes/MissionType_Gather_Nodes_Ocean.MissionType_Gather_Nodes_Ocean",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Missions/GatherNodes/MissionType_Gather_Nodes_Ocean.MissionType_Gather_Nodes_Ocean",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-008-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/PrimalEarth/Dinos/Carno/Carno_Character_BP.Carno_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/PrimalEarth/Dinos/Carno/Carno_Character_BP.Carno_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-009-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/PrimalEarth/Dinos/Anglerfish/Angler_Character_BP.Angler_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/PrimalEarth/Dinos/Anglerfish/Angler_Character_BP.Angler_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "static_default_is_not_runtime_observation",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "runtime-010-observation-required",
+      "question": "Return a real runtime observation or the named runtime evidence gap.",
+      "category": "RUNTIME",
+      "primaryDomain": "runtime_validation",
+      "entity": "/Game/Packs/TidesOfFortune/Dinos/Axolotl/Axolotl_Small/Axolotl_Small_Character_BP.Axolotl_Small_Character_BP",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": true,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Packs/TidesOfFortune/Dinos/Axolotl/Axolotl_Small/Axolotl_Small_Character_BP.Axolotl_Small_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "RUNTIME_DYNAMIC_BRANCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "missing_entity_is_not_identity",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-001-missing-entity",
+      "question": "Do not substitute a similarly named asset for this absent canonical URI.",
+      "category": "NEGATIVE",
+      "primaryDomain": "creature_definition",
+      "entity": "/Game/__ARK_KB_MISSING__/Missing_1.Missing_1",
+      "requirements": {
+        "answerMode": "IDENTITY",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": null,
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "NO_ENTITY_MATCH"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "map_namespace_is_not_map_usage",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-002-map-usage-boundary",
+      "question": "Do not infer direct map usage from the asset namespace without confirmed typed evidence.",
+      "category": "NEGATIVE",
+      "primaryDomain": "map_world",
+      "entity": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/Genesis/Missions/VRBattle/MissionType_VRBattle_Base.MissionType_VRBattle_Base",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "MAP_USAGE_INCOMPLETE"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "pcg_reference_is_not_direct_placement",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-003-pcg-placement-boundary",
+      "question": "Do not promote an unconfirmed PCG reference to direct placement.",
+      "category": "NEGATIVE",
+      "primaryDomain": "map_world",
+      "entity": "/Game/Aberration/Environment/BioLumChamber/Vegetation/Foliage/AquaticClutterB/SM_AquaticClutterB_settings.SM_AquaticClutterB_settings",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/Aberration/Environment/BioLumChamber/Vegetation/Foliage/AquaticClutterB/SM_AquaticClutterB_settings.SM_AquaticClutterB_settings",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "MAP_USAGE_INCOMPLETE"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "world_partition_reference_is_not_usage",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-004-world-partition-boundary",
+      "question": "Do not promote a World Partition package reference to confirmed map usage.",
+      "category": "NEGATIVE",
+      "primaryDomain": "map_world",
+      "entity": "/Game/Aberration/Environment/HarvestableResources/Mesh/SM_Gem_Biolum_01_settings.SM_Gem_Biolum_01_settings",
+      "requirements": {
+        "answerMode": "MECHANISM",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": true,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/Aberration/Environment/HarvestableResources/Mesh/SM_Gem_Biolum_01_settings.SM_Gem_Biolum_01_settings",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "MAP_USAGE_INCOMPLETE"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "ambiguous_alias_is_not_identity",
+      "performancePath": "FUZZY_CANDIDATE",
+      "id": "negative-005-ambiguous-alias",
+      "question": "Do not choose one asset from this ambiguous alias or fuzzy candidate set.",
+      "category": "NEGATIVE",
+      "primaryDomain": "creature_definition",
+      "entity": "Buff_",
+      "requirements": {
+        "answerMode": "IDENTITY",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "AMBIGUOUS",
+        "identityUri": null,
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "AMBIGUOUS_ENTITY"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "ambiguous_alias_is_not_identity",
+      "performancePath": "FUZZY_CANDIDATE",
+      "id": "negative-006-ambiguous-alias",
+      "question": "Do not choose one asset from this ambiguous alias or fuzzy candidate set.",
+      "category": "NEGATIVE",
+      "primaryDomain": "creature_definition",
+      "entity": "SupplyCrate_",
+      "requirements": {
+        "answerMode": "IDENTITY",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "AMBIGUOUS",
+        "identityUri": null,
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "AMBIGUOUS_ENTITY"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "ambiguous_alias_is_not_identity",
+      "performancePath": "FUZZY_CANDIDATE",
+      "id": "negative-007-ambiguous-alias",
+      "question": "Do not choose one asset from this ambiguous alias or fuzzy candidate set.",
+      "category": "NEGATIVE",
+      "primaryDomain": "creature_definition",
+      "entity": "DinoCharacterStatusComponent_BP_",
+      "requirements": {
+        "answerMode": "IDENTITY",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "AMBIGUOUS",
+        "identityUri": null,
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "AMBIGUOUS_ENTITY"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "stale_source_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-008-stale-fact",
+      "question": "Do not return this stale declared default as a complete fact.",
+      "category": "NEGATIVE",
+      "primaryDomain": "item_use",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "DECLARED_DEFAULT"
+        ],
+        "factNames": [
+          "DescriptiveNameBase"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "FACT_STALE"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "stale_source_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-009-stale-fact",
+      "question": "Do not return this stale declared default as a complete fact.",
+      "category": "NEGATIVE",
+      "primaryDomain": "item_use",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "DECLARED_DEFAULT"
+        ],
+        "factNames": [
+          "SpoilingTime"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "FACT_STALE"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "stale_source_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-010-stale-fact",
+      "question": "Do not return this stale declared default as a complete fact.",
+      "category": "NEGATIVE",
+      "primaryDomain": "item_use",
+      "entity": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "DECLARED_DEFAULT"
+        ],
+        "factNames": [
+          "bIsCookingIngredient"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/ASA/Dinos/Archelon/Dinos/Consumables/PrimalItemConsumable_Veggie_TurtleAlgae_ASA.PrimalItemConsumable_Veggie_TurtleAlgae_ASA",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "FACT_STALE"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "stale_source_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-011-stale-fact",
+      "question": "Do not return this stale declared default as a complete fact.",
+      "category": "NEGATIVE",
+      "primaryDomain": "creature_definition",
+      "entity": "/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "DECLARED_DEFAULT"
+        ],
+        "factNames": [
+          "ActivateAttackRange"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "FACT_STALE"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "stale_source_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-012-stale-fact",
+      "question": "Do not return this stale declared default as a complete fact.",
+      "category": "NEGATIVE",
+      "primaryDomain": "creature_definition",
+      "entity": "/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP",
+      "requirements": {
+        "answerMode": "FACT",
+        "factTypes": [
+          "DECLARED_DEFAULT"
+        ],
+        "factNames": [
+          "AgeRangeMax"
+        ],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "FACT_STALE"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "candidate_edge_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-013-candidate-edge",
+      "question": "Do not let a candidate or legacy-unverified registration close this relationship query.",
+      "category": "NEGATIVE",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/COREMEDIA_PrimalGameData_BP.COREMEDIA_PrimalGameData_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "APPLIES_BUFF"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/COREMEDIA_PrimalGameData_BP.COREMEDIA_PrimalGameData_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "candidate_edge_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-014-candidate-edge",
+      "question": "Do not let a candidate or legacy-unverified registration close this relationship query.",
+      "category": "NEGATIVE",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/PrimalGameDataARKNX_BP.PrimalGameDataARKNX_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "USES_DAMAGE_TYPE"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/PrimalGameDataARKNX_BP.PrimalGameDataARKNX_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "candidate_edge_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-015-candidate-edge",
+      "question": "Do not let a candidate or legacy-unverified registration close this relationship query.",
+      "category": "NEGATIVE",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/BASE_PrimalGameData_BP.BASE_PrimalGameData_BP",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "GRANTS_ITEM"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "DB_PARTIAL",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/BASE_PrimalGameData_BP.BASE_PrimalGameData_BP",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "candidate_edge_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-016-candidate-edge",
+      "question": "Do not let a candidate or legacy-unverified registration close this relationship query.",
+      "category": "NEGATIVE",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/CoreBlueprints/CORE_PrimalGameData.CORE_PrimalGameData",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "USES_PRIMAL_GAME_DATA"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/CORE_PrimalGameData.CORE_PrimalGameData",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "candidate_edge_is_not_complete",
+      "performancePath": "EXACT_CANONICAL_URI",
+      "id": "negative-017-candidate-edge",
+      "question": "Do not let a candidate or legacy-unverified registration close this relationship query.",
+      "category": "NEGATIVE",
+      "primaryDomain": "global_registration",
+      "entity": "/Game/PrimalEarth/Structures/FishBasket.FishBasket",
+      "requirements": {
+        "answerMode": "RELATIONSHIP",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [
+          "REGISTERS_STRUCTURE"
+        ],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "EVIDENCE_REQUIRED",
+        "identityUri": "/Game/PrimalEarth/Structures/FishBasket.FishBasket",
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [
+          "REFERENCE_CLOSURE_OPEN"
+        ],
+        "mustContainEvidence": false,
+        "semanticExpectation": "GAP_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": true
+    },
+    {
+      "negativeCase": "identity_only_is_not_semantic",
+      "performancePath": "EXACT_ALIAS",
+      "id": "negative-018-identity-only",
+      "question": "Resolve this exact alias as identity only; do not count it as a semantic answer.",
+      "category": "NEGATIVE",
+      "primaryDomain": "item_use",
+      "entity": "PrimalItemResource_Ambergris",
+      "requirements": {
+        "answerMode": "IDENTITY",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "IDENTITY_ONLY_COMPLETE",
+        "status": "COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris.PrimalItemResource_Ambergris",
+        "identityStatus": "EXTRACTED",
+        "identityConfidence": "HIGH",
+        "identityEvidence": {
+          "evidenceUri": "package:///Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris",
+          "evidenceRole": "IDENTITY_REVISION",
+          "freshness": "FRESH",
+          "sourceRevision": {
+            "sourceKind": "asset_package",
+            "sourceUri": "package:///Game/Genesis/Dinos/SpaceWhale/PrimalItemResource_Ambergris",
+            "sourceFingerprint": "d5fcaac794c1133b64ab52354a9c5f817ad568ba38b96810fea8e3af3ae2b1eb",
+            "producerVersion": "Blueprint-to-Code",
+            "schemaVersion": "ark-asset-package/v1",
+            "freshness": "FRESH"
+          }
+        },
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "IDENTITY_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "identity_only_is_not_semantic",
+      "performancePath": "EXACT_ALIAS",
+      "id": "negative-019-identity-only",
+      "question": "Resolve this exact alias as identity only; do not count it as a semantic answer.",
+      "category": "NEGATIVE",
+      "primaryDomain": "creature_definition",
+      "entity": "GiantTurtle_Character_BP",
+      "requirements": {
+        "answerMode": "IDENTITY",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "IDENTITY_ONLY_COMPLETE",
+        "status": "COMPLETE",
+        "identityUri": "/Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP.GiantTurtle_Character_BP",
+        "identityStatus": "EXTRACTED",
+        "identityConfidence": "HIGH",
+        "identityEvidence": {
+          "evidenceUri": "package:///Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP",
+          "evidenceRole": "IDENTITY_REVISION",
+          "freshness": "FRESH",
+          "sourceRevision": {
+            "sourceKind": "asset_package",
+            "sourceUri": "package:///Game/Genesis/Dinos/GiantTurtle/GiantTurtle_Character_BP",
+            "sourceFingerprint": "a910e5cbf70ad0e2af5490e624c098012a1241f39eeb0beac9ab68446acade3b",
+            "producerVersion": "Blueprint-to-Code",
+            "schemaVersion": "ark-asset-package/v1",
+            "freshness": "FRESH"
+          }
+        },
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "IDENTITY_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    },
+    {
+      "negativeCase": "identity_only_is_not_semantic",
+      "performancePath": "EXACT_ALIAS",
+      "id": "negative-020-identity-only",
+      "question": "Resolve this exact alias as identity only; do not count it as a semantic answer.",
+      "category": "NEGATIVE",
+      "primaryDomain": "status_component",
+      "entity": "DinoCharacterStatusComponent_BP",
+      "requirements": {
+        "answerMode": "IDENTITY",
+        "factTypes": [],
+        "factNames": [],
+        "edgeTypes": [],
+        "requiresNative": false,
+        "requiresRuntime": false,
+        "requiresMapEvidence": false,
+        "evidenceLimit": 50,
+        "budgetTokens": 2000
+      },
+      "expected": {
+        "route": "IDENTITY_ONLY_COMPLETE",
+        "status": "COMPLETE",
+        "identityUri": "/Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP.DinoCharacterStatusComponent_BP",
+        "identityStatus": "EXTRACTED",
+        "identityConfidence": "HIGH",
+        "identityEvidence": {
+          "evidenceUri": "package:///Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP",
+          "evidenceRole": "IDENTITY_REVISION",
+          "freshness": "FRESH",
+          "sourceRevision": {
+            "sourceKind": "asset_package",
+            "sourceUri": "package:///Game/PrimalEarth/CoreBlueprints/DinoCharacterStatusComponent_BP",
+            "sourceFingerprint": "d17d4e79f99e631289d438c6585b47f5287e5532e37ebec35243e9deecdd5ef9",
+            "producerVersion": "Blueprint-to-Code",
+            "schemaVersion": "ark-asset-package/v1",
+            "freshness": "FRESH"
+          }
+        },
+        "facts": [],
+        "relationships": [],
+        "gapCodes": [],
+        "mustContainEvidence": true,
+        "semanticExpectation": "IDENTITY_ONLY"
+      },
+      "reviewStatus": "FIXTURE_EXACT",
+      "protocolBoundaryOnly": false
+    }
+  ]
+}

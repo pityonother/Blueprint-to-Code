@@ -1,9 +1,11 @@
-"""Mine likely Blueprint graph names from Unreal .uasset files.
+"""Recover conservative Blueprint graph evidence from Unreal asset packages.
 
-This is deliberately conservative: it does not parse Blueprint bytecode or
-serialized graph objects. It only extracts safe ASCII/UTF-16 strings and ranks
-names that look like Blueprint graph pages. ARK DevKit Python validation remains
-the authority for whether a candidate is a real graph.
+The module has both a string-based candidate miner and bounded parsers for the
+package summary, Name/Import/Export maps, selected serialized object properties,
+EdGraph/K2 nodes, pins, and links. It does not parse Blueprint bytecode, claim
+every Unreal property layout, or treat heuristic links as confirmed facts.
+ARK DevKit validation remains authoritative when a serialized layout is missing
+or ambiguous.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from typing import Iterable
 
 from .config import NODE_SEMANTICS
 from .core import build_blueprint_payload_from_nodes, parse_blueprint_text
+from .devkit_paths import DEFAULT_CONTENT_ROOTS, devkit_content_roots
 from .models import NodeInfo, PinInfo
 
 
@@ -31,13 +34,6 @@ UASSET_PARTIAL_TRIAGE_SCHEMA = "blueprint-translator.uasset-partial-graph-triage
 UASSET_QUALITY_GATES_SCHEMA = "blueprint-translator.uasset-quality-gates.v1"
 UASSET_CLASS_DEFAULTS_SCHEMA = "blueprint-translator.uasset-class-defaults.v1"
 DEFAULT_MAX_CANDIDATES = 1600
-
-DEFAULT_CONTENT_ROOTS = (
-    r"C:\Program Files\Epic Games\ARKDevkit\Projects\ShooterGame\Content",
-    r"D:\Epic Games\ARKDevkit\Projects\ShooterGame\Content",
-    r"E:\Epic Games\ARKDevkit\Projects\ShooterGame\Content",
-    r"G:\ARKDevkit\Projects\ShooterGame\Content",
-)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
@@ -395,18 +391,11 @@ def _dedupe_paths(roots: Iterable[Path]) -> list[Path]:
 
 
 def content_roots(extra_roots: Iterable[str | os.PathLike[str]] | None = None) -> list[Path]:
-    roots: list[Path] = []
-    for env_name in ("ARK_DEVKIT_CONTENT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT"):
-        for value in _split_path_list(os.environ.get(env_name)):
-            roots.append(Path(value).expanduser())
-    for env_name in ("ARK_DEVKIT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_ROOT"):
-        for value in _split_path_list(os.environ.get(env_name)):
-            roots.append(Path(value).expanduser() / "Projects" / "ShooterGame" / "Content")
-    roots.extend(Path(_clean_path_text(value)).expanduser() for value in _config_lines(DEVKIT_CONTENT_ROOT_FILE))
-    if extra_roots:
-        roots.extend(Path(_clean_path_text(value)).expanduser() for value in extra_roots if _clean_path_text(value))
-    roots.extend(Path(value) for value in DEFAULT_CONTENT_ROOTS)
-    return _dedupe_paths(roots)
+    return devkit_content_roots(
+        extra_roots,
+        config_file=DEVKIT_CONTENT_ROOT_FILE,
+        default_roots=DEFAULT_CONTENT_ROOTS,
+    )
 
 
 def _parse_mount_mapping(value: str) -> tuple[str, Path] | None:
@@ -591,6 +580,37 @@ def _read_fstring(data: bytes, offset: int) -> tuple[str, int]:
     raw = data[offset : offset + max(0, byte_count - 2)]
     offset += byte_count
     return raw.decode("utf-16le", errors="replace"), offset
+
+
+def _read_inline_soft_object_fstring(
+    data: bytes,
+    offset: int,
+    value_end: int,
+) -> tuple[str, int]:
+    """Read a strictly bounded FString embedded in an inline SoftObjectPath."""
+
+    if offset < 0 or value_end > len(data) or offset + 4 > value_end:
+        raise ValueError("Inline SoftObjectPath FString is outside its value boundary.")
+    length = _read_i32(data, offset)
+    offset += 4
+    if length == 0:
+        return "", offset
+    if length > 0:
+        if length > 1_000_000 or offset + length > value_end:
+            raise ValueError("Invalid inline SoftObjectPath FString length.")
+        raw = data[offset : offset + length]
+        if not raw.endswith(b"\x00"):
+            raise ValueError("Inline SoftObjectPath FString is not null terminated.")
+        return raw[:-1].decode("ascii", errors="strict"), offset + length
+
+    char_count = -length
+    byte_count = char_count * 2
+    if char_count > 1_000_000 or offset + byte_count > value_end:
+        raise ValueError("Invalid inline SoftObjectPath UTF-16 FString length.")
+    raw = data[offset : offset + byte_count]
+    if not raw.endswith(b"\x00\x00"):
+        raise ValueError("Inline SoftObjectPath UTF-16 FString is not null terminated.")
+    return raw[:-2].decode("utf-16le", errors="strict"), offset + byte_count
 
 
 def _read_fname(names: list[str], data: bytes, offset: int) -> tuple[str, int, int]:
@@ -1296,6 +1316,41 @@ def object_ref_name(value: int, imports: list[dict[str, object]], exports: list[
     return ""
 
 
+def object_ref_path(
+    value: int,
+    imports: list[dict[str, object]],
+    exports: list[dict[str, object]],
+) -> str:
+    """Return a full package/object identity when the package outer is serialized."""
+
+    def row_for(package_index: int) -> dict[str, object] | None:
+        if package_index > 0:
+            index = package_index - 1
+            return exports[index] if 0 <= index < len(exports) else None
+        if package_index < 0:
+            index = -package_index - 1
+            return imports[index] if 0 <= index < len(imports) else None
+        return None
+
+    leaf = object_ref_name(value, imports, exports)
+    current = value
+    seen: set[int] = set()
+    while current and current not in seen:
+        seen.add(current)
+        row = row_for(current)
+        if not isinstance(row, dict):
+            break
+        name = str(row.get("object_name") or row.get("display_name") or "")
+        if name.startswith(("/Game/", "/Script/", "/Engine/")):
+            package_path = name.split(".", 1)[0]
+            return f"{package_path}.{leaf}" if leaf and leaf != package_path.rsplit("/", 1)[-1] else package_path
+        outer = row.get("outer_index")
+        if not isinstance(outer, int):
+            break
+        current = outer
+    return leaf
+
+
 def extract_object_ref_array(
     block: bytes,
     imports: list[dict[str, object]],
@@ -1374,6 +1429,47 @@ def extract_member_reference_name(data: bytes, names: list[str]) -> str:
         if is_member_reference_name_candidate(value):
             return value
     return ""
+
+
+def extract_member_parent_reference(
+    data: bytes,
+    names: list[str],
+    imports: list[dict[str, object]],
+    exports: list[dict[str, object]],
+) -> dict[str, object]:
+    """Decode the tagged FPackageIndex stored in FMemberReference.MemberParent."""
+
+    for pos, _name in fname_positions(data, names, {"MemberParent"}):
+        type_tag = _fname_at(data, pos + 8, names)
+        if not type_tag or type_tag[0] not in {
+            "ObjectProperty",
+            "ClassProperty",
+            "SoftObjectProperty",
+        }:
+            continue
+        for value_pos in (pos + 25, pos + 24, pos + 28, pos + 32):
+            if not 0 <= value_pos <= len(data) - 4:
+                continue
+            package_index = _read_i32(data, value_pos)
+            if (
+                package_index
+                and _valid_package_index(package_index, imports, exports)
+            ):
+                return {
+                    "package_index": package_index,
+                    "object": object_ref_name(
+                        package_index,
+                        imports,
+                        exports,
+                    ),
+                    "object_path": object_ref_path(
+                        package_index,
+                        imports,
+                        exports,
+                    ),
+                    "raw_offset": value_pos,
+                }
+    return {}
 
 
 def guid_to_text(raw: bytes) -> str:
@@ -1473,6 +1569,11 @@ def property_parse_confidence(type_name: str, parsed: dict[str, object]) -> str:
         value = parsed.get("value")
         return "medium" if isinstance(value, list) and value else "low"
     if type_name == "StructProperty":
+        if (
+            parsed.get("member_name")
+            and parsed.get("member_parent_object_path")
+        ):
+            return "high"
         return "medium" if parsed.get("member_name") or parsed.get("guid") else "low"
     return "low"
 
@@ -1529,6 +1630,7 @@ def parse_property_block_value(
             item["value"] = ref
             item["package_index"] = ref
             item["object"] = object_ref_name(int(ref or 0), imports, exports)
+            item["object_path"] = object_ref_path(int(ref or 0), imports, exports)
         elif type_name == "ArrayProperty":
             refs, array_offset = extract_object_ref_array(chunk, imports, exports)
             item["value"] = refs
@@ -1536,11 +1638,29 @@ def parse_property_block_value(
             item["element_kind"] = "FPackageIndex" if refs else "unknown"
             item["array_parse"] = array_parse_payload(refs, array_offset, len(chunk))
             item["objects"] = [object_ref_name(value, imports, exports) for value in refs[:500]]
+            item["object_paths"] = [object_ref_path(value, imports, exports) for value in refs[:500]]
         elif type_name == "StructProperty":
             struct_region = export_data[pos : min(len(export_data), max(end, pos + 192))]
             member_name = extract_member_reference_name(struct_region, names)
             if member_name:
                 item["member_name"] = member_name
+            member_parent = extract_member_parent_reference(
+                struct_region,
+                names,
+                imports,
+                exports,
+            )
+            if member_parent:
+                item["member_parent_package_index"] = member_parent[
+                    "package_index"
+                ]
+                item["member_parent_object"] = member_parent["object"]
+                item["member_parent_object_path"] = member_parent[
+                    "object_path"
+                ]
+                item["member_parent_raw_offset"] = (
+                    pos + int(member_parent["raw_offset"])
+                )
             guid = extract_guid_value(chunk, names, "MemberGuid")
             if guid:
                 item["guid"] = guid
@@ -2207,6 +2327,7 @@ def _parse_cdo_array_value(
     cursor = value_offset + 4
     values: list[object] = []
     objects: list[str] = []
+    object_paths: list[str] = []
     elements: list[dict[str, object]] = []
 
     fixed_widths = {
@@ -2220,7 +2341,59 @@ def _parse_cdo_array_value(
         "NameProperty": 8,
     }
     width = fixed_widths.get(inner_type)
-    if width is not None:
+    inline_soft_object_paths = (
+        inner_type == "SoftObjectProperty"
+        and width is not None
+        and cursor + count * width != value_end
+    )
+    if inline_soft_object_paths:
+        for index in range(count):
+            element_start = cursor
+            if cursor + 12 > value_end:
+                return None
+            asset_path_info = _fname_at(export_data, cursor, names)
+            if not asset_path_info:
+                return None
+            asset_path, _asset_path_index, asset_path_number = asset_path_info
+            asset_leaf = asset_path.rsplit("/", 1)[-1]
+            if (
+                asset_path_number != 0
+                or not asset_path.startswith("/")
+                or "." not in asset_leaf
+                or asset_leaf.startswith(".")
+                or asset_leaf.endswith(".")
+            ):
+                return None
+            cursor += 8
+            try:
+                sub_path, cursor_after = _read_inline_soft_object_fstring(
+                    export_data,
+                    cursor,
+                    value_end,
+                )
+            except (IndexError, ValueError, struct.error):
+                return None
+            if cursor_after > value_end:
+                return None
+            cursor = cursor_after
+            object_path = (
+                f"{asset_path}:{sub_path}" if sub_path else asset_path
+            )
+            values.append(object_path)
+            objects.append(object_path)
+            object_paths.append(object_path)
+            elements.append(
+                {
+                    "index": index,
+                    "value": object_path,
+                    "object": object_path,
+                    "object_path": object_path,
+                    "raw_offsets": raw_offsets(element_start, cursor),
+                }
+            )
+        if cursor != value_end:
+            return None
+    elif width is not None:
         if cursor + count * width != value_end:
             return None
         for index in range(count):
@@ -2250,11 +2423,15 @@ def _parse_cdo_array_value(
                 resolved = object_ref_name(int(value), imports, exports)
                 element["object"] = resolved
                 objects.append(resolved)
+                resolved_path = object_ref_path(int(value), imports, exports)
+                element["object_path"] = resolved_path
+                object_paths.append(resolved_path)
             elif inner_type == "SoftObjectProperty":
                 soft_path = _soft_object_path_for_index(soft_object_paths, int(value))
                 resolved = str(soft_path.get("object_path") or "") if soft_path else ""
                 element["object"] = resolved
                 objects.append(resolved)
+                object_paths.append(resolved)
             values.append(value)
             elements.append(element)
     elif inner_type == "StructProperty":
@@ -2267,6 +2444,31 @@ def _parse_cdo_array_value(
                 else _ark_cdo_property_sequence
             )
         )
+        struct_envelope: dict[str, object] | None = None
+        if tag_layout == "ark_compact_guid_marker":
+            envelope = _ark_guid_cdo_property_tag_at(
+                export_data,
+                names,
+                cursor,
+                value_end,
+            )
+            if (
+                isinstance(envelope, dict)
+                and envelope.get("type") == "StructProperty"
+                and envelope.get("name") == block.get("name")
+                and int(envelope.get("end") or 0) == value_end
+            ):
+                envelope_value_offset = int(envelope.get("value_offset") or 0)
+                if cursor < envelope_value_offset <= value_end:
+                    cursor = envelope_value_offset
+                    struct_envelope = {
+                        "name": envelope.get("name"),
+                        "struct": envelope.get("struct"),
+                        "raw_offsets": raw_offsets(
+                            int(envelope.get("offset") or 0),
+                            envelope_value_offset,
+                        ),
+                    }
         for index in range(count):
             element_start = cursor
             nested_blocks, cursor_after, terminated = sequence_parser(
@@ -2302,6 +2504,7 @@ def _parse_cdo_array_value(
     return {
         "value": values,
         "objects": objects,
+        "object_paths": object_paths,
         "array_offset": value_offset,
         "element_kind": inner_type,
         "array_parse": {
@@ -2311,6 +2514,11 @@ def _parse_cdo_array_value(
             "raw_size": declared_size,
             "array_offset": value_offset,
             "elements": elements,
+            **(
+                {"struct_envelope": struct_envelope}
+                if inner_type == "StructProperty" and struct_envelope is not None
+                else {}
+            ),
         },
     }
 
@@ -2366,6 +2574,7 @@ def parse_cdo_property_value(
             if _valid_package_index(ref, imports, exports):
                 item["value"] = ref
                 item["object"] = object_ref_name(ref, imports, exports)
+                item["object_path"] = object_ref_path(ref, imports, exports)
             else:
                 item["value"] = None
                 item["object"] = ""
@@ -2442,6 +2651,18 @@ def parse_cdo_property_value(
             )
             if decoded_array is not None:
                 item.update(decoded_array)
+            elif str(block.get("inner_type") or "") == "SoftObjectProperty":
+                item["value"] = []
+                item["array_offset"] = value_offset
+                item["element_kind"] = "SoftObjectProperty"
+                item["array_parse"] = {
+                    "parsed": False,
+                    "element_kind": "SoftObjectProperty",
+                    "raw_size": max(0, value_end - value_offset),
+                    "array_offset": value_offset,
+                }
+                item["objects"] = []
+                item["object_paths"] = []
             else:
                 value_chunk = export_data[value_offset:end]
                 refs, array_offset = extract_object_ref_array(value_chunk, imports, exports)
@@ -2450,6 +2671,9 @@ def parse_cdo_property_value(
                 item["element_kind"] = "FPackageIndex" if refs else "unknown"
                 item["array_parse"] = array_parse_payload(refs, array_offset, len(value_chunk))
                 item["objects"] = [object_ref_name(value, imports, exports) for value in refs[:500]]
+                item["object_paths"] = [
+                    object_ref_path(value, imports, exports) for value in refs[:500]
+                ]
         elif type_name == "MapProperty":
             item["value"] = {"raw_size": max(0, end - value_offset), "parsed": False}
         else:
@@ -2838,6 +3062,48 @@ def infer_pin_container_type(region: bytes, names: list[str]) -> str:
     return "None"
 
 
+def extract_pin_type_object_reference(
+    region: bytes,
+    names: list[str],
+    imports: list[dict[str, object]],
+    exports: list[dict[str, object]],
+) -> dict[str, object]:
+    """Decode FEdGraphPinType.PinSubCategoryObject after its two FNames."""
+
+    for category_pos, category in _all_fname_candidates(
+        region,
+        names,
+        0,
+        len(region),
+    ):
+        if category.casefold() not in PIN_CATEGORY_NAMES:
+            continue
+        value_pos = category_pos + 16
+        if value_pos > len(region) - 4:
+            continue
+        package_index = _read_i32(region, value_pos)
+        if (
+            not package_index
+            or not _valid_package_index(
+                package_index,
+                imports,
+                exports,
+            )
+        ):
+            continue
+        return {
+            "package_index": package_index,
+            "object": object_ref_name(package_index, imports, exports),
+            "object_path": object_ref_path(
+                package_index,
+                imports,
+                exports,
+            ),
+            "raw_offset": value_pos,
+        }
+    return {}
+
+
 def extract_pin_default_value(region: bytes) -> str:
     for pos in range(0, max(0, min(len(region) - 4, 160))):
         try:
@@ -3041,6 +3307,12 @@ def parse_exported_pin_object(
     properties, property_warnings = parse_export_properties(pin_data, names, imports, exports)
     pin_name = parse_exported_pin_name(properties, pin_export)
     category, subcategory, container_type, pin_type_region = parse_exported_pin_category(properties, pin_data, names)
+    pin_type_object = extract_pin_type_object_reference(
+        pin_type_region,
+        names,
+        imports,
+        exports,
+    )
     direction = parse_exported_pin_direction(
         properties,
         pin_data,
@@ -3062,7 +3334,15 @@ def parse_exported_pin_object(
     pin_type = {
         "PinCategory": category,
         "PinSubCategory": subcategory,
-        "PinSubCategoryObject": default_object,
+        "PinSubCategoryObject": str(
+            pin_type_object.get("object") or default_object
+        ),
+        "PinSubCategoryObjectPath": str(
+            pin_type_object.get("object_path") or ""
+        ),
+        "PinSubCategoryObjectPackageIndex": (
+            pin_type_object.get("package_index")
+        ),
         "ContainerType": container_type,
         "bIsReference": False,
         "bIsConst": False,
@@ -3282,10 +3562,24 @@ def parse_custom_pins(
         pin_id = pin_guid or f"{node_export.get('display_name') or node_export.get('object_name')}_pin_{index + 1}"
         subcategory = infer_pin_subcategory(region, names, category_pos, name_pos)
         container_type = infer_pin_container_type(region, names)
+        pin_type_object = extract_pin_type_object_reference(
+            region,
+            names,
+            imports,
+            exports,
+        )
         pin_type = {
             "PinCategory": category,
             "PinSubCategory": subcategory,
-            "PinSubCategoryObject": default_object,
+            "PinSubCategoryObject": str(
+                pin_type_object.get("object") or default_object
+            ),
+            "PinSubCategoryObjectPath": str(
+                pin_type_object.get("object_path") or ""
+            ),
+            "PinSubCategoryObjectPackageIndex": (
+                pin_type_object.get("package_index")
+            ),
             "ContainerType": container_type,
             "bIsReference": False,
             "bIsConst": False,

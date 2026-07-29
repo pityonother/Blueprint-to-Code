@@ -1,30 +1,160 @@
-# Blueprint to Code---Made by codex，I just provide direction
+# Blueprint to Code
 
-## 项目简介 / Project Overview
+Blueprint to Code is an evidence-first local analyzer for ARK DevKit and Unreal
+Blueprint assets. It recovers inspectable Blueprint evidence, links an optional
+version-bound native evidence layer, and builds bounded, source-traceable
+contexts and reports.
 
-**中文：** Blueprint to Code 是一个面向 ARK DevKit / Unreal Blueprint 的本地分析工具。它可以从复制的蓝图图页、DevKit 导出的 Class Defaults / Components，以及 `.uasset` / `.uexp` 资产文件中恢复蓝图结构，生成行为报告、伪代码、诊断信息、调用关系和玩家/模组作者可读的分析结论。目标是尽量减少手动 Ctrl+A/C 图页复制，让复杂蓝图资产可以被更快地审查、比较和理解。
+它不是完整 Blueprint decompiler，不会恢复开发者的原始 C++ 源码，也不保证生成
+可编译 C++。伪代码和 Ghidra 伪 C 都是分析产物；每项结论只在记录的资产、
+DLL/PDB、recipe、生成器和运行时观察边界内成立。仓库与发布包不包含 ARK
+DevKit、游戏资产、ShooterGame DLL/PDB、Ghidra workspace 或完整 proprietary
+反编译输出。项目版本以根目录 [`VERSION`](VERSION) 为唯一来源。
 
-**English:** Blueprint to Code is a local analysis toolkit for ARK DevKit / Unreal Blueprint assets. It can read copied Blueprint graph text, DevKit-exported Class Defaults / Components, and recoverable graph data from `.uasset` / `.uexp` files, then generate behavior reports, pseudocode, diagnostics, call graphs, and readable summaries for players and mod authors. Its goal is to reduce manual graph copying and make large Blueprint assets easier to inspect, compare, and understand.
+## 5 分钟快速开始
 
-核心能力 / Key features:
+源码开发需要 Node.js `^20.19.0` 或 `>=22.12.0`。真实资产读取还需要在本机
+合法安装 ARK DevKit；只浏览 committed fixtures 不需要 ARK 文件。
 
-- 直接从 `.uasset` / `.uexp` 读取可恢复的 EdGraph、K2 节点、Pins 和连线。
-- 兼容传统剪贴板图页输入，二进制读取失败的图页可单独补采。
-- 默认生成规范化 `evidence.sqlite` 和不超过 1,500 estimated tokens 的 `agent_index.md`；需要时按稳定 Evidence ID 查询 Node、Pin、Wire、Default 和缺口。
-- 可显式生成 `asset_report.md`、`behavior_summary.md`、`diagnostics_report.md`、`call_graph_summary.md` 等 legacy 人类报告。
-- 提供本地 Web 控制中心和一键启动脚本，方便非程序用户使用。
-- Full local web control center, one-click Windows launcher, packaged Python runtime, and focused reports for Blueprint behavior review.
+```powershell
+npm ci
+npm run build
+.\scripts\launch_blueprint_tool.ps1 -NoBuild
+```
 
-文档入口 / Documentation:
+浏览器打开 `http://127.0.0.1:8765/` 后：
 
-- [开发伙伴交接：可信度、查询、测试与发布](docs/DEVELOPER_HANDOFF_zh.md)
-- [Blueprint Evidence Store v2 规格](docs/BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
-- [Buff_StriderHackingParent 实证案例](docs/BUFF_STRIDER_HACKING_PARENT_EVIDENCE_V2_CASE_zh.md)
+1. 从 ARK DevKit 复制一个 `/Game/...Asset.Asset` Object Path；
+2. 粘贴到第 1 步，点击“从 .uasset 读取图内容”；
+3. 先读不超过 1,500 estimated tokens 的 `agent_index.md`；
+4. 用有预算的 query/context 命令补取当前问题需要的证据。
+
+完整环境包用户可直接运行 `START_HERE.bat`；诊断入口是 `DIAGNOSE.bat`。
+
+## 证据架构
+
+```mermaid
+flowchart LR
+    A[".uasset / .uexp<br/>Defaults / Components<br/>clipboard graphs"] --> B["Blueprint Evidence Store<br/>bp:// IDs"]
+    C["Optional DLL + matching PDB<br/>hash-bound Ghidra recipe"] --> D["Native Evidence Store<br/>native:// IDs"]
+    B --> E["Hybrid edge graph<br/>confirmed / ambiguous / unresolved"]
+    D --> E
+    E --> F["Bounded context pack"]
+    F --> G["Report + Claim Manifest<br/>claim:// IDs"]
+    H["Runtime observations<br/>runtime:// IDs"] --> G
+    I["Asset / binary / recipe / generator changes"] --> J["Automatic stale or fail-closed result"]
+    J --> E
+    J --> G
+```
+
+一个 Blueprint → Native → Claim 链路的形状如下。解析器只有在 owner、
+qualified name 与候选数都满足规则时才把边标为 `CONFIRMED`：
+
+```text
+bp://<asset-id>@<revision-id>/g/<graph-id>/n/<node-id>
+  --CALLS_NATIVE-->
+native://<binary-sha256>/ShooterGameEditor-ShooterGame.dll/<rva>
+  --SUPPORTS-->
+claim://<report-id>/<claim-id>
+```
+
+若函数有多个候选，边保持 `AMBIGUOUS`；若完整本地 evidence 未提交，公开报告
+指向 sanitized manifest 并标记 `LOCAL_EVIDENCE_REQUIRED`，不会伪造
+`CONFIRMED`。
+
+## 核心能力
+
+- 从 `.uasset` / `.uexp` 恢复可确认的 EdGraph、K2 Node、Pin、Wire、Default
+  与明确 gap；失败图页仍可用剪贴板单独补采。
+- 以 revision 固定的 `evidence.sqlite`、稳定 `bp://` ID 和 500–8,000
+  estimated-token 查询预算提供 Blueprint evidence。
+- 通过声明式 recipe、DLL/PDB 身份匹配和动态 Ghidra project 提供可选的
+  `native://` evidence；SQLite 只作为 JSON SHA-256 绑定的查询索引。
+- 保存 Blueprint ↔ Native 的 confirmed、ambiguous 与 unresolved 显式边，
+  默认 context 不塞入整份反编译文本。
+- 用 Claim Manifest 绑定报告结论、来源 fingerprints、假设、失效条件与
+  runtime 状态。
+- 提供 Harvest 完整节点静态估计、双向 Top 10 查询和独立 runtime observation
+  校准；静态估计不冒充真实游戏测量。
+- 提供 loopback 默认、本地 session、同源 POST、请求体上限、脱敏 job 快照与
+  进程树取消的 Web 控制中心。
+
+## ARK Knowledge Base vNext
+
+vNext 已实现为与 legacy 并行的四库快照：`catalog.sqlite` 保存全量范围图，
+`core.sqlite` 保存语义事实与 lineage，`search.sqlite` 提供搜索投影，
+`cache.sqlite` 只保存可丢弃查询缓存。当前规范 immutable-v2 全量构建
+`20260727T222549-a2d56bd7fed8` 包含 577,579 entities、
+3,442,470 catalog edges、10,587 declared facts、102,329 effective facts，
+以及 1 条严格双侧 Evidence 绑定的 confirmed Blueprint-native link。
+
+密封质量门禁当前为 58/75 通过，`activeStaleSources=0`，因此工作台保持
+`shadow`，默认查询来源仍是 `legacy`。这不是失败降级：native、projection、
+storage 和 stale-leak 门已经闭合，`vNext` 与 `compare` 可用于查证；独立
+query/registration/300 资产 role gold 与剩余正确性、延迟门未通过前不会
+自动切换默认来源。
+
+构建与门禁：
+
+```powershell
+.\runtime\python\python.exe scripts\build_ark_kb_vnext.py `
+  --discovery-database knowledge_base\discovery_bundle\kb_discovery.sqlite `
+  --capture-root captures `
+  --native-root native_evidence `
+  --runtime-root runtime_observations `
+  --legacy-kb-root knowledge_base\db `
+  --map-evidence-catalog analysis\harvest_nodes\resource_node_catalog.json `
+  --output knowledge_base\vnext `
+  --full-snapshot
+
+.\runtime\python\python.exe scripts\run_ark_kb_vnext_gates.py `
+  --discovery-database knowledge_base\discovery_bundle\kb_discovery.sqlite `
+  --snapshot-root knowledge_base\vnext
+```
+
+门禁未全部通过时，第二条命令会以非零状态结束并保留 legacy 默认，这是预期的
+fail-closed 行为。启动控制中心后打开
+`http://127.0.0.1:8765/?view=knowledge`，可选择 `legacy`、`vNext` 或
+`compare`。API 包括 `/api/kb/query`、`/api/kb/plan`、
+`/api/kb/compare`、实体搜索/详情/事实/关系/Coverage/生效默认值端点。
+
+完整架构、实测覆盖和切换条件见：
+
+- [vNext 架构](docs/ark_kb_vnext/ARCHITECTURE.md)
+- [覆盖率与切换报告](docs/ark_kb_vnext/COVERAGE_AND_CUTOVER.md)
+- [实施完成报告](docs/ark_kb_vnext/COMPLETION_REPORT.md)
+
+## 文档索引
+
 - [中文使用手册](docs/USER_GUIDE_zh.md)
+- [开发伙伴交接：查询、测试与发布](docs/DEVELOPER_HANDOFF_zh.md)
+- [Blueprint Evidence Store v2](docs/BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
+- [Native Evidence Store v1](docs/NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md)
+- [Ghidra 原生分析](docs/GHIDRA_NATIVE_ANALYSIS_zh.md)
+- [Hybrid Evidence Linking](docs/HYBRID_EVIDENCE_LINKING_zh.md)
+- [Report Claim Manifest](docs/REPORT_CLAIM_MANIFEST_zh.md)
+- [Runtime Calibration](docs/RUNTIME_CALIBRATION_zh.md)
+- [Harvest Runtime 实测协议](docs/HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)
+- [ARK 资源点 Explorer](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)
+- [ARK Knowledge Discovery：GPT Pro 视察说明](docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)
+- [ARK Knowledge Base vNext 架构](docs/ark_kb_vnext/ARCHITECTURE.md)
+- [ARK Knowledge Base vNext 覆盖率与切换报告](docs/ark_kb_vnext/COVERAGE_AND_CUTOVER.md)
+- [ARK Knowledge Base vNext 实施完成报告](docs/ark_kb_vnext/COMPLETION_REPORT.md)
+- [授权与分发策略](docs/LICENSE_POLICY.md)
 
-ARK DevKit / Unreal Blueprint clipboard-text analyzer for turning copied Blueprint
-graph pages, exported Class Defaults, and component context into reports that are
-useful for mod behavior review.
+## Knowledge Discovery 视察包
+
+供 GPT Pro 视察的派生调查包位于
+`knowledge_base/discovery_bundle.zip`，通过 Git LFS 托管。拉取本分支后执行：
+
+```text
+git lfs install
+git lfs pull --include="knowledge_base/discovery_bundle.zip"
+```
+
+完整 clone、分支和 SHA-256 验证命令见
+[GPT Pro 视察说明](docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)。该 ZIP 只用于视察
+Codex 的发现进度，不是项目交接包。
 
 ## Control Center
 
@@ -36,11 +166,15 @@ The packaged toolkit does **not** include ARK DevKit or ARK `.uasset/.uexp/.ubul
 files. Reading real game assets requires a separately installed ARK DevKit on the
 developer's own Windows machine; only derived evidence may be included as a sample.
 
-If the ARK DevKit is installed outside the default Epic Games paths, copy
-`devkit_content_root.example.txt` to `devkit_content_root.txt` and put that
-machine's `ShooterGame\Content` directory on the first line. Unreal Object Paths
-such as `/Game/PrimalEarth/Dinos/Dodo/Dodo_Character_BP.Dodo_Character_BP` are
-relative to that Content root, not to this project's folder.
+On Windows the toolkit first reads the Epic Games Launcher manifests under
+`%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests` and automatically resolves
+custom install locations such as `E:\AKD\ARKDevkit`. An explicit environment
+variable or `devkit_content_root.txt` still takes priority. If the Launcher
+manifest is missing, copy `devkit_content_root.example.txt` to
+`devkit_content_root.txt` and put that machine's `ShooterGame\Content` directory
+on the first line. Unreal Object Paths such as
+`/Game/PrimalEarth/Dinos/Dodo/Dodo_Character_BP.Dodo_Character_BP` are relative
+to that Content root, not to this project's folder.
 
 For external mod folders, copy `devkit_path_mappings.example.txt` to
 `devkit_path_mappings.txt` and map the Unreal mount to the mod Content folder,
@@ -121,6 +255,8 @@ For the combined local app without the PowerShell launcher:
 npm run control
 ```
 
+资源点采集 Explorer 位于 `http://127.0.0.1:8765/?view=harvest`。它提供资源点正向 Top 10、恐龙反向强项、地图包含/“当前证据仅此地图”与资源类型联动过滤，以及可取消的数据构建页。排行主指标是标准化静态环境下的 `estimatedYieldPerNode`（预计目标资源单位/完整节点）；攻击间隔只作速度诊断，不再决定总产量顺序。资源下拉框以 DevKit 玩家名称为主标签、完整 Blueprint Object Path 为筛选身份、短 class 为辅助核对和旧链接兼容信息；完整口径、证据边界、当前正式产物和九阶段状态见 [`docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)。
+
 ## Token-Safe Report Reading
 
 Do not give an AI the whole `captures/<AssetName>/` directory. The validated default is `indexed`: a new `.uasset` read writes `evidence/evidence.sqlite`, `evidence/manifest.json`, and an `output/agent_index.md` capped at 1,500 estimated tokens. Read that index first:
@@ -143,7 +279,13 @@ Every response states the whole-response token estimate, returned/omitted counts
 
 Default-value entities also expose `valueStatus`, `valueUsable`, bounded parse metadata, and resolved object names/fields. An `ArrayProperty` with `value=[]` is a confirmed empty array only when its parse metadata says `parsed=true`; when `parsed=false`, the same placeholder is `NOT_RECOVERED`, appears in `overview/gaps`, and is excluded from semantic knowledge imports and behavior comparisons. This prevents token compression from silently turning missing data into a false “empty” fact.
 
-Cross-asset ARK harvesting comparisons use the same rule at batch scale. `scripts/rank_ark_harvest.py` writes a complete `.full.json` plus an `ark-harvest-compact/v2` view with one bounded `resourceView` per requested resource, all-row unknown summaries, component-scan gap counts, returned/omitted counts, source/manifest fingerprints, and an exact sibling `detailLocation` for on-demand drill-down. `scripts/verify_ark_harvest_report.py` independently re-derives best rows, resource candidates, scan/source coverage, and the entire expected compact view from full; it requires exact equality, a smaller-than-full result, and at most 12,000 estimated tokens. See `docs/ARK_HARVEST_RANKING_SYSTEM_zh.md` and the concrete `analysis/harvest_rankings/harvest_ranking_metal.md` example.
+Cross-asset ARK harvesting comparisons use the same rule at batch scale. `scripts/rank_ark_harvest.py` writes a complete `.full.json`, a compatibility `.query.json`, and an `ark-harvest-compact/v3` AI view for Component/resource evidence. Explicit resource runs get one bounded `resourceView` per resource; `--all-resources` gets a bounded `resourceIndex` so dozens of resource classes still stay below the context limit. Compact output retains all-row unknown summaries, component-scan gaps, returned/omitted counts, source/manifest fingerprints, and an exact sibling `detailLocation` for on-demand drill-down. `scripts/verify_ark_harvest_report.py` independently re-derives best rows, resource candidates, scan/source coverage, and the entire expected compact view from full; it requires exact equality, a smaller-than-full result, and at most 12,000 estimated tokens.
+
+The current Resource Explorer keeps a separate `harvest_evaluation_catalog.json` instead of expanding the Component reports into a Cartesian product. The verified 2026-07-21 local dataset discovered 2,088 `*Character* + *Char_BP*` candidates, confirmed 1,406 `PrimalDinoCharacter` assets, grouped 280 species, and decoded 3,586 attacks. It also contains 1,328 resource-node definitions, including the real `FoliageType_Actor` counterexample, and 9,100 exact node-resource entries. Node list/detail/filter reads use a generated SQLite companion that is SHA-256-bound to the canonical node JSON; a mismatch fails closed.
+
+Map usage is evidence-layered: direct `.umap` package references, PCG_Biomes dependencies, and World Partition `__ExternalActors__` references are recorded separately. `assetOrigin.packageNamespace` is never treated as map usage. These layers fixed the old Genesis/Genesis2-only appearance, but they still do not prove spawn coordinates or a complete runtime dependency closure, so `claimsCompleteMapUsage=false` remains required.
+
+The GUI evaluates only the selected HarvestComponent/resource-entry pair, collapses variants by species, and returns at most ten rows plus a node-relative percentage. The reverse view ranks one creature's specialties by its score divided by each node-resource leader. `bSkipTamed`, `bOnlyOnWildDinos`, and `bPreventWithRider` are hard exclusions; dynamic `bUseBlueprintCanRiderAttack` and `bUseBlueprintAdjustOutputDamage` rows may receive a static numeric estimate only when the required facts exist, and remain visibly `CONDITIONAL/PARTIAL` rather than being promoted to confirmed. Results remain `claimsAllNodes=false`, `claimsAllNodeDefinitionClasses=false`, `claimsAllCreatures=false`, `claimsAllDiscoveredCandidates=false`, `claimsCompleteMapUsage=false`, and `claimsGlobalTop=false`; `estimatedYieldPerNode` is a static estimate for one complete standardized node, not a measured runtime yield. See `docs/ARK_HARVEST_RANKING_SYSTEM_zh.md` and `docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`.
 
 When one answer needs several related refs, build a question-specific context pack capped at 1,400 estimated tokens:
 
@@ -430,6 +572,23 @@ python scripts\bp_clipboard_to_prompt.py --compare-asset captures\OldAsset_BP ca
 ```
 
 Asset compare writes `compare_report.md`, `compare_summary.md`, `compare.json`, and `behavior_impact_report.md`. The behavior impact report groups changes by likely ARK behavior areas such as Parachute, Glide, Sliding, Nursing, MultiUse, Damage, Passenger, Movement, HUD, and Replication.
+
+### Optional Ghidra Native Evidence
+
+Blueprint to Code remains the source of truth for `.uasset` / `.uexp`, Class
+Defaults, Components, and Blueprint graph evidence. When an important formula
+ends at an unrecovered native C++ function, the optional Ghidra helper can bind
+decompiler evidence to the exact local ShooterGame DLL/PDB hashes without
+committing binaries, Ghidra projects, or generated evidence:
+
+```powershell
+.\scripts\native_analysis\Test-NativeAnalysisSetup.ps1
+.\scripts\native_analysis\Import-ShooterGameNative.ps1
+```
+
+Use `START_GHIDRA.bat` to open the configured workspace. Version pins,
+environment overrides, evidence IDs, and safety boundaries are documented in
+[`docs/GHIDRA_NATIVE_ANALYSIS_zh.md`](docs/GHIDRA_NATIVE_ANALYSIS_zh.md).
 
 Run the full Python regression suite and frontend build:
 

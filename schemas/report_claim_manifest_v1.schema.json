@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/report_claim_manifest_v1.schema.json",
+  "title": "Blueprint to Code report claim manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "reportId",
+    "reportPath",
+    "generatedAtUtc",
+    "generator",
+    "dependencies",
+    "claims"
+  ],
+  "properties": {
+    "schema": {"const": "blueprint-to-code-report-claims/v1"},
+    "reportId": {"type": "string", "minLength": 1},
+    "reportPath": {"type": "string", "minLength": 1},
+    "generatedAtUtc": {"type": "string"},
+    "generator": {
+      "type": "object",
+      "required": ["repositoryCommit", "dirty"],
+      "properties": {
+        "repositoryCommit": {"type": "string"},
+        "dirty": {"type": "boolean"}
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "required": [
+        "blueprintAssets",
+        "nativeEvidenceSets",
+        "runtimeObservationSets"
+      ],
+      "properties": {
+        "blueprintAssets": {"type": "array"},
+        "nativeEvidenceSets": {"type": "array"},
+        "runtimeObservationSets": {"type": "array"}
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "claimId",
+          "summary",
+          "status",
+          "confidence",
+          "evidenceRefs",
+          "assumptions",
+          "sourceFingerprints",
+          "invalidationConditions",
+          "reportMarkers",
+          "runtimeValidation"
+        ],
+        "properties": {
+          "claimId": {"type": "string", "pattern": "^claim://"},
+          "summary": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "minLength": 1},
+          "confidence": {"type": "string", "minLength": 1},
+          "evidenceRefs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string"}
+          },
+          "assumptions": {"type": "array", "items": {"type": "string"}},
+          "sourceFingerprints": {"type": "object"},
+          "invalidationConditions": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "reportMarkers": {"type": "array", "items": {"type": "string"}},
+          "runtimeValidation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "observationRefs"],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "NOT_RUN",
+                  "STATIC_REVERSED",
+                  "INSUFFICIENT_OBSERVATIONS",
+                  "RUNTIME_CALIBRATED",
+                  "RUNTIME_CONFIRMED",
+                  "RUNTIME_DIVERGED",
+                  "UNSUPPORTED_DYNAMIC_BRANCH"
+                ]
+              },
+              "observationRefs": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {"type": "string"}
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "status": {"const": "NOT_RUN"},
+                  "observationRefs": {"maxItems": 0}
+                }
+              },
+              {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "STATIC_REVERSED",
+                      "INSUFFICIENT_OBSERVATIONS",
+                      "RUNTIME_CALIBRATED",
+                      "RUNTIME_CONFIRMED",
+                      "RUNTIME_DIVERGED",
+                      "UNSUPPORTED_DYNAMIC_BRANCH"
+                    ]
+                  },
+                  "observationRefs": {"minItems": 1}
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

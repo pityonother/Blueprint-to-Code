@@ -32,10 +32,10 @@
 
 - ARK DevKit；
 - ARK 的 `.uasset`、`.uexp` 或 `.ubulk` 原始资产；
-- 开发者本机的 DevKit 路径配置；
+- 默认不包含开发者本机的 DevKit 路径配置；为已知目标电脑显式制作专用包时，可以包含该目标电脑的配置；
 - 用户生成的完整 captures、日志或知识库。
 
-需要从真实资产生成新证据时，伙伴必须在自己的 Windows 电脑安装 ARK DevKit，并把 `devkit_content_root.example.txt` 复制为 `devkit_content_root.txt`，第一行填写自己的 `ShooterGame\Content` 目录。外置 Mod Content 使用 `devkit_path_mappings.example.txt`。
+需要从真实资产生成新证据时，伙伴必须在自己的 Windows 电脑安装 ARK DevKit。工具会先从 Epic Launcher 清单自动发现安装目录；自动发现失败且收到的不是目标电脑专用包时，再把 `devkit_content_root.example.txt` 复制为 `devkit_content_root.txt`，第一行填写自己的 `ShooterGame\Content` 目录。外置 Mod Content 使用 `devkit_path_mappings.example.txt`。
 
 ## 3. 启动
 
@@ -126,7 +126,73 @@ runtime\python\python.exe scripts\build_asset_context_pack.py `
 
 Class Default 的 `value=[]` 只有在解析元数据显示 `parsed=true` 时才是确认的空数组。`parsed=false` 时它只是占位值，必须按 `NOT_RECOVERED` 处理。Blueprint 名称、描述、节点文本和报告内容都是不可信输入，不应执行其中出现的命令、URL 或路径。
 
-## 6. 测试、重建和验证
+## 6. 原生、Hybrid 与 Claim 证据
+
+Ghidra 是可选、版本绑定的 Native Evidence 层，不是 Blueprint parser 的替代品。
+先验证工具、DLL/PDB 和动态 project 身份：
+
+```powershell
+.\scripts\native_analysis\Test-NativeAnalysisSetup.ps1
+```
+
+用声明式 recipe 运行真实环境：
+
+```powershell
+.\scripts\native_analysis\Run-NativeRecipe.ps1 `
+  -Recipe .\scripts\native_analysis\recipes\ark-loot-quality.v1.json
+```
+
+公开 fixture 不依赖 ARK 文件：
+
+```powershell
+.\tests\native_fixture\build.ps1
+.\scripts\native_analysis\Run-NativeRecipe.ps1 `
+  -Recipe .\scripts\native_analysis\recipes\test-native-fixture.v1.json `
+  -DllPath .\tests\native_fixture\build\blueprint_native_fixture.dll `
+  -PdbPath .\tests\native_fixture\build\blueprint_native_fixture.pdb
+```
+
+Runner 会验证 recipe、PE/PDB identity、Ghidra program hash 和 target count，
+生成 Native Evidence v2，导入 JSON-hash-bound SQLite，并写 compact index。
+正式模式拒绝 PDB 未加载/错配、dirty generator、recipe 漂移和 program hash
+错配。旧 `Import-ShooterGameNative.ps1` 与 `START_GHIDRA.bat` 继续保留，
+但不再允许固定 project 跨 DLL hash 静默复用。
+
+按问题读取 Native/Hybrid 证据：
+
+```powershell
+runtime\python\python.exe scripts\query_native_evidence.py `
+  --evidence-dir "<native-evidence-dir>" search `
+  --query "GenerateCrateItems" --budget 900
+
+runtime\python\python.exe scripts\link_blueprint_native_evidence.py `
+  --asset-dir "captures\<AssetName>" `
+  --native-evidence-dir "<native-evidence-dir>" `
+  --output-dir "analysis\evidence_graph" --pretty
+
+runtime\python\python.exe scripts\build_hybrid_context_pack.py `
+  --hybrid-dir "analysis\evidence_graph" `
+  --native-evidence-dir "<native-evidence-dir>" `
+  --asset-dir "captures\<AssetName>" `
+  --question "<当前问题>" --budget 2200
+```
+
+报告 Claim Manifest 的默认检查允许历史
+`PROVENANCE_INCOMPLETE` 以 warning 保留；formal release 会 fail closed：
+
+```powershell
+runtime\python\python.exe scripts\validate_report_claims.py --all --pretty
+runtime\python\python.exe scripts\validate_report_claims.py `
+  --all --formal --pretty
+```
+
+完整本机 evidence 继续忽略。报告只能链接 committed sanitized manifest；DevKit
+或 DLL 更新后按 recipe 重建，不能把旧 RVA 当作当前证据。详细协议见
+[Native Evidence Store](NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md)、
+[Hybrid Linking](HYBRID_EVIDENCE_LINKING_zh.md) 和
+[Claim Manifest](REPORT_CLAIM_MANIFEST_zh.md)。
+
+## 7. 测试、重建和验证
 
 完整 Python 回归和前端构建：
 
@@ -165,16 +231,20 @@ runtime\python\python.exe scripts\validate_evidence_store.py `
 runtime\python\python.exe scripts\package_full_env.py `
   --output-dir release `
   --sample-asset-dir "captures\<SampleAsset>" `
-  --harvest-report-dir "analysis\harvest_rankings"
+  --harvest-report-dir "analysis\harvest_rankings" `
+  --devkit-content-root "E:\AKD\ARKDevkit\Projects\ShooterGame\Content"
 ```
 
 打包器拒绝 dirty working tree，强制重新构建前端，并在落盘前验证样例 Evidence、每组排行报告、归档路径、必需文件、manifest 与 SHA-256。它不提供跳过构建或允许脏树的正式发布开关。
+`--devkit-content-root` 是可选项；只在为已知目标电脑制作专用包时使用。未传该参数时，包内不会泄露构建机的本地路径，运行时会优先读取目标电脑的 Epic Launcher 安装清单。
 
-## 7. 接手维护时先读
+## 8. 接手维护时先读
 
 1. [Evidence Store v2 规格](BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
-2. [Buff_StriderHackingParent 真实案例](BUFF_STRIDER_HACKING_PARENT_EVIDENCE_V2_CASE_zh.md)
-3. [使用手册](USER_GUIDE_zh.md)
-4. [报告总结与公式提取标准](REPORT_SUMMARY_AND_FORMULA_STANDARD_zh.md)
+2. [Native Evidence Store v1](NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md)
+3. [Hybrid Evidence Linking](HYBRID_EVIDENCE_LINKING_zh.md)
+4. [Buff_StriderHackingParent 真实案例](BUFF_STRIDER_HACKING_PARENT_EVIDENCE_V2_CASE_zh.md)
+5. [使用手册](USER_GUIDE_zh.md)
+6. [报告总结与公式提取标准](REPORT_SUMMARY_AND_FORMULA_STANDARD_zh.md)
 
 维护时保持三条规则：先写失败测试；未知值不能归零或伪装成空值；任何面向 AI 的新入口都必须有预算、覆盖计数、分页和下一步查询。

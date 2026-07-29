@@ -1,0 +1,30 @@
+{
+  "schema": "ark-kb-native-gold-set/v1",
+  "version": "ark-native-gold-set/v1",
+  "binarySha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a",
+  "pdbSha256": "5285ae571d09fde9183a491f6bdef6e10a143857dd8b7fa5f9e6755b9c01bc16",
+  "pdbGuidAge": "b63263f4-93dd-4e82-a597-81e704da2a86/2",
+  "moduleName": "ShooterGameEditor-ShooterGame.dll",
+  "targets": [
+    {"id": "loot-generate-crate", "domain": "loot_quality_reward", "qualifiedSymbol": "UPrimalInventoryComponent::GenerateCrateItems", "rva": "0x13A1420", "recipeId": "ark-loot-quality/v1"},
+    {"id": "loot-generate-supply-crate", "domain": "loot_quality_reward", "qualifiedSymbol": "APrimalStructureItemContainer_SupplyCrate::GenerateCrateItems", "rva": "0xAEBA50", "recipeId": "ark-loot-quality/v1"},
+    {"id": "loot-generate-custom-crate", "domain": "loot_quality_reward", "qualifiedSymbol": "UPrimalInventoryComponent::GenerateCustomCrateItems", "rva": "0x13A55E0", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-initialize", "domain": "item_use", "qualifiedSymbol": "UPrimalItem::InitializeItem", "rva": "0x1448C40", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-init-new", "domain": "item_use", "qualifiedSymbol": "UPrimalItem::InitNewItem", "rva": "0x1447DB0", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-add-new", "domain": "inventory", "qualifiedSymbol": "UPrimalItem::AddNewItem", "rva": "0x1414E60", "recipeId": "ark-loot-quality/v1"},
+    {"id": "inventory-add-item", "domain": "inventory", "qualifiedSymbol": "UPrimalInventoryComponent::AddItem", "rva": "0x138FD80", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-add-to-inventory", "domain": "inventory", "qualifiedSymbol": "UPrimalItem::AddToInventory", "rva": "0x1415AF0", "recipeId": "ark-loot-quality/v1"},
+    {"id": "inventory-add-object", "domain": "inventory", "qualifiedSymbol": "UPrimalInventoryComponent::AddItemObjectEx", "rva": "0x1390DB0", "recipeId": "ark-loot-quality/v1"},
+    {"id": "inventory-allow-add", "domain": "inventory", "qualifiedSymbol": "UPrimalInventoryComponent::AllowAddInventoryItem", "rva": "0x1392D10", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-create-net-info", "domain": "save_persistence_transfer", "qualifiedSymbol": "UPrimalItem::CreateItemFromNetInfo", "rva": "0x1425540", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-get-net-info", "domain": "save_persistence_transfer", "qualifiedSymbol": "UPrimalItem::GetItemNetInfo", "rva": "0x143CCF0", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-serialize", "domain": "save_persistence_transfer", "qualifiedSymbol": "UPrimalItem::Serialize", "rva": "0x145BD90", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-clamp-stats", "domain": "loot_quality_reward", "qualifiedSymbol": "UPrimalItem::ClampStats", "rva": "0x1422930", "recipeId": "ark-loot-quality/v1"},
+    {"id": "item-max-quantity", "domain": "item_use", "qualifiedSymbol": "UPrimalItem::GetMaxItemQuantity", "rva": "0x143F6E0", "recipeId": "ark-loot-quality/v1"},
+    {"id": "craft-resource-quantity", "domain": "crafting_engram", "qualifiedSymbol": "UPrimalItem::calcResourceQuantityRequired", "rva": "0x1469500", "recipeId": "ark-loot-quality/v1"},
+    {"id": "harvest-give-resource", "domain": "harvest", "qualifiedSymbol": "UPrimalHarvestingComponent::GiveHarvestResource", "rva": "0x12ACCD0", "recipeId": "ark-harvest-native/v1"},
+    {"id": "harvest-apply-damage-entry", "domain": "harvest", "qualifiedSymbol": "FAttachedInstancedHarvestingElement::ApplyHarvestDamageEntryDamage", "rva": "0x12A57D0", "recipeId": "ark-harvest-native/v1"},
+    {"id": "harvest-receive-damage", "domain": "harvest", "qualifiedSymbol": "FAttachedInstancedHarvestingElement::ReceiveComponentDamage", "rva": "0x12B21E0", "recipeId": "ark-harvest-native/v1"},
+    {"id": "harvest-valid-damage-type", "domain": "harvest", "qualifiedSymbol": "UPrimalHarvestingComponent::IsValidHarvestingDamageType", "rva": "0x12B1960", "recipeId": "ark-harvest-native/v1"}
+  ]
+}

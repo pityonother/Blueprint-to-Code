@@ -7,6 +7,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import shutil
+import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -18,6 +21,9 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from blueprint_translator.harvest_ranking import (
+    NORMALIZED_HARVEST_AMOUNT_SCALE,
+    YIELD_MODEL_VERSION,
+    YIELD_SCORE_BASIS,
     evaluate_attack_resource,
     extract_creature_attacks,
     extract_harvest_component,
@@ -27,6 +33,7 @@ from blueprint_translator.harvest_ranking import (
 from blueprint_translator.harvest_report_validation import (
     COMPACT_SCHEMA,
     build_canonical_ai_view,
+    build_ranking_revision_fields,
 )
 from blueprint_translator.uasset_graphs import (
     normalize_blueprint_object_path,
@@ -37,7 +44,7 @@ from blueprint_translator.uasset_graphs import (
 )
 
 
-SCHEMA = "ark-harvest-ranking/v1"
+SCHEMA = "ark-harvest-ranking/v2"
 DEFAULT_DEVKIT_ROOT = Path(r"C:\Program Files\Epic Games\ARKDevkit")
 DEFAULT_CREATURES = [
     {
@@ -59,19 +66,61 @@ DEFAULT_CREATURES = [
 ]
 
 
+def build_methodology() -> dict[str, Any]:
+    """Describe the one metric that is allowed to determine ranking order."""
+
+    return {
+        "metric": "estimatedYieldPerNode",
+        "scoreBasis": YIELD_SCORE_BASIS,
+        "formulaVersion": YIELD_MODEL_VERSION,
+        "usageScope": "UNFILTERED_ENGINE_ATTACKS",
+        "observedYieldPerSecond": None,
+        "formula": (
+            "completeNodeGrantCalls * normalizedResourceWeight "
+            "* expectedQuantityPerSelection"
+        ),
+        "normalizedProfile": {
+            "harvestAmountScale": NORMALIZED_HARVEST_AMOUNT_SCALE,
+            "nodeStartState": "FRESH",
+            "nodeCompletion": "FULLY_HARVESTED",
+        },
+        "legacyCompatibility": {
+            "engineComparisonIndex": "DEPRECATED_ALIAS_OF_ESTIMATED_YIELD_PER_NODE",
+            "harvestPressurePerSecond": "DIAGNOSTIC_ONLY_NOT_USED_FOR_ORDER",
+        },
+        "notIncluded": [
+            "runtime melee stat and damage scaling",
+            "server and runtime harvest multiplier overrides",
+            "Blueprint, buff, gene, and mission hooks",
+            "nonlinear quantity random powers",
+            "bIsSingleUnitHarvest and nonzero additional-effectiveness cases (rows fail closed)",
+            "actual animation wall-clock timing",
+            "nodes hit per swing",
+            "controlled observed yield",
+        ],
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Decode creature attacks, damage-type overrides, and harvest components into a compact "
-            "comparison report. Scores are evidence-bounded engine indices, not observed resource yield."
+            "comparison report. Rankings estimate resource units from one fresh, fully harvested node "
+            "under a normalized static profile; they are not observed yield per second."
         )
     )
     parser.add_argument("--devkit-root", type=Path, default=DEFAULT_DEVKIT_ROOT)
-    parser.add_argument(
+    resource_group = parser.add_mutually_exclusive_group()
+    resource_group.add_argument(
         "--resource",
         action="append",
         default=[],
         help="Target resource class/name; repeatable. Default: PrimalItemResource_Metal_C.",
+    )
+    resource_group.add_argument(
+        "--all-resources",
+        action="store_true",
+        help="Rank every resource class recovered from the component catalog.",
     )
     parser.add_argument(
         "--creature",
@@ -92,6 +141,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("analysis") / "harvest_rankings")
     parser.add_argument("--max-components", type=int, default=0, help="Optional safety limit; 0 means all.")
+    parser.add_argument(
+        "--discover-all-components",
+        action="store_true",
+        help=(
+            "Add every *HarvestComponent*.uasset under Content to the standard "
+            "PrimalEarth component directory."
+        ),
+    )
+    parser.add_argument(
+        "--extra-component",
+        action="append",
+        default=[],
+        help="Exact component .uasset or /Game object path; repeatable.",
+    )
+    parser.add_argument(
+        "--extra-component-file",
+        action="append",
+        type=Path,
+        default=[],
+        help="UTF-8 file containing exact component paths; repeatable.",
+    )
     return parser.parse_args(argv)
 
 
@@ -111,6 +181,12 @@ def normalize_resource(value: str) -> str:
 def resource_slug(resource: str) -> str:
     value = resource.removeprefix("PrimalItemResource_").removesuffix("_C")
     return "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_") or "resource"
+
+
+def resource_report_slug(resources: Iterable[str], *, selection_mode: str) -> str:
+    if selection_mode == "ALL_DISCOVERED":
+        return "all_resources"
+    return "_".join(resource_slug(resource) for resource in resources)
 
 
 def uasset_object_path(path: Path, content_root: Path) -> str:
@@ -162,7 +238,33 @@ class AssetReader:
         )
         if not isinstance(generated, dict):
             return ""
-        return object_ref_name(int(generated.get("super_index") or 0), imports, exports)
+        super_index = int(generated.get("super_index") or 0)
+        if super_index >= 0:
+            return object_ref_name(super_index, imports, exports)
+        import_index = -super_index - 1
+        if not 0 <= import_index < len(imports):
+            return ""
+        imported = imports[import_index]
+        if not isinstance(imported, dict):
+            return ""
+        name = str(imported.get("object_name") or "")
+        package_path = ""
+        outer_index = imported.get("outer_index")
+        seen: set[int] = set()
+        while isinstance(outer_index, int) and outer_index < 0:
+            outer_import_index = -outer_index - 1
+            if outer_import_index in seen or not 0 <= outer_import_index < len(imports):
+                break
+            seen.add(outer_import_index)
+            outer = imports[outer_import_index]
+            if not isinstance(outer, dict):
+                break
+            outer_name = str(outer.get("object_name") or "")
+            if str(outer.get("class_name") or "") == "Package" or outer_name.startswith("/Game/"):
+                package_path = outer_name.split(".", 1)[0]
+                break
+            outer_index = outer.get("outer_index")
+        return f"{package_path}.{name}" if package_path and name else name
 
     def effective_defaults(
         self,
@@ -177,7 +279,7 @@ class AssetReader:
         merged: dict[str, dict[str, Any]] = {}
         source_chain: list[Path] = []
         parent_name = self.generated_class_parent(resolved)
-        parent_path = class_index.get(parent_name)
+        parent_path = class_index.get(parent_name) or class_index.get(parent_name.casefold())
         if parent_path and parent_path.resolve() != resolved:
             parent_rows, parent_chain = self.effective_defaults(
                 parent_path,
@@ -201,11 +303,37 @@ class AssetReader:
         return list(merged.values()), source_chain
 
 
-def build_class_index(paths: Iterable[Path]) -> dict[str, Path]:
+def build_class_index(
+    paths: Iterable[Path],
+    *,
+    content_root: Path | None = None,
+) -> dict[str, Path]:
     index: dict[str, Path] = {}
-    for path in sorted({item.resolve() for item in paths if item.is_file()}):
-        index[path.stem] = path
-        index[f"{path.stem}_C"] = path
+    resolved_paths = sorted({item.resolve() for item in paths if item.is_file()})
+    by_stem: dict[str, list[Path]] = defaultdict(list)
+    for path in resolved_paths:
+        by_stem[path.stem.casefold()].append(path)
+        if content_root is not None:
+            try:
+                relative = path.relative_to(content_root.resolve()).with_suffix("").as_posix()
+            except ValueError:
+                relative = ""
+            if relative:
+                package_path = f"/Game/{relative}"
+                for key in (
+                    package_path,
+                    f"{package_path}.{path.stem}",
+                    f"{package_path}.{path.stem}_C",
+                ):
+                    index[key] = path
+                    index[key.casefold()] = path
+    for group in by_stem.values():
+        if len(group) != 1:
+            continue
+        path = group[0]
+        for key in (path.stem, f"{path.stem}_C"):
+            index[key] = path
+            index[key.casefold()] = path
     return index
 
 
@@ -298,6 +426,8 @@ def discover_components(
     selected_names: set[str],
     max_components: int,
     target_resources: set[str] | None = None,
+    discover_all_content: bool = False,
+    extra_component_paths: Iterable[Path] = (),
 ) -> tuple[
     list[dict[str, Any]],
     dict[str, list[str]],
@@ -305,8 +435,16 @@ def discover_components(
     list[dict[str, Any]],
 ]:
     harvest_root = content_root / "PrimalEarth" / "CoreBlueprints" / "HarvestComponents"
-    all_files = sorted(harvest_root.rglob("*.uasset"))
-    class_index = build_class_index(all_files)
+    all_files_set = {path.resolve() for path in harvest_root.rglob("*.uasset")}
+    if discover_all_content:
+        all_files_set.update(
+            path.resolve() for path in content_root.rglob("*HarvestComponent*.uasset")
+        )
+    all_files_set.update(
+        path.resolve() for path in extra_component_paths if Path(path).is_file()
+    )
+    all_files = sorted(all_files_set)
+    class_index = build_class_index(all_files, content_root=content_root)
     files = list(all_files)
     if selected_names:
         files = [path for path in files if path.stem in selected_names or f"{path.stem}_C" in selected_names]
@@ -316,7 +454,7 @@ def discover_components(
     resource_catalog: dict[str, list[str]] = defaultdict(list)
     failures: list[dict[str, Any]] = []
     manifest: list[dict[str, Any]] = []
-    requested_resources = set(target_resources or set())
+    requested_resources = None if target_resources is None else set(target_resources)
     for path in files:
         object_path = uasset_object_path(path, content_root)
         try:
@@ -328,13 +466,15 @@ def discover_components(
             )
             fact["path"] = path.resolve()
             fact["sourceChain"] = [item.resolve() for item in source_chain]
+            recovered_resources = {
+                str(entry.get("resource") or "")
+                for entry in fact.get("resourceEntries", [])
+                if isinstance(entry, dict) and str(entry.get("resource") or "")
+            }
             matched_resources = sorted(
-                {
-                    str(entry.get("resource") or "")
-                    for entry in fact.get("resourceEntries", [])
-                    if isinstance(entry, dict)
-                    and str(entry.get("resource") or "") in requested_resources
-                }
+                recovered_resources
+                if requested_resources is None
+                else recovered_resources & requested_resources
             )
             semantic_gaps = sorted({str(gap) for gap in fact.get("gaps") or [] if str(gap)})
             semantic_gap = bool(semantic_gaps)
@@ -404,6 +544,69 @@ def discover_components(
     return components, dict(sorted(resource_catalog.items())), failures, manifest
 
 
+def load_extra_component_paths(args: argparse.Namespace, content_root: Path) -> list[Path]:
+    values = [str(value) for value in args.extra_component]
+    for manifest_path in args.extra_component_file:
+        values.extend(
+            line.strip()
+            for line in manifest_path.read_text(
+                encoding="utf-8-sig", errors="replace"
+            ).splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+    paths: list[Path] = []
+    for value in values:
+        text = value.strip().strip("\"'").replace("\\", "/")
+        if text.startswith("/Game/"):
+            package = text.split(".", 1)[0].removeprefix("/Game/")
+            path = content_root / Path(package + ".uasset")
+        else:
+            path = Path(text)
+            if not path.is_absolute():
+                path = content_root / path
+        paths.append(path.resolve())
+    return sorted(set(paths))
+
+
+def discover_damage_type_assets(
+    content_root: Path,
+    *,
+    prefer_rg: bool = True,
+) -> tuple[list[Path], str]:
+    """Discover DLC damage types in one native walk; avoid Path.rglob over all Content."""
+
+    root = Path(content_root).resolve()
+    rg = shutil.which("rg") if prefer_rg else None
+    if rg:
+        completed = subprocess.run(
+            [rg, "--files", "-g", "*DmgType*.uasset", str(root)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode in {0, 1}:
+            return (
+                sorted(
+                    {
+                        Path(line.strip()).resolve()
+                        for line in completed.stdout.splitlines()
+                        if line.strip()
+                    }
+                ),
+                "RIPGREP",
+            )
+
+    found: list[Path] = []
+    for directory, _subdirectories, filenames in os.walk(root):
+        base = Path(directory)
+        for filename in filenames:
+            if "DmgType" in filename and filename.endswith(".uasset"):
+                found.append((base / filename).resolve())
+    return sorted(set(found)), "OS_WALK"
+
+
 def build_damage_context(
     *,
     creatures: list[dict[str, Any]],
@@ -418,8 +621,25 @@ def build_damage_context(
     dict[str, list[str]],
 ]:
     damage_root = content_root / "PrimalEarth" / "CoreBlueprints" / "DamageTypes"
-    damage_files = sorted(damage_root.glob("*.uasset"))
-    damage_index = build_class_index(damage_files)
+    damage_files = set(damage_root.glob("*.uasset"))
+    discovered_damage_files, _discovery_backend = discover_damage_type_assets(content_root)
+    damage_files.update(discovered_damage_files)
+    exact_paths: dict[str, Path] = {}
+    for creature in creatures:
+        for attack in creature.get("attacks", []):
+            if not isinstance(attack, dict):
+                continue
+            damage_type = str(attack.get("damageType") or "")
+            object_path = str(attack.get("damageTypeObjectPath") or "")
+            if not damage_type or not object_path.startswith("/Game/"):
+                continue
+            package = object_path.split(".", 1)[0].removeprefix("/Game/")
+            candidate = (content_root / Path(package + ".uasset")).resolve()
+            if candidate.is_file():
+                exact_paths[damage_type] = candidate
+                damage_files.add(candidate)
+    damage_files = sorted(path.resolve() for path in damage_files if path.is_file())
+    damage_index = build_class_index(damage_files, content_root=content_root)
     parent_map: dict[str, str] = {}
     overrides: dict[tuple[str, str], str] = {}
     facts: list[dict[str, Any]] = []
@@ -437,7 +657,7 @@ def build_damage_context(
         if not damage_type or damage_type in visited:
             continue
         visited.add(damage_type)
-        path = damage_index.get(damage_type)
+        path = exact_paths.get(damage_type) or damage_index.get(damage_type)
         if not path:
             gaps_by_damage_type[damage_type] = ["DAMAGE_TYPE_ASSET_NOT_FOUND"]
             facts.append(
@@ -549,8 +769,22 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
         "resourceWeightShare",
         "overrideQuantityMin",
         "overrideQuantityMax",
+        "overrideQuantityRandomPower",
+        "quantityRandomPowerSource",
+        "quantityOverrideMatch",
+        "estimatedGrantCallsPerNode",
+        "estimatedHitsToDepleteNode",
+        "expectedQuantityPerSelection",
+        "clampResourceHarvestDamage",
+        "normalizedHarvestAmountScale",
+        "yieldModelVersion",
+        "yieldModelBasis",
+        "yieldModelStatus",
+        "yieldModelCaveats",
+        "estimatedYieldPerNode",
         "harvestPressurePerSecond",
         "engineComparisonIndex",
+        "legacyDiagnostics",
         "maxHarvestHealth",
         "harvestHealthGiveResourceInterval",
         "observedYieldPerSecond",
@@ -560,7 +794,21 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
         "warningsByScope",
         "scoreBasis",
     )
-    return {key: row.get(key) for key in keys if key in row}
+    compact = {key: row.get(key) for key in keys if key in row}
+    estimated_yield = compact.get("estimatedYieldPerNode")
+    if isinstance(estimated_yield, (int, float)):
+        legacy_alias = compact.get("engineComparisonIndex")
+        if isinstance(legacy_alias, (int, float)) and float(legacy_alias) != float(
+            estimated_yield
+        ):
+            legacy_diagnostics = dict(compact.get("legacyDiagnostics") or {})
+            legacy_diagnostics.setdefault("engineComparisonIndex", legacy_alias)
+            legacy_diagnostics.setdefault(
+                "scoreBasis", "DEPRECATED_ATTACK_CADENCE_COEFFICIENT"
+            )
+            compact["legacyDiagnostics"] = legacy_diagnostics
+        compact["engineComparisonIndex"] = estimated_yield
+    return compact
 
 
 def build_resource_candidates(
@@ -657,7 +905,7 @@ def _render_resource_view(view: dict[str, Any]) -> list[str]:
     if focus_rows:
         lines.extend(
             [
-                "| Resource | Component | Creature / Attack | Status | Damage | Interval | Dmg× | Qty× | Weight share | Index |",
+                "| Resource | Component | Creature / Attack | Status | Damage | Interval | Dmg× | Qty× | Weight share | 预计整节点产量 |",
                 "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
@@ -675,7 +923,7 @@ def _render_resource_view(view: dict[str, Any]) -> list[str]:
                     damage_multiplier=_number(row.get("damageMultiplier")),
                     quantity_multiplier=_number(row.get("harvestQuantityMultiplier")),
                     share=_number(row.get("resourceWeightShare")),
-                    score=_number(row.get("engineComparisonIndex")),
+                    score=_number(row.get("estimatedYieldPerNode")),
                 )
             )
     else:
@@ -688,7 +936,7 @@ def _render_resource_view(view: dict[str, Any]) -> list[str]:
             "",
             "同系组件只有在所有比较字段一致时才折叠；名称与对象路径均保留。",
             "",
-            "| Component aliases | Creature / Attack | Status | Weight share | Index |",
+            "| Component aliases | Creature / Attack | Status | Weight share | 预计整节点产量 |",
             "| --- | --- | --- | ---: | ---: |",
         ]
     )
@@ -700,7 +948,7 @@ def _render_resource_view(view: dict[str, Any]) -> list[str]:
             f"| {', '.join(str(item) for item in aliases)} | "
             f"{row.get('creature', '-')} / {row.get('attackName', '-')} | "
             f"{row.get('rankingStatus', '-')} | {_number(row.get('resourceWeightShare'))} | "
-            f"{_number(row.get('engineComparisonIndex'))} |"
+            f"{_number(row.get('estimatedYieldPerNode'))} |"
         )
     if not any(
         not focus_component
@@ -723,26 +971,47 @@ def render_markdown(payload: dict[str, Any], *, detail_location: str) -> str:
         f"语义缺口：{payload['coverage']['componentsSemanticGap']}；命中资源组件：{payload['coverage']['componentsMatched']}",
         f"- 生物：{payload['coverage']['creaturesLoaded']}；攻击：{payload['coverage']['attacksDecoded']}",
         "",
-        "> `engineComparisonIndex` 是用于同节点横向比较的推断索引，不是每击产量或资源/秒。",
-        "> `observedYieldPerSecond` 保持为 null，直到补齐运行时公式、服务器倍率和受控实测。",
+        "> 主排名指标 `estimatedYieldPerNode` 表示标准化静态条件下，从一座全新节点完整采完的预计资源单位数。",
+        "> 它不是每秒产量；`engineComparisonIndex` 仅是暂时兼容别名，必须与主指标相同且不参与排序。",
     ]
-    for resource_view in ai_view["resourceViews"]:
-        lines.extend(["", *_render_resource_view(resource_view)])
+    resource_views = ai_view.get("resourceViews") or []
+    if resource_views:
+        for resource_view in resource_views:
+            lines.extend(["", *_render_resource_view(resource_view)])
+    else:
+        lines.extend(
+            [
+                "",
+                "## 全资源有界目录",
+                "",
+                "详细行不内联；按资源点和资源 ID 从本地 API/完整报告按需查询。",
+                "",
+                "| Resource | Status | Ranked | Unranked | Incompatible |",
+                "| --- | --- | ---: | ---: | ---: |",
+            ]
+        )
+        for item in (ai_view.get("resourceIndex") or {}).get("items") or []:
+            counts = item.get("candidateCounts") or {}
+            lines.append(
+                f"| {item.get('resource', '-')} | {item.get('discoveryStatus', '-')} | "
+                f"{counts.get('ranked', 0)} | {counts.get('unranked', 0)} | "
+                f"{counts.get('incompatible', 0)} |"
+            )
     lines.extend(
         [
             "",
             "## 口径",
             "",
             "```text",
-            "harvestPressurePerSecond = baseDamage / attackInterval",
-            "                           * DamageMultiplier",
-            "                           * HarvestQuantityMultiplier",
+            "completeNodeGrantCalls    = native static hit-loop grants until node health reaches zero",
             "resourceWeightShare       = target effective weight / sum(positive effective weights)",
-            "engineComparisonIndex     = harvestPressurePerSecond * resourceWeightShare",
+            "expectedQuantityPerSelection = (OverrideQuantityMin + OverrideQuantityMax) / 2",
+            "estimatedYieldPerNode     = completeNodeGrantCalls * resourceWeightShare",
+            "                            * expectedQuantityPerSelection",
             "```",
             "",
-            "这个索引只在同一 HarvestComponent、同一资源、相同运行时条件下用于排序。",
-            "资源权重是选择权重；攻击范围、实际命中节点数、近战属性、节点剩余生命、服务器倍率和动画实际周期仍需单列。",
+            "这个产量只在同一 HarvestComponent、同一资源、相同标准化运行条件下用于排序。",
+            "资源权重是选择权重；攻击范围、实际命中节点数、近战属性、服务器倍率、蓝图/增益/基因/任务动态钩子和动画实际周期仍需单列。",
             "",
             "## 扫描完整性与组件缺口",
             "",
@@ -778,7 +1047,10 @@ def render_markdown(payload: dict[str, Any], *, detail_location: str) -> str:
                 f"缺失 `{', '.join(item.get('missingFacts') or []) or '-'}`；例：{examples or '-'}"
             )
     else:
-        lines.append("- 当前最佳行没有解析缺口；运行时产量公式仍按设计保持未知。")
+        lines.append(
+            "- 当前最佳行没有解析缺口；完整节点产量已按静态本地模型估算，"
+            "运行时动态钩子仍不在模型内。"
+        )
     lines.extend(
         [
             "",
@@ -812,19 +1084,27 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     content_root = devkit_root / "Projects" / "ShooterGame" / "Content"
     if not content_root.is_dir():
         raise FileNotFoundError(f"ARK DevKit content root not found: {content_root}")
+    selection_mode = "ALL_DISCOVERED" if args.all_resources else "EXPLICIT"
     resources = [normalize_resource(value) for value in (args.resource or ["Metal"])]
     resources = list(dict.fromkeys(resources))
     reader = AssetReader()
     creature_specs = load_creature_specs(args)
     creatures, creature_failures = resolve_creatures(creature_specs, content_root, reader)
     selected_components = {value.removesuffix("_C").removesuffix(".uasset") for value in args.component}
+    extra_component_paths = load_extra_component_paths(args, content_root)
     components, resource_catalog, component_failures, component_scan_manifest = discover_components(
         content_root=content_root,
         reader=reader,
         selected_names=selected_components,
         max_components=max(0, int(args.max_components)),
-        target_resources=set(resources),
+        target_resources=None if args.all_resources else set(resources),
+        discover_all_content=bool(args.discover_all_components),
+        extra_component_paths=extra_component_paths,
     )
+    if args.all_resources:
+        resources = sorted(resource_catalog)
+        if not resources:
+            raise ValueError("No resource classes were recovered for --all-resources")
     matched_components = [
         component
         for component in components
@@ -895,28 +1175,14 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     ]
     component_gap_summary = summarize_component_gaps(component_scan_manifest)
     manifest_hash = scan_manifest_hash(component_scan_manifest)
-    return {
+    payload = {
         "schema": SCHEMA,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "devkitRoot": str(devkit_root),
         "contentRoot": str(content_root),
         "resources": resources,
-        "methodology": {
-            "scoreBasis": "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD",
-            "observedYieldPerSecond": None,
-            "formula": (
-                "baseDamage / attackInterval * DamageMultiplier * HarvestQuantityMultiplier "
-                "* normalizedResourceWeight"
-            ),
-            "notIncluded": [
-                "runtime melee stat scaling",
-                "server harvest multipliers",
-                "node remaining-health clamp",
-                "actual animation wall-clock timing",
-                "nodes hit per swing",
-                "controlled observed yield",
-            ],
-        },
+        "resourceSelectionMode": selection_mode,
+        "methodology": build_methodology(),
         "coverage": {
             "creaturesRequested": len(creature_specs),
             "creaturesLoaded": len(creatures),
@@ -930,6 +1196,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
                 record.get("semanticGap") is True for record in component_scan_manifest
             ),
             "componentsMatched": len(matched_components),
+            "componentCatalogEntries": len(components),
             "componentSourceFingerprints": {
                 "attemptedPaths": len(attempted_component_paths),
                 "fingerprintedPaths": len(fingerprinted_component_paths),
@@ -959,6 +1226,18 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
             }
             for component in matched_components
         ],
+        "componentCatalog": [
+            {
+                **{
+                    key: value
+                    for key, value in component.items()
+                    if key not in {"path", "sourceChain"}
+                },
+                "path": str(component["path"]),
+                "sourceChain": [str(item) for item in component["sourceChain"]],
+            }
+            for component in components
+        ],
         "damageTypes": damage_facts,
         "rows": rows,
         "bestRows": [compact_row(row) for row in best],
@@ -974,13 +1253,19 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         },
         "sources": sources,
     }
+    payload.update(build_ranking_revision_fields(payload))
+    return payload
 
 
 def write_outputs(payload: dict[str, Any], output_dir: Path) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    slug = "_".join(resource_slug(resource) for resource in payload["resources"])
+    slug = resource_report_slug(
+        payload["resources"],
+        selection_mode=str(payload.get("resourceSelectionMode") or "EXPLICIT"),
+    )
     full_path = output_dir / f"harvest_ranking_{slug}.full.json"
     ai_path = output_dir / f"harvest_ranking_{slug}.ai.json"
+    query_path = output_dir / f"harvest_ranking_{slug}.query.json"
     markdown_path = output_dir / f"harvest_ranking_{slug}.md"
     catalog_path = output_dir / "resource_catalog.json"
     detail_location = full_path.name
@@ -1005,6 +1290,24 @@ def write_outputs(payload: dict[str, Any], output_dir: Path) -> dict[str, str]:
         }
     full_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     ai_path.write_text(json.dumps(ai_payload, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    query_path.write_text(
+        json.dumps(
+            {
+                "schema": payload["schema"],
+                "querySchema": "ark-harvest-ranking-query/v2",
+                "generatedAt": payload["generatedAt"],
+                "datasetRevision": payload.get("datasetRevision"),
+                "scanManifestHash": payload.get("scanManifestHash"),
+                "methodology": payload["methodology"],
+                "coverage": payload["coverage"],
+                "bestRows": payload["bestRows"],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     markdown_path.write_text(markdown + "\n", encoding="utf-8")
     catalog_path.write_text(
         json.dumps(
@@ -1022,6 +1325,7 @@ def write_outputs(payload: dict[str, Any], output_dir: Path) -> dict[str, str]:
     return {
         "full": str(full_path.resolve()),
         "ai": str(ai_path.resolve()),
+        "query": str(query_path.resolve()),
         "markdown": str(markdown_path.resolve()),
         "catalog": str(catalog_path.resolve()),
     }

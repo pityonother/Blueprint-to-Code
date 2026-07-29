@@ -1,0 +1,247 @@
+{
+  "schema": "blueprint-to-code-native-analysis-recipe/v1",
+  "recipeId": "ark-loot-quality/v1",
+  "description": "Version-bound ARK loot generation, item quality, rating clamp, and blueprint-cost native targets used by the current reward reports.",
+  "binaryModule": "ShooterGameEditor-ShooterGame.dll",
+  "requirements": {
+    "pdbRequired": true,
+    "formalProvenanceRequired": true
+  },
+  "targets": [
+    {
+      "id": "supply-crate-generate-items",
+      "selector": {
+        "qualifiedName": "APrimalStructureItemContainer_SupplyCrate::GenerateCrateItems"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 1,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "inventory-generate-crate-items",
+      "selector": {
+        "qualifiedName": "UPrimalInventoryComponent::GenerateCrateItems"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "inventory-generate-custom-crate-items",
+      "selector": {
+        "qualifiedName": "UPrimalInventoryComponent::GenerateCustomCrateItems"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "primal-item-clamp-stats",
+      "selector": {
+        "qualifiedName": "UPrimalItem::ClampStats"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "primal-item-clamp-rating",
+      "selector": {
+        "qualifiedName": "UPrimalItem::ClampItemRating"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "game-data-quality-index",
+      "selector": {
+        "qualifiedName": "UPrimalGameData::GetItemQualityIndex"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "primal-item-override-rating",
+      "selector": {
+        "qualifiedName": "UPrimalItem::OverrideItemRating"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "primal-item-random-stat-value",
+      "selector": {
+        "qualifiedName": "FItemStatInfo::GetRandomValue"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "victory-core-weighted-random-index",
+      "selector": {
+        "rva": "0xB65B60"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "primal-item-add-new-item",
+      "selector": {
+        "rva": "0x1414E60"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "item-stat-info-get-modifier",
+      "selector": {
+        "rva": "0x143D7B0"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 1,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "primal-item-init-new-item",
+      "selector": {
+        "rva": "0x1447DB0"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "primal-item-initialize-item",
+      "selector": {
+        "rva": "0x1448C40"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    },
+    {
+      "id": "primal-item-blueprint-resource-quantity",
+      "selector": {
+        "qualifiedName": "UPrimalItem::calcResourceQuantityRequired"
+      },
+      "expectedMatches": 1,
+      "exports": {
+        "decompile": true,
+        "callersDepth": 2,
+        "calleesDepth": 2,
+        "constants": true,
+        "fieldAccesses": false,
+        "branches": true,
+        "vtable": false
+      }
+    }
+  ],
+  "fieldQueries": [],
+  "vtableQueries": [],
+  "budgets": {
+    "maxFunctions": 120,
+    "maxCallEdges": 4000,
+    "maxFieldAccesses": 4000,
+    "maxConstants": 8000,
+    "maxVtableMatches": 64,
+    "maxDecompiledCharactersPerFunction": 40000,
+    "maxTotalDecompiledCharacters": 500000
+  }
+}

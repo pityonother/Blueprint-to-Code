@@ -1,0 +1,58 @@
+{
+  "schema": "blueprint-to-code-report-claims/v1",
+  "reportId": "fixture-report",
+  "reportPath": "reports/fixture.md",
+  "generatedAtUtc": "2026-07-27T00:00:00Z",
+  "generator": {
+    "repositoryCommit": "fixture",
+    "dirty": false
+  },
+  "dependencies": {
+    "blueprintAssets": [],
+    "nativeEvidenceSets": [
+      {
+        "manifestPath": "reports/evidence_manifests/fixture.native.json",
+        "evidenceSetId": "native-set://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "binarySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pdbSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "recipeId": "test-native-fixture/v1",
+        "recipeSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "generatorScriptSha256": {
+          "runner": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      }
+    ],
+    "runtimeObservationSets": []
+  },
+  "claims": [
+    {
+      "claimId": "claim://fixture/quality-result",
+      "summary": "Quality result is bounded.",
+      "status": "STATIC_REVERSED",
+      "confidence": "HIGH",
+      "evidenceRefs": [
+        "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/fixture.dll/0x1000"
+      ],
+      "assumptions": [
+        "Synthetic fixture mirrors the supported branch."
+      ],
+      "sourceFingerprints": {
+        "nativeEvidenceSetId": "native-set://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "binarySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recipeSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "invalidationConditions": [
+        "binary sha changed",
+        "recipe changed",
+        "generator changed"
+      ],
+      "reportMarkers": [
+        "Quality result is bounded."
+      ],
+      "runtimeValidation": {
+        "status": "NOT_RUN",
+        "observationRefs": []
+      }
+    }
+  ]
+}

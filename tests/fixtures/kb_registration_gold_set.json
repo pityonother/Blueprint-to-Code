@@ -1,0 +1,53 @@
+{
+  "schema": "ark-kb-registration-gold-set/v2",
+  "purpose": "Property-classifier unit fixtures only. Synthetic owner cross-products are not real relationship gold.",
+  "relationshipCases": [],
+  "relationshipGoldStatus": "NOT_AVAILABLE",
+  "relationshipGoldGap": "INDEPENDENT_OWNER_TARGET_REVIEW_REQUIRED",
+  "owners": [
+    "/Game/Gold/Owner_1.Owner_1",
+    "/Game/Gold/Owner_2.Owner_2",
+    "/Game/Gold/Owner_3.Owner_3",
+    "/Game/Gold/Owner_4.Owner_4",
+    "/Game/Gold/Owner_5.Owner_5"
+  ],
+  "cases": [
+    ["PrimalGameDataOverride", "primal_game_data_registration"],
+    ["DefaultGameMode", "game_mode_registration"],
+    ["GameStateClass", "game_state_registration"],
+    ["PlayerControllerClass", "player_controller_registration"],
+    ["WorldSettingsClass", "world_settings_registration"],
+    ["MapClass", "map_world_registration"],
+    ["NPCSpawnEntriesContainer", "spawn_registration"],
+    ["MissionType", "mission_world_event_registration"],
+    ["TaskClass", "mission_world_event_registration"],
+    ["AdditionalEngramBlueprintClasses", "engram_registration"],
+    ["RemapEngrams", "engram_registration"],
+    ["AdditionalDinoEntries", "creature_registration"],
+    ["NPCClass", "creature_registration"],
+    ["AdditionalItemBlueprintClasses", "item_registration"],
+    ["RemapItems", "item_registration"],
+    ["AdditionalBuffClasses", "buff_registration"],
+    ["BuffClass", "buff_registration"],
+    ["AdditionalStructuresToPlace", "structure_registration"],
+    ["SupplyCrateClass", "loot_reward_registration"],
+    ["HarvestResourceComponent", "harvest_component_registration"],
+    ["DamageTypeClass", "damage_type_registration"],
+    ["StatusComponentClass", "status_component_registration"],
+    ["InventoryComponentClass", "inventory_component_registration"],
+    ["PCGGraph", "biome_pcg_registration"],
+    ["WorldPartitionRuntimeCellClass", "world_partition_registration"],
+    ["SaveGameClass", "save_transfer_registration"],
+    ["TransferList", "save_transfer_registration"],
+    ["BossClass", "boss_arena_encounter_registration"],
+    ["ArenaClass", "boss_arena_encounter_registration"],
+    ["EncounterClass", "boss_arena_encounter_registration"]
+  ],
+  "negativeCases": [
+    "AssetRegistryDependency",
+    "Texture2D",
+    "Package",
+    "Function",
+    "SoftObjectPathMap"
+  ]
+}

@@ -71,6 +71,101 @@ class ReleasePackagingTests(unittest.TestCase):
             "git@github.com:example/project.git",
         )
 
+    def test_partner_content_root_can_be_written_as_explicit_package_config(self):
+        from package_full_env import build_devkit_content_root_config
+
+        self.assertEqual(
+            build_devkit_content_root_config(
+                r"E:\AKD\ARKDevkit\Projects\ShooterGame\Content"
+            ),
+            b"E:\\AKD\\ARKDevkit\\Projects\\ShooterGame\\Content\n",
+        )
+        for invalid in (
+            r"E:\AKD\ARKDevkit",
+            r"E:\AKD\..\Projects\ShooterGame\Content",
+            "relative/Projects/ShooterGame/Content",
+            "E:\\AKD\\ARKDevkit\\Projects\\ShooterGame\\Content\nmalicious",
+        ):
+            with self.subTest(path=invalid), self.assertRaises(ValueError):
+                build_devkit_content_root_config(invalid)
+
+    def test_verified_archive_embeds_partner_content_root_and_checksum(self):
+        import json
+        import zipfile
+
+        from package_full_env import (
+            ARCHIVE_ROOT,
+            _add_entry,
+            _sha256_bytes,
+            _verify_archive,
+            build_devkit_content_root_config,
+            build_package_manifest,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            entries: dict[str, Path | bytes] = {}
+            for relative in (
+                "START_HERE.bat",
+                "DIAGNOSE.bat",
+                "runtime/python/python.exe",
+                "dist/index.html",
+                "scripts/blueprint_tool_server.py",
+            ):
+                _add_entry(entries, relative, f"fixture:{relative}\n".encode("utf-8"))
+            config = build_devkit_content_root_config(
+                r"E:\AKD\ARKDevkit\Projects\ShooterGame\Content"
+            )
+            _add_entry(entries, "devkit_content_root.txt", config)
+            manifest = build_package_manifest(
+                repository_url="https://github.com/example/Blueprint-to-Code.git",
+                commit="a" * 40,
+                branch="codex/fix-partner-devkit-root",
+                generated_at_utc="2026-07-21T00:00:00+00:00",
+                file_count=len(entries) + 2,
+                sample_asset="Fixture",
+                devkit_content_root_configured=True,
+            )
+            manifest_bytes = (
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8")
+            _add_entry(entries, "PACKAGE_MANIFEST.json", manifest_bytes)
+
+            hashes = {
+                name: _sha256_bytes(source)
+                for name, source in entries.items()
+                if isinstance(source, bytes)
+            }
+            sums = "".join(
+                f"{digest}  {name.removeprefix(f'{ARCHIVE_ROOT}/')}\n"
+                for name, digest in sorted(hashes.items())
+            ).encode("utf-8")
+            _add_entry(entries, "SHA256SUMS.txt", sums)
+            archive_path = Path(temp_dir) / "partner.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                for name, source in sorted(entries.items()):
+                    self.assertIsInstance(source, bytes)
+                    archive.writestr(name, source)
+
+            _verify_archive(archive_path, hashes, sums)
+            with zipfile.ZipFile(archive_path) as archive:
+                names = archive.namelist()
+                packaged_manifest = json.loads(
+                    archive.read(f"{ARCHIVE_ROOT}/PACKAGE_MANIFEST.json")
+                )
+                packaged_sums = archive.read(f"{ARCHIVE_ROOT}/SHA256SUMS.txt")
+                packaged_config = archive.read(
+                    f"{ARCHIVE_ROOT}/devkit_content_root.txt"
+                )
+
+        self.assertEqual(
+            packaged_config,
+            b"E:\\AKD\\ARKDevkit\\Projects\\ShooterGame\\Content\n",
+        )
+        self.assertIn(f"{ARCHIVE_ROOT}/devkit_content_root.txt", names)
+        self.assertTrue(packaged_manifest["devkitContentRootConfigured"])
+        self.assertEqual(packaged_manifest["fileCount"], len(names))
+        self.assertIn(b"devkit_content_root.txt", packaged_sums)
+
     def test_harvest_report_discovery_requires_complete_nonempty_triplets(self):
         from package_full_env import discover_harvest_reports
 

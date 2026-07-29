@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/native-query-response/v1",
+  "title": "Native evidence query response",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "query",
+    "requestedBudget",
+    "effectiveBudget",
+    "estimatedTokens",
+    "returnedCount",
+    "omittedCount",
+    "cursor",
+    "nextQuery",
+    "sourceFingerprint",
+    "evidenceSetId",
+    "coverage",
+    "items",
+    "gaps"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code-native-query/v1"
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "requestedBudget": {
+      "type": "integer",
+      "minimum": 500
+    },
+    "effectiveBudget": {
+      "type": "integer",
+      "minimum": 500,
+      "maximum": 8000
+    },
+    "estimatedTokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "returnedCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "omittedCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nextQuery": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "sourceFingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evidenceSetId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "available",
+        "returned",
+        "availableNotReturned",
+        "byStatus"
+      ],
+      "properties": {
+        "available": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "returned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "availableNotReturned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byStatus": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  }
+}

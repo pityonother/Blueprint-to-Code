@@ -1,4 +1,14 @@
 import './styles.css';
+import {
+  workspaceUrl,
+  workspaceViewFromSearch,
+  type WorkspaceView,
+} from './app/router';
+import { HarvestExplorer } from './harvest/explorer';
+import { KnowledgeWorkspace } from './kb/workspace';
+import { ApiFailure, api, type ApiResult } from './shared/api';
+import { readableError } from './shared/errors';
+import { escapeHtml } from './shared/html';
 
 type ReportKey =
   | 'agent_index'
@@ -121,6 +131,7 @@ interface KnowledgeBaseSummary {
 
 interface AppState extends ApiResult {
   ok: boolean;
+  version: string;
   projectRoot: string;
   captureRoot: string;
   assets: AssetSummary[];
@@ -131,19 +142,11 @@ interface AppState extends ApiResult {
   devkitOutputLogCommand: string;
 }
 
-interface ApiResult {
-  ok: boolean;
-  error?: string;
-  code?: string;
-  [key: string]: unknown;
-}
-
 interface JobInfo {
   id: string;
   kind: string;
   title: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
-  command: string;
   stdout: string;
   stderr: string;
   returnCode: number | null;
@@ -182,19 +185,9 @@ if (!app) {
   throw new Error('Missing #app root.');
 }
 const root = app;
-
-class ApiFailure extends Error {
-  payload: ApiResult;
-  status: number;
-  code?: string;
-
-  constructor(payload: ApiResult, status: number) {
-    super(payload.error || `请求失败：${status}`);
-    this.payload = payload;
-    this.status = status;
-    this.code = typeof payload.code === 'string' ? payload.code : undefined;
-  }
-}
+let workspaceView = workspaceViewFromSearch(window.location.search);
+const harvestExplorer = new HarvestExplorer(() => render());
+const knowledgeWorkspace = new KnowledgeWorkspace(() => render());
 
 const reportLabels: Record<ReportKey, string> = {
   agent_index: 'AI 证据索引',
@@ -227,6 +220,7 @@ const defaultReport: ReportKey = 'agent_index';
 const DEFAULT_ARTIFACT_MODE = 'indexed' as const;
 
 let state: AppState | null = null;
+let appVersion = '';
 let selectedPath = window.localStorage.getItem('blueprint-tool.selected') || '';
 let selectedReport: ReportKey = defaultReport;
 let reportContent = '';
@@ -253,15 +247,6 @@ let selectedMissingFunctions = new Set<string>();
 let graphQueueSummary: GraphQueueSummary | null = null;
 let graphQueueSummaryAssetPath = '';
 
-function escapeHtml(value: unknown): string {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
 function appendLog(message: string): void {
   const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   logs = [`[${timestamp}] ${message}`, ...logs].slice(0, 90);
@@ -272,29 +257,6 @@ function setMainNotice(message: string, tone: 'info' | 'good' | 'warn' | 'danger
   mainNotice = message;
   mainNoticeTone = tone;
   appendLog(message);
-}
-
-function readableError(error: unknown): string {
-  if (error instanceof ApiFailure) {
-    const attempted = error.payload.attemptedPaths;
-    if (Array.isArray(attempted) && attempted.length) {
-      return `${error.message} 尝试路径：${attempted.slice(0, 3).join('；')}`;
-    }
-    return error.message;
-  }
-  return error instanceof Error ? error.message : String(error);
-}
-
-async function api<T extends ApiResult>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
-  const payload = (await response.json()) as T;
-  if (!response.ok || !payload.ok) {
-    throw new ApiFailure(payload, response.status);
-  }
-  return payload;
 }
 
 function delay(ms: number): Promise<void> {
@@ -884,15 +846,26 @@ function currentAsset(): AssetSummary | undefined {
 }
 
 function renderTopbar(): string {
+  const titles: Record<WorkspaceView, [string, string]> = {
+    blueprint: ['蓝图分析工作台', '从 .uasset 还原 Unreal/ARK Blueprint，再生成中文行为说明。'],
+    harvest: ['ARK 资源点采集查询', '资源节点 → HarvestComponent → 产出资源 → 生物排行'],
+    knowledge: ['ARK 知识库 vNext', '实体、角色、领域、事实、Evidence 与数据库优先查询计划。'],
+  };
+  const [title, subtitle] = titles[workspaceView];
   return `
     <header class="topbar">
       <div class="topbar-title">
-        <h1>蓝图分析工作台</h1>
-        <small>从 .uasset 还原 Unreal/ARK Blueprint，再生成中文行为说明。</small>
+        <h1>${escapeHtml(title)}</h1>
+        <small>${escapeHtml(subtitle)}</small>
       </div>
       <div class="top-actions">
-        ${actionButton('刷新状态', 'refresh', 'ghost', busy)}
-        ${actionButton('打开 captures 目录', 'open-capture-root', 'ghost')}
+        <nav class="workspace-tabs" aria-label="工作区">
+          <button class="workspace-tab ${workspaceView === 'blueprint' ? 'active' : ''}" type="button" data-workspace="blueprint" aria-current="${workspaceView === 'blueprint' ? 'page' : 'false'}">蓝图分析</button>
+          <button class="workspace-tab ${workspaceView === 'harvest' ? 'active' : ''}" type="button" data-workspace="harvest" aria-current="${workspaceView === 'harvest' ? 'page' : 'false'}">资源点采集排行</button>
+          <button class="workspace-tab ${workspaceView === 'knowledge' ? 'active' : ''}" type="button" data-workspace="knowledge" aria-current="${workspaceView === 'knowledge' ? 'page' : 'false'}">知识库 vNext</button>
+        </nav>
+        ${workspaceView === 'blueprint' ? actionButton('刷新状态', 'refresh', 'ghost', busy) : ''}
+        ${workspaceView === 'blueprint' ? actionButton('打开 captures 目录', 'open-capture-root', 'ghost') : ''}
       </div>
     </header>
   `;
@@ -1221,7 +1194,47 @@ function renderAdvancedSection(asset?: AssetSummary): string {
   `;
 }
 
+function renderVersionFooter(): string {
+  const label = appVersion ? `v${appVersion}` : '版本加载中';
+  return `
+    <footer class="app-footer" aria-label="应用版本">
+      Blueprint to Code ${escapeHtml(label)}
+    </footer>
+  `;
+}
+
 function renderMain(): void {
+  if (workspaceView === 'harvest') {
+    root.innerHTML = `
+      <div class="shell">
+        ${renderTopbar()}
+        <main class="workspace harvest-workspace">
+          ${harvestExplorer.render()}
+        </main>
+        ${renderVersionFooter()}
+      </div>
+    `;
+    bindEvents();
+    harvestExplorer.bind();
+    harvestExplorer.ensureLoaded();
+    return;
+  }
+  if (workspaceView === 'knowledge') {
+    root.innerHTML = `
+      <div class="shell">
+        ${renderTopbar()}
+        <main class="workspace kb-main">
+          ${knowledgeWorkspace.render()}
+        </main>
+        ${renderVersionFooter()}
+      </div>
+    `;
+    bindEvents();
+    knowledgeWorkspace.bind();
+    knowledgeWorkspace.ensureLoaded();
+    return;
+  }
+
   const asset = currentAsset();
   if (asset && asset.path !== selectedPath) {
     selectedPath = asset.path;
@@ -1241,6 +1254,7 @@ function renderMain(): void {
         ${renderAdvancedSection(asset)}
         <p class="footnote">日志最近一条：${escapeHtml(logs[0] || '无')}</p>
       </main>
+      ${renderVersionFooter()}
     </div>
   `;
 
@@ -1260,6 +1274,10 @@ function renderLoading(): void {
 }
 
 function render(): void {
+  if (workspaceView === 'harvest' || workspaceView === 'knowledge') {
+    renderMain();
+    return;
+  }
   if (!state) {
     renderLoading();
     return;
@@ -1283,6 +1301,29 @@ function syncInputs(): void {
 }
 
 function bindEvents(): void {
+  document.querySelectorAll<HTMLButtonElement>('[data-workspace]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const requested = button.dataset.workspace;
+      const nextView: WorkspaceView = requested === 'harvest' || requested === 'knowledge'
+        ? requested
+        : 'blueprint';
+      if (nextView === workspaceView) {
+        return;
+      }
+      syncInputs();
+      workspaceView = nextView;
+      const url = workspaceUrl(window.location.href, workspaceView);
+      window.history.replaceState({}, '', url);
+      render();
+      if (workspaceView === 'blueprint' && !state) {
+        void refreshState();
+      }
+      if (workspaceView === 'knowledge') {
+        knowledgeWorkspace.ensureLoaded();
+      }
+    });
+  });
+
   document.querySelectorAll<HTMLButtonElement>('[data-select-asset]').forEach((button) => {
     button.addEventListener('click', () => {
       syncInputs();
@@ -1353,6 +1394,7 @@ async function refreshState(keepReport = true): Promise<void> {
   const previousSelectedPath = selectedPath;
   const payload = await api<AppState>('/api/state');
   state = payload;
+  appVersion = payload.version;
   if (!selectedPath || !state.assets.some((asset) => asset.path === selectedPath)) {
     selectedPath = state.assets.find((asset) => asset.graphs > 0 && asset.hasOutput)?.path || state.assets[0]?.path || '';
   }
@@ -1926,6 +1968,12 @@ async function cancelCurrentJob(): Promise<void> {
   }
 }
 
+async function refreshVersion(): Promise<void> {
+  const payload = await api<ApiResult & { version: string }>('/api/state');
+  appVersion = payload.version;
+  render();
+}
+
 async function buildKnowledgeBase(): Promise<void> {
   busy = true;
   appendLog('开始生成 ARK DevKit 全局背景知识库。');
@@ -2245,7 +2293,14 @@ async function handleAction(action: string): Promise<void> {
 }
 
 render();
-refreshState().catch((error) => {
-  logs = [error instanceof Error ? error.message : String(error)];
-  render();
-});
+if (workspaceView === 'blueprint') {
+  refreshState().catch((error) => {
+    logs = [error instanceof Error ? error.message : String(error)];
+    render();
+  });
+} else {
+  refreshVersion().catch((error) => {
+    logs = [error instanceof Error ? error.message : String(error)];
+    render();
+  });
+}

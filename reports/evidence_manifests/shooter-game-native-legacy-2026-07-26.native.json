@@ -1,0 +1,176 @@
+{
+  "schema": "blueprint-to-code-sanitized-native-evidence/v1",
+  "evidenceSetId": "native-set://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/legacy-provenance-incomplete-2026-07-26",
+  "generatedAtUtc": "2026-07-26T18:13:23Z",
+  "localEvidenceRelativePath": "native_evidence/b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/historical-report-rebuild",
+  "trust": {
+    "status": "PROVENANCE_INCOMPLETE"
+  },
+  "provenance": {
+    "binary": {
+      "module": "ShooterGameEditor-ShooterGame.dll",
+      "sha256": "b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a"
+    },
+    "pdb": {
+      "fileName": "ShooterGameEditor-ShooterGame.pdb",
+      "sha256": "5285ae571d09fde9183a491f6bdef6e10a143857dd8b7fa5f9e6755b9c01bc16",
+      "guid": "b63263f4-93dd-4e82-a597-81e704da2a86",
+      "age": 2,
+      "loaded": true,
+      "matchesBinary": true,
+      "identityBasis": "Reverified against the same binary hash in the current DevKit; the legacy export did not record this PDB fingerprint."
+    },
+    "generator": {
+      "repositoryCommit": "UNRECOVERED",
+      "repositoryDirty": null,
+      "recipeId": "UNRECOVERED_LEGACY_RECIPE",
+      "recipeSha256": "",
+      "scriptSha256": {}
+    }
+  },
+  "targets": [
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0xAEA7E0",
+      "qualifiedName": "APrimalStructureItemContainer_SupplyCrate::APrimalStructureItemContainer_SupplyCrate",
+      "rva": "0xAEA7E0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0xAEBA50",
+      "qualifiedName": "APrimalStructureItemContainer_SupplyCrate::GenerateCrateItems",
+      "rva": "0xAEBA50"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x13A1420",
+      "qualifiedName": "UPrimalInventoryComponent::GenerateCrateItems",
+      "rva": "0x13A1420"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x13A55E0",
+      "qualifiedName": "UPrimalInventoryComponent::GenerateCustomCrateItems",
+      "rva": "0x13A55E0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0xB65B60",
+      "qualifiedName": "UVictoryCore::GetWeightedRandomIndex",
+      "rva": "0xB65B60"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1414E60",
+      "qualifiedName": "UPrimalItem::AddNewItem",
+      "rva": "0x1414E60"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1422930",
+      "qualifiedName": "UPrimalItem::ClampStats",
+      "rva": "0x1422930"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14223E0",
+      "qualifiedName": "UPrimalItem::ClampItemRating",
+      "rva": "0x14223E0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x12EA8F0",
+      "qualifiedName": "UPrimalGameData::GetItemQualityIndex",
+      "rva": "0x12EA8F0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1453B10",
+      "qualifiedName": "UPrimalItem::OverrideItemRating",
+      "rva": "0x1453B10"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x143D7B0",
+      "qualifiedName": "FItemStatInfo::GetItemStatModifier",
+      "rva": "0x143D7B0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1441730",
+      "qualifiedName": "FItemStatInfo::GetRandomValue",
+      "rva": "0x1441730"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x142E5A0",
+      "qualifiedName": "UPrimalItem::GetCraftingRequirements",
+      "rva": "0x142E5A0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14332F0",
+      "qualifiedName": "UPrimalItem::GetCraftingResourceRequirement",
+      "rva": "0x14332F0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x16A490",
+      "qualifiedName": "UPrimalItem::GetResourceRequirementIncreaseRatingPower",
+      "rva": "0x16A490"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x16A4B0",
+      "qualifiedName": "UPrimalItem::GetResourceRequirementRatingIncreasePercentage",
+      "rva": "0x16A4B0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x16A4D0",
+      "qualifiedName": "UPrimalItem::GetResourceRequirementRatingScale",
+      "rva": "0x16A4D0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1447DB0",
+      "qualifiedName": "UPrimalItem::InitNewItem",
+      "rva": "0x1447DB0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1448C40",
+      "qualifiedName": "UPrimalItem::InitializeItem",
+      "rva": "0x1448C40"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1469500",
+      "qualifiedName": "UPrimalItem::calcResourceQuantityRequired",
+      "rva": "0x1469500"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x11E5420",
+      "qualifiedName": "APrimalDinoAIController::ShouldForceFlee",
+      "rva": "0x11E5420"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x3B82D0",
+      "qualifiedName": "APrimalDinoCharacter::BPShouldForceFlee",
+      "rva": "0x3B82D0"
+    },
+    {
+      "evidenceId": "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x15F5B10",
+      "qualifiedName": "APrimalDinoCharacter::ShouldForceFlee",
+      "rva": "0x15F5B10"
+    }
+  ],
+  "legacySourceFiles": [
+    "shooter-game-native-targets-b0e67e1e7625.json",
+    "shooter-game-native-quality-expanded-b0e67e1e7625.json",
+    "shooter-game-native-player-item-model-b0e67e1e7625.json",
+    "shooter-game-native-initialize-item-b0e67e1e7625.json",
+    "shooter-game-native-resource-quantity-formula-b0e67e1e7625.json",
+    "shooter-game-native-quality-cost-multiplier-accessors-b0e67e1e7625.json",
+    "shooter-game-native-ferox-force-flee-b0e67e1e7625.json",
+    "shooter-game-native-name-search-ferox-flee-b0e67e1e7625.json"
+  ],
+  "gaps": [
+    {
+      "code": "LEGACY_RECIPE_MISSING",
+      "detail": "The 2026-07-26 exports predate the versioned recipe and do not retain a recipe fingerprint."
+    },
+    {
+      "code": "LEGACY_PDB_FINGERPRINT_MISSING",
+      "detail": "The legacy exports record only that a PDB was loaded; the committed PDB identity is a later re-verification against the same binary hash."
+    },
+    {
+      "code": "LEGACY_GENERATOR_FINGERPRINTS_MISSING",
+      "detail": "The original runner, exporter, and PDB configurator fingerprints were not retained."
+    },
+    {
+      "code": "FORMAL_REBUILD_REQUIRED",
+      "detail": "Rebuild a v2 evidence set with the current recipe before formal release."
+    }
+  ]
+}

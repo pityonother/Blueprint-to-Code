@@ -13,20 +13,96 @@ from blueprint_translator.harvest_ranking import (  # noqa: E402
     extract_creature_attacks,
     extract_harvest_component,
     extract_resource_damage_overrides,
+    normalize_unreal_object_identity,
     rank_harvest_rows,
 )
 from rank_ark_harvest import (  # noqa: E402
+    SCHEMA,
+    AssetReader,
     best_rows,
+    build_class_index,
     build_damage_context,
+    build_methodology,
+    discover_damage_type_assets,
     build_resource_candidates,
     compact_row,
     discover_components,
+    parse_args,
+    resource_report_slug,
     scan_manifest_hash,
     summarize_component_gaps,
 )
 
 
 class HarvestRankingTests(unittest.TestCase):
+    def test_damage_type_discovery_filters_in_one_walk_without_pathlib_rglob(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expected = [
+                root / "DLC" / "DmgType_Custom.uasset",
+                root / "PrimalEarth" / "MyDmgTypeExtra.uasset",
+            ]
+            ignored = [root / "DLC" / "Other.uasset", root / "DLC" / "DmgType.txt"]
+            for path in [*expected, *ignored]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+
+            found, backend = discover_damage_type_assets(root, prefer_rg=False)
+
+        self.assertEqual(found, sorted(path.resolve() for path in expected))
+        self.assertEqual(backend, "OS_WALK")
+
+    def test_normalizes_updated_devkit_full_object_identity(self):
+        self.assertEqual(
+            normalize_unreal_object_identity(
+                "/Game/PrimalEarth/CoreBlueprints/DamageTypes/"
+                "DmgType_Melee_Dino_MineStone.DmgType_Melee_Dino_MineStone_C"
+            ),
+            "DmgType_Melee_Dino_MineStone_C",
+        )
+        self.assertEqual(
+            normalize_unreal_object_identity(
+                "BlueprintGeneratedClass'/Game/Test/Foo.Foo_C'"
+            ),
+            "Foo_C",
+        )
+
+    def test_updated_devkit_full_override_paths_match_short_damage_type(self):
+        component = self._metal_component()
+        full_damage_type = (
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/"
+            "DmgType_MineStone.DmgType_MineStone_C"
+        )
+        for entry in component["resourceEntries"]:
+            entry["weightOverrides"] = {
+                full_damage_type: 0.4
+                if entry["resource"] == "PrimalItemResource_Stone_C"
+                else 0.63
+            }
+            entry["damageTypeEntryValues"] = [full_damage_type]
+        component["damageEntries"][0]["damageTypeParent"] = full_damage_type
+
+        row = evaluate_attack_resource(
+            creature="Ankylosaurus",
+            creature_object_path="/Game/PrimalEarth/Dinos/Ankylo/Ankylo_Character_BP",
+            attack={
+                "attackIndex": 0,
+                "attackName": "Tail",
+                "damageType": "DmgType_MineStone_C",
+                "baseDamage": 50.0,
+                "attackInterval": 1.0,
+                "gaps": [],
+            },
+            component=component,
+            resource="PrimalItemResource_Metal_C",
+            damage_type_parents={},
+            resource_damage_overrides={},
+        )
+
+        self.assertEqual(row["rankingStatus"], "RANKED")
+        self.assertEqual(row["damageTypeMatch"], "DmgType_MineStone_C")
+        self.assertAlmostEqual(row["resourceWeight"], 0.63)
+
     def test_damage_context_indexes_non_dmgtype_blueprint_and_stops_at_native_parent(self):
         class FakeReader:
             def __init__(self):
@@ -82,6 +158,48 @@ class HarvestRankingTests(unittest.TestCase):
             )
         )
 
+    def test_damage_context_resolves_exact_damage_type_outside_primalearth_directory(self):
+        class FakeReader:
+            def generated_class_parent(self, path):
+                return "/Script/ShooterGame.ShooterDamageType"
+
+            def effective_defaults(self, path, class_index):
+                return [], [path]
+
+        creatures = [
+            {
+                "attacks": [
+                    {
+                        "damageType": "DmgType_DLCMine_C",
+                        "damageTypeObjectPath": (
+                            "/Game/DLC/DamageTypes/DmgType_DLCMine."
+                            "DmgType_DLCMine_C"
+                        ),
+                    }
+                ]
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir)
+            damage_path = content_root / "DLC" / "DamageTypes" / "DmgType_DLCMine.uasset"
+            damage_path.parent.mkdir(parents=True)
+            damage_path.touch()
+
+            parent_map, _overrides, facts, used_paths, gaps = build_damage_context(
+                creatures=creatures,
+                resources=["PrimalItemResource_Metal_C"],
+                content_root=content_root,
+                reader=FakeReader(),
+            )
+
+        self.assertEqual(
+            parent_map["DmgType_DLCMine_C"],
+            "/Script/ShooterGame.ShooterDamageType",
+        )
+        self.assertEqual(gaps["DmgType_DLCMine_C"], [])
+        self.assertEqual(used_paths, {damage_path.resolve()})
+        self.assertEqual(facts[0]["path"], str(damage_path.resolve()))
+
     def test_extract_creature_attacks_keeps_struct_elements_and_resolved_damage_type(self):
         properties = [
             {
@@ -101,9 +219,28 @@ class HarvestRankingTests(unittest.TestCase):
                                     "type": "ObjectProperty",
                                     "value": -4,
                                     "object": "DmgType_MineStone_C",
+                                    "object_path": (
+                                        "/Game/Test/Damage/DmgType_MineStone."
+                                        "DmgType_MineStone_C"
+                                    ),
                                 },
                                 {"name": "MeleeDamageAmount", "type": "IntProperty", "value": 120},
                                 {"name": "AttackInterval", "type": "FloatProperty", "value": 0.5},
+                                {"name": "RiderAttackInterval", "type": "FloatProperty", "value": 1.25},
+                                {"name": "bSkipTamed", "type": "BoolProperty", "value": False},
+                                {"name": "bSkipAI", "type": "BoolProperty", "value": True},
+                                {
+                                    "name": "bOnlyOnWildDinos",
+                                    "type": "BoolProperty",
+                                    "value": True,
+                                },
+                                {"name": "bPreventWithRider", "type": "BoolProperty", "value": False},
+                                {"name": "bUseBlueprintCanRiderAttack", "type": "BoolProperty", "value": True},
+                                {
+                                    "name": "bUseBlueprintAdjustOutputDamage",
+                                    "type": "BoolProperty",
+                                    "value": True,
+                                },
                                 {"name": "MeleeSwingRadius", "type": "FloatProperty", "value": 450.0},
                             ],
                         }
@@ -117,12 +254,23 @@ class HarvestRankingTests(unittest.TestCase):
         self.assertEqual(len(attacks), 1)
         self.assertEqual(attacks[0]["attackName"], "Bite")
         self.assertEqual(attacks[0]["damageType"], "DmgType_MineStone_C")
+        self.assertEqual(
+            attacks[0]["damageTypeObjectPath"],
+            "/Game/Test/Damage/DmgType_MineStone.DmgType_MineStone_C",
+        )
         self.assertEqual(attacks[0]["baseDamage"], 120)
         self.assertEqual(attacks[0]["attackInterval"], 0.5)
+        self.assertEqual(attacks[0]["riderAttackInterval"], 1.25)
+        self.assertFalse(attacks[0]["skipTamed"])
+        self.assertTrue(attacks[0]["skipAI"])
+        self.assertTrue(attacks[0]["onlyOnWildDinos"])
+        self.assertFalse(attacks[0]["preventWithRider"])
+        self.assertTrue(attacks[0]["useBlueprintCanRiderAttack"])
+        self.assertTrue(attacks[0]["useBlueprintAdjustOutputDamage"])
         self.assertEqual(attacks[0]["rawOffsets"], {"start": 100, "end": 300})
         self.assertEqual(attacks[0]["valueStatus"], "CONFIRMED")
 
-    def test_magmasaur_metal_override_produces_bounded_engine_index(self):
+    def test_magmasaur_metal_override_produces_complete_node_yield(self):
         attack = {
             "attackIndex": 0,
             "attackName": "Bite",
@@ -155,9 +303,14 @@ class HarvestRankingTests(unittest.TestCase):
         self.assertAlmostEqual(row["resourceWeight"], 0.63)
         self.assertAlmostEqual(row["resourceWeightShare"], 0.63 / 1.03)
         self.assertAlmostEqual(row["harvestPressurePerSecond"], 480.0)
-        self.assertAlmostEqual(row["engineComparisonIndex"], 480.0 * (0.63 / 1.03))
+        self.assertAlmostEqual(row["estimatedYieldPerNode"], 33.029126213592235)
+        self.assertEqual(row["engineComparisonIndex"], row["estimatedYieldPerNode"])
+        self.assertAlmostEqual(
+            row["legacyDiagnostics"]["engineComparisonIndex"],
+            480.0 * (0.63 / 1.03),
+        )
         self.assertIsNone(row["observedYieldPerSecond"])
-        self.assertEqual(row["scoreBasis"], "INFERRED_ENGINE_COEFFICIENT_INDEX_NOT_RESOURCE_YIELD")
+        self.assertEqual(row["scoreBasis"], "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE")
 
     def test_zero_resource_weight_is_incompatible_not_zero_score(self):
         attack = {
@@ -186,7 +339,7 @@ class HarvestRankingTests(unittest.TestCase):
         self.assertIsNone(row["engineComparisonIndex"])
         self.assertNotEqual(row["engineComparisonIndex"], 0.0)
 
-    def test_missing_attack_interval_is_not_recovered(self):
+    def test_missing_attack_interval_does_not_change_complete_node_yield(self):
         attack = {
             "attackIndex": 0,
             "attackName": "Bite",
@@ -207,22 +360,132 @@ class HarvestRankingTests(unittest.TestCase):
             resource_damage_overrides={},
         )
 
-        self.assertEqual(row["rankingStatus"], "UNRANKED")
-        self.assertEqual(row["reasonCode"], "REQUIRED_ATTACK_FACT_NOT_RECOVERED")
-        self.assertIsNone(row["engineComparisonIndex"])
-        self.assertIn("AttackInterval", row["missingFacts"])
-        self.assertEqual(row["missingFactsByScope"]["attack"], ["AttackInterval"])
+        self.assertEqual(row["rankingStatus"], "RANKED")
+        self.assertEqual(row["reasonCode"], "COMPLETE_NODE_YIELD_ESTIMATED")
+        self.assertGreater(row["estimatedYieldPerNode"], 0.0)
+        self.assertIsNone(row["harvestPressurePerSecond"])
+        self.assertIsNone(row["legacyDiagnostics"]["engineComparisonIndex"])
+        self.assertEqual(row["missingFacts"], [])
 
     def test_ranked_rows_sort_before_explicit_unranked_rows(self):
         rows = [
-            {"creature": "Zed", "attackName": "B", "rankingStatus": "UNRANKED", "engineComparisonIndex": None},
-            {"creature": "Anky", "attackName": "Tail", "rankingStatus": "RANKED", "engineComparisonIndex": 90.0},
-            {"creature": "Magma", "attackName": "Bite", "rankingStatus": "RANKED", "engineComparisonIndex": 290.0},
+            {"creature": "Zed", "attackName": "B", "rankingStatus": "UNRANKED", "estimatedYieldPerNode": None},
+            {"creature": "Anky", "attackName": "Tail", "rankingStatus": "RANKED", "estimatedYieldPerNode": 90.0, "engineComparisonIndex": 999.0},
+            {"creature": "Magma", "attackName": "Bite", "rankingStatus": "RANKED", "estimatedYieldPerNode": 290.0, "engineComparisonIndex": 1.0},
         ]
 
         ranked = rank_harvest_rows(rows)
 
         self.assertEqual([row["creature"] for row in ranked], ["Magma", "Anky", "Zed"])
+
+    def test_streetlight_ranks_doedicurus_above_dreadnoughtus_by_complete_node_yield(self):
+        component = self._extinction_streetlight_component()
+        common = {
+            "component": component,
+            "resource": "PrimalItemResource_Electronics_C",
+            "damage_type_parents": {},
+            "resource_damage_overrides": {},
+        }
+        dreadnoughtus = evaluate_attack_resource(
+            creature="Dreadnoughtus",
+            creature_object_path="/Game/Extinction/Dinos/Dreadnoughtus_Character_BP",
+            attack={
+                "attackIndex": 0,
+                "attackName": "Neck Flail",
+                "damageType": "DmgType_Melee_Dino_Herbivore_C",
+                "baseDamage": 1080.0,
+                "attackInterval": 0.5,
+                "gaps": [],
+            },
+            **common,
+        )
+        doedicurus = evaluate_attack_resource(
+            creature="Doedicurus",
+            creature_object_path="/Game/PrimalEarth/Dinos/Doedicurus/Doed_Character_BP",
+            attack={
+                "attackIndex": 0,
+                "attackName": "Tail Attack",
+                "damageType": "DmgType_SuperMineStone_C",
+                "baseDamage": 32.0,
+                "attackInterval": 0.67,
+                "gaps": [],
+            },
+            **common,
+        )
+
+        self.assertEqual(dreadnoughtus["maxHarvestHealth"], 150.0)
+        self.assertEqual(doedicurus["harvestQuantityMultiplier"], 7.0)
+        self.assertGreater(
+            doedicurus["estimatedYieldPerNode"],
+            dreadnoughtus["estimatedYieldPerNode"],
+            "A finite 150-health streetlight must reward Doedicurus's 7x harvest "
+            "quantity multiplier ahead of Dreadnoughtus's overkill damage.",
+        )
+
+        ranked = rank_harvest_rows([dreadnoughtus, doedicurus])
+
+        self.assertEqual(
+            [row["creature"] for row in ranked],
+            ["Doedicurus", "Dreadnoughtus"],
+        )
+
+    def test_complete_node_yield_is_not_increased_by_short_attack_interval(self):
+        component = self._extinction_streetlight_component()
+
+        def maeguana_row(attack_interval):
+            return evaluate_attack_resource(
+                creature="Maeguana",
+                creature_object_path="/Game/LostColony/Dinos/Maeguana/Maeguana_Character_BP",
+                attack={
+                    "attackIndex": 0,
+                    "attackName": "BellyFlop",
+                    "damageType": "DmgType_Melee_Dino_Herbivore_C",
+                    "baseDamage": 20.0,
+                    "attackInterval": attack_interval,
+                    "gaps": [],
+                },
+                component=component,
+                resource="PrimalItemResource_Electronics_C",
+                damage_type_parents={},
+                resource_damage_overrides={},
+            )
+
+        devkit_interval_row = maeguana_row(0.01)
+        one_second_interval_row = maeguana_row(1.0)
+
+        self.assertAlmostEqual(
+            devkit_interval_row["estimatedYieldPerNode"],
+            one_second_interval_row["estimatedYieldPerNode"],
+            msg=(
+                "AttackInterval describes cadence, so 0.01 must not create a 100x "
+                "advantage in expected yield from one complete node."
+            ),
+        )
+
+    def test_ranked_rows_use_complete_node_yield_instead_of_engine_dps_index(self):
+        rows = [
+            {
+                "creature": "Dreadnoughtus",
+                "attackName": "Neck Flail",
+                "rankingStatus": "RANKED",
+                "estimatedYieldPerNode": 150.0,
+                "engineComparisonIndex": 2160.0,
+            },
+            {
+                "creature": "Doedicurus",
+                "attackName": "Tail Attack",
+                "rankingStatus": "RANKED",
+                "estimatedYieldPerNode": 1050.0,
+                "engineComparisonIndex": 1002.99,
+            },
+        ]
+
+        ranked = rank_harvest_rows(rows)
+
+        self.assertEqual(
+            [row["creature"] for row in ranked],
+            ["Doedicurus", "Dreadnoughtus"],
+        )
 
     def test_extract_harvest_component_zips_damage_type_overrides_by_index(self):
         def array_prop(name, value, *, objects=None, elements=None):
@@ -241,7 +504,16 @@ class HarvestRankingTests(unittest.TestCase):
         resource_element = {
             "index": 0,
             "properties": [
-                {"name": "ResourceItem", "type": "ObjectProperty", "value": -1, "object": "Metal_C"},
+                {
+                    "name": "ResourceItem",
+                    "type": "ObjectProperty",
+                    "value": -1,
+                    "object": "Metal_C",
+                    "object_path": (
+                        "/Game/PrimalEarth/CoreBlueprints/Resources/"
+                        "PrimalItemResource_Metal.PrimalItemResource_Metal_C"
+                    ),
+                },
                 {"name": "EntryWeight", "type": "FloatProperty", "value": 0.0},
                 {"name": "OverrideQuantityMin", "type": "IntProperty", "value": 0},
                 {"name": "OverrideQuantityMax", "type": "IntProperty", "value": 1},
@@ -278,10 +550,176 @@ class HarvestRankingTests(unittest.TestCase):
 
         self.assertEqual(component["gaps"], [])
         self.assertEqual(component["resourceEntries"][0]["resource"], "Metal_C")
+        self.assertEqual(
+            component["resourceEntries"][0]["resourceObjectPath"],
+            (
+                "/Game/PrimalEarth/CoreBlueprints/Resources/"
+                "PrimalItemResource_Metal.PrimalItemResource_Metal_C"
+            ),
+        )
         self.assertEqual(component["resourceEntries"][0]["weightOverrides"], {"MineStone_C": 0.63})
         self.assertEqual(component["resourceEntries"][0]["minQuantityOverrides"], {"MineStone_C": 1.0})
         self.assertEqual(component["damageEntries"][0]["damageTypeParent"], "MineStone_C")
         self.assertEqual(component["maxHarvestHealth"], 620.0)
+
+    def test_biolum_aligned_soft_damage_types_restore_bio_toxin_normalization(self):
+        damage_type_paths = [
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/"
+            "DmgType_Melee_Dino_Herbivore.DmgType_Melee_Dino_Herbivore_C",
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/"
+            "DmgType_Melee_SickleHarvest.DmgType_Melee_SickleHarvest_C",
+            "/Game/PrimalEarth/CoreBlueprints/DamageTypes/"
+            "DmgType_Melee_BigfootHarvest.DmgType_Melee_BigfootHarvest_C",
+        ]
+
+        def array_prop(name, values, *, objects=None, elements=None):
+            return {
+                "name": name,
+                "type": "ArrayProperty",
+                "value": values,
+                "objects": objects or [],
+                "array_parse": {
+                    "parsed": True,
+                    "count": len(values),
+                    "elements": elements or [],
+                },
+            }
+
+        resource_specs = [
+            ("PrimalItemResource_Fibers_C", 0.3, True),
+            ("PrimalItemResource_CommonMushroom_C", 0.2, True),
+            ("PrimalItemResource_RareMushroom_C", 0.5, False),
+            ("PrimalItemResource_RareFlower_C", 0.5, False),
+            ("PrimalItemConsumable_JellyVenom_C", 1.0, False),
+            ("PrimalItemConsumable_Mushroom_Auric_C", 0.2, True),
+            ("PrimalItemConsumable_Mushroom_Aquatic_C", 0.2, True),
+            ("PrimalItemConsumable_Mushroom_Ascerbic_C", 0.2, True),
+        ]
+        resource_elements = []
+        for entry_index, (resource, base_weight, has_overrides) in enumerate(
+            resource_specs
+        ):
+            override_paths = damage_type_paths if has_overrides else []
+            weight_overrides = [0.0, 1000.0, 1000.0] if has_overrides else []
+            min_overrides = [0.0, 2.0, 2.0] if has_overrides else []
+            max_overrides = [0.0, 7.0, 7.0] if has_overrides else []
+            resource_elements.append(
+                {
+                    "index": entry_index,
+                    "properties": [
+                        {
+                            "name": "ResourceItem",
+                            "type": "ObjectProperty",
+                            "value": -(entry_index + 1),
+                            "object": resource,
+                        },
+                        {
+                            "name": "EntryWeight",
+                            "type": "FloatProperty",
+                            "value": base_weight,
+                        },
+                        {
+                            "name": "OverrideQuantityMin",
+                            "type": "FloatProperty",
+                            "value": 1.0,
+                        },
+                        {
+                            "name": "OverrideQuantityMax",
+                            "type": "FloatProperty",
+                            "value": 1.0,
+                        },
+                        array_prop(
+                            "DamageTypeEntryValuesOverrides",
+                            list(range(len(override_paths))),
+                            objects=override_paths,
+                        ),
+                        array_prop(
+                            "DamageTypeEntryWeightOverrides", weight_overrides
+                        ),
+                        array_prop(
+                            "DamageTypeEntryMinQuantityOverrides", min_overrides
+                        ),
+                        array_prop(
+                            "DamageTypeEntryMaxQuantityOverrides", max_overrides
+                        ),
+                    ],
+                }
+            )
+        damage_element = {
+            "index": 0,
+            "properties": [
+                {
+                    "name": "DamageTypeParent",
+                    "type": "ObjectProperty",
+                    "value": -20,
+                    "object": damage_type_paths[0],
+                },
+                {
+                    "name": "DamageMultiplier",
+                    "type": "FloatProperty",
+                    "value": 10.0,
+                },
+                {
+                    "name": "HarvestQuantityMultiplier",
+                    "type": "FloatProperty",
+                    "value": 1.0,
+                },
+            ],
+        }
+        component = extract_harvest_component(
+            [
+                array_prop(
+                    "HarvestResourceEntries",
+                    [{} for _item in resource_elements],
+                    elements=resource_elements,
+                ),
+                array_prop(
+                    "HarvestDamageTypeEntries",
+                    [{}],
+                    elements=[damage_element],
+                ),
+                {"name": "MaxHarvestHealth", "type": "FloatProperty", "value": 100.0},
+                {
+                    "name": "HarvestHealthGiveResourceInterval",
+                    "type": "FloatProperty",
+                    "value": 20.0,
+                },
+            ],
+            component="Harvest_Trap_Biolum01",
+            object_path=(
+                "/Game/PrimalEarth/CoreBlueprints/HarvestComponents/"
+                "Harvest_Trap_Biolum01.Harvest_Trap_Biolum01"
+            ),
+        )
+
+        row = evaluate_attack_resource(
+            creature="Ankylosaurus",
+            creature_object_path="/Game/PrimalEarth/Dinos/Ankylo/Ankylo_Character_BP",
+            attack={
+                "attackIndex": 0,
+                "attackName": "Tail",
+                "damageType": "DmgType_Melee_Dino_Herbivore_Medium_C",
+                "baseDamage": 50.0,
+                "attackInterval": 1.0,
+                "gaps": [],
+            },
+            component=component,
+            resource="PrimalItemConsumable_JellyVenom_C",
+            damage_type_parents={
+                "DmgType_Melee_Dino_Herbivore_Medium_C": (
+                    "DmgType_Melee_Dino_Herbivore_C"
+                )
+            },
+            resource_damage_overrides={},
+        )
+
+        self.assertEqual(component["gaps"], [])
+        self.assertEqual(row["rankingStatus"], "RANKED")
+        self.assertNotEqual(
+            row["reasonCode"], "RESOURCE_WEIGHT_NORMALIZATION_NOT_RECOVERED"
+        )
+        self.assertEqual(row["totalPositiveResourceWeight"], 2.0)
+        self.assertEqual(row["resourceWeightShare"], 0.5)
 
     def test_damage_override_extractor_rejects_misaligned_arrays(self):
         properties = [
@@ -411,14 +849,13 @@ class HarvestRankingTests(unittest.TestCase):
         self.assertEqual(row["rankingStatus"], "UNRANKED")
         self.assertEqual(row["reasonCode"], "REQUIRED_DAMAGE_TYPE_FACT_NOT_RECOVERED")
 
-    def test_min_max_quantity_gaps_are_informational_for_current_formula(self):
+    def test_missing_min_max_quantity_blocks_complete_node_yield(self):
         component = self._metal_component()
-        component["gaps"] = [
-            "DAMAGE_TYPE_MIN_QUANTITY_OVERRIDE_NOT_RECOVERED",
-            "DAMAGE_TYPE_MAX_QUANTITY_OVERRIDE_NOT_RECOVERED",
-        ]
-        component["rankingGaps"] = []
-        component["resourceEntries"][1]["gaps"] = list(component["gaps"])
+        target = component["resourceEntries"][1]
+        target["overrideQuantityMin"] = None
+        target["overrideQuantityMax"] = None
+        target["minQuantityOverrides"] = {}
+        target["maxQuantityOverrides"] = {}
 
         row = evaluate_attack_resource(
             creature="Magmasaur",
@@ -437,9 +874,43 @@ class HarvestRankingTests(unittest.TestCase):
             resource_damage_overrides={},
         )
 
-        self.assertEqual(row["rankingStatus"], "RANKED")
+        self.assertEqual(row["rankingStatus"], "UNRANKED")
+        self.assertEqual(row["reasonCode"], "RESOURCE_QUANTITY_MODEL_NOT_RECOVERED")
         self.assertEqual(
-            row["warnings"],
+            row["missingFactsByScope"]["target"],
+            ["OverrideQuantityMax", "OverrideQuantityMin"],
+        )
+
+    def test_unrecovered_matching_quantity_override_does_not_fall_back_to_base_range(self):
+        component = self._metal_component()
+        target = component["resourceEntries"][1]
+        target["damageTypeEntryValues"] = ["DmgType_MineStone_C"]
+        target["rankingGaps"] = [
+            "DAMAGE_TYPE_MIN_QUANTITY_OVERRIDE_NOT_RECOVERED",
+            "DAMAGE_TYPE_MAX_QUANTITY_OVERRIDE_NOT_RECOVERED",
+        ]
+
+        row = evaluate_attack_resource(
+            creature="Magmasaur",
+            creature_object_path="/Game/Magma",
+            attack={
+                "attackIndex": 0,
+                "attackName": "Bite",
+                "damageType": "DmgType_MineStone_C",
+                "baseDamage": 120.0,
+                "attackInterval": 0.5,
+                "gaps": [],
+            },
+            component=component,
+            resource="PrimalItemResource_Metal_C",
+            damage_type_parents={},
+            resource_damage_overrides={},
+        )
+
+        self.assertEqual(row["rankingStatus"], "UNRANKED")
+        self.assertEqual(row["reasonCode"], "RESOURCE_QUANTITY_MODEL_NOT_RECOVERED")
+        self.assertEqual(
+            row["missingFactsByScope"]["target"],
             [
                 "DAMAGE_TYPE_MAX_QUANTITY_OVERRIDE_NOT_RECOVERED",
                 "DAMAGE_TYPE_MIN_QUANTITY_OVERRIDE_NOT_RECOVERED",
@@ -557,7 +1028,8 @@ class HarvestRankingTests(unittest.TestCase):
                 "creatureObjectPath": "/Game/Creatures/B",
                 "attackIndex": 0,
                 "rankingStatus": "RANKED",
-                "engineComparisonIndex": 5.0,
+                "estimatedYieldPerNode": 5.0,
+                "engineComparisonIndex": 5000.0,
             },
         ]
 
@@ -568,6 +1040,9 @@ class HarvestRankingTests(unittest.TestCase):
         self.assertEqual(by_creature_path["/Game/Creatures/A"]["rankingStatus"], "UNRANKED")
         self.assertEqual(by_creature_path["/Game/Creatures/A"]["attackIndex"], 1)
         self.assertEqual(by_creature_path["/Game/Creatures/B"]["rankingStatus"], "RANKED")
+        self.assertEqual(
+            by_creature_path["/Game/Creatures/B"]["estimatedYieldPerNode"], 5.0
+        )
 
     def test_resource_candidates_preserve_each_requested_resource_and_explicit_empty_status(self):
         candidates = build_resource_candidates(
@@ -579,6 +1054,7 @@ class HarvestRankingTests(unittest.TestCase):
                     "creatureObjectPath": "/Game/Magma",
                     "attackIndex": 0,
                     "rankingStatus": "RANKED",
+                    "estimatedYieldPerNode": 10.0,
                 },
                 {
                     "resource": "Wood_C",
@@ -636,6 +1112,7 @@ class HarvestRankingTests(unittest.TestCase):
                 "attackIndex": 7,
                 "attackName": "SameName",
                 "rankingStatus": "UNRANKED",
+                "estimatedYieldPerNode": None,
                 "missingFacts": ["X"],
                 "missingFactsByScope": {"target": ["X"]},
             }
@@ -649,6 +1126,35 @@ class HarvestRankingTests(unittest.TestCase):
             ),
             ("/Game/Nodes/A", "/Game/Creatures/A", 7),
         )
+
+    def test_cli_contract_uses_complete_node_yield_and_normalizes_legacy_alias(self):
+        methodology = build_methodology()
+        row = compact_row(
+            {
+                "resource": "Metal_C",
+                "component": "MetalNode",
+                "creature": "Doedicurus",
+                "attackName": "Tail",
+                "rankingStatus": "RANKED",
+                "estimatedYieldPerNode": 42.5,
+                "engineComparisonIndex": 9999.0,
+                "estimatedGrantCallsPerNode": 85,
+            }
+        )
+
+        self.assertEqual(SCHEMA, "ark-harvest-ranking/v2")
+        self.assertEqual(methodology["metric"], "estimatedYieldPerNode")
+        self.assertEqual(
+            methodology["scoreBasis"],
+            "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE",
+        )
+        self.assertEqual(
+            methodology["formulaVersion"],
+            "harvest-estimated-yield-per-node/v1-native-static-profile",
+        )
+        self.assertEqual(row["estimatedYieldPerNode"], 42.5)
+        self.assertEqual(row["engineComparisonIndex"], 42.5)
+        self.assertEqual(row["legacyDiagnostics"]["engineComparisonIndex"], 9999.0)
 
     def test_component_discovery_indexes_all_parents_before_filters_and_records_semantic_gaps(self):
         class FakeReader:
@@ -696,6 +1202,189 @@ class HarvestRankingTests(unittest.TestCase):
         self.assertEqual(manifest[0]["matched"], False)
         self.assertEqual(manifest[0]["discoveryStatus"], "SEMANTIC_GAP")
 
+    def test_component_discovery_can_include_content_wide_harvest_components(self):
+        class FakeReader:
+            @staticmethod
+            def effective_defaults(path, _class_index):
+                return [], [path]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir)
+            standard_root = (
+                content_root / "PrimalEarth" / "CoreBlueprints" / "HarvestComponents"
+            )
+            standard_root.mkdir(parents=True)
+            (standard_root / "BaseComponent.uasset").touch()
+            local_root = content_root / "Aberration" / "Environment" / "Local"
+            local_root.mkdir(parents=True)
+            (local_root / "LumaHarvestComponent.uasset").touch()
+            exact_node_component = local_root / "Palm_Pickup_Component.uasset"
+            exact_node_component.touch()
+            (local_root / "UnrelatedAsset.uasset").touch()
+
+            def fake_extract(_properties, *, component, object_path):
+                resource = (
+                    "PrimalItemResource_Wood_C"
+                    if component == "BaseComponent"
+                    else "PrimalItemResource_Gem_C"
+                )
+                return {
+                    "component": component,
+                    "objectPath": object_path,
+                    "resourceEntries": [{"resource": resource}],
+                    "damageEntries": [],
+                    "gaps": [],
+                    "rankingGaps": [],
+                }
+
+            with patch("rank_ark_harvest.extract_harvest_component", side_effect=fake_extract):
+                components, catalog, failures, manifest = discover_components(
+                    content_root=content_root,
+                    reader=FakeReader(),
+                    selected_names=set(),
+                    max_components=0,
+                    target_resources=None,
+                    discover_all_content=True,
+                    extra_component_paths=[exact_node_component],
+                )
+
+        self.assertEqual(
+            {component["component"] for component in components},
+            {"BaseComponent", "LumaHarvestComponent", "Palm_Pickup_Component"},
+        )
+        self.assertEqual(
+            set(catalog),
+            {"PrimalItemResource_Gem_C", "PrimalItemResource_Wood_C"},
+        )
+        self.assertEqual(failures, [])
+        self.assertTrue(all(record["matched"] for record in manifest))
+
+    def test_all_resources_mode_has_a_stable_bounded_output_slug(self):
+        args = parse_args(["--all-resources", "--discover-all-components"])
+
+        self.assertTrue(args.all_resources)
+        self.assertTrue(args.discover_all_components)
+        self.assertEqual(
+            resource_report_slug(
+                ["PrimalItemResource_Stone_C", "PrimalItemResource_Wood_C"],
+                selection_mode="ALL_DISCOVERED",
+            ),
+            "all_resources",
+        )
+
+    def test_class_index_uses_full_paths_and_does_not_pick_a_duplicate_short_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir) / "Content"
+            first = content_root / "Aberration" / "MushroomHarvestComponent.uasset"
+            second = content_root / "Genesis" / "MushroomHarvestComponent.uasset"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir(parents=True)
+            first.touch()
+            second.touch()
+
+            index = build_class_index([first, second], content_root=content_root)
+
+        self.assertNotIn("MushroomHarvestComponent_C", index)
+        self.assertEqual(
+            index[
+                "/Game/Aberration/MushroomHarvestComponent."
+                "MushroomHarvestComponent_C"
+            ],
+            first.resolve(),
+        )
+        self.assertEqual(
+            index[
+                "/Game/Genesis/MushroomHarvestComponent."
+                "MushroomHarvestComponent_C"
+            ],
+            second.resolve(),
+        )
+
+    def test_generated_class_parent_recovers_the_import_package_path(self):
+        reader = AssetReader()
+        child_path = Path("ChildHarvestComponent.uasset")
+        package = {
+            "exports": [
+                {
+                    "object_name": "ChildHarvestComponent_C",
+                    "class_name": "BlueprintGeneratedClass",
+                    "super_index": -1,
+                }
+            ],
+            "imports": [
+                {
+                    "object_name": "MushroomHarvestComponent_C",
+                    "outer_index": -2,
+                },
+                {
+                    "class_name": "Package",
+                    "object_name": "/Game/Aberration/CoreBlueprints/HarvestComponents/"
+                    "MushroomHarvestComponent",
+                    "outer_index": 0,
+                },
+            ],
+        }
+
+        with patch.object(reader, "package", return_value=package):
+            parent = reader.generated_class_parent(child_path)
+
+        self.assertEqual(
+            parent,
+            "/Game/Aberration/CoreBlueprints/HarvestComponents/"
+            "MushroomHarvestComponent.MushroomHarvestComponent_C",
+        )
+
+    @staticmethod
+    def _extinction_streetlight_component():
+        return {
+            "component": "CityPropHarvestComponent_Light",
+            "objectPath": (
+                "/Game/Extinction/Environment/City/HarvestComponents/"
+                "CityPropHarvestComponent_Light"
+            ),
+            "maxHarvestHealth": 150.0,
+            "harvestHealthGiveResourceInterval": 40.0,
+            "resourceEntries": [
+                {
+                    "resource": "PrimalItemResource_Electronics_C",
+                    "entryWeight": 0.2,
+                    "effectivenessQuantityMultiplier": 1.0,
+                    "overrideQuantityMin": 0.0,
+                    "overrideQuantityMax": 1.0,
+                    "weightOverrides": {},
+                    "minQuantityOverrides": {},
+                    "maxQuantityOverrides": {},
+                    "gaps": [],
+                },
+                {
+                    "resource": "PrimalItemResource_ElementDust_C",
+                    "entryWeight": 0.8,
+                    "effectivenessQuantityMultiplier": 1.0,
+                    "overrideQuantityMin": 1.0,
+                    "overrideQuantityMax": 2.0,
+                    "weightOverrides": {},
+                    "minQuantityOverrides": {},
+                    "maxQuantityOverrides": {},
+                    "gaps": [],
+                },
+            ],
+            "damageEntries": [
+                {
+                    "damageTypeParent": "DmgType_Melee_Dino_Herbivore_C",
+                    "damageMultiplier": 1.0,
+                    "harvestQuantityMultiplier": 1.0,
+                    "damageHarvestAdditionalEffectiveness": 0.0,
+                },
+                {
+                    "damageTypeParent": "DmgType_SuperMineStone_C",
+                    "damageMultiplier": 3.0,
+                    "harvestQuantityMultiplier": 7.0,
+                    "damageHarvestAdditionalEffectiveness": 0.0,
+                },
+            ],
+            "gaps": [],
+        }
+
     @staticmethod
     def _metal_component():
         return {
@@ -707,6 +1396,9 @@ class HarvestRankingTests(unittest.TestCase):
                 {
                     "resource": "PrimalItemResource_Stone_C",
                     "entryWeight": 1.0,
+                    "overrideQuantityMin": 1.0,
+                    "overrideQuantityMax": 1.0,
+                    "overrideQuantityRandomPower": 1.0,
                     "weightOverrides": {"DmgType_MineStone_C": 0.4},
                     "minQuantityOverrides": {"DmgType_MineStone_C": 1.0},
                     "maxQuantityOverrides": {"DmgType_MineStone_C": 1.0},
@@ -714,6 +1406,9 @@ class HarvestRankingTests(unittest.TestCase):
                 {
                     "resource": "PrimalItemResource_Metal_C",
                     "entryWeight": 0.0,
+                    "overrideQuantityMin": 1.0,
+                    "overrideQuantityMax": 2.0,
+                    "overrideQuantityRandomPower": 1.0,
                     "weightOverrides": {"DmgType_MineStone_C": 0.63},
                     "minQuantityOverrides": {"DmgType_MineStone_C": 1.0},
                     "maxQuantityOverrides": {"DmgType_MineStone_C": 2.0},

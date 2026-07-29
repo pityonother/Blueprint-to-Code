@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -23,6 +22,7 @@ from blueprint_translator.asset_ledger import (
     replace_deferred_assets,
     restore_ledger_snapshot,
 )
+from blueprint_translator.devkit_paths import devkit_content_roots
 from blueprint_translator.uasset_graphs import current_uasset_graph_payload_files
 from blueprint_translator.evidence_repository import open_asset_repository
 from blueprint_translator.evidence_values import downstream_default_metadata, default_value_is_usable
@@ -75,17 +75,6 @@ RELATED_PRIORITY_FORMULA_TABLES = (
     ("unresolved_formulas", "required_next_probe_json", "unresolved_formulas.required_next_probe"),
 )
 UE_OBJECT_PATH_PATTERN = re.compile(r"/Game/[A-Za-z0-9_./]+")
-DEFAULT_CONTENT_ROOTS = [
-    Path(r"C:\Program Files\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
-    Path(r"C:\Program Files\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
-    Path(r"D:\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
-    Path(r"D:\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
-    Path(r"E:\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
-    Path(r"E:\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
-    Path(r"G:\ARKDevkit\Projects\ShooterGame\Content"),
-    Path(r"G:\ARKDevKit\Projects\ShooterGame\Content"),
-]
-
 KEYWORD_GROUPS = {
     "feather_inheritance": [
         "Feather",
@@ -707,25 +696,9 @@ def short_path(path: Path, root: Path) -> str:
 
 
 def configured_content_roots() -> list[Path]:
-    roots: list[Path] = []
-    for env_name in ("ARK_DEVKIT_CONTENT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT"):
-        value = os.environ.get(env_name)
-        if value and value.strip():
-            roots.append(Path(value.strip().strip("\"'")).expanduser())
-    for env_name in ("ARK_DEVKIT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_ROOT"):
-        value = os.environ.get(env_name)
-        if value and value.strip():
-            roots.append(Path(value.strip().strip("\"'")).expanduser() / "Projects" / "ShooterGame" / "Content")
-    roots.extend(DEFAULT_CONTENT_ROOTS)
-
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for root in roots:
-        key = str(root).lower()
-        if key not in seen:
-            unique.append(root)
-            seen.add(key)
-    return unique
+    return devkit_content_roots(
+        config_file=SCRIPT_ROOT.parent / "devkit_content_root.txt"
+    )
 
 
 def default_content_root() -> Path | None:

@@ -22,16 +22,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 LOG_ROOT = PROJECT_ROOT / "logs" / "diagnostics"
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
 
-DEFAULT_CONTENT_ROOTS = (
-    Path(r"C:\Program Files\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
-    Path(r"C:\Program Files\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
-    Path(r"D:\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
-    Path(r"D:\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
-    Path(r"E:\Epic Games\ARKDevkit\Projects\ShooterGame\Content"),
-    Path(r"E:\Epic Games\ARKDevKit\Projects\ShooterGame\Content"),
-    Path(r"G:\ARKDevkit\Projects\ShooterGame\Content"),
-    Path(r"G:\ARKDevKit\Projects\ShooterGame\Content"),
+from blueprint_translator.devkit_paths import (  # noqa: E402
+    DEFAULT_CONTENT_ROOTS,
+    devkit_content_root_candidates,
 )
 
 STATUS_LABELS = {
@@ -108,19 +104,12 @@ def candidate_content_roots(cli_roots: list[str]) -> list[tuple[str, Path]]:
         path = clean_path(value)
         if path:
             candidates.append(("命令行 --content-root", path))
-    for env_name in ("ARK_DEVKIT_CONTENT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT"):
-        path = clean_path(os.environ.get(env_name))
-        if path:
-            candidates.append((f"环境变量 {env_name}", path))
-    for env_name in ("ARK_DEVKIT_ROOT", "BLUEPRINT_TO_CODE_DEVKIT_ROOT"):
-        path = clean_path(os.environ.get(env_name))
-        if path:
-            candidates.append((f"环境变量 {env_name}", path / "Projects" / "ShooterGame" / "Content"))
-    config_value = read_first_config_line(DEVKIT_CONTENT_ROOT_FILE)
-    config_path = clean_path(config_value)
-    if config_path:
-        candidates.append(("devkit_content_root.txt", config_path))
-    candidates.extend(("默认猜测路径", path) for path in DEFAULT_CONTENT_ROOTS)
+    candidates.extend(
+        devkit_content_root_candidates(
+            config_file=DEVKIT_CONTENT_ROOT_FILE,
+            default_roots=DEFAULT_CONTENT_ROOTS,
+        )
+    )
     return dedupe_paths(candidates)
 
 
@@ -277,6 +266,8 @@ def check_frontend(checks: list[dict[str, Any]]) -> None:
 
 
 def check_devkit_content(checks: list[dict[str, Any]], cli_roots: list[str]) -> tuple[str, Path] | None:
+    candidates = candidate_content_roots(cli_roots)
+    existing = first_existing_content_root(candidates)
     for index, value in enumerate(cli_roots, start=1):
         cli_path = clean_path(value)
         if cli_path:
@@ -317,17 +308,24 @@ def check_devkit_content(checks: list[dict[str, Any]], cli_roots: list[str]) -> 
             "" if configured.is_dir() else "打开 devkit_content_root.txt，把第一行改成真实的 ShooterGame\\Content 目录。",
         )
     else:
+        auto_discovered = existing is not None and existing[0] == "Epic Games Launcher manifest"
         add_check(
             checks,
             "DevKit Content",
             "devkit_content_root.txt",
-            "warn",
-            "未配置 devkit_content_root.txt。",
-            "如果 DevKit 不在默认位置，把 devkit_content_root.example.txt 复制为 devkit_content_root.txt，并写入 Content 目录。",
+            "info" if auto_discovered else "warn",
+            (
+                "未配置 devkit_content_root.txt；已通过 Epic Launcher 安装清单自动发现。"
+                if auto_discovered
+                else "未配置 devkit_content_root.txt。"
+            ),
+            (
+                ""
+                if auto_discovered
+                else "工具会先读取 Epic Launcher 安装清单；如果自动发现失败，再把 devkit_content_root.example.txt 复制为 devkit_content_root.txt，并写入 Content 目录。"
+            ),
         )
 
-    candidates = candidate_content_roots(cli_roots)
-    existing = first_existing_content_root(candidates)
     if not existing:
         attempted = "\n".join(f"- {source}: {path}" for source, path in candidates[:12])
         add_check(
