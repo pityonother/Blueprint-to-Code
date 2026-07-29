@@ -21,12 +21,15 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
     CurrentPointerBaseline,
+    CurrentSnapshotBaseline,
     PointerCASConflictError,
     PointerCASDestinationError,
     PointerCASUncertainStateError,
     PointerCASWriteError,
+    capture_current_snapshot_baseline,
     compare_and_swap_current_pointer,
     read_current_pointer_baseline,
+    validate_current_snapshot_baseline,
 )
 from blueprint_translator.kb_vnext import pointer_cas as pointer_module  # noqa: E402
 from blueprint_translator.kb_vnext import snapshot as snapshot_module  # noqa: E402
@@ -89,6 +92,239 @@ def _process_cas_writer(
 
 
 class CurrentPointerCASTests(unittest.TestCase):
+    def test_missing_reparse_pointer_is_not_treated_as_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_detector = (
+                pointer_module._is_link_junction_or_reparse
+            )
+
+            with patch.object(
+                pointer_module,
+                "_is_link_junction_or_reparse",
+                side_effect=lambda path: (
+                    path.name == "current.json"
+                    or real_detector(path)
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "not a regular file",
+                ):
+                    read_current_pointer_baseline(root)
+
+    def test_capture_current_snapshot_freezes_raw_pointer_and_manifest(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _snapshot(root, "build-a")
+            pointer_bytes = _pointer_bytes("build-a", indent=4)
+            (root / "current.json").write_bytes(pointer_bytes)
+            manifest_path = (
+                root / "snapshots" / "build-a" / "manifest.json"
+            )
+            manifest_bytes = manifest_path.read_bytes()
+
+            baseline = capture_current_snapshot_baseline(root)
+
+            self.assertIsInstance(baseline, CurrentSnapshotBaseline)
+            self.assertEqual(baseline.pointer.build_id, "build-a")
+            self.assertEqual(
+                baseline.pointer.pointer_sha256,
+                hashlib.sha256(pointer_bytes).hexdigest(),
+            )
+            self.assertEqual(
+                baseline.snapshot_dir,
+                (root / "snapshots" / "build-a").resolve(),
+            )
+            self.assertEqual(baseline.manifest_bytes, manifest_bytes)
+            self.assertEqual(
+                baseline.manifest_sha256,
+                hashlib.sha256(manifest_bytes).hexdigest(),
+            )
+            self.assertFalse(baseline.tree_validated)
+            receipt = validate_current_snapshot_baseline(
+                snapshot_root=root,
+                baseline=baseline,
+            )
+            self.assertEqual(receipt["status"], "VERIFIED_NOOP")
+            self.assertFalse(receipt["pointerUpdated"])
+
+    def test_capture_rejects_pointer_race_while_manifest_is_read(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _snapshot(root, "build-a")
+            _snapshot(root, "build-b")
+            (root / "current.json").write_bytes(
+                _pointer_bytes("build-a")
+            )
+            real_reader = (
+                pointer_module._read_validated_destination_snapshot
+            )
+
+            def switch_pointer(
+                snapshot_root: Path,
+                target_build_id: str,
+                *,
+                expected_manifest_sha256: str | None = None,
+            ) -> tuple[Path, bytes, str]:
+                frozen = real_reader(
+                    snapshot_root,
+                    target_build_id,
+                    expected_manifest_sha256=(
+                        expected_manifest_sha256
+                    ),
+                )
+                (root / "current.json").write_bytes(
+                    _pointer_bytes("build-b")
+                )
+                return frozen
+
+            with patch.object(
+                pointer_module,
+                "_read_validated_destination_snapshot",
+                side_effect=switch_pointer,
+            ):
+                with self.assertRaises(PointerCASConflictError):
+                    capture_current_snapshot_baseline(root)
+
+    def test_capture_rejects_manifest_race_under_shared_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _snapshot(root, "build-a")
+            (root / "current.json").write_bytes(
+                _pointer_bytes("build-a")
+            )
+            manifest_path = (
+                root / "snapshots" / "build-a" / "manifest.json"
+            )
+            real_reader = (
+                pointer_module._read_validated_destination_snapshot
+            )
+            reads = 0
+
+            def replace_manifest(
+                snapshot_root: Path,
+                target_build_id: str,
+                *,
+                expected_manifest_sha256: str | None = None,
+            ) -> tuple[Path, bytes, str]:
+                nonlocal reads
+                frozen = real_reader(
+                    snapshot_root,
+                    target_build_id,
+                    expected_manifest_sha256=(
+                        expected_manifest_sha256
+                    ),
+                )
+                reads += 1
+                if reads == 1:
+                    manifest_path.write_bytes(
+                        manifest_path.read_bytes() + b" "
+                    )
+                return frozen
+
+            with patch.object(
+                pointer_module,
+                "_read_validated_destination_snapshot",
+                side_effect=replace_manifest,
+            ):
+                with self.assertRaises(PointerCASDestinationError):
+                    capture_current_snapshot_baseline(root)
+
+    def test_capture_rejects_reparse_current_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _snapshot(root, "build-a")
+            (root / "current.json").write_bytes(
+                _pointer_bytes("build-a")
+            )
+            real_detector = (
+                pointer_module._is_link_junction_or_reparse
+            )
+
+            with patch.object(
+                pointer_module,
+                "_is_link_junction_or_reparse",
+                side_effect=lambda path: (
+                    path.name == "current.json"
+                    or real_detector(path)
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "not a regular file",
+                ):
+                    capture_current_snapshot_baseline(root)
+
+    def test_snapshot_baseline_detects_whitespace_and_manifest_changes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _snapshot(root, "build-a")
+            (root / "current.json").write_bytes(
+                _pointer_bytes("build-a")
+            )
+            baseline = capture_current_snapshot_baseline(root)
+
+            (root / "current.json").write_bytes(
+                _pointer_bytes("build-a", indent=2)
+            )
+            with self.assertRaises(PointerCASConflictError):
+                validate_current_snapshot_baseline(
+                    snapshot_root=root,
+                    baseline=baseline,
+                )
+
+            (root / "current.json").write_bytes(
+                _pointer_bytes("build-a")
+            )
+            manifest_path = (
+                root / "snapshots" / "build-a" / "manifest.json"
+            )
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+            manifest["unexpected"] = True
+            manifest_path.write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            with self.assertRaises(PointerCASDestinationError):
+                validate_current_snapshot_baseline(
+                    snapshot_root=root,
+                    baseline=baseline,
+                )
+
+    def test_bounded_read_rejects_path_replacement_before_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pointer_path = root / "current.json"
+            pointer_path.write_bytes(_pointer_bytes("build-a"))
+            replacement = root / "replacement.json"
+            replacement.write_bytes(_pointer_bytes("build-a"))
+            real_open = Path.open
+            replaced = False
+
+            def replace_before_open(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ):
+                nonlocal replaced
+                if path == pointer_path and not replaced:
+                    replacement.replace(pointer_path)
+                    replaced = True
+                return real_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", replace_before_open):
+                with self.assertRaisesRegex(ValueError, "changed before open"):
+                    read_current_pointer_baseline(root)
+
     def test_expected_baseline_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

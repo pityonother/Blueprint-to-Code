@@ -31,7 +31,11 @@ from .rebuild_worker import (
     SUCCEEDED,
     SUPPORTED_REBUILD_KINDS,
 )
-from .source_manifest import SourceDiff, SourceRevision
+from .source_manifest import (
+    SourceDiff,
+    SourceRevision,
+    canonical_source_diff_bytes,
+)
 
 
 PRODUCTION = "PRODUCTION"
@@ -1054,7 +1058,7 @@ def build_add_only_blueprint_delta(
                     "DELTA_DATABASE_SNAPSHOT_DRIFT",
                     "base or staged durable state changed during validation",
                 )
-            source_json = _canonical(source_diff.payload())
+            source_json = canonical_source_diff_bytes(source_diff)
             return AddOnlyBlueprintDelta(
                 trust_context=context,
                 source_diff_sha256=hashlib.sha256(source_json).hexdigest(),
