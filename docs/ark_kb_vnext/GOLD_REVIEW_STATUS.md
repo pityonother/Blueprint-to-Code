@@ -83,7 +83,15 @@ productionGoldEligible=false
 productionGoldWritten=false
 ```
 
-Gold freeze and apply are outside this validation slice.
+The Stage 13C proposal-only freeze boundary is documented in
+`GOLD_FREEZE_PROPOSAL.md`. It can consume only a complete, production-eligible
+signed-v2 query review set and exact raw Gold bytes. No such real review set is
+present, so proposal readiness remains blocked. `--apply` remains
+`BLOCKED_BY_SIGNED_FREEZE_APPROVAL` and cannot write tracked Gold.
+Proposal generation preserves every existing `reviewStatus`; it does not
+convert signed-v2 provenance into legacy `HUMAN_REVIEWED` or `EMPIRICAL`.
+Applying any proposal additionally remains blocked by
+`SIGNED_V2_GOLD_PROVENANCE_CONSUMER_REQUIRED`.
 
 ## Cutover
 
