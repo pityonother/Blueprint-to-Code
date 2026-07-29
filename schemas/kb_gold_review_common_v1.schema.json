@@ -35,19 +35,62 @@
       "required": [
         "ownerUri",
         "targetUri",
-        "registrationType",
+        "declaredRegistrationType",
         "sourceProperty",
+        "propertyType",
         "evidenceUri",
-        "sourceKind"
+        "evidenceFreshness",
+        "sourceKind",
+        "candidateCohort"
       ],
       "properties": {
         "ownerUri": {"type": "string", "minLength": 1},
         "targetUri": {"type": "string", "minLength": 1},
-        "registrationType": {"type": "string", "minLength": 1},
+        "declaredRegistrationType": {
+          "type": ["string", "null"]
+        },
         "sourceProperty": {"type": "string", "minLength": 1},
+        "propertyType": {"type": "string", "minLength": 1},
         "evidenceUri": {"type": "string", "minLength": 1},
-        "sourceKind": {"type": "string", "minLength": 1}
-      }
+        "evidenceFreshness": {
+          "enum": ["FRESH", "STALE", "NOT_AVAILABLE"]
+        },
+        "sourceKind": {"type": "string", "minLength": 1},
+        "candidateCohort": {
+          "enum": ["TYPED_ANCHOR", "RAW_CLASS_DEFAULT_RELATION"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "candidateCohort": {"const": "TYPED_ANCHOR"}
+            }
+          },
+          "then": {
+            "properties": {
+              "declaredRegistrationType": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "candidateCohort": {
+                "const": "RAW_CLASS_DEFAULT_RELATION"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "declaredRegistrationType": {"const": null}
+            }
+          }
+        }
+      ]
     },
     "registrationSourceCandidate": {
       "type": "object",
@@ -67,6 +110,7 @@
         "generatedFromCore",
         "generatedFromClassifier",
         "sourceIdentity",
+        "sourceGaps",
         "candidates"
       ],
       "properties": {
@@ -85,7 +129,12 @@
             "sourceInventoryId",
             "sourceFingerprint",
             "sourceRowSetSha256",
-            "sourceRowCount"
+            "sourceRowCount",
+            "typedAnchorCount",
+            "rawRelationCount",
+            "deduplicatedCandidateCount",
+            "captureStoreCount",
+            "captureStoreSetSha256"
           ],
           "properties": {
             "databaseSchema": {
@@ -98,7 +147,23 @@
             "sourceInventoryId": {"type": "string", "minLength": 1},
             "sourceFingerprint": {"$ref": "#/$defs/sha256"},
             "sourceRowSetSha256": {"$ref": "#/$defs/sha256"},
-            "sourceRowCount": {"type": "integer", "minimum": 1}
+            "sourceRowCount": {"type": "integer", "minimum": 1},
+            "typedAnchorCount": {"type": "integer", "minimum": 0},
+            "rawRelationCount": {"type": "integer", "minimum": 0},
+            "deduplicatedCandidateCount": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "captureStoreCount": {"type": "integer", "minimum": 0},
+            "captureStoreSetSha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "sourceGaps": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^SOURCE_TYPED_CANDIDATE_SHORTFALL:[0-9]+/120$"
           }
         },
         "candidates": {

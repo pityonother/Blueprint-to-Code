@@ -31,21 +31,24 @@ The checked-in query, registration, and role production-gold counts remain
 - benchmark rejection of label-only `EMPIRICAL` cases;
 - ignored local review workspace.
 
-The actual independent Discovery source exposed 27 unique typed registration
-rows, below the requested 120-candidate preparation target:
+The current primary registration pack combines 27 source-declared typed anchors
+with 112 fresh direct raw class-default relations from 234 Blueprint Evidence
+Stores. One raw relation overlaps a typed anchor, leaving 138 unique
+owner/target/property candidates:
 
-- pack: `registration-87110e3aae010067`;
+- pack: `registration-b20a2660388c32d5`;
 - pack SHA-256:
-  `8f070fd9fd34084842fb92f9475b4a63b8d481daa8b054bb84f75ffa9a7cbc2e`;
-- candidates: 27;
-- source shortfall: `SOURCE_CANDIDATE_SHORTFALL:27/120`;
+  `73540bc8636ff4e9a97354572cd1caae390e80c3c2d53756f71d5fbfbccb202f`;
+- candidates: 138;
+- source cohorts in pack: 27 typed anchors and 111 raw relations;
+- source status: `SOURCE_TYPED_CANDIDATE_SHORTFALL:27/120`;
 - validation: `VALID_REVIEW_PACK`;
 - import status: `BLOCKED_BY_INDEPENDENT_REVIEW`;
 - production gold written: false.
 
-The shortfall is reported rather than filled with generic references,
-classifier fixtures, repeated rows, or inferred labels. The role candidate
-exporter produced the requested primary review pool:
+Raw candidates have `declaredRegistrationType=null`; they do not borrow current
+Core/classifier labels and are not counted as gold. The role candidate exporter
+produced the requested primary review pool:
 
 - pack: `role-c43e2571a8d0d505`;
 - pack SHA-256:

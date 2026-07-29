@@ -46,6 +46,7 @@ def _parser() -> argparse.ArgumentParser:
         / "kb_query_gold_set.v1.json",
     )
     parser.add_argument("--discovery-db", type=Path)
+    parser.add_argument("--captures-root", type=Path)
     parser.add_argument("--source-manifest", type=Path)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output", type=Path)
@@ -96,7 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     source_manifest: dict[str, object] | None = None
     try:
         if args.kind == "query":
-            if args.discovery_db is not None or args.source_manifest is not None:
+            if (
+                args.discovery_db is not None
+                or args.source_manifest is not None
+                or args.captures_root is not None
+            ):
                 raise GoldReviewError(
                     "query export does not accept a Discovery source"
                 )
@@ -120,16 +125,29 @@ def main(argv: list[str] | None = None) -> int:
                 if args.kind == "registration":
                     source_manifest = (
                         registration_review_source_from_sqlite(
-                            _absolute(args.discovery_db)
+                            _absolute(args.discovery_db),
+                            captures_root=(
+                                _absolute(args.captures_root)
+                                if args.captures_root is not None
+                                else None
+                            ),
                         )
                     )
                 else:
+                    if args.captures_root is not None:
+                        raise GoldReviewError(
+                            "role export does not accept --captures-root"
+                        )
                     source_manifest = role_review_source_from_sqlite(
                         _absolute(args.discovery_db),
                         seed=args.seed,
                         limit=args.limit or 360,
                     )
             else:
+                if args.captures_root is not None:
+                    raise GoldReviewError(
+                        "--captures-root requires --discovery-db"
+                    )
                 raw_source = _read_json(
                     _absolute(args.source_manifest)
                 )

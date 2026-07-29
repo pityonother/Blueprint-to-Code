@@ -94,10 +94,13 @@ _REGISTRATION_PAYLOAD_FIELDS = frozenset(
     {
         "ownerUri",
         "targetUri",
-        "registrationType",
+        "declaredRegistrationType",
         "sourceProperty",
+        "propertyType",
         "evidenceUri",
+        "evidenceFreshness",
         "sourceKind",
+        "candidateCohort",
     }
 )
 _REGISTRATION_SOURCE_FIELDS = frozenset(
@@ -107,6 +110,7 @@ _REGISTRATION_SOURCE_FIELDS = frozenset(
         "generatedFromCore",
         "generatedFromClassifier",
         "sourceIdentity",
+        "sourceGaps",
         "candidates",
     }
 )
@@ -118,6 +122,11 @@ _REGISTRATION_SOURCE_IDENTITY_FIELDS = frozenset(
         "sourceFingerprint",
         "sourceRowSetSha256",
         "sourceRowCount",
+        "typedAnchorCount",
+        "rawRelationCount",
+        "deduplicatedCandidateCount",
+        "captureStoreCount",
+        "captureStoreSetSha256",
     }
 )
 _ROLE_PAYLOAD_FIELDS = frozenset(
@@ -188,6 +197,12 @@ _FORBIDDEN_SOURCE_MARKERS = (
     "classifier",
     "kb_vnext_core",
     "semantic_core",
+)
+_REGISTRATION_COHORTS = frozenset(
+    {"TYPED_ANCHOR", "RAW_CLASS_DEFAULT_RELATION"}
+)
+_RAW_OBJECT_PATH = re.compile(
+    r"^/(?:Game|Engine)/[^\r\n]+\.[^/:\r\n]+(?:_C)?$"
 )
 
 
@@ -311,10 +326,34 @@ def _validate_candidate_payload(
         raise GoldReviewError(
             "registration payload fields do not match v1 contract"
         )
-    for field in sorted(_REGISTRATION_PAYLOAD_FIELDS):
+    for field in sorted(
+        _REGISTRATION_PAYLOAD_FIELDS - {"declaredRegistrationType"}
+    ):
         _required_text(
             payload.get(field),
             field=f"{path}.{field}",
+        )
+    cohort = str(payload.get("candidateCohort") or "").upper()
+    if cohort not in _REGISTRATION_COHORTS:
+        raise GoldReviewError(
+            "unsupported registration candidate cohort"
+        )
+    declared_type = payload.get("declaredRegistrationType")
+    if cohort == "TYPED_ANCHOR":
+        _required_text(
+            declared_type,
+            field=f"{path}.declaredRegistrationType",
+        )
+    elif declared_type is not None:
+        raise GoldReviewError(
+            "raw registration relation cannot declare a semantic type"
+        )
+    if (
+        str(payload.get("evidenceFreshness") or "").upper()
+        not in _EVIDENCE_SOURCE_FRESHNESS
+    ):
+        raise GoldReviewError(
+            "unsupported registration source evidence freshness"
         )
     source_kind = _normalized_key(payload.get("sourceKind"))
     if any(
@@ -490,8 +529,10 @@ def _discovery_metadata(
 
 def registration_review_source_from_sqlite(
     database_path: Path,
+    *,
+    captures_root: Path | None = None,
 ) -> dict[str, object]:
-    """Extract blind typed registrations from a read-only Discovery DB."""
+    """Extract typed anchors and optional fresh raw Evidence relations."""
 
     connection = _sqlite_read_only(database_path)
     try:
@@ -515,11 +556,25 @@ def registration_review_source_from_sqlite(
                     source_property,
                     source_evidence_id,
                     confidence,
-                    source_kind
-                FROM system_registrations
+                    source_kind,
+                    COALESCE(a.evidence_freshness, 'NOT_AVAILABLE')
+                        AS evidence_freshness
+                FROM system_registrations AS r
+                LEFT JOIN assets AS a
+                  ON a.object_path = r.owner_object_path
                 ORDER BY registration_id
                 """
             ).fetchall()
+            freshness_by_owner = {
+                str(row["object_path"]): str(row["evidence_freshness"])
+                for row in connection.execute(
+                    """
+                    SELECT object_path, evidence_freshness
+                    FROM assets
+                    WHERE object_path <> ''
+                    """
+                )
+            }
         except sqlite3.Error as error:
             raise GoldReviewError(
                 "Discovery typed-registration source is unavailable"
@@ -537,8 +592,11 @@ def registration_review_source_from_sqlite(
             "Discovery database has no typed registrations"
         )
 
-    raw_rows: list[dict[str, object]] = []
-    candidates: list[dict[str, object]] = []
+    typed_rows: list[dict[str, object]] = []
+    candidates_by_relation: dict[
+        tuple[str, str, str],
+        dict[str, object],
+    ] = {}
     for row in rows:
         raw_row = {
             key: row[key]
@@ -551,43 +609,241 @@ def registration_review_source_from_sqlite(
                 "source_evidence_id",
                 "confidence",
                 "source_kind",
+                "evidence_freshness",
             )
         }
-        raw_rows.append(raw_row)
-        candidates.append(
-            {
-                "caseId": _required_text(
-                    row["registration_id"],
-                    field="registration_id",
+        typed_rows.append(raw_row)
+        owner_uri = _required_text(
+            row["owner_object_path"],
+            field="owner_object_path",
+        )
+        target_uri = _required_text(
+            row["target_object_path"],
+            field="target_object_path",
+        )
+        source_property = _required_text(
+            row["source_property"],
+            field="source_property",
+        )
+        freshness = str(row["evidence_freshness"] or "").upper()
+        if freshness == "SOURCE_NOT_AVAILABLE":
+            freshness = "NOT_AVAILABLE"
+        relation_key = (owner_uri, target_uri, source_property)
+        if relation_key in candidates_by_relation:
+            raise GoldReviewError(
+                "duplicate typed registration relationship"
+            )
+        candidates_by_relation[relation_key] = {
+            "caseId": _required_text(
+                row["registration_id"],
+                field="registration_id",
+            ),
+            "payload": {
+                "ownerUri": owner_uri,
+                "targetUri": target_uri,
+                "declaredRegistrationType": _required_text(
+                    row["registration_type"],
+                    field="registration_type",
+                ),
+                "sourceProperty": source_property,
+                "propertyType": "UNKNOWN",
+                "evidenceUri": _required_text(
+                    row["source_evidence_id"],
+                    field="source_evidence_id",
+                ),
+                "evidenceFreshness": freshness,
+                "sourceKind": _required_text(
+                    row["source_kind"],
+                    field="source_kind",
+                ),
+                "candidateCohort": "TYPED_ANCHOR",
+            },
+        }
+
+    raw_relation_rows: list[dict[str, object]] = []
+    capture_store_identities: list[dict[str, object]] = []
+    if captures_root is not None:
+        try:
+            resolved_captures = captures_root.resolve(strict=True)
+        except OSError as error:
+            raise GoldReviewError(
+                f"cannot read capture Evidence root: {captures_root}"
+            ) from error
+        if not resolved_captures.is_dir():
+            raise GoldReviewError(
+                "capture Evidence root must be a directory"
+            )
+        evidence_databases = sorted(
+            resolved_captures.glob("*/evidence/evidence.sqlite"),
+            key=lambda path: path.as_posix(),
+        )
+        if not evidence_databases:
+            raise GoldReviewError(
+                "capture Evidence root has no evidence.sqlite stores"
+            )
+        raw_by_relation: dict[
+            tuple[str, str, str],
+            dict[str, object],
+        ] = {}
+        for evidence_database in evidence_databases:
+            evidence_connection = _sqlite_read_only(evidence_database)
+            try:
+                try:
+                    revisions = evidence_connection.execute(
+                        """
+                        SELECT
+                            revision_id,
+                            object_path,
+                            source_fingerprint,
+                            schema_version,
+                            generated_at
+                        FROM asset_revisions
+                        ORDER BY revision_id
+                        """
+                    ).fetchall()
+                    defaults = evidence_connection.execute(
+                        """
+                        SELECT
+                            ar.object_path,
+                            ar.source_fingerprint,
+                            ar.generated_at,
+                            ar.revision_id,
+                            cd.default_ref,
+                            cd.name,
+                            cd.type_name,
+                            cd.value_json,
+                            cd.confidence,
+                            cd.source
+                        FROM asset_revisions AS ar
+                        JOIN class_defaults AS cd
+                          ON cd.revision_id = ar.revision_id
+                        ORDER BY
+                            ar.object_path,
+                            cd.default_ref
+                        """
+                    ).fetchall()
+                except sqlite3.Error as error:
+                    raise GoldReviewError(
+                        "capture Evidence store schema is unavailable"
+                    ) from error
+            finally:
+                evidence_connection.close()
+            capture_store_identities.append(
+                {
+                    "relativeStore": evidence_database.relative_to(
+                        resolved_captures
+                    ).as_posix(),
+                    "revisions": [
+                        {
+                            key: revision[key]
+                            for key in (
+                                "revision_id",
+                                "object_path",
+                                "source_fingerprint",
+                                "schema_version",
+                                "generated_at",
+                            )
+                        }
+                        for revision in revisions
+                    ],
+                }
+            )
+            for default in defaults:
+                owner_uri = str(default["object_path"] or "").strip()
+                if freshness_by_owner.get(owner_uri) != "FRESH":
+                    continue
+                if str(default["confidence"] or "").casefold() != "high":
+                    continue
+                property_type = str(default["type_name"] or "").strip()
+                if not any(
+                    marker in property_type.casefold()
+                    for marker in ("object", "class", "interface")
+                ):
+                    continue
+                try:
+                    decoded_value = json.loads(default["value_json"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if (
+                    not isinstance(decoded_value, str)
+                    or _RAW_OBJECT_PATH.fullmatch(decoded_value) is None
+                    or ":EventGraph" in decoded_value
+                ):
+                    continue
+                source_property = _required_text(
+                    default["name"],
+                    field="raw registration source property",
+                )
+                relation_key = (
+                    owner_uri,
+                    decoded_value,
+                    source_property,
+                )
+                raw_row = {
+                    key: default[key]
+                    for key in (
+                        "object_path",
+                        "source_fingerprint",
+                        "generated_at",
+                        "revision_id",
+                        "default_ref",
+                        "name",
+                        "type_name",
+                        "value_json",
+                        "confidence",
+                        "source",
+                    )
+                }
+                observed = raw_by_relation.get(relation_key)
+                if observed is None or str(
+                    raw_row["default_ref"]
+                ) < str(observed["default_ref"]):
+                    raw_by_relation[relation_key] = raw_row
+
+        for relation_key in sorted(raw_by_relation):
+            raw_row = raw_by_relation[relation_key]
+            raw_relation_rows.append(raw_row)
+            if relation_key in candidates_by_relation:
+                continue
+            owner_uri, target_uri, source_property = relation_key
+            identity = "\0".join(relation_key)
+            candidates_by_relation[relation_key] = {
+                "caseId": (
+                    "registration-raw://"
+                    + hashlib.sha256(
+                        identity.encode("utf-8")
+                    ).hexdigest()[:24]
                 ),
                 "payload": {
-                    "ownerUri": _required_text(
-                        row["owner_object_path"],
-                        field="owner_object_path",
-                    ),
-                    "targetUri": _required_text(
-                        row["target_object_path"],
-                        field="target_object_path",
-                    ),
-                    "registrationType": _required_text(
-                        row["registration_type"],
-                        field="registration_type",
-                    ),
-                    "sourceProperty": _required_text(
-                        row["source_property"],
-                        field="source_property",
+                    "ownerUri": owner_uri,
+                    "targetUri": target_uri,
+                    "declaredRegistrationType": None,
+                    "sourceProperty": source_property,
+                    "propertyType": _required_text(
+                        raw_row["type_name"],
+                        field="raw registration property type",
                     ),
                     "evidenceUri": _required_text(
-                        row["source_evidence_id"],
-                        field="source_evidence_id",
+                        raw_row["default_ref"],
+                        field="raw registration evidence URI",
                     ),
-                    "sourceKind": _required_text(
-                        row["source_kind"],
-                        field="source_kind",
-                    ),
+                    "evidenceFreshness": "FRESH",
+                    "sourceKind": "blueprint_evidence_store",
+                    "candidateCohort": "RAW_CLASS_DEFAULT_RELATION",
                 },
             }
-        )
+
+    candidates = [
+        candidates_by_relation[key]
+        for key in sorted(candidates_by_relation)
+    ]
+    capture_store_set_sha256 = _sha256_json(
+        capture_store_identities
+    )
+    source_rows = {
+        "typedAnchors": typed_rows,
+        "rawClassDefaultRelations": raw_relation_rows,
+    }
 
     source_manifest: dict[str, object] = {
         "schema": REGISTRATION_REVIEW_SOURCE_SCHEMA,
@@ -599,9 +855,22 @@ def registration_review_source_from_sqlite(
             "generatedAt": metadata["generated_at_utc"],
             "sourceInventoryId": str(inventory["source_id"]),
             "sourceFingerprint": str(inventory["source_fingerprint"]),
-            "sourceRowSetSha256": _sha256_json(raw_rows),
-            "sourceRowCount": len(raw_rows),
+            "sourceRowSetSha256": _sha256_json(source_rows),
+            "sourceRowCount": len(candidates),
+            "typedAnchorCount": len(typed_rows),
+            "rawRelationCount": len(raw_relation_rows),
+            "deduplicatedCandidateCount": len(candidates),
+            "captureStoreCount": len(capture_store_identities),
+            "captureStoreSetSha256": capture_store_set_sha256,
         },
+        "sourceGaps": (
+            [
+                "SOURCE_TYPED_CANDIDATE_SHORTFALL:"
+                f"{len(typed_rows)}/120"
+            ]
+            if len(typed_rows) < 120
+            else []
+        ),
         "candidates": candidates,
     }
     return validate_registration_review_source(source_manifest)
@@ -647,24 +916,59 @@ def validate_registration_review_source(
         identity.get("sourceInventoryId"),
         field="registration source inventory ID",
     )
-    for field in ("sourceFingerprint", "sourceRowSetSha256"):
+    for field in (
+        "sourceFingerprint",
+        "sourceRowSetSha256",
+        "captureStoreSetSha256",
+    ):
         if not _is_sha256(identity.get(field)):
             raise GoldReviewError(
                 f"registration source {field} must be SHA-256"
             )
     row_count = identity.get("sourceRowCount")
+    typed_count = identity.get("typedAnchorCount")
+    raw_count = identity.get("rawRelationCount")
+    deduplicated_count = identity.get("deduplicatedCandidateCount")
+    capture_store_count = identity.get("captureStoreCount")
     candidates = source_manifest.get("candidates")
     if (
         isinstance(row_count, bool)
         or not isinstance(row_count, int)
         or row_count < 1
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in (
+                typed_count,
+                raw_count,
+                capture_store_count,
+            )
+        )
+        or isinstance(deduplicated_count, bool)
+        or not isinstance(deduplicated_count, int)
+        or deduplicated_count < 1
         or not isinstance(candidates, list)
         or len(candidates) != row_count
+        or row_count != deduplicated_count
+        or typed_count + raw_count < deduplicated_count
     ):
         raise GoldReviewError(
             "registration source row count does not match candidates"
         )
+    expected_source_gaps = (
+        [f"SOURCE_TYPED_CANDIDATE_SHORTFALL:{typed_count}/120"]
+        if typed_count < 120
+        else []
+    )
+    if source_manifest.get("sourceGaps") != expected_source_gaps:
+        raise GoldReviewError(
+            "registration source gaps do not match typed anchor count"
+        )
     case_ids: set[str] = set()
+    relation_keys: set[tuple[str, str, str]] = set()
+    observed_typed = 0
+    observed_raw = 0
     for index, candidate in enumerate(candidates):
         if (
             not isinstance(candidate, Mapping)
@@ -687,7 +991,30 @@ def validate_registration_review_source(
             candidate["payload"],
             path=f"registrationSource.candidates[{index}].payload",
         )
+        payload = candidate["payload"]
+        relation_key = (
+            str(payload["ownerUri"]),
+            str(payload["targetUri"]),
+            str(payload["sourceProperty"]),
+        )
+        if relation_key in relation_keys:
+            raise GoldReviewError(
+                "duplicate registration relationship candidate"
+            )
+        if payload["candidateCohort"] == "TYPED_ANCHOR":
+            observed_typed += 1
+        else:
+            observed_raw += 1
         case_ids.add(case_id)
+        relation_keys.add(relation_key)
+    if (
+        observed_typed != typed_count
+        or observed_raw != deduplicated_count - typed_count
+        or raw_count < observed_raw
+    ):
+        raise GoldReviewError(
+            "registration cohort counts do not match candidates"
+        )
     return copy.deepcopy(dict(source_manifest))
 
 
@@ -701,7 +1028,7 @@ def build_registration_review_pack(
     tool_version: str,
     limit: int = 120,
 ) -> dict[str, object]:
-    """Build a blind pack from independent typed registration rows."""
+    """Build a blind pack from independent typed and raw Evidence rows."""
 
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise GoldReviewError("registration candidate limit must be positive")
@@ -724,7 +1051,7 @@ def build_registration_review_pack(
         author_key_fingerprint=author_key_fingerprint,
         seed=seed,
         selection_rule=(
-            "INDEPENDENT_TYPED_REGISTRATIONS_STABLE_HASH_V1_"
+            "INDEPENDENT_TYPED_AND_RAW_EVIDENCE_STABLE_HASH_V1_"
             f"LIMIT_{limit}"
         ),
         source_manifest_sha256=_sha256_json(normalized_source),

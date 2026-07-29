@@ -149,6 +149,10 @@ def _registration_discovery_db(path: Path) -> None:
             confidence TEXT NOT NULL,
             source_kind TEXT NOT NULL
         );
+        CREATE TABLE assets (
+            object_path TEXT PRIMARY KEY,
+            evidence_freshness TEXT NOT NULL
+        );
         """
     )
     connection.executemany(
@@ -219,6 +223,105 @@ def _registration_discovery_db(path: Path) -> None:
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
+    )
+    connection.executemany(
+        "INSERT INTO assets(object_path, evidence_freshness) VALUES (?, ?)",
+        (
+            ("/Game/Owner/A.Owner", "FRESH"),
+            ("/Game/Owner/B.Owner", "FRESH"),
+            ("/Game/Owner/C.Owner", "STALE"),
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+
+def _registration_capture_stores(root: Path) -> None:
+    database = root / "capture-a" / "evidence" / "evidence.sqlite"
+    database.parent.mkdir(parents=True)
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE asset_revisions (
+            revision_id TEXT PRIMARY KEY,
+            asset_id TEXT NOT NULL,
+            asset_name TEXT NOT NULL,
+            object_path TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            uasset_path TEXT NOT NULL
+        );
+        CREATE TABLE class_defaults (
+            default_ref TEXT PRIMARY KEY,
+            revision_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            type_name TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            value_codec TEXT NOT NULL,
+            value_blob BLOB,
+            confidence TEXT NOT NULL,
+            source TEXT NOT NULL,
+            extra_json TEXT NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO asset_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "revision-a",
+            "asset-a",
+            "OwnerA",
+            "/Game/Owner/A.Owner",
+            REVISION_SHA256,
+            "evidence-test/v1",
+            "ark.blueprint.evidence.v2",
+            "2026-07-29T00:00:00+00:00",
+            "redacted",
+        ),
+    )
+    defaults = (
+        (
+            "bp://asset-a@revision-a/default/RawClass",
+            "revision-a",
+            "RawClass",
+            "SoftObjectProperty",
+            json.dumps("/Game/Target/Raw.Raw_C"),
+            "json",
+            None,
+            "high",
+            "uasset_cdo_property_tag",
+            "{}",
+        ),
+        (
+            "bp://asset-a@revision-a/default/ItemClass",
+            "revision-a",
+            "ItemClass",
+            "SoftObjectProperty",
+            json.dumps("/Game/Target/A.Target_C"),
+            "json",
+            None,
+            "high",
+            "uasset_cdo_property_tag",
+            "{}",
+        ),
+        (
+            "bp://asset-a@revision-a/default/LowConfidenceClass",
+            "revision-a",
+            "LowConfidenceClass",
+            "SoftObjectProperty",
+            json.dumps("/Game/Target/Ignored.Ignored_C"),
+            "json",
+            None,
+            "low",
+            "uasset_cdo_property_tag",
+            "{}",
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO class_defaults VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        defaults,
     )
     connection.commit()
     connection.close()
@@ -595,10 +698,16 @@ class GoldReviewPackTests(unittest.TestCase):
         self,
     ):
         with tempfile.TemporaryDirectory() as temporary:
-            database = Path(temporary) / "discovery.sqlite"
+            root = Path(temporary)
+            database = root / "discovery.sqlite"
+            captures = root / "captures"
             _registration_discovery_db(database)
+            _registration_capture_stores(captures)
 
-            source = registration_review_source_from_sqlite(database)
+            source = registration_review_source_from_sqlite(
+                database,
+                captures_root=captures,
+            )
             first = build_registration_review_pack(
                 source_manifest=source,
                 author_id="registration-pack-author",
@@ -620,24 +729,66 @@ class GoldReviewPackTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(first["kind"], "registration")
-        self.assertEqual(len(first["candidates"]), 3)
+        self.assertEqual(len(first["candidates"]), 4)
+        self.assertEqual(
+            source["sourceIdentity"]["typedAnchorCount"],
+            3,
+        )
+        self.assertEqual(
+            source["sourceIdentity"]["rawRelationCount"],
+            2,
+        )
+        self.assertEqual(
+            source["sourceIdentity"]["deduplicatedCandidateCount"],
+            4,
+        )
+        self.assertEqual(
+            source["sourceGaps"],
+            ["SOURCE_TYPED_CANDIDATE_SHORTFALL:3/120"],
+        )
         self.assertEqual(
             first["selectionRule"],
-            "INDEPENDENT_TYPED_REGISTRATIONS_STABLE_HASH_V1_LIMIT_120",
+            "INDEPENDENT_TYPED_AND_RAW_EVIDENCE_STABLE_HASH_V1_LIMIT_120",
         )
         expected_fields = {
             "ownerUri",
             "targetUri",
-            "registrationType",
+            "declaredRegistrationType",
             "sourceProperty",
+            "propertyType",
             "evidenceUri",
+            "evidenceFreshness",
             "sourceKind",
+            "candidateCohort",
         }
         for candidate in first["candidates"]:
             self.assertEqual(
                 set(candidate["payload"]),
                 expected_fields,
             )
+        raw_candidates = [
+            candidate
+            for candidate in first["candidates"]
+            if candidate["payload"]["candidateCohort"]
+            == "RAW_CLASS_DEFAULT_RELATION"
+        ]
+        self.assertEqual(len(raw_candidates), 1)
+        self.assertIsNone(
+            raw_candidates[0]["payload"]["declaredRegistrationType"]
+        )
+        typed_candidates = [
+            candidate
+            for candidate in first["candidates"]
+            if candidate["payload"]["candidateCohort"]
+            == "TYPED_ANCHOR"
+        ]
+        self.assertEqual(len(typed_candidates), 3)
+        self.assertTrue(
+            all(
+                candidate["payload"]["declaredRegistrationType"]
+                for candidate in typed_candidates
+            )
+        )
         serialized = json.dumps(first, sort_keys=True).casefold()
         for forbidden in (
             "expectededgetype",
@@ -677,10 +828,13 @@ class GoldReviewPackTests(unittest.TestCase):
                 "payload": {
                     "ownerUri": "/Game/Owner/A.Owner",
                     "targetUri": "/Game/Target/A.Target_C",
-                    "registrationType": "item_registration",
+                    "declaredRegistrationType": "item_registration",
                     "sourceProperty": "ItemClass",
+                    "propertyType": "UNKNOWN",
                     "evidenceUri": "existing-kb://registrations/a",
+                    "evidenceFreshness": "FRESH",
                     "sourceKind": "existing_knowledge_database",
+                    "candidateCohort": "TYPED_ANCHOR",
                     forbidden_field: "leaked",
                 },
             }

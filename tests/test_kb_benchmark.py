@@ -26,7 +26,6 @@ from blueprint_translator.kb_vnext.benchmark import (  # noqa: E402
     validate_benchmark_shape,
 )
 from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
-    build_query_review_pack,
     build_review_pack,
     query_candidate_from_gold_case,
     review_content_sha256,

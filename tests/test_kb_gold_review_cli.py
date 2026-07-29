@@ -175,6 +175,10 @@ class GoldReviewCliTests(unittest.TestCase):
                     confidence TEXT NOT NULL,
                     source_kind TEXT NOT NULL
                 );
+                CREATE TABLE assets (
+                    object_path TEXT PRIMARY KEY,
+                    evidence_freshness TEXT NOT NULL
+                );
                 INSERT INTO metadata VALUES
                     ('schema', 'blueprint-to-code-kb-discovery/v2'),
                     ('generated_at_utc', '2026-07-29T00:00:00+00:00');
@@ -196,10 +200,64 @@ class GoldReviewCliTests(unittest.TestCase):
                     'HIGH',
                     'existing_knowledge_database'
                 );
+                INSERT INTO assets VALUES (
+                    '/Game/Owner/A.Owner', 'FRESH'
+                );
                 """
             )
             connection.commit()
             connection.close()
+            captures = root / "captures"
+            evidence_db = (
+                captures
+                / "capture-a"
+                / "evidence"
+                / "evidence.sqlite"
+            )
+            evidence_db.parent.mkdir(parents=True)
+            evidence = sqlite3.connect(evidence_db)
+            evidence.executescript(
+                """
+                CREATE TABLE asset_revisions (
+                    revision_id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    asset_name TEXT NOT NULL,
+                    object_path TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    parser_version TEXT NOT NULL,
+                    schema_version TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    uasset_path TEXT NOT NULL
+                );
+                CREATE TABLE class_defaults (
+                    default_ref TEXT PRIMARY KEY,
+                    revision_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    type_name TEXT NOT NULL,
+                    value_json TEXT NOT NULL,
+                    value_codec TEXT NOT NULL,
+                    value_blob BLOB,
+                    confidence TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    extra_json TEXT NOT NULL
+                );
+                INSERT INTO asset_revisions VALUES (
+                    'revision-a', 'asset-a', 'OwnerA',
+                    '/Game/Owner/A.Owner',
+                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    'evidence-test/v1', 'ark.blueprint.evidence.v2',
+                    '2026-07-29T00:00:00+00:00', 'redacted'
+                );
+                INSERT INTO class_defaults VALUES (
+                    'bp://asset-a@revision-a/default/RawClass',
+                    'revision-a', 'RawClass', 'SoftObjectProperty',
+                    '"/Game/Target/Raw.Raw_C"', 'json', NULL, 'high',
+                    'uasset_cdo_property_tag', '{}'
+                );
+                """
+            )
+            evidence.commit()
+            evidence.close()
             output = root / "packs"
             export = subprocess.run(
                 [
@@ -209,6 +267,8 @@ class GoldReviewCliTests(unittest.TestCase):
                     "registration",
                     "--discovery-db",
                     str(database),
+                    "--captures-root",
+                    str(captures),
                     "--limit",
                     "120",
                     "--output",
@@ -230,7 +290,7 @@ class GoldReviewCliTests(unittest.TestCase):
             self.assertEqual(export.returncode, 0, export.stderr)
             exported = json.loads(export.stdout)
             self.assertEqual(exported["kind"], "registration")
-            self.assertEqual(exported["candidateCases"], 1)
+            self.assertEqual(exported["candidateCases"], 2)
             pack_path = Path(exported["packPath"])
             source_path = Path(exported["sourceManifestPath"])
             self.assertTrue(pack_path.is_file())
