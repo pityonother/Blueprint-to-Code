@@ -124,6 +124,98 @@ UNUSABLE_VALUE_KINDS = {
     "FINGERPRINT",
     "CONFIRMED_EMPTY",
 }
+_GOLD_PAYLOAD_FIELDS = frozenset(
+    {
+        "schema",
+        "version",
+        "selectionMode",
+        "generatedFromCore",
+        "authoredFrom",
+        "semanticCoverageLimitations",
+        "cases",
+    }
+)
+_CASE_REQUIRED_FIELDS = frozenset(
+    {
+        "id",
+        "question",
+        "category",
+        "primaryDomain",
+        "entity",
+        "requirements",
+        "expected",
+        "reviewStatus",
+        "protocolBoundaryOnly",
+        "performancePath",
+    }
+)
+_CASE_FIELDS = _CASE_REQUIRED_FIELDS | {"negativeCase"}
+_REQUIREMENT_FIELDS = frozenset(
+    {
+        "answerMode",
+        "factTypes",
+        "factNames",
+        "edgeTypes",
+        "requiresNative",
+        "requiresRuntime",
+        "requiresMapEvidence",
+        "evidenceLimit",
+        "budgetTokens",
+    }
+)
+_EXPECTED_REQUIRED_FIELDS = frozenset(
+    {
+        "route",
+        "identityUri",
+        "facts",
+        "relationships",
+        "gapCodes",
+        "mustContainEvidence",
+        "semanticExpectation",
+    }
+)
+_EXPECTED_FIELDS = _EXPECTED_REQUIRED_FIELDS | {
+    "status",
+    "identityStatus",
+    "identityConfidence",
+    "identityEvidence",
+}
+_FACT_FIELDS = frozenset(
+    {
+        "factType",
+        "factName",
+        "valueKind",
+        "value",
+        "status",
+        "evidenceUri",
+    }
+)
+_RELATIONSHIP_REQUIRED_FIELDS = frozenset(
+    {"edgeType", "targetUri", "status", "evidenceUri"}
+)
+_RELATIONSHIP_FIELDS = _RELATIONSHIP_REQUIRED_FIELDS | {
+    "sourceUri",
+    "freshness",
+    "evidenceLayer",
+    "claimsCompleteMapUsage",
+    "claimsSpawnCoordinates",
+}
+_IDENTITY_EVIDENCE_FIELDS = frozenset(
+    {"evidenceUri", "evidenceRole", "freshness", "sourceRevision"}
+)
+_SOURCE_REVISION_FIELDS = frozenset(
+    {
+        "sourceKind",
+        "sourceUri",
+        "sourceFingerprint",
+        "producerVersion",
+        "schemaVersion",
+        "freshness",
+    }
+)
+_FACT_VALUE_KINDS = frozenset(
+    {"NUMBER", "INTEGER", "BOOLEAN", "TEXT", "ENTITY_REF", "JSON"}
+)
 PERFORMANCE_SAMPLE_TARGET = 20
 SEARCH_FUZZY_P95_LIMIT_MS = 250.0
 CACHE_HIT_P95_LIMIT_MS = 250.0
@@ -332,86 +424,321 @@ def _as_string_list(value: object, *, field: str) -> list[str]:
     return list(value)
 
 
+def _validate_exact_fields(
+    value: Mapping[str, object],
+    *,
+    required: frozenset[str],
+    allowed: frozenset[str],
+    field: str,
+) -> None:
+    raw_keys = set(value)
+    if any(not isinstance(key, str) for key in raw_keys):
+        raise ValueError(f"{field} keys must be strings")
+    missing = sorted(required - raw_keys)
+    unexpected = sorted(raw_keys - allowed)
+    if missing:
+        raise ValueError(f"{field} missing fields: {missing}")
+    if unexpected:
+        raise ValueError(f"{field} has unexpected fields: {unexpected}")
+
+
+def _require_non_empty_text(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+
+def _require_boolean(value: object, *, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
+def _require_positive_integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+    return value
+
+
+def _validate_fact_value(
+    value: object,
+    *,
+    value_kind: str,
+    field: str,
+) -> None:
+    if value_kind == "NUMBER":
+        finite_number = False
+        if not isinstance(value, bool) and isinstance(value, (int, float)):
+            try:
+                finite_number = math.isfinite(value)
+            except (OverflowError, TypeError):
+                finite_number = False
+        if not finite_number:
+            raise ValueError(f"{field} NUMBER value must be finite numeric")
+        return
+    if value_kind == "INTEGER":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{field} INTEGER value must be an integer")
+        return
+    if value_kind == "BOOLEAN":
+        if not isinstance(value, bool):
+            raise ValueError(f"{field} BOOLEAN value must be a boolean")
+        return
+    if value_kind in {"TEXT", "ENTITY_REF"}:
+        _require_non_empty_text(value, field=f"{field} {value_kind} value")
+        return
+    if value_kind == "JSON":
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{field} JSON value must be finite JSON") from error
+        return
+    raise ValueError(f"{field} has unsupported valueKind {value_kind}")
+
+
+def _validate_raw_fact(value: object, *, field: str) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    _validate_exact_fields(
+        value,
+        required=_FACT_FIELDS,
+        allowed=_FACT_FIELDS,
+        field=field,
+    )
+    for key in ("factType", "factName", "status", "evidenceUri"):
+        _require_non_empty_text(value[key], field=f"{field} {key}")
+    value_kind = _require_non_empty_text(
+        value["valueKind"],
+        field=f"{field} valueKind",
+    ).upper()
+    if value_kind not in _FACT_VALUE_KINDS:
+        raise ValueError(f"{field} has unsupported valueKind {value_kind}")
+    _validate_fact_value(
+        value["value"],
+        value_kind=value_kind,
+        field=field,
+    )
+
+
+def _validate_raw_relationship(value: object, *, field: str) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    _validate_exact_fields(
+        value,
+        required=_RELATIONSHIP_REQUIRED_FIELDS,
+        allowed=_RELATIONSHIP_FIELDS,
+        field=field,
+    )
+    for key in ("edgeType", "targetUri", "status", "evidenceUri"):
+        _require_non_empty_text(value[key], field=f"{field} {key}")
+    for key in ("sourceUri", "freshness", "evidenceLayer"):
+        if key in value:
+            _require_non_empty_text(value[key], field=f"{field} {key}")
+    for key in ("claimsCompleteMapUsage", "claimsSpawnCoordinates"):
+        if key in value:
+            _require_boolean(value[key], field=f"{field} {key}")
+
+
+def _validate_raw_identity_evidence(value: object, *, field: str) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    _validate_exact_fields(
+        value,
+        required=_IDENTITY_EVIDENCE_FIELDS,
+        allowed=_IDENTITY_EVIDENCE_FIELDS,
+        field=field,
+    )
+    for key in ("evidenceUri", "evidenceRole", "freshness"):
+        _require_non_empty_text(value[key], field=f"{field} {key}")
+    revision = value["sourceRevision"]
+    if not isinstance(revision, dict):
+        raise ValueError(f"{field} sourceRevision must be an object")
+    _validate_exact_fields(
+        revision,
+        required=_SOURCE_REVISION_FIELDS,
+        allowed=_SOURCE_REVISION_FIELDS,
+        field=f"{field} sourceRevision",
+    )
+    for key in sorted(_SOURCE_REVISION_FIELDS):
+        _require_non_empty_text(
+            revision[key],
+            field=f"{field} sourceRevision {key}",
+        )
+
+
+def _validate_raw_expected(value: object, *, field: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    _validate_exact_fields(
+        value,
+        required=_EXPECTED_REQUIRED_FIELDS,
+        allowed=_EXPECTED_FIELDS,
+        field=field,
+    )
+    _require_non_empty_text(value["route"], field=f"{field} route")
+    identity_uri = value["identityUri"]
+    if identity_uri is not None:
+        _require_non_empty_text(identity_uri, field=f"{field} identityUri")
+    facts = value["facts"]
+    relationships = value["relationships"]
+    if not isinstance(facts, list):
+        raise ValueError(f"{field} facts must be a list")
+    if not isinstance(relationships, list):
+        raise ValueError(f"{field} relationships must be a list")
+    for index, fact in enumerate(facts, start=1):
+        _validate_raw_fact(fact, field=f"{field} fact {index}")
+    for index, relationship in enumerate(relationships, start=1):
+        _validate_raw_relationship(
+            relationship,
+            field=f"{field} relationship {index}",
+        )
+    _as_string_list(value["gapCodes"], field=f"{field} gapCodes")
+    _require_boolean(
+        value["mustContainEvidence"],
+        field=f"{field} mustContainEvidence",
+    )
+    _require_non_empty_text(
+        value["semanticExpectation"],
+        field=f"{field} semanticExpectation",
+    )
+    for key in ("status", "identityStatus", "identityConfidence"):
+        if key in value:
+            _require_non_empty_text(value[key], field=f"{field} {key}")
+    if "identityEvidence" in value:
+        _validate_raw_identity_evidence(
+            value["identityEvidence"],
+            field=f"{field} identityEvidence",
+        )
+    return value
+
+
 def _parse_case(raw: object, *, index: int) -> BenchmarkCase:
     if not isinstance(raw, dict):
         raise ValueError(f"Gold case {index} must be an object")
-    required = {
-        "id",
-        "question",
-        "category",
-        "primaryDomain",
-        "entity",
-        "requirements",
-        "expected",
-        "reviewStatus",
-        "protocolBoundaryOnly",
-    }
-    missing = sorted(required - raw.keys())
-    if missing:
-        raise ValueError(f"Gold case {index} missing fields: {missing}")
+    field = f"Gold case {index}"
+    _validate_exact_fields(
+        raw,
+        required=_CASE_REQUIRED_FIELDS,
+        allowed=_CASE_FIELDS,
+        field=field,
+    )
+    query_id = _require_non_empty_text(raw["id"], field=f"{field} id")
+    question = _require_non_empty_text(
+        raw["question"],
+        field=f"{field} question",
+    )
+    category = _require_non_empty_text(
+        raw["category"],
+        field=f"{field} category",
+    )
+    primary_domain = _require_non_empty_text(
+        raw["primaryDomain"],
+        field=f"{field} primaryDomain",
+    )
+    entity = _require_non_empty_text(
+        raw["entity"],
+        field=f"{field} entity",
+    )
+    review_status = _require_non_empty_text(
+        raw["reviewStatus"],
+        field=f"{field} reviewStatus",
+    )
+    protocol_boundary_only = _require_boolean(
+        raw["protocolBoundaryOnly"],
+        field=f"{field} protocolBoundaryOnly",
+    )
+    performance_path = raw["performancePath"]
+    if not isinstance(performance_path, str):
+        raise ValueError(f"{field} performancePath must be a string")
+    negative_case = raw.get("negativeCase", "")
+    if not isinstance(negative_case, str):
+        raise ValueError(f"{field} negativeCase must be a string")
     requirements = raw["requirements"]
-    expected = raw["expected"]
-    if not isinstance(requirements, dict) or not isinstance(expected, dict):
-        raise ValueError(f"Gold case {index} request/expected must be objects")
+    if not isinstance(requirements, dict):
+        raise ValueError(f"{field} requirements must be an object")
+    _validate_exact_fields(
+        requirements,
+        required=_REQUIREMENT_FIELDS,
+        allowed=_REQUIREMENT_FIELDS,
+        field=f"{field} requirements",
+    )
+    answer_mode = _require_non_empty_text(
+        requirements["answerMode"],
+        field=f"{field} answerMode",
+    )
+    fact_types = _as_string_list(
+        requirements["factTypes"],
+        field=f"{field} factTypes",
+    )
+    fact_names = _as_string_list(
+        requirements["factNames"],
+        field=f"{field} factNames",
+    )
+    edge_types = _as_string_list(
+        requirements["edgeTypes"],
+        field=f"{field} edgeTypes",
+    )
+    requires_native = _require_boolean(
+        requirements["requiresNative"],
+        field=f"{field} requiresNative",
+    )
+    requires_runtime = _require_boolean(
+        requirements["requiresRuntime"],
+        field=f"{field} requiresRuntime",
+    )
+    requires_map = _require_boolean(
+        requirements["requiresMapEvidence"],
+        field=f"{field} requiresMapEvidence",
+    )
+    evidence_limit = _require_positive_integer(
+        requirements["evidenceLimit"],
+        field=f"{field} evidenceLimit",
+    )
+    budget_tokens = _require_positive_integer(
+        requirements["budgetTokens"],
+        field=f"{field} budgetTokens",
+    )
+    expected = _validate_raw_expected(
+        raw["expected"],
+        field=f"{field} expected",
+    )
     request = {
-        "entity": str(raw["entity"]),
-        "answerMode": str(requirements.get("answerMode") or ""),
-        "factTypes": _as_string_list(
-            requirements.get("factTypes", []),
-            field=f"case {index} factTypes",
-        ),
-        "factNames": _as_string_list(
-            requirements.get("factNames", []),
-            field=f"case {index} factNames",
-        ),
-        "edgeTypes": _as_string_list(
-            requirements.get("edgeTypes", []),
-            field=f"case {index} edgeTypes",
-        ),
-        "requiresNative": bool(requirements.get("requiresNative")),
-        "requiresRuntime": bool(requirements.get("requiresRuntime")),
-        "requiresMapEvidence": bool(
-            requirements.get("requiresMapEvidence")
-        ),
-        "evidenceLimit": int(requirements.get("evidenceLimit") or 50),
-        "budgetTokens": int(requirements.get("budgetTokens") or 2_000),
+        "entity": entity,
+        "answerMode": answer_mode,
+        "factTypes": fact_types,
+        "factNames": fact_names,
+        "edgeTypes": edge_types,
+        "requiresNative": requires_native,
+        "requiresRuntime": requires_runtime,
+        "requiresMapEvidence": requires_map,
+        "evidenceLimit": evidence_limit,
+        "budgetTokens": budget_tokens,
     }
     normalized_expected = {
-        "route": str(expected.get("route") or ""),
+        "route": expected["route"],
         "status": expected.get("status"),
-        "identityUri": expected.get("identityUri"),
+        "identityUri": expected["identityUri"],
         "identityStatus": expected.get("identityStatus"),
         "identityConfidence": expected.get("identityConfidence"),
         "identityEvidence": expected.get("identityEvidence"),
-        "facts": expected.get("facts", []),
-        "relationships": expected.get("relationships", []),
-        "gapCodes": _as_string_list(
-            expected.get("gapCodes", []),
-            field=f"case {index} gapCodes",
-        ),
-        "mustContainEvidence": bool(
-            expected.get("mustContainEvidence")
-        ),
-        "semanticExpectation": str(
-            expected.get("semanticExpectation") or ""
-        ),
+        "facts": expected["facts"],
+        "relationships": expected["relationships"],
+        "gapCodes": list(expected["gapCodes"]),
+        "mustContainEvidence": expected["mustContainEvidence"],
+        "semanticExpectation": expected["semanticExpectation"],
     }
-    if not isinstance(normalized_expected["facts"], list):
-        raise ValueError(f"Gold case {index} facts must be a list")
-    if not isinstance(normalized_expected["relationships"], list):
-        raise ValueError(f"Gold case {index} relationships must be a list")
     return BenchmarkCase(
-        query_id=str(raw["id"]),
-        question=str(raw["question"]),
-        category=str(raw["category"]).upper(),
-        primary_domain=str(raw["primaryDomain"]),
-        entity=str(raw["entity"]),
+        query_id=query_id,
+        question=question,
+        category=category,
+        primary_domain=primary_domain,
+        entity=entity,
         request=request,
         expected=normalized_expected,
-        review_status=str(raw["reviewStatus"]),
-        protocol_boundary_only=bool(raw["protocolBoundaryOnly"]),
-        negative_case=str(raw.get("negativeCase") or ""),
-        performance_path=str(raw.get("performancePath") or ""),
+        review_status=review_status,
+        protocol_boundary_only=protocol_boundary_only,
+        negative_case=negative_case,
+        performance_path=performance_path,
     )
 
 
@@ -779,6 +1106,55 @@ def validate_benchmark_shape(cases: Sequence[BenchmarkCase]) -> None:
         )
 
 
+def validate_benchmark_gold_payload(
+    payload: object,
+) -> tuple[BenchmarkCase, ...]:
+    """Validate canonical in-memory Gold shape and semantic constraints.
+
+    This does not grant human or signed-v2 review provenance. File-backed
+    loaders must enforce those trust contracts separately.
+    """
+
+    if not isinstance(payload, Mapping):
+        raise ValueError("Benchmark gold corpus must be a JSON object")
+    _validate_exact_fields(
+        payload,
+        required=_GOLD_PAYLOAD_FIELDS,
+        allowed=_GOLD_PAYLOAD_FIELDS,
+        field="Benchmark gold corpus",
+    )
+    if payload.get("schema") != GOLD_SET_SCHEMA:
+        raise ValueError("Unexpected benchmark gold corpus schema")
+    _require_non_empty_text(
+        payload.get("version"),
+        field="Gold version",
+    )
+    if payload.get("selectionMode") != "MANUAL_FIXED":
+        raise ValueError("Gold selectionMode must be MANUAL_FIXED")
+    if payload.get("generatedFromCore") is not False:
+        raise ValueError("Gold generatedFromCore must be false")
+    _as_string_list(
+        payload.get("authoredFrom"),
+        field="Gold authoredFrom",
+    )
+    limitations = payload.get("semanticCoverageLimitations")
+    if not isinstance(limitations, list) or any(
+        not isinstance(item, Mapping) for item in limitations
+    ):
+        raise ValueError(
+            "Gold semanticCoverageLimitations must be a list of objects"
+        )
+    raw_cases = payload.get("cases")
+    if not isinstance(raw_cases, list):
+        raise ValueError("Benchmark gold corpus cases must be a list")
+    cases = tuple(
+        _parse_case(value, index=index)
+        for index, value in enumerate(raw_cases, start=1)
+    )
+    validate_benchmark_shape(cases)
+    return cases
+
+
 def _corpus_readiness(
     cases: Sequence[BenchmarkCase],
 ) -> tuple[bool, list[dict[str, object]]]:
@@ -920,26 +1296,12 @@ def load_benchmark_gold_set(
     trusted_reviewer_registry_path: Path | None = None,
 ) -> dict[str, object]:
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError("Benchmark gold corpus must be a JSON object")
-    if raw.get("schema") != GOLD_SET_SCHEMA:
-        raise ValueError("Unexpected benchmark gold corpus schema")
-    if raw.get("selectionMode") != "MANUAL_FIXED":
-        raise ValueError("Gold selectionMode must be MANUAL_FIXED")
-    if raw.get("generatedFromCore") is not False:
-        raise ValueError("Gold generatedFromCore must be false")
-    raw_cases = raw.get("cases")
-    if not isinstance(raw_cases, list):
-        raise ValueError("Benchmark gold corpus cases must be a list")
-    _validate_empirical_cases(
-        raw_cases,
-        trusted_reviewer_registry_path=trusted_reviewer_registry_path,
-    )
-    cases = [
-        _parse_case(value, index=index)
-        for index, value in enumerate(raw_cases, start=1)
-    ]
-    validate_benchmark_shape(cases)
+    if isinstance(raw, Mapping) and isinstance(raw.get("cases"), list):
+        _validate_empirical_cases(
+            raw["cases"],
+            trusted_reviewer_registry_path=trusted_reviewer_registry_path,
+        )
+    cases = list(validate_benchmark_gold_payload(raw))
     _validate_human_reviewed_cases(
         cases,
         projection_review_path=projection_review_path,
