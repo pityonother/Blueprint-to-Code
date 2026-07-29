@@ -2,7 +2,7 @@
 
 - 状态：Amended by Stage 13
 - 日期：2026-07-29
-- 适用版本：`ark-kb-burn-in-policy/v1`
+- 适用版本：`ark-kb-burn-in-policy/v1`、`ark-kb-burn-in-policy/v2`
 
 ## Stage 13 安全修订
 
@@ -21,6 +21,59 @@ defaultQuerySource=legacy
 也不能使 `qualityGates.cutoverEligible=true`。后续只有完成签名并绑定
 artifact 的 v2 合同后，才会重新开放 cutover evaluation。不得把旧 v1
 attestation 透明升级为 v2。
+
+## Stage 13B v2 验证边界
+
+Stage 13B 新增只读的 `ark-kb-burn-in-attestation/v2` 与
+`ark-kb-burn-in-evidence-bundle/v2` 验证器。该验证器不创建 identity、
+private key、receipt、runtime artifact 或 snapshot，也不修改 current
+pointer。它要求：
+
+- top-level approval 和每个 component receipt 都通过 trusted registry v2
+  中 `BURN_IN_OPERATOR` Ed25519 公钥的验证；
+- registry version 必须匹配调用方通过独立渠道传入的 expected SHA-256，
+  不能从 attestation 或 manifest 内自我授权；
+- attestation、bundle、top-level scope、每个 component scope 与 detached
+  artifact 都精确绑定调用方从独立渠道传入的 `burnInRunId` 和
+  `candidateBuildId`，旧 run 或其他 candidate 的 receipt 不得复用；
+- top-level scope 同时绑定 previous build 和 previous manifest SHA-256；
+- 12 个 E4 场景全部使用结构化 receipt，布尔值不能通过。七个成功发布场景
+  必须各自引用 current 历史链中的唯一 direct-child transition；三个失败场景
+  必须证明未发布且 current 未变化；`unchangedCacheHit` 必须同 build 命中缓存；
+  `concurrentReaders` 必须使用相邻 sealed builds、执行受控 swap 且 mixed
+  observation 为零；
+- rollback 必须从实际 current/链尾回到相邻前驱；concurrent-reader drill 的
+  from/to 也必须是相邻 sealed builds；
+- rollback、concurrent-reader 和 shadow disposition 各自绑定独立 artifact；
+- shadow disposition 必须覆盖全部三份 sealed builds，并匹配调用方从独立渠道
+  传入的 representative corpus ID、SHA-256 与完整 case ID 集合；单行自报
+  corpus 不得通过；
+- 验证器从 `VerifiedSignedReceipt.artifact_bytes` 解析 artifact，并逐字段
+  对照 signed claim，不能仅凭 artifact hash 宣称 operation 已通过；
+- 三份 burn-in snapshot 必须是 `shadow/legacy`、75/75 且显式形成
+  `previousSnapshot` manifest SHA-256 链；断链、分叉或 current 不指向链尾
+  都 fail closed；
+- 同一 bundle 内所有 receipt 共用一个原子 replay guard。
+
+`TEST_ONLY` receipt 可以用于验证合同实现，但返回结果始终是
+`productionEligible=false`，也不能进入 production trust context。仓库不保存
+任何测试 registry、private key 或 receipt fixture。
+
+本阶段故意不把 v2 verifier 接入 snapshot eligibility、build CLI 或 current
+pointer。缺少真实 operator、真实 E4/drill artifacts、三份带 parent binding
+的 shadow snapshots 和后续密封发布层时，状态仍是：
+
+```text
+SIGNED_BURN_IN_V2_REQUIRED
+BLOCKED_BY_MISSING_TRUSTED_BURN_IN_OPERATOR
+BLOCKED_BY_MISSING_BURN_IN_EVIDENCE
+mode=shadow
+defaultQuerySource=legacy
+```
+
+后续 staging/promotion 必须复制验证器返回的原始 artifact bytes，并在 build、
+promotion 和 ready rollback 边界持续使用独立渠道提供的 registry SHA-256。
+不得在后续复核时把 snapshot 内记录的 digest 重新解释为 trust anchor。
 
 ## 背景
 
