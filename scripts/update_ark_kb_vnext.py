@@ -46,6 +46,12 @@ from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
     plan_invalidation,
 )
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
+from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
+    CurrentSnapshotBaseline,
+    PointerCASError,
+    capture_current_snapshot_baseline,
+    read_current_pointer_baseline,
+)
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     _snapshot_semantic_input_hashes,
     resolve_current_snapshot,
@@ -64,6 +70,13 @@ from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     source_manifest_binding as source_manifest_binding,
     source_manifest_from_binding,
     source_manifest_from_payload as source_manifest_from_payload,
+)
+from blueprint_translator.kb_vnext.update_baseline import (  # noqa: E402
+    UpdateBaseline,
+    UpdateBaselineBlockedGap,
+    build_update_baseline,
+    validate_final_source_manifest,
+    validate_update_baseline_identity,
 )
 
 
@@ -240,6 +253,7 @@ class UpdateHooks:
     run_narrow_gates: NarrowGates
     publish_atomic: AtomicPublisher
     verify_publication: PublicationVerifier
+    require_locked_update_baseline: bool = False
 
 
 def scan_source_manifest(paths: UpdatePaths) -> SourceManifest:
@@ -1016,6 +1030,7 @@ def default_hooks() -> UpdateHooks:
         run_narrow_gates=_unavailable_gates,
         publish_atomic=_unavailable_publish,
         verify_publication=verify_current_publication,
+        require_locked_update_baseline=True,
     )
 
 
@@ -1341,6 +1356,7 @@ def _validate_staging_workspace(
 
 @contextmanager
 def _single_writer_lock(output: Path) -> Iterator[None]:
+    output_preexisted = output.exists()
     output.mkdir(parents=True, exist_ok=True)
     lock_path = output / ".incremental-update.lock"
     try:
@@ -1363,6 +1379,11 @@ def _single_writer_lock(output: Path) -> Iterator[None]:
             lock_path.unlink()
         except FileNotFoundError:
             pass
+        if not output_preexisted:
+            try:
+                output.rmdir()
+            except OSError:
+                pass
 
 
 def _safe_publication(
@@ -1425,6 +1446,145 @@ def _uncertain_after_switch_result(
     }
 
 
+def _capture_locked_current_snapshot(
+    paths: UpdatePaths,
+) -> CurrentSnapshotBaseline | None:
+    """Capture the exact current pointer and manifest under the writer lock."""
+
+    try:
+        pointer = read_current_pointer_baseline(paths.output)
+        if pointer.build_id is None:
+            return None
+        current_snapshot = capture_current_snapshot_baseline(paths.output)
+        if current_snapshot.pointer != pointer:
+            raise UpdateBlocked(
+                "UPDATE_BASELINE_IDENTITY_CHANGED",
+                "The expected current build or raw pointer changed while "
+                "the writer lock was held.",
+                full_rebuild_required=True,
+            )
+        return current_snapshot
+    except (FileNotFoundError, OSError, PointerCASError, ValueError) as exc:
+        raise UpdateBlocked(
+            "UPDATE_BASELINE_IDENTITY_INVALID",
+            "The current build, raw pointer, or manifest identity could not "
+            "be captured safely.",
+            full_rebuild_required=True,
+        ) from exc
+
+
+def _locked_baseline_error(error: Exception) -> UpdateBlocked:
+    if isinstance(error, UpdateBaselineBlockedGap):
+        return UpdateBlocked(
+            error.gap_code,
+            str(error),
+            full_rebuild_required=True,
+        )
+    return UpdateBlocked(
+        "UPDATE_BASELINE_IDENTITY_CHANGED",
+        "The current build, raw pointer, manifest, or update baseline "
+        "identity changed while the writer lock was held.",
+        full_rebuild_required=True,
+    )
+
+
+def _build_locked_update_baseline(
+    *,
+    paths: UpdatePaths,
+    expected_current_snapshot: CurrentSnapshotBaseline,
+    candidate_source_manifest: SourceManifest,
+) -> UpdateBaseline:
+    """Build and independently revalidate one locked update baseline."""
+
+    try:
+        baseline = build_update_baseline(
+            snapshot_root=paths.output,
+            candidate_source_manifest=candidate_source_manifest,
+            expected_current_snapshot=expected_current_snapshot,
+        )
+        return validate_update_baseline_identity(
+            baseline,
+            expected_current_snapshot=expected_current_snapshot,
+            expected_candidate_source_manifest=(
+                candidate_source_manifest
+            ),
+        )
+    except (
+        FileNotFoundError,
+        OSError,
+        PointerCASError,
+        UpdateBaselineBlockedGap,
+        ValueError,
+    ) as exc:
+        raise _locked_baseline_error(exc) from exc
+
+
+def _validate_locked_update_state(
+    *,
+    paths: UpdatePaths,
+    hooks: UpdateHooks,
+    previous: SourceManifest | None,
+    candidate: SourceManifest,
+    diff: SourceDiff,
+    baseline: UpdateBaseline | None,
+    expected_current_snapshot: CurrentSnapshotBaseline | None,
+) -> None:
+    """Re-scan sources and recheck the exact baseline before using it."""
+
+    if baseline is not None:
+        if expected_current_snapshot is None:
+            raise AssertionError("strict baseline requires current identity")
+        try:
+            validate_update_baseline_identity(
+                baseline,
+                expected_current_snapshot=expected_current_snapshot,
+                expected_candidate_source_manifest=candidate,
+            )
+        except (
+            FileNotFoundError,
+            OSError,
+            PointerCASError,
+            UpdateBaselineBlockedGap,
+            ValueError,
+        ) as exc:
+            raise _locked_baseline_error(exc) from exc
+    observed_candidate = hooks.scan_manifest(paths)
+    if baseline is not None:
+        try:
+            validate_final_source_manifest(
+                baseline,
+                observed_candidate,
+            )
+            validate_update_baseline_identity(
+                baseline,
+                expected_current_snapshot=expected_current_snapshot,
+                expected_candidate_source_manifest=observed_candidate,
+            )
+        except (
+            FileNotFoundError,
+            OSError,
+            PointerCASError,
+            UpdateBaselineBlockedGap,
+            ValueError,
+        ) as exc:
+            raise _locked_baseline_error(exc) from exc
+        return
+    observed_diff = compare_source_manifests(
+        previous,
+        observed_candidate,
+    )
+    if (
+        observed_candidate.fingerprint != candidate.fingerprint
+        or observed_diff != diff
+    ):
+        raise UpdateBlocked(
+            "SOURCE_MANIFEST_CHANGED_DURING_UPDATE",
+            "The candidate source manifest changed while the writer lock "
+            "was held.",
+            full_rebuild_required=True,
+        )
+
+
 def run_incremental_update(
     paths: UpdatePaths,
     *,
@@ -1441,48 +1601,90 @@ def run_incremental_update(
         raise ValueError("max_rebuild_items must be a positive integer")
     paths = paths.resolved()
     hooks = hooks or default_hooks()
+    use_strict_default_baseline = hooks.require_locked_update_baseline
     base: dict[str, object] = {
         "schema": UPDATE_RESULT_SCHEMA,
         "published": False,
         "fullRebuildPerformed": False,
     }
-    try:
-        previous = hooks.load_previous_manifest(paths)
-        current = hooks.scan_manifest(paths)
-    except UpdateBlocked as exc:
-        return _blocked_result(base=base, error=exc)
-    diff = compare_source_manifests(previous, current)
-    base.update(
-        {
-            "sourceManifestFingerprint": current.fingerprint,
-            "sourceChanges": _safe_source_diff(diff),
-        }
-    )
-    if diff.is_empty:
-        return {
-            **base,
-            "status": "cache_hit",
-            "cacheHit": True,
-            "reason": "source manifest is unchanged; no publication needed",
-        }
-    try:
-        # The production check admits only the bounded additive Blueprint
-        # diagnostic slice; every other source change stops before staging.
-        hooks.check_capability(previous, diff)
-    except UpdateBlocked as exc:
-        return _blocked_result(base=base, error=exc)
-
     workspace: UpdateWorkspace | None = None
     workspace_is_confined = False
     try:
         with _single_writer_lock(paths.output):
+            expected_current_snapshot = (
+                _capture_locked_current_snapshot(paths)
+                if use_strict_default_baseline
+                else None
+            )
+            baseline: UpdateBaseline | None = None
+            if expected_current_snapshot is None:
+                previous = hooks.load_previous_manifest(paths)
+                current = hooks.scan_manifest(paths)
+                diff = compare_source_manifests(previous, current)
+            else:
+                current = hooks.scan_manifest(paths)
+                baseline = _build_locked_update_baseline(
+                    paths=paths,
+                    expected_current_snapshot=(
+                        expected_current_snapshot
+                    ),
+                    candidate_source_manifest=current,
+                )
+                previous = baseline.base_source_manifest
+                diff = baseline.source_diff
+            base.update(
+                {
+                    "sourceManifestFingerprint": current.fingerprint,
+                    "sourceChanges": _safe_source_diff(diff),
+                }
+            )
+            _validate_locked_update_state(
+                paths=paths,
+                hooks=hooks,
+                previous=previous,
+                candidate=current,
+                diff=diff,
+                baseline=baseline,
+                expected_current_snapshot=expected_current_snapshot,
+            )
+            if diff.is_empty:
+                return {
+                    **base,
+                    "status": "cache_hit",
+                    "cacheHit": True,
+                    "reason": (
+                        "source manifest is unchanged; no publication needed"
+                    ),
+                }
+            # The production check admits only the bounded additive Blueprint
+            # diagnostic slice; every other source change stops before staging.
+            hooks.check_capability(previous, diff)
             workspace = hooks.stage_snapshot(paths)
             _validate_staging_workspace(paths, workspace)
             workspace_is_confined = True
+            if (
+                baseline is not None
+                and workspace.base_build_id
+                and workspace.base_build_id != baseline.base_build_id
+            ):
+                raise UpdateBlocked(
+                    "UPDATE_BASELINE_IDENTITY_CHANGED",
+                    "The staged snapshot does not match the locked base build.",
+                    full_rebuild_required=True,
+                )
             if workspace.staging_receipt:
                 base["staging"] = _safe_staging_receipt(
                     workspace.staging_receipt
                 )
+            _validate_locked_update_state(
+                paths=paths,
+                hooks=hooks,
+                previous=previous,
+                candidate=current,
+                diff=diff,
+                baseline=baseline,
+                expected_current_snapshot=expected_current_snapshot,
+            )
             plans = list(hooks.plan_changes(workspace, diff))
             if not plans:
                 raise UpdateBlocked(
@@ -1516,6 +1718,15 @@ def run_incremental_update(
                         "narrow gates failed; snapshot not published"
                     ),
                 }
+            _validate_locked_update_state(
+                paths=paths,
+                hooks=hooks,
+                previous=previous,
+                candidate=current,
+                diff=diff,
+                baseline=baseline,
+                expected_current_snapshot=expected_current_snapshot,
+            )
             try:
                 raw_publication = hooks.publish_atomic(
                     workspace,

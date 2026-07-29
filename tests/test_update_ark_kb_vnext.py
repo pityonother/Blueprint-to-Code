@@ -430,7 +430,7 @@ def test_source_manifest_binding_rejects_mismatched_fingerprint() -> None:
         update.source_manifest_from_binding(binding)
 
 
-def test_default_first_run_fails_before_lock_stage_or_output_creation(
+def test_default_first_run_locks_scan_but_does_not_stage_or_leave_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -777,6 +777,193 @@ def test_previous_manifest_is_loaded_only_from_current_immutable_snapshot(
     loaded = update.load_current_source_manifest(paths)
 
     assert loaded == expected
+
+
+def _write_bound_current_snapshot(
+    paths: update.UpdatePaths,
+    source_manifest: update.SourceManifest,
+    *,
+    build_id: str = "build-current",
+) -> tuple[Path, bytes, bytes]:
+    snapshot = paths.output / "snapshots" / build_id
+    snapshot.mkdir(parents=True)
+    manifest_bytes = json.dumps(
+        {
+            "schema": "ark-kb-vnext-snapshot/v1",
+            "buildId": build_id,
+            "incrementalUpdate": update.source_manifest_binding(
+                source_manifest
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    pointer_bytes = json.dumps(
+        {
+            "buildId": build_id,
+            "snapshotRelativePath": f"snapshots/{build_id}",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    (snapshot / "manifest.json").write_bytes(manifest_bytes)
+    (paths.output / "current.json").write_bytes(pointer_bytes)
+    return snapshot, pointer_bytes, manifest_bytes
+
+
+def test_default_candidate_scan_runs_under_incremental_writer_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    previous = _manifest(_semantic("ontology", "old"))
+    candidate = _manifest(_semantic("ontology", "new"))
+    _write_bound_current_snapshot(paths, previous)
+    scan_lock_states: list[bool] = []
+
+    def scan(locked_paths: update.UpdatePaths) -> update.SourceManifest:
+        scan_lock_states.append(
+            (
+                locked_paths.output / ".incremental-update.lock"
+            ).is_file()
+        )
+        assert scan_lock_states[-1] is True
+        return candidate
+
+    monkeypatch.setattr(update, "scan_source_manifest", scan)
+
+    result = update.run_incremental_update(paths)
+
+    assert result["gapCodes"] == [
+        "NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED"
+    ]
+    assert scan_lock_states == [True, True]
+
+
+def test_default_runner_fails_closed_on_raw_pointer_change_during_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    previous = _manifest(_semantic("ontology", "old"))
+    candidate = _manifest(_semantic("ontology", "new"))
+    _, pointer_bytes, _ = _write_bound_current_snapshot(paths, previous)
+    changed_pointer_bytes = json.dumps(
+        json.loads(pointer_bytes),
+        indent=2,
+    ).encode("utf-8")
+    assert hashlib.sha256(changed_pointer_bytes).digest() != (
+        hashlib.sha256(pointer_bytes).digest()
+    )
+    scans = 0
+
+    def scan(locked_paths: update.UpdatePaths) -> update.SourceManifest:
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            (locked_paths.output / "current.json").write_bytes(
+                changed_pointer_bytes
+            )
+        return candidate
+
+    monkeypatch.setattr(update, "scan_source_manifest", scan)
+
+    result = update.run_incremental_update(paths)
+
+    assert result["gapCodes"] == ["UPDATE_BASELINE_IDENTITY_CHANGED"]
+    assert result["published"] is False
+
+
+def test_default_runner_fails_closed_on_build_id_change_during_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    previous = _manifest(_semantic("ontology", "old"))
+    candidate = _manifest(_semantic("ontology", "new"))
+    _, build_b_pointer, _ = _write_bound_current_snapshot(
+        paths,
+        previous,
+        build_id="build-b",
+    )
+    _write_bound_current_snapshot(
+        paths,
+        previous,
+        build_id="build-a",
+    )
+    scans = 0
+
+    def scan(locked_paths: update.UpdatePaths) -> update.SourceManifest:
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            (locked_paths.output / "current.json").write_bytes(
+                build_b_pointer
+            )
+        return candidate
+
+    monkeypatch.setattr(update, "scan_source_manifest", scan)
+
+    result = update.run_incremental_update(paths)
+
+    assert result["gapCodes"] == ["UPDATE_BASELINE_IDENTITY_CHANGED"]
+    assert result["published"] is False
+
+
+def test_default_runner_fails_closed_on_manifest_change_during_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    previous = _manifest(_semantic("ontology", "old"))
+    candidate = _manifest(_semantic("ontology", "new"))
+    snapshot, _, manifest_bytes = _write_bound_current_snapshot(
+        paths,
+        previous,
+    )
+    scans = 0
+
+    def scan(locked_paths: update.UpdatePaths) -> update.SourceManifest:
+        del locked_paths
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            (snapshot / "manifest.json").write_bytes(
+                manifest_bytes + b"\n"
+            )
+        return candidate
+
+    monkeypatch.setattr(update, "scan_source_manifest", scan)
+
+    result = update.run_incremental_update(paths)
+
+    assert result["gapCodes"] == ["UPDATE_BASELINE_IDENTITY_CHANGED"]
+    assert result["published"] is False
+
+
+def test_default_runner_fails_closed_on_source_change_after_locked_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    previous = _manifest(_semantic("ontology", "old"))
+    candidate = _manifest(_semantic("ontology", "new"))
+    changed_candidate = _manifest(_semantic("ontology", "changed-again"))
+    _write_bound_current_snapshot(paths, previous)
+    observed = iter((candidate, changed_candidate))
+
+    monkeypatch.setattr(
+        update,
+        "scan_source_manifest",
+        lambda locked_paths: next(observed),
+    )
+
+    result = update.run_incremental_update(paths)
+
+    assert result["gapCodes"] == [
+        "SOURCE_MANIFEST_CHANGED_DURING_UPDATE"
+    ]
+    assert result["published"] is False
 
 
 def _write_stage_source_snapshot(
