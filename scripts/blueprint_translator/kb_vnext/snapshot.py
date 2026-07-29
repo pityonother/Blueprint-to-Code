@@ -29,6 +29,15 @@ from .cutover_readiness import (
 )
 from .native_ingest import native_evidence_input_sha256
 from .ontology import load_ontology
+from .pointer_cas import (
+    CURRENT_POINTER_KEYS,
+    CURRENT_POINTER_NAME,
+    CurrentPointerBaseline,
+    PointerCASConflictError,
+    compare_and_swap_current_pointer,
+    read_current_pointer_baseline,
+    validate_current_pointer_destination,
+)
 from .projections import (
     DOMAIN_PROJECTIONS,
     PROJECTION_SCHEMA_SQL,
@@ -81,8 +90,6 @@ DATABASE_NAMES = (
     "cache.sqlite",
 )
 SNAPSHOT_SCHEMA = "ark-kb-vnext-snapshot/v1"
-CURRENT_POINTER_NAME = "current.json"
-CURRENT_POINTER_KEYS = frozenset({"buildId", "snapshotRelativePath"})
 SNAPSHOT_SOURCE_KIND = "semantic_input_set"
 SNAPSHOT_SOURCE_URI = "kb-inputs://ark/vnext"
 RUNTIME_HEALTH_SCHEMA = "ark-kb-runtime-health/v1"
@@ -469,14 +476,15 @@ def _read_json_object(
 
 
 def _safe_build_id(value: object) -> str:
-    build_id = str(value or "").strip()
     if (
-        not build_id
-        or not _SAFE_BUILD_ID.fullmatch(build_id)
-        or build_id in {".", ".."}
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or not _SAFE_BUILD_ID.fullmatch(value)
+        or value in {".", ".."}
     ):
         raise ValueError("snapshot buildId is missing or unsafe")
-    return build_id
+    return value
 
 
 def resolve_current_snapshot(
@@ -1205,13 +1213,26 @@ def _write_text(path: Path, value: str) -> None:
     os.replace(temporary, path)
 
 
-def _write_current_pointer(output_dir: Path, build_id: str) -> None:
-    _write_json(
-        output_dir / CURRENT_POINTER_NAME,
-        {
-            "buildId": build_id,
-            "snapshotRelativePath": f"snapshots/{build_id}",
-        },
+def _write_current_pointer(
+    output_dir: Path,
+    build_id: str,
+    *,
+    expected: CurrentPointerBaseline,
+    expected_current_manifest_sha256: str | None = None,
+    expected_target_manifest_sha256: str | None = None,
+    operation: str = "POINTER_CAS",
+) -> dict[str, object]:
+    return compare_and_swap_current_pointer(
+        snapshot_root=output_dir,
+        target_build_id=build_id,
+        expected=expected,
+        expected_current_manifest_sha256=(
+            expected_current_manifest_sha256
+        ),
+        expected_target_manifest_sha256=(
+            expected_target_manifest_sha256
+        ),
+        operation=operation,
     )
 
 
@@ -2431,7 +2452,14 @@ def _promote_snapshot(
     staging: Path,
     output_dir: Path,
     manifest: dict[str, object],
-) -> None:
+    expected_current_pointer: CurrentPointerBaseline,
+    expected_current_manifest_sha256: str | None = None,
+) -> dict[str, object]:
+    if not isinstance(
+        expected_current_pointer,
+        CurrentPointerBaseline,
+    ):
+        raise TypeError("expected current pointer baseline is required")
     build_id = _safe_build_id(manifest.get("buildId"))
     if manifest.get("schema") != SNAPSHOT_SCHEMA:
         raise ValueError("snapshot manifest schema is unknown")
@@ -2463,7 +2491,65 @@ def _promote_snapshot(
     _write_text(manifests / "core_schema.sql", FULL_CORE_SCHEMA_SQL)
     _write_text(manifests / "search_schema.sql", SEARCH_SCHEMA_SQL)
     _write_text(manifests / "cache_schema.sql", CACHE_SCHEMA_SQL)
-    _write_current_pointer(output_dir, build_id)
+    target_manifest_sha256 = hashlib.sha256(
+        (destination / "manifest.json").read_bytes()
+    ).hexdigest()
+    return _write_current_pointer(
+        output_dir,
+        build_id,
+        expected=expected_current_pointer,
+        expected_current_manifest_sha256=(
+            expected_current_manifest_sha256
+        ),
+        expected_target_manifest_sha256=target_manifest_sha256,
+        operation="FULL_SNAPSHOT_PROMOTION",
+    )
+
+
+def _validate_rollback_adjacency(
+    *,
+    current_manifest: Mapping[str, object],
+    target_build_id: str,
+    target_manifest_bytes: bytes,
+) -> None:
+    """Enforce explicit adjacent lineage without inventing legacy history."""
+
+    previous = current_manifest.get("previousSnapshot")
+    if (
+        not isinstance(previous, Mapping)
+        or set(previous) != {"buildId", "manifestSha256"}
+        or previous.get("buildId") != target_build_id
+        or previous.get("manifestSha256")
+        != hashlib.sha256(target_manifest_bytes).hexdigest()
+    ):
+        raise ValueError(
+            "rollback target must be the declared adjacent predecessor"
+        )
+
+
+def _snapshot_parent_binding(
+    *,
+    output_dir: Path,
+    expected_pointer: CurrentPointerBaseline,
+) -> dict[str, str] | None:
+    """Bind a new build to the exact current immutable manifest."""
+
+    if expected_pointer.build_id is None:
+        return None
+    current = resolve_current_snapshot(output_dir, allow_legacy=False)
+    if current.build_id != expected_pointer.build_id:
+        raise PointerCASConflictError(
+            "current pointer changed while binding the snapshot parent"
+        )
+    manifest_bytes = current.manifest_path.read_bytes()
+    if read_current_pointer_baseline(output_dir) != expected_pointer:
+        raise PointerCASConflictError(
+            "current pointer changed while binding the snapshot parent"
+        )
+    return {
+        "buildId": current.build_id,
+        "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
+    }
 
 
 def rollback_current_snapshot(
@@ -2480,19 +2566,29 @@ def rollback_current_snapshot(
     expected_current_build_id = _safe_build_id(
         expected_current_build_id
     )
-    current = resolve_current_snapshot(output_dir)
-    if current.build_id != expected_current_build_id:
+    expected_pointer = read_current_pointer_baseline(output_dir)
+    if expected_pointer.build_id != expected_current_build_id:
         raise ValueError(
             "expected current build does not match the resolved pointer"
         )
+    current = resolve_current_snapshot(output_dir)
+    if current.build_id != expected_current_build_id:
+        raise PointerCASConflictError(
+            "current pointer changed while resolving the rollback tip"
+        )
+    current_manifest_sha256 = hashlib.sha256(
+        current.manifest_path.read_bytes()
+    ).hexdigest()
 
     target = output_dir / "snapshots" / target_build_id
     if not target.is_dir():
         raise FileNotFoundError(
             f"rollback target snapshot does not exist: {target_build_id}"
         )
+    target_manifest_path = target / "manifest.json"
+    target_manifest_bytes = target_manifest_path.read_bytes()
     manifest = _read_json_object(
-        target / "manifest.json",
+        target_manifest_path,
         label="rollback target manifest",
     )
     if (
@@ -2504,29 +2600,64 @@ def rollback_current_snapshot(
         staging=target,
         manifest=manifest,
     )
-
-    latest = resolve_current_snapshot(output_dir)
-    if latest.build_id != expected_current_build_id:
-        raise ValueError(
-            "current build changed during rollback validation"
+    if target_build_id != expected_current_build_id:
+        _validate_rollback_adjacency(
+            current_manifest=current.manifest,
+            target_build_id=target_build_id,
+            target_manifest_bytes=target_manifest_bytes,
         )
+
     pointer_updated = (
         not dry_run and target_build_id != expected_current_build_id
     )
     if pointer_updated:
-        _write_current_pointer(output_dir, target_build_id)
-        resolved = resolve_current_snapshot(output_dir)
-        if resolved.build_id != target_build_id:
-            raise RuntimeError("rollback pointer verification failed")
+        pointer_receipt = _write_current_pointer(
+            output_dir,
+            target_build_id,
+            expected=expected_pointer,
+            expected_current_manifest_sha256=current_manifest_sha256,
+            expected_target_manifest_sha256=hashlib.sha256(
+                target_manifest_bytes
+            ).hexdigest(),
+            operation="ROLLBACK",
+        )
+    elif dry_run:
+        pointer_receipt = validate_current_pointer_destination(
+            snapshot_root=output_dir,
+            target_build_id=target_build_id,
+            expected=expected_pointer,
+            expected_current_manifest_sha256=current_manifest_sha256,
+            expected_target_manifest_sha256=hashlib.sha256(
+                target_manifest_bytes
+            ).hexdigest(),
+            operation="ROLLBACK_DRY_RUN",
+        )
+    else:
+        pointer_receipt = compare_and_swap_current_pointer(
+            snapshot_root=output_dir,
+            target_build_id=expected_current_build_id,
+            expected=expected_pointer,
+            expected_current_manifest_sha256=current_manifest_sha256,
+            expected_target_manifest_sha256=current_manifest_sha256,
+            operation="ROLLBACK_NOOP",
+        )
 
     return {
         "schema": "ark-kb-vnext-rollback/v1",
+        "evidenceClass": "UNSIGNED_LOCAL_WRITE_FACT",
         "status": "VALIDATED" if dry_run else "COMPLETED",
         "completedAt": datetime.now(UTC).isoformat(timespec="seconds"),
         "fromBuildId": expected_current_build_id,
         "toBuildId": target_build_id,
         "dryRun": bool(dry_run),
         "pointerUpdated": pointer_updated,
+        "pointerBeforeSha256": pointer_receipt[
+            "beforePointerSha256"
+        ],
+        "pointerAfterSha256": pointer_receipt[
+            "afterPointerSha256"
+        ],
+        "pointerCAS": pointer_receipt,
         "immutableSnapshotsModified": False,
         "snapshotsDeleted": 0,
         "legacyFallbackPreserved": True,
@@ -2576,6 +2707,11 @@ def build_vnext_snapshot(
         raise FileNotFoundError(discovery_database)
     _validate_output_root(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    expected_current_pointer = read_current_pointer_baseline(output_dir)
+    previous_snapshot = _snapshot_parent_binding(
+        output_dir=output_dir,
+        expected_pointer=expected_current_pointer,
+    )
     work_root = output_dir / ".build"
     work_root.mkdir(parents=True, exist_ok=True)
     if generated_at is None:
@@ -2736,6 +2872,8 @@ def build_vnext_snapshot(
             },
             "incrementalUpdate": source_manifest_binding(source_manifest),
         }
+        if previous_snapshot is not None:
+            manifest["previousSnapshot"] = previous_snapshot
         _write_json(staging / "manifest.json", manifest)
         quality_report = _evaluate_staged_quality_gates(
             project_root=project_root,
@@ -2811,10 +2949,16 @@ def build_vnext_snapshot(
                 "Snapshot source manifest changed during build: "
                 + ", ".join(changed_uris)
             )
-        _promote_snapshot(
+        pointer_receipt = _promote_snapshot(
             staging=staging,
             output_dir=output_dir,
             manifest=manifest,
+            expected_current_pointer=expected_current_pointer,
+            expected_current_manifest_sha256=(
+                previous_snapshot["manifestSha256"]
+                if previous_snapshot is not None
+                else None
+            ),
         )
         return {
             "status": "complete",
@@ -2826,6 +2970,7 @@ def build_vnext_snapshot(
             "counts": manifest["counts"],
             "databases": published_metrics,
             "cutover": manifest["cutover"],
+            "pointerCAS": pointer_receipt,
         }
     finally:
         if staging.exists():

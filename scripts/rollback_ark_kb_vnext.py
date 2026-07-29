@@ -14,6 +14,9 @@ SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
+from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
+    PointerCASUncertainStateError,
+)
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     rollback_current_snapshot,
 )
@@ -54,6 +57,23 @@ def main(argv: list[str] | None = None) -> int:
             expected_current_build_id=args.expected_current_build_id,
             dry_run=args.dry_run,
         )
+    except PointerCASUncertainStateError as exc:
+        print(
+            json.dumps(
+                {
+                    "schema": "ark-kb-vnext-rollback/v1",
+                    "status": "UNCERTAIN",
+                    "error": str(exc),
+                    "pointerUpdated": None,
+                    "pointerCAS": exc.receipt,
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 3
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(
             json.dumps(
