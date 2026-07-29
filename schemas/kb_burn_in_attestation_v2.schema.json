@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/kb_burn_in_attestation_v2.schema.json",
+  "title": "ARK KB vNext signed burn-in attestation v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "policyVersion",
+    "burnInRunId",
+    "candidateBuildId",
+    "status",
+    "evidenceBundleUri",
+    "evidenceBundleSha256",
+    "operatorApproval"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ark-kb-burn-in-attestation/v2"
+    },
+    "policyVersion": {
+      "const": "ark-kb-burn-in-policy/v2"
+    },
+    "burnInRunId": {
+      "$ref": "#/$defs/runId"
+    },
+    "candidateBuildId": {
+      "$ref": "#/$defs/buildId"
+    },
+    "status": {
+      "const": "PASSED"
+    },
+    "evidenceBundleUri": {
+      "$ref": "#/$defs/artifactUri"
+    },
+    "evidenceBundleSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "operatorApproval": {
+      "$ref": "#/$defs/operatorApproval"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifactUri": {
+      "type": "string",
+      "pattern": "^artifact://[^\\\\%?#:]+(?:/[^\\\\%?#:]+)*$"
+    },
+    "buildId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$"
+    },
+    "operatorApproval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "signatureAlgorithm",
+        "payload",
+        "signedPayloadSha256",
+        "signatureBase64"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-signed-receipt-envelope/v2"
+        },
+        "signatureAlgorithm": {
+          "const": "Ed25519"
+        },
+        "payload": {
+          "$ref": "#/$defs/operatorApprovalPayload"
+        },
+        "signedPayloadSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signatureBase64": {
+          "type": "string",
+          "minLength": 88,
+          "maxLength": 88
+        }
+      }
+    },
+    "operatorApprovalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "receiptId",
+        "registryVersionSha256",
+        "trustContext",
+        "signerId",
+        "role",
+        "issuedAt",
+        "nonce",
+        "scope",
+        "artifactUri",
+        "artifactSha256",
+        "claim"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-signed-receipt-payload/v2"
+        },
+        "receiptId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "registryVersionSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "trustContext": {
+          "enum": ["PRODUCTION", "TEST_ONLY"]
+        },
+        "signerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "const": "BURN_IN_OPERATOR"
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 8
+        },
+        "scope": {
+          "$ref": "#/$defs/topScope"
+        },
+        "artifactUri": {
+          "$ref": "#/$defs/artifactUri"
+        },
+        "artifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "claim": {
+          "$ref": "#/$defs/topClaim"
+        }
+      }
+    },
+    "topScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "policyVersion",
+        "burnInRunId",
+        "candidateBuildId",
+        "previousBuildId",
+        "previousManifestSha256"
+      ],
+      "properties": {
+        "kind": {
+          "const": "BURN_IN_ATTESTATION"
+        },
+        "policyVersion": {
+          "const": "ark-kb-burn-in-policy/v2"
+        },
+        "burnInRunId": {
+          "$ref": "#/$defs/runId"
+        },
+        "candidateBuildId": {
+          "$ref": "#/$defs/buildId"
+        },
+        "previousBuildId": {
+          "$ref": "#/$defs/buildId"
+        },
+        "previousManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "topClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "sealedSnapshotCount",
+        "incrementalScenarioCount",
+        "rollbackReceiptCount",
+        "concurrentReaderReceiptCount",
+        "shadowDispositionReceiptCount"
+      ],
+      "properties": {
+        "status": {
+          "const": "PASSED"
+        },
+        "sealedSnapshotCount": {
+          "const": 3
+        },
+        "incrementalScenarioCount": {
+          "const": 12
+        },
+        "rollbackReceiptCount": {
+          "const": 1
+        },
+        "concurrentReaderReceiptCount": {
+          "const": 1
+        },
+        "shadowDispositionReceiptCount": {
+          "const": 1
+        }
+      }
+    }
+  }
+}
