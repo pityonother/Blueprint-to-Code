@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/kb_gold_review_common_v1.schema.json",
+  "title": "ARK KB independent gold review common protocol v1",
+  "oneOf": [
+    {"$ref": "#/$defs/reviewPack"},
+    {"$ref": "#/$defs/reviewReceipt"},
+    {"$ref": "#/$defs/validationResult"}
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caseId", "payload", "candidateSha256"],
+      "properties": {
+        "caseId": {"type": "string", "minLength": 1},
+        "payload": {
+          "type": "object",
+          "description": "Blind reviewer payload. Current expected answers, routes, predictions, roles, and confidence fields are forbidden by the validator."
+        },
+        "candidateSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "reviewPack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "packId",
+        "kind",
+        "authorId",
+        "authorKeyFingerprint",
+        "createdAt",
+        "toolVersion",
+        "seed",
+        "selectionRule",
+        "sourceManifestSha256",
+        "candidates",
+        "packSha256"
+      ],
+      "properties": {
+        "schema": {"const": "ark-kb-gold-review-pack/v1"},
+        "packId": {"type": "string", "minLength": 1},
+        "kind": {
+          "type": "string",
+          "enum": ["query", "registration", "role"]
+        },
+        "authorId": {"type": "string", "minLength": 1},
+        "authorKeyFingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "createdAt": {"type": "string", "format": "date-time"},
+        "toolVersion": {"type": "string", "minLength": 1},
+        "seed": {"type": "string", "minLength": 1},
+        "selectionRule": {"type": "string", "minLength": 1},
+        "sourceManifestSha256": {"$ref": "#/$defs/sha256"},
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/candidate"}
+        },
+        "packSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "sourceRevisionSha256", "freshness"],
+      "properties": {
+        "uri": {"type": "string", "minLength": 1},
+        "sourceRevisionSha256": {"$ref": "#/$defs/sha256"},
+        "freshness": {
+          "type": "string",
+          "enum": ["FRESH", "STALE", "NOT_RECOVERED"]
+        }
+      }
+    },
+    "reviewReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "packId",
+        "packSha256",
+        "caseId",
+        "candidateSha256",
+        "reviewerId",
+        "reviewerKeyFingerprint",
+        "reviewerRole",
+        "round",
+        "reviewedAt",
+        "verdict",
+        "answer",
+        "evidence",
+        "rationale",
+        "toolVersion",
+        "contentSha256"
+      ],
+      "properties": {
+        "schema": {"const": "ark-kb-gold-review/v1"},
+        "packId": {"type": "string", "minLength": 1},
+        "packSha256": {"$ref": "#/$defs/sha256"},
+        "caseId": {"type": "string", "minLength": 1},
+        "candidateSha256": {"$ref": "#/$defs/sha256"},
+        "reviewerId": {"type": "string", "minLength": 1},
+        "reviewerKeyFingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewerRole": {
+          "type": "string",
+          "enum": ["REVIEWER", "ADJUDICATOR"]
+        },
+        "round": {"type": "integer", "minimum": 1},
+        "reviewedAt": {"type": "string", "format": "date-time"},
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "CONFIRMED",
+            "REJECTED",
+            "EXPECTED_GAP",
+            "UNRESOLVED"
+          ]
+        },
+        "answer": {"type": "object"},
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "rationale": {"type": "string", "minLength": 1},
+        "toolVersion": {"type": "string", "minLength": 1},
+        "contentSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "validationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "packId",
+        "packSha256",
+        "kind",
+        "candidateCases",
+        "reviewedCases",
+        "reviewCount",
+        "status",
+        "gaps"
+      ],
+      "properties": {
+        "schema": {"const": "ark-kb-gold-review-validation/v1"},
+        "packId": {"type": "string", "minLength": 1},
+        "packSha256": {"$ref": "#/$defs/sha256"},
+        "kind": {
+          "type": "string",
+          "enum": ["query", "registration", "role"]
+        },
+        "candidateCases": {"type": "integer", "minimum": 1},
+        "reviewedCases": {"type": "integer", "minimum": 0},
+        "reviewCount": {"type": "integer", "minimum": 0},
+        "status": {
+          "type": "string",
+          "enum": [
+            "READY_TO_FREEZE",
+            "BLOCKED_BY_INDEPENDENT_REVIEW"
+          ]
+        },
+        "gaps": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
