@@ -62,6 +62,29 @@ produced the requested primary review pool:
 
 Both production gates remain red.
 
+## Signed v2 validation status
+
+The v2 validator and artifact schema are available, but no real
+human-managed registry or signed reviewer artifacts are present. Automated
+contract tests generate ephemeral `TEST_ONLY` keys in process; those results
+are explicitly ineligible for production Gold and are not checked in.
+
+Existing review packs with `authorKeyFingerprint=automation:<id>` are
+diagnostic-only. Production v2 requires a newly exported pack bound to an
+externally trusted author public-key fingerprint and the same 64-character
+lowercase SHA-256 supplied out of band during validation. No such production
+author identity or re-exported production pack is present in this repository.
+
+Current signed-v2 status remains:
+
+```text
+BLOCKED_BY_INDEPENDENT_REVIEW
+productionGoldEligible=false
+productionGoldWritten=false
+```
+
+Gold freeze and apply are outside this validation slice.
+
 ## Cutover
 
 This work does not change cutover state. vNext remains:
