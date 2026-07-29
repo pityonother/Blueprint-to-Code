@@ -4,27 +4,29 @@
 
 **keep legacy / shadow**
 
-Stage 8/9 已把 typed registration、真实角色信号、独立 gold 计分、不可变
-快照和发布前门禁做成 fail-closed 实现，但当前独立语义证据仍不满足切换
-条件。旧库不能删除，vNext 不能改为默认。
+Stage 8–12 已把 typed registration、真实角色信号、独立 gold 计分、盲审
+工厂、逐 case 诊断、真实性能路径、受限增量和 burn-in/cutover 校验做成
+fail-closed 实现，但当前独立语义证据仍不满足切换条件。旧库不能删除，
+vNext 不能改为默认。
 
 本文中的统计来自本机规范 `current.json` 指向的真实全量 immutable-v2
-快照。质量报告已在 pointer 可见前密封；发布后的外部复核得到相同
-`58/75` 结果，但不能改变 current。
+快照。质量报告已在 pointer 可见前密封；独立复核得到相同 `60/75` 结果，
+但不能改变 current。
 
 ## 已发布快照身份
 
 | 项目 | 值 |
 |---|---:|
-| Build ID | `20260727T222549-a2d56bd7fed8` |
-| Source SHA-256 | `a2d56bd7fed88edd1098915ea3723da0fdef0b0a263567b56f46bae074f385cd` |
+| Build ID | `20260729T115548-1a203b594bb6` |
+| Source SHA-256 | `1a203b594bb6119dbf29d5a0c8789bd653c716eaf72e5915ee5a176675576450` |
 | Discovery SHA-256 | `028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f` |
 | Discovery bytes | 3,816,792,064 |
 | Snapshot schema | `ark-kb-vnext-snapshot/v1` |
 | Published layout | `immutable-v2`：`current.json -> snapshots/<buildId>` |
-| Sealed quality | 58 / 75 passed，17 failed |
+| Sealed quality | 60 / 75 passed，15 failed |
 | Runtime health | `activeStaleSources=0` |
 | Published cutover | `mode=shadow`, `defaultQuerySource=legacy` |
+| Burn-in | `MISSING / BURN_IN_ATTESTATION_MISSING` |
 
 ## 已发布快照内容
 
@@ -86,7 +88,7 @@ Role gold 文件当前不存在，因此计数为 0。即使 classifier unit cas
 resolution 为 `verified_callsite`，双方 source revision 均为 `FRESH`；
 双方 fingerprint 都是规范 SHA-256，Blueprint revision 为
 `uasset-graph-reader-evidence-v3 / ark.blueprint.evidence.v2`。其余 713
-条保持 candidate。Native 两门均已通过，但整体仍因其他 17 门保持
+条保持 candidate。Native 两门均已通过，但整体仍因其他 15 门保持
 `shadow / legacy`。
 
 ## Stage 8 实现覆盖
@@ -140,11 +142,11 @@ snapshots/<buildId>/
 - `runtimeHealth` 与 Core metadata 绑定，活动陈旧来源不能进入
   `ready/vnext`。
 
-当前快照的 10 个数据库/投影均通过 integrity、FK 与绑定验证；没有
-WAL/SHM sidecar。`storage.integrity` 通过，Core/Discovery 大小比为
-`0.6804`。服务初始化约 `0.043s`，轻量 `health()` 约 `0.024s`，返回
-`READY / FRESH`；首次完整摘要绑定搜索约 `2.79s`，同服务缓存后约
-`0.13s`。
+当前快照的 10 个数据库/投影均通过 integrity 与 FK 验证，journal 均为
+`DELETE`，没有 WAL/SHM sidecar。9 个 authoritative 数据库的 bytes/SHA
+与 manifest 完全匹配；`cache.sqlite` 是 build-bound、`disposable=true`
+的运行时存储，允许受控增长，不计作 immutable semantic authority。
+`storage.integrity` 通过，服务返回 `READY / FRESH`。
 
 对已经发布的 snapshot 运行门禁，只能写
 `reports/<buildId>/quality_gates.json`、`query_benchmark.json` 和
@@ -154,9 +156,11 @@ manifest，也不能把 default 切到 vNext；通过结果必须密封进一个
 
 ## 增量能力门禁
 
-Queue worker 的任务状态、receipt、恢复和 fail-closed 行为已经实现，且定义
-了 11 类 rebuild operation。但生产默认 backend 当前只接通
-`CLASS_CLOSURE` 和 `EFFECTIVE_ENTITY`。
+Queue worker 的任务状态、receipt、恢复和 fail-closed 行为已经实现。生产
+更新器只接受明确的 1–32 个 add-only `BLUEPRINT_EVIDENCE` source changes，
+并只接通真实 FACT materializer；其余 EDGE/ROLE/DOMAIN/NATIVE/
+REGISTRATION/PROJECTION backend、update/delete/rename 和混合变化仍返回
+稳定 `BLOCKED_GAP` 或 full-rebuild-required。
 
 `scripts/update_ark_kb_vnext.py` 的生产默认路径会：
 
@@ -164,7 +168,7 @@ Queue worker 的任务状态、receipt、恢复和 fail-closed 行为已经实�
 - 在新 immutable snapshot 中原子绑定 fingerprint、10 项 semantic input、
   runtime 汇总、每个 capture revision 和每个已验证 Native evidence set；
 - 对完成该绑定的新 full build，在输入未变化时返回 cache hit 且不 stage；
-- 首次运行、source 删除、非选择性输入变化或缺少选择性能力时，在
+- source 删除、修改、重命名、非选择性输入变化或缺少选择性能力时，在
   lock/staging/queue/publication 前返回稳定 gap；
 - 设置 `fullRebuildRequired=true`；
 - 不复制现有 snapshot，不修改 current，不发布部分构建。
@@ -175,13 +179,17 @@ Source-manifest fingerprint 明确排除顶层 `generatedAt`，不会仅因扫�
 相同输入 update 实测返回 `cacheHit=true`、`published=false`、
 `fullRebuildPerformed=false`，current 与快照目录数均未改变。
 
-因此“单资产增量摄取到原子发布”仍未通过生产门禁。当前安全更新方式仍是
-显式 `--full-snapshot`。不能把 unchanged cache hit 或 fail-fast 安全性描述
-为增量发布已经完成。
+真实 7-capture 本地差异因同时存在 semantic producer、benchmark gold、
+quality gold 和 ontology drift，被正确判定为
+`NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，没有 publication。当前相同
+输入再次实测 `cacheHit=true`、`published=false`。因此“单资产增量摄取到
+原子发布”和计划要求的 12 个生产场景仍未闭合；不能把 add-only FACT
+原型、unchanged cache hit 或 fail-fast 安全性描述为完整增量发布。
 
 ## 切换规则
 
-只有新 snapshot 在发布前生成并密封：
+只有新 snapshot 在发布前同时密封 75/75 quality 和有效 burn-in
+attestation，才允许生成：
 
 ```json
 {
@@ -196,19 +204,24 @@ Source-manifest fingerprint 明确排除顶层 `generatedAt`，不会仅因扫�
 }
 ```
 
-才允许把 vNext 设为默认。当前 17 个失败门按原因归组为：
+才允许把 vNext 设为默认。当前 15 个失败门按原因归组为：
 
 1. role 独立 gold 仍为 0/300；
 2. registration 真实 Owner→Target gold 仍为 0/100，因此 count、
    precision/recall、classification、Owner/Target resolution、
    materialization、Evidence 和 lineage 共 10 门阻断；
 3. query human gold 仅 5/130，corpus 尚未 ready；
-4. query protocol compliance `91.54%`、expected-gap match `76.60%`、
-   wrong-answer rate `9.23%`，未达到 fail-closed 门槛；
-5. single-entity P95 为 `358.929ms`，高于 `<250ms` 门槛。
+4. query protocol compliance `98.46%` 和 wrong-answer rate `2.31%`
+   未达到 fail-closed 门槛；expected-gap match 已通过 `95.74%`。
 
 生产选择性 ingest/backend/publisher 仍是工程能力边界，但当前 sealed
-质量报告中的 native、projection、storage 和 stale-leak 门已经通过。
+质量报告中的 native、projection、storage、performance、expected-gap 和
+stale-leak 门已经通过。密封 benchmark P95 为 `3.786ms`；三次独立完整
+复测 P95 为 `4.857 / 4.104 / 4.935ms`，均低于固定 `<250ms` 门槛。
+
+即使未来 quality 达到 75/75，没有 3 个连续合格 sealed builds、真实 shadow
+diff disposition、rollback/concurrent-reader 记录和 12 个生产增量场景，
+burn-in validator 仍会返回 `BLOCKED_BY_MISSING_BURN_IN_EVIDENCE`。
 
 所以当前必须保持：
 

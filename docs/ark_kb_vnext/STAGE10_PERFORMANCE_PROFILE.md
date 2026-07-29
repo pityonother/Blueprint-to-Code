@@ -1,6 +1,6 @@
 # ARK KB vNext Stage 10 Performance Profile
 
-Status: `PARTIAL_PASS_BLOCKED_BY_SNAPSHOT_REBUILD`
+Status: `PERFORMANCE_PASS_BLOCKED_BY_GOLD_AND_BURN_IN`
 
 This profile covers the Stage D1 instrumentation and the currently executable
 part of D3. It does not change gold data, quality thresholds, cache validity,
@@ -8,12 +8,12 @@ Evidence/freshness checks, the sealed snapshot, or the current pointer.
 
 ## Measurement target
 
-- Branch baseline: `bc6843f`
-- Snapshot build: `20260727T222549-a2d56bd7fed8`
+- Performance implementation head: `a92a716`
+- Integrated snapshot build: `20260729T115548-1a203b594bb6`
 - Immutable benchmark report:
   `reports/query_benchmark.json`
 - Manifest-declared benchmark SHA-256:
-  `fc20fd1972673840afd03b22f9ee4fdd725b8cac2b13ea9cf31c5f43e0cb9891`
+  `f9950a60a0c7bf90ea2427855e84981c0222c030fe710f4e29cbbc9e79bc2361`
 - Cases per run: 130 fixed gold-set cases
 - Timing clock: `time.perf_counter`
 - Timing mode: explicit `include_timing=True`; disabled by default
@@ -26,50 +26,48 @@ when an internal recorder is attached.
 
 ## Three consecutive real runs
 
-| Run | P50 ms | P95 ms | P99 ms | Max ms | Semantic outcome SHA-256 |
-|---|---:|---:|---:|---:|---|
-| 1 | 0.307 | 5.365 | 210.899 | 255.208 | `e49071f8da57570045fec06a9a28e54643f8363aa13c7cf6c477d4d48faa6ae8` |
-| 2 | 0.303 | 5.573 | 218.917 | 248.867 | `e49071f8da57570045fec06a9a28e54643f8363aa13c7cf6c477d4d48faa6ae8` |
-| 3 | 0.305 | 5.764 | 217.886 | 243.316 | `e49071f8da57570045fec06a9a28e54643f8363aa13c7cf6c477d4d48faa6ae8` |
+| Run | P50 ms | P95 ms | P99 ms | Storage coverage | Performance gates |
+|---|---:|---:|---:|---|---|
+| 1 | 0.349 | 4.857 | 7.701 | complete | pass |
+| 2 | 0.358 | 4.104 | 5.652 | complete | pass |
+| 3 | 0.407 | 4.935 | 8.473 | complete | pass |
 
 All three overall single-entity P95 values are below the fixed 250 ms target.
-The semantic digest is computed from ordered `queryId`, `route`, `status`, and
-`gapCodes` values.
-
-The same digest computed from the sealed benchmark report is
-`e49071f8da57570045fec06a9a28e54643f8363aa13c7cf6c477d4d48faa6ae8`.
-The following results are also unchanged in every run:
+The following semantic outcomes are unchanged in every run and match the
+manifest-bound benchmark:
 
 - Route counts: `AMBIGUOUS=3`, `DB_PARTIAL=14`,
   `DB_SEMANTIC_COMPLETE=80`, `EVIDENCE_REQUIRED=30`,
   `IDENTITY_ONLY_COMPLETE=3`
-- Protocol compliance: `119/130` (`0.9153846153846154`)
-- Wrong-answer count: `12/130` (`0.09230769230769231`)
-- Expected-gap match: `36/47` (`0.7659574468085106`)
+- Protocol compliance: `128/130` (`0.9846153846153847`)
+- Wrong-answer count: `3/130` (`0.023076923076923078`)
+- Expected-gap match: `45/47` (`0.9574468085106383`)
 
 The sealed pre-optimization report recorded P50 `0.247 ms`, P95 `358.929 ms`,
-P99 `419.260 ms`, and maximum `636.353 ms`. This comparison uses the immutable
-report already bound by the manifest; no replacement report or gold edit was
-made.
+P99 `419.260 ms`, and maximum `636.353 ms`. The new sealed report records P50
+`0.269 ms`, P95 `3.786 ms`, P99 `5.298 ms`, and maximum `5.324 ms`. Both
+comparisons use manifest-bound reports; no replacement report, threshold, or
+gold edit was made.
 
 ## Run 1 segmented diagnostics
 
 | Segment | Samples | SQLite queryCount | P50 ms | P95 ms | P99 ms |
 |---|---:|---:|---:|---:|---:|
-| planner total | 130 | 7,548 | 0.283 | 5.284 | 210.859 |
+| planner total | 130 | 7,548 | 0.315 | 4.770 | 7.603 |
 | fact requirement planning | 130 | 0 | 0.002 | 0.004 | 0.005 |
-| identity lookup | 130 | 7,025 | 0.057 | 0.219 | 210.774 |
-| fact query | 45 | 45 | 0.031 | 0.087 | 0.107 |
-| effective fact query | 60 | 80 | 0.125 | 0.238 | 0.344 |
-| relationship query | 138 | 193 | 0.033 | 0.761 | 0.938 |
-| source revision validation | 303 | 55 | 0.016 | 0.160 | 0.211 |
-| Evidence hydration | 126 | 150 | 0.003 | 2.998 | 3.724 |
-| answer/context serialization | 130 | 0 | 0.018 | 0.059 | 0.105 |
+| identity lookup | 130 | 7,025 | 0.069 | 0.166 | 3.903 |
+| fact query | 45 | 45 | 0.039 | 0.081 | 0.179 |
+| effective fact query | 60 | 80 | 0.138 | 0.327 | 0.505 |
+| relationship query | 138 | 193 | 0.022 | 0.796 | 1.052 |
+| source revision validation | 303 | 55 | 0.019 | 0.184 | 0.231 |
+| Evidence hydration | 126 | 150 | 0.003 | 3.698 | 4.527 |
+| answer/context serialization | 130 | 0 | 0.019 | 0.066 | 0.075 |
 
-Identity lookup owns the long tail. In run 1 the three exact-alias samples had
-P95 `255.208 ms`, and the three fuzzy-candidate samples had P95 `205.896 ms`.
-The overall fixed-corpus P95 passes, but the exact-alias tail remains the next
-measured optimization target.
+The former alias/fuzzy long tail is no longer present in the fixed corpus.
+The sealed storage run observed P95 `162.956 ms` for exact alias and
+`156.337 ms` for fuzzy candidates. Across the three independent reruns, the
+largest fuzzy P95 was `189.281 ms` and the largest valid cache-hit P95 was
+`43.323 ms`.
 
 Source-revision timing is intentionally marked `PARTIAL`. Identity,
 relationship, native, effective-class, and post-hydration fact-revision checks
@@ -81,37 +79,25 @@ flow, so no synthetic duration is reported.
 Relationship SQL projection and relationship-Evidence projection also remain a
 single measured operation for the same reason.
 
-## Storage and cache blocker
+## Storage and cache result
 
-The real storage benchmark stops fail-closed before cache validation:
+The real full snapshot contains all three required NOCASE indexes and passed
+the FTS `EXPLAIN QUERY PLAN` contract. The sealed storage run covered exact
+canonical URI, exact alias, FTS phrase, fuzzy candidate, cold/warm connections,
+cache miss/hit, expiration, source revision, invalidation token, and build
+rejection paths.
 
-```text
-BLOCKED_BY_SNAPSHOT_REBUILD
-search.sqlite schema contract is incomplete:
-index:idx_entity_search_display_nocase
-index:idx_entity_search_internal_nocase
-index:idx_search_aliases_nocase
-```
+The sealed storage result is `coverage.complete=true` and
+`performanceGates.passed=true`. All 10 SQLite stores/projections passed
+`integrity_check`, had zero foreign-key violations, used `journal_mode=DELETE`,
+and had no WAL/SHM sidecars.
 
-Those indexes were added by `bc6843f`, but the current immutable snapshot was
-built before that schema change. The benchmark must not add indexes in place,
-edit the manifest, bypass schema validation, or treat a fixture as gold.
-
-Before the refusal, run 1 recorded:
-
-| Storage segment | Samples | SQLite queryCount | P50 ms | P95 ms | P99 ms |
-|---|---:|---:|---:|---:|---:|
-| pointer/manifest resolution | 2 | 0 | 0.705 | 0.769 | 0.769 |
-| connection acquire | 63 | 63 | 0.239 | 0.626 | 0.988 |
-
-`cacheValidation` and `cacheWrite` therefore have no real-snapshot samples.
-Their instrumentation and unchanged build/revision/TTL/invalidation contracts
-are exercised by the isolated storage contract test, but those fixture timings
-are not presented as gold or as D3 completion evidence.
-
-The storage performance gate remains failed until a new immutable snapshot is
-built and sealed from the real source manifest with the new Search indexes.
-This work must not switch `current.json` until all normal cutover gates pass.
+`cache.sqlite` is intentionally `disposable=true` and mutable after
+publication. It is excluded from the authoritative immutable-database set;
+runtime writes remain build-bound and must pass revision-set, TTL, and
+invalidation-token checks. The benchmark always copies the snapshot to an
+isolated directory before cache mutation, and the original runtime cache is
+not used as semantic authority.
 
 ## Completion decision
 
@@ -121,5 +107,7 @@ This work must not switch `current.json` until all normal cutover gates pass.
 - Route/status/gap parity with sealed report: passed.
 - Existing index/EXPLAIN contracts: preserved.
 - Cache build/revision/TTL/invalidation validity: preserved.
-- Real storage/search/cache performance suite: `BLOCKED_BY_SNAPSHOT_REBUILD`.
-- Stage D as a whole: not complete; no threshold or gate was relaxed.
+- Real storage/search/cache performance suite: passed.
+- Stage D engineering and fixed performance gates: complete.
+- Cutover remains blocked by independent gold, query correctness, production
+  incremental coverage, and burn-in; no threshold or gate was relaxed.

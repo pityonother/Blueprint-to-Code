@@ -59,8 +59,10 @@ knowledge_base/vnext/
 7. 最后原子替换小型 `current.json`。
 
 因此，指针切换前崩溃会保留旧 current；已经打开旧 SQLite 的服务继续读取
-旧 immutable snapshot；新服务只会从同一个新 snapshot 目录打开四库，不会
-出现 Core 新、Search 旧的混合状态。
+旧 snapshot；新服务只会从同一个新 snapshot 目录打开四库，不会出现 Core
+新、Search 旧的混合状态。Catalog/Core/Search、领域投影、manifest 和密封
+报告是 immutable authority；Cache 是同 build 绑定的 disposable runtime
+store，不承担语义权威。
 
 `VNextKnowledgeService` 在构造时只解析一次 current pointer，并把
 Core、Search、Cache 和 manifest 绑定到该次解析的 snapshot。历史
@@ -115,7 +117,7 @@ flowchart LR
 | `catalog.sqlite` | canonical identity、包、范围边和 Coverage | 边表使用整数 ID，不重复长 Object Path |
 | `core.sqlite` | 类闭包、角色、领域、typed edge、事实、生效默认值、native 边和 lineage | 语义真值必须绑定 revision 与 Evidence |
 | `search.sqlite` | exact alias、FTS phrase/prefix 和有界 fuzzy 候选 | 可由 Core 重建，不承担语义真值 |
-| `cache.sqlite` | query snapshot、Context Pack、answer plan | 命中前验证 TTL、build/revision/token；可丢弃 |
+| `cache.sqlite` | query snapshot、Context Pack、answer plan | `disposable=true`，允许运行时写入；命中前验证 TTL、build/revision/token；可丢弃且不承担语义权威 |
 
 ## 事实、关系与角色
 
@@ -161,7 +163,7 @@ percentile。缺失、不新鲜或自生成 benchmark 信号不会按零伪装�
 
 `correct=true`、classifier 自己生成的标签、property-name unit fixture、exact
 native function identity 和 gap-only protocol case 都不能代替上述独立
-gold。规范快照 `20260727T222549-a2d56bd7fed8` 已用
+gold。规范快照 `20260729T115548-1a203b594bb6` 已用
 `verified_callsite` 生成 1 条 `CONFIRMED/HIGH` link：
 `Shapeshifter_Small_Character_BP.AddItemObjectEx` 指向
 `UPrimalInventoryComponent::AddItemObjectEx`。双方 Evidence、规范
@@ -253,7 +255,8 @@ fail fast，并返回 `fullRebuildRequired=true`。它目前不是“单资产�
 }
 ```
 
-当前规范快照的密封门禁为 `58/75`，17 个 critical gate 仍开放，因此必须
+当前规范快照的密封门禁为 `60/75`，15 个 critical gate 仍开放；burn-in
+attestation 仍为 `MISSING`，因此必须
 保持：
 
 ```json

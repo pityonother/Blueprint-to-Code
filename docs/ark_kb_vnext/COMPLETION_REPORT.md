@@ -2,10 +2,10 @@
 
 ## 总体状态
 
-Stage 8/9 的工程实现已完成以下收口：typed registration 语义拆分、角色真实
-信号接线、独立 gold fail-closed 计分、受验证的 rebuild worker 边界、
-immutable snapshot、发布前门禁密封、原子 current pointer 和统一 reader
-解析。
+Stage 8–12 的工程实现已完成以下收口：typed registration 语义拆分、角色真实
+信号接线、独立 gold fail-closed 计分、盲审工厂、逐 case 查询诊断、真实性能
+分析、受限增量 rebuild、immutable snapshot、发布前门禁密封、原子 current
+pointer、burn-in attestation 和 rollback 边界。
 
 这不等于“已经可以替换 legacy”。当前人工/实证 gold 和部分生产增量能力
 仍缺失，所以交付状态是：
@@ -21,18 +21,25 @@ implementation hardened
 
 以下身份来自本机规范 current 指向的真实全量 post-hardening 快照：
 
-- Build：`20260727T222549-a2d56bd7fed8`
-- Source SHA-256：`a2d56bd7fed88edd1098915ea3723da0fdef0b0a263567b56f46bae074f385cd`
+- Build：`20260729T115548-1a203b594bb6`
+- Source SHA-256：`1a203b594bb6119dbf29d5a0c8789bd653c716eaf72e5915ee5a176675576450`
 - Discovery SHA-256：`028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f`
 - 当前发布布局：`immutable-v2`
 - 发布合同：根 `current.json` 指向
   `snapshots/<buildId>/manifest.json`
-- 密封门禁：58/75 passed，17 failed
+- 密封门禁：60/75 passed，15 failed
 - Runtime health：`activeStaleSources=0`
 - 当前 cutover：`shadow / legacy`
+- Burn-in：`MISSING / BURN_IN_ATTESTATION_MISSING`
 
 质量报告、benchmark、runtime health 和数据库 identity 已在 pointer 可见
-前密封到 snapshot manifest；发布后的外部复核得到相同 58/75 结果。
+前密封到 snapshot manifest；独立复核重算了报告与诊断哈希，并得到相同
+60/75 结果。
+
+`catalog.sqlite`、`core.sqlite`、`search.sqlite`、六个 projection、manifest
+和密封报告是不可变权威；`cache.sqlite` 明确标记为 `disposable=true`，
+允许运行时写入，但每次命中仍须验证 build、revision set、TTL 和
+invalidation token。cache 的发布时 SHA 只描述空种子，不是运行时不变式。
 
 ## Actual semantic content
 
@@ -216,18 +223,25 @@ schema 和绑定验证。密封 `runtimeHealth` 与 Core metadata 一致，
   receipt 的 fail-closed 路径；
 - 文档 build/source identity 与当前已发布 manifest 一致性。
 
-本轮最终受影响矩阵实跑结果为 `136 passed, 135 subtests passed`；合并后的
-`test_kb_*.py` 全量验收为 `439 tests OK`，update 专项为 `46 passed`，
-performance/document 专项为 `12 passed, 6 subtests passed`。Ruff 与
-`git diff --check` 通过。真实 full build、发布后 sealed validator、API
-health/search、外部门禁和 unchanged update 均已执行。外部门禁按预期以
-非零退出并报告 58/75，而不是把 shadow 误报成失败构建。
+完整堆栈的 Python 全量验收为 `1214 passed, 4 skipped`，并通过 606 个
+subtests；最终受影响矩阵为 `137 passed, 22 subtests`。前端 API/harvest
+contracts 与 production Vite build 均通过。
+Ruff 与 `git diff --check` 通过。真实 full build、sealed validator、API
+health/search、三次完整性能复测、storage integrity/FK/WAL/SHM 和 unchanged
+update 均已执行。update 返回 `cacheHit=true`、`published=false`，没有创建
+staging 或交换 current。
 
 复现命令：
 
 ```powershell
-.\runtime\python\python.exe -m unittest discover -s tests -p "test_kb_*.py"
-.\runtime\python\python.exe -m pytest tests\test_update_ark_kb_vnext.py -q
+python -m pytest -q
+python scripts\update_ark_kb_vnext.py `
+  --discovery-database knowledge_base\discovery_bundle\kb_discovery.sqlite `
+  --capture-root captures `
+  --native-root native_evidence `
+  --legacy-kb-root knowledge_base\db `
+  --map-evidence-catalog analysis\harvest_nodes\resource_node_catalog.json `
+  --output knowledge_base\vnext
 git diff --check
 ```
 
@@ -238,14 +252,18 @@ git diff --check
 1. query human gold 5/130，低于 120；
 2. registration relationship gold 0/100；
 3. role gold 0/300；
-4. query protocol compliance `91.54%`、expected-gap match `76.60%` 和
-   wrong-answer rate `9.23%` 未达门槛；
-5. single-entity P95 `358.929ms`，高于 `<250ms`；
-6. 单资产生产选择性 ingest/backend/publisher 尚未闭合。
+4. query protocol compliance `98.46%` 和 wrong-answer rate `2.31%`
+   未达门槛；expected-gap match 已达到 `95.74%`；
+5. 单实体性能已通过：密封 P95 `3.786ms`，三次独立完整复测为
+   `4.857 / 4.104 / 4.935ms`；
+6. 生产增量目前只允许 1–32 个 add-only Blueprint Evidence 的 FACT
+   materialization；update/delete/rename 和其他 backend 仍 fail closed；
+7. 没有 3 个连续合格 sealed builds、真实 shadow diff disposition、
+   rollback/concurrent-reader 记录和 12 个生产增量场景 attestation。
 
 密封报告中 native、projection、storage、runtime freshness 和 stale-leak
-门已经通过；17 个失败门集中在 role gold、registration gold/派生指标和
-query gold/正确性/延迟。
+门已经通过；15 个失败门集中在 role gold、registration gold/派生指标和
+query gold/正确性。性能不再是失败门，但它不能替代独立 review 或 burn-in。
 
 只有所有关键门禁在发布前通过并密封到新 manifest，才允许：
 
