@@ -769,7 +769,15 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
             1,
         )
         self.assertEqual(result["goldSet"]["fixedGoldCases"], 130)
-        self.assertEqual(result["goldSet"]["humanGoldCases"], 5)
+        self.assertEqual(result["goldSet"]["humanGoldCases"], 0)
+        self.assertEqual(
+            result["goldSet"]["compatibilityReviewedCases"],
+            5,
+        )
+        self.assertEqual(
+            result["goldSet"]["productionReviewContract"],
+            "SIGNED_V2_RECEIPTS_REQUIRED",
+        )
         self.assertFalse(result["goldSet"]["corpusReadyForCutover"])
         self.assertTrue(result["identityOnlyNotCountedAsSemantic"])
         self.assertLessEqual(result["contextTokens"]["maximum"], 2_000)

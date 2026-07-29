@@ -722,7 +722,7 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         }
         return report, case_results_bytes, failure_matrix_bytes
 
-    def test_benchmark_v2_gates_replace_legacy_self_selected_metrics(self):
+    def test_unsigned_benchmark_claims_cannot_satisfy_gold_gates(self):
         benchmark = {
             "schema": "ark-kb-query-benchmark/v2",
             "total": 120,
@@ -782,7 +782,26 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         self.assertNotIn("queries.complete_or_bounded", gate_ids)
         self.assertNotIn("queries.simple_db_only", gate_ids)
         self.assertNotIn("queries.no_silent_unresolved", gate_ids)
-        self.assertTrue(all(bool(gate["passed"]) for gate in gates))
+        by_id = {str(gate["id"]): gate for gate in gates}
+        self.assertFalse(by_id["queries.human_gold_cases"]["passed"])
+        self.assertEqual(by_id["queries.human_gold_cases"]["actual"], 0)
+        self.assertFalse(
+            by_id["queries.corpus_ready_for_cutover"]["passed"]
+        )
+        self.assertFalse(
+            by_id["queries.corpus_ready_for_cutover"]["actual"]
+        )
+        self.assertTrue(
+            all(
+                bool(gate["passed"])
+                for gate in gates
+                if gate["id"]
+                not in {
+                    "queries.human_gold_cases",
+                    "queries.corpus_ready_for_cutover",
+                }
+            )
+        )
 
     def test_registration_gate_rejects_noncomplete_high_confidence(self):
         core = sqlite3.connect(":memory:")
@@ -928,19 +947,19 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             "INDEPENDENT_OWNER_TARGET_REVIEW_REQUIRED",
         )
 
-    def test_relationship_gold_checks_resolution_edge_and_evidence(self):
+    def test_unsigned_relationship_reviews_do_not_count_as_production_gold(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             fixtures = project_root / "tests" / "fixtures"
             fixtures.mkdir(parents=True)
             reviews = [
                 {
-                    "reviewerId": "reviewer-a",
+                    "reviewerId": "unsigned-string-a",
                     "round": 1,
                     "verdict": "CONFIRMED",
                 },
                 {
-                    "reviewerId": "reviewer-b",
+                    "reviewerId": "unsigned-string-b",
                     "round": 2,
                     "verdict": "CONFIRMED",
                 },
@@ -1065,21 +1084,10 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             finally:
                 core.close()
 
-        self.assertTrue(metrics["available"])
-        self.assertEqual(metrics["relationships"], 2)
-        self.assertEqual(metrics["positiveCases"], 1)
-        self.assertEqual(metrics["negativeCases"], 1)
-        for key in (
-            "precision",
-            "recall",
-            "classificationPrecision",
-            "classificationRecall",
-            "ownerResolutionRate",
-            "targetResolutionRate",
-            "edgeMaterializationRate",
-            "evidenceCorrectnessRate",
-        ):
-            self.assertEqual(metrics[key], 1.0, key)
+        self.assertFalse(metrics["available"])
+        self.assertEqual(metrics["relationships"], 0)
+        self.assertEqual(metrics["compatibilityRelationships"], 2)
+        self.assertEqual(metrics["gapCode"], "SIGNED_V2_RECEIPTS_REQUIRED")
 
     def test_relationship_gold_rejects_stale_self_attested_edges(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1106,12 +1114,12 @@ class KnowledgeQualityGateTests(unittest.TestCase):
                                 "reviewStatus": "EMPIRICAL",
                                 "reviews": [
                                     {
-                                        "reviewerId": "reviewer-a",
+                                        "reviewerId": "unsigned-string-a",
                                         "round": 1,
                                         "verdict": "CONFIRMED",
                                     },
                                     {
-                                        "reviewerId": "reviewer-b",
+                                        "reviewerId": "unsigned-string-b",
                                         "round": 2,
                                         "verdict": "CONFIRMED",
                                     },
@@ -1191,11 +1199,10 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             finally:
                 core.close()
 
-        self.assertTrue(metrics["available"])
-        self.assertEqual(metrics["classificationPrecision"], 1.0)
-        self.assertEqual(metrics["edgeMaterializationRate"], 0.0)
-        self.assertEqual(metrics["evidenceCorrectnessRate"], 0.0)
-        self.assertEqual(metrics["recall"], 0.0)
+        self.assertFalse(metrics["available"])
+        self.assertEqual(metrics["relationships"], 0)
+        self.assertEqual(metrics["compatibilityRelationships"], 1)
+        self.assertEqual(metrics["gapCode"], "SIGNED_V2_RECEIPTS_REQUIRED")
 
     def test_registration_lineage_requires_fresh_complete_revision(self):
         core = sqlite3.connect(":memory:")
@@ -1300,7 +1307,7 @@ class KnowledgeQualityGateTests(unittest.TestCase):
         self.assertEqual(metrics["assets"], 0)
         self.assertIsNone(metrics["precision"])
 
-    def test_role_gold_recomputes_predictions_after_two_reviews(self):
+    def test_unsigned_role_reviews_do_not_count_as_production_gold(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             fixtures = project_root / "tests" / "fixtures"
@@ -1316,12 +1323,12 @@ class KnowledgeQualityGateTests(unittest.TestCase):
                     "reviewStatus": "HUMAN_REVIEWED",
                     "reviews": [
                         {
-                            "reviewerId": "reviewer-a",
+                            "reviewerId": "unsigned-string-a",
                             "round": 1,
                             "roles": expected_roles,
                         },
                         {
-                            "reviewerId": "reviewer-b",
+                            "reviewerId": "unsigned-string-b",
                             "round": 2,
                             "roles": expected_roles,
                         },
@@ -1402,13 +1409,28 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             finally:
                 core.close()
 
-        self.assertTrue(metrics["available"])
-        self.assertEqual(metrics["assets"], 2)
-        self.assertEqual(metrics["precision"], 0.5)
-        self.assertEqual(metrics["recall"], 0.5)
-        self.assertEqual(metrics["resolutionRate"], 1.0)
-        self.assertEqual(stale_metrics["precision"], 0.0)
-        self.assertEqual(stale_metrics["recall"], 0.0)
+        self.assertFalse(metrics["available"])
+        self.assertEqual(metrics["assets"], 0)
+        self.assertEqual(metrics["compatibilityAssets"], 2)
+        self.assertIn("signed v2", metrics["detail"].lower())
+        self.assertEqual(
+            metrics["compatibilityMetrics"]["precision"],
+            0.5,
+        )
+        self.assertEqual(
+            metrics["compatibilityMetrics"]["recall"],
+            0.5,
+        )
+        self.assertFalse(stale_metrics["available"])
+        self.assertEqual(stale_metrics["compatibilityAssets"], 2)
+        self.assertEqual(
+            stale_metrics["compatibilityMetrics"]["precision"],
+            0.0,
+        )
+        self.assertEqual(
+            stale_metrics["compatibilityMetrics"]["recall"],
+            0.0,
+        )
 
     def test_benchmark_v2_gates_fail_closed_for_current_corpus_gaps(self):
         gates = _query_benchmark_gates(

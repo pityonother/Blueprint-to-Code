@@ -17,11 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from .gold_review import (
-    GoldReviewError,
-    load_trusted_reviewer_registry,
-    validate_query_review_provenance,
-)
 from .kb_context import build_bounded_context_pack
 from .map_usage import MAP_USAGE_EDGE_TYPES
 from .profiling import SegmentTiming, measure_segment
@@ -63,12 +58,6 @@ DEFAULT_PROJECTION_REVIEW_PATH = (
     Path(__file__).resolve().parents[3]
     / "ontology"
     / "projection_review.v1.json"
-)
-DEFAULT_TRUSTED_REVIEWER_REGISTRY_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "tests"
-    / "fixtures"
-    / "kb_trusted_reviewer_registry.v1.json"
 )
 CATEGORY_MINIMUMS = {
     "FACT": 30,
@@ -917,30 +906,11 @@ def _validate_empirical_cases(
     ]
     if not empirical_cases:
         return
-    registry_path = (
-        trusted_reviewer_registry_path
-        or DEFAULT_TRUSTED_REVIEWER_REGISTRY_PATH
+    del trusted_reviewer_registry_path
+    raise ValueError(
+        "SIGNED_V2_RECEIPTS_REQUIRED: v1 EMPIRICAL hash receipts are "
+        "diagnostic compatibility evidence only"
     )
-    if not registry_path.is_file():
-        raise ValueError(
-            "EMPIRICAL requires validated review provenance and a "
-            "trusted reviewer registry"
-        )
-    try:
-        trusted_reviewers = load_trusted_reviewer_registry(registry_path)
-        for raw_case in empirical_cases:
-            provenance = raw_case.get("reviewProvenance")
-            if not isinstance(provenance, Mapping):
-                raise GoldReviewError(
-                    "EMPIRICAL requires validated review provenance"
-                )
-            validate_query_review_provenance(
-                raw_case,
-                provenance,
-                trusted_reviewers=trusted_reviewers,
-            )
-    except GoldReviewError as error:
-        raise ValueError(str(error)) from error
 
 
 def load_benchmark_gold_set(
@@ -975,6 +945,10 @@ def load_benchmark_gold_set(
         projection_review_path=projection_review_path,
     )
     ready, gaps = _corpus_readiness(cases)
+    compatibility_reviewed_cases = sum(
+        case.review_status in {"HUMAN_REVIEWED", "EMPIRICAL"}
+        for case in cases
+    )
     return {
         "schema": GOLD_SET_SCHEMA,
         "version": str(raw.get("version") or ""),
@@ -982,7 +956,11 @@ def load_benchmark_gold_set(
         "generatedFromCore": False,
         "corpusSha256": _json_hash(raw),
         "cases": cases,
-        "corpusReadyForCutover": ready,
+        "corpusReadyForCutover": False,
+        "semanticCorpusReadyForCutover": ready,
+        "productionHumanGoldCases": 0,
+        "compatibilityReviewedCases": compatibility_reviewed_cases,
+        "productionReviewContract": "SIGNED_V2_RECEIPTS_REQUIRED",
         "corpusGaps": gaps,
         "limitations": raw.get("semanticCoverageLimitations", []),
     }
@@ -4152,10 +4130,16 @@ def run_query_benchmark(
             "selectionMode": gold["selectionMode"],
             "generatedFromCore": gold["generatedFromCore"],
             "fixedGoldCases": len(cases),
-            "humanGoldCases": sum(
-                case.review_status in {"HUMAN_REVIEWED", "EMPIRICAL"}
-                for case in cases
-            ),
+            "humanGoldCases": gold["productionHumanGoldCases"],
+            "compatibilityReviewedCases": gold[
+                "compatibilityReviewedCases"
+            ],
+            "productionReviewContract": gold[
+                "productionReviewContract"
+            ],
+            "semanticCorpusReadyForCutover": gold[
+                "semanticCorpusReadyForCutover"
+            ],
             "protocolBoundaryOnlyCases": sum(
                 case.protocol_boundary_only for case in cases
             ),

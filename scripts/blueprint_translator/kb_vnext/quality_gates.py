@@ -616,6 +616,9 @@ def _registration_gold_metrics(
         "targetResolutionRate": 0.0,
         "edgeMaterializationRate": 0.0,
         "evidenceCorrectnessRate": 0.0,
+        "compatibilityRelationships": 0,
+        "compatibilityMetrics": {},
+        "productionReviewContract": "SIGNED_V2_RECEIPTS_REQUIRED",
         "gapCode": "INDEPENDENT_OWNER_TARGET_REVIEW_REQUIRED",
     }
     try:
@@ -927,8 +930,7 @@ def _registration_gold_metrics(
             )
 
     relationships = len(cases)
-    return {
-        "available": True,
+    compatibility_metrics = {
         "relationships": relationships,
         "positiveCases": positive_cases,
         "negativeCases": relationships - positive_cases,
@@ -955,7 +957,12 @@ def _registration_gold_metrics(
             evidence_correct,
             relationships,
         ),
-        "gapCode": "",
+    }
+    return {
+        **unavailable,
+        "compatibilityRelationships": relationships,
+        "compatibilityMetrics": compatibility_metrics,
+        "gapCode": "SIGNED_V2_RECEIPTS_REQUIRED",
     }
 
 
@@ -970,6 +977,9 @@ def _role_gold_metrics(
         "recall": None,
         "resolutionRate": 0.0,
         "perRole": {},
+        "compatibilityAssets": 0,
+        "compatibilityMetrics": {},
+        "productionReviewContract": "SIGNED_V2_RECEIPTS_REQUIRED",
         "detail": (
             "No independently reviewed 300-asset role gold set exists; "
             "classifier unit cases are not counted as production gold."
@@ -1188,8 +1198,7 @@ def _role_gold_metrics(
         for role, counts in per_role_counts.items()
         if sum(counts.values()) > 0
     }
-    return {
-        "available": True,
+    compatibility_metrics = {
         "assets": len(cases),
         "precision": _ratio(
             true_positive,
@@ -1201,9 +1210,14 @@ def _role_gold_metrics(
         ),
         "resolutionRate": _ratio(resolved, len(cases)),
         "perRole": per_role,
+    }
+    return {
+        **unavailable,
+        "compatibilityAssets": len(cases),
+        "compatibilityMetrics": compatibility_metrics,
         "detail": (
-            "Predictions were recomputed from Core after two independent "
-            "review rounds; disagreements require adjudication."
+            "Unsigned v1 reviewer strings are retained as compatibility "
+            "diagnostics only; signed v2 receipts are required."
         ),
     }
 
@@ -1484,7 +1498,9 @@ def _query_benchmark_gates(
             return None
 
     fixed_gold = integer(gold, "fixedGoldCases")
-    human_gold = integer(gold, "humanGoldCases")
+    reported_human_gold = integer(gold, "humanGoldCases")
+    human_gold = 0
+    corpus_ready = False
     protocol = rate("protocolComplianceRate")
     semantic_exact = rate("semanticExactMatchRate")
     usable_value = rate("usableValueAnswerRate")
@@ -1531,16 +1547,23 @@ def _query_benchmark_gates(
             "queries",
             target=">=120 HUMAN_REVIEWED or EMPIRICAL cases",
             actual=human_gold,
-            passed=human_gold is not None and human_gold >= 120,
-            detail="Fixture-exact protocol cases do not count as human gold.",
+            passed=False,
+            detail=(
+                "Unsigned benchmark claims cannot establish production Gold; "
+                "signed v2 provenance is required. Reported compatibility "
+                f"count: {reported_human_gold}."
+            ),
         ),
         _gate(
             "queries.corpus_ready_for_cutover",
             "queries",
             target=True,
-            actual=gold.get("corpusReadyForCutover"),
-            passed=gold.get("corpusReadyForCutover") is True,
-            detail="The fixed corpus itself declares no outstanding review gap.",
+            actual=corpus_ready,
+            passed=False,
+            detail=(
+                "Corpus readiness remains fail-closed until signed v2 Gold "
+                "provenance is verified by the production gate path."
+            ),
         ),
         _gate(
             "queries.protocol_compliance",
