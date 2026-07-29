@@ -880,6 +880,40 @@ class KnowledgeStorageTests(unittest.TestCase):
             self.assertEqual(storage_performance["error"], "")
             self.assertTrue(storage_performance["connections"])
             self.assertEqual(
+                quality["diagnosticsSchema"],
+                "ark-kb-query-diagnostics/v1",
+            )
+            for uri_key, sha_key in (
+                ("caseResultsUri", "caseResultsSha256"),
+                ("failureMatrixUri", "failureMatrixSha256"),
+            ):
+                artifact = snapshot_root / str(quality[uri_key])
+                self.assertTrue(artifact.is_file())
+                self.assertEqual(
+                    quality[sha_key],
+                    hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                )
+            diagnostics = quality_report["benchmark"][
+                "diagnosticArtifacts"
+            ]
+            self.assertEqual(
+                quality["diagnosticsBindingSha256"],
+                snapshot_module._query_diagnostics_binding_sha256(
+                    build_id=result["buildId"],
+                    corpus_sha256=diagnostics["corpusSha256"],
+                    quality_report_sha256=quality["sha256"],
+                    benchmark_report_sha256=quality[
+                        "benchmarkSha256"
+                    ],
+                    case_results_sha256=quality[
+                        "caseResultsSha256"
+                    ],
+                    failure_matrix_sha256=quality[
+                        "failureMatrixSha256"
+                    ],
+                ),
+            )
+            self.assertEqual(
                 result["cutover"]["defaultQuerySource"], "legacy"
             )
             self.assertEqual(

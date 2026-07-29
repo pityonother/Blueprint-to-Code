@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -50,6 +51,42 @@ def _report_uris(snapshot_root: Path, build_id: str) -> tuple[str, str]:
     )
 
 
+def _diagnostic_report_metadata(
+    snapshot_root: Path,
+    build_id: str,
+    benchmark: object,
+) -> dict[str, str]:
+    if not isinstance(benchmark, Mapping):
+        return {}
+    artifacts = benchmark.get("diagnosticArtifacts")
+    if not isinstance(artifacts, Mapping):
+        return {}
+    case_results = artifacts.get("caseResults")
+    failure_matrix = artifacts.get("failureMatrix")
+    if not isinstance(case_results, Mapping) or not isinstance(
+        failure_matrix,
+        Mapping,
+    ):
+        return {}
+    immutable = (
+        (snapshot_root / "current.json").is_file()
+        or (snapshot_root / "manifest.json").is_file()
+    )
+    report_root = f"reports/{build_id}" if immutable else "reports"
+    return {
+        "caseResultsUri": (
+            f"{report_root}/query_case_results.jsonl"
+        ),
+        "caseResultsSha256": str(case_results.get("sha256") or ""),
+        "failureMatrixUri": (
+            f"{report_root}/query_failure_matrix.json"
+        ),
+        "failureMatrixSha256": str(
+            failure_matrix.get("sha256") or ""
+        ),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     snapshot_root = _absolute(args.snapshot_root)
@@ -66,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_root,
         str(report["buildId"]),
     )
+    diagnostic_metadata = _diagnostic_report_metadata(
+        snapshot_root,
+        str(report["buildId"]),
+        report["benchmark"],
+    )
     print(
         json.dumps(
             {
@@ -75,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cutover": cutover,
                 "reportUri": report_uri,
                 "benchmarkUri": benchmark_uri,
+                **diagnostic_metadata,
             },
             ensure_ascii=False,
             indent=2,

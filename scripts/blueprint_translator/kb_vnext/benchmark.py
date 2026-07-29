@@ -2625,6 +2625,86 @@ def query_failure_matrix_json_bytes(
     ).encode("utf-8")
 
 
+def query_diagnostic_artifact_bytes(
+    benchmark: Mapping[str, object],
+    *,
+    expected_build_id: str | None = None,
+) -> tuple[bytes, bytes]:
+    """Recompute and validate the two diagnostic artifact byte streams."""
+
+    if str(benchmark.get("schema") or "") != BENCHMARK_SCHEMA:
+        raise ValueError("Query diagnostic benchmark schema is invalid")
+    diagnostics = benchmark.get("diagnosticArtifacts")
+    gold_set = benchmark.get("goldSet")
+    raw_results = benchmark.get("results")
+    if (
+        not isinstance(diagnostics, Mapping)
+        or not isinstance(gold_set, Mapping)
+        or not isinstance(raw_results, list)
+        or any(
+            not isinstance(item, Mapping)
+            for item in raw_results
+        )
+    ):
+        raise ValueError(
+            "Query diagnostic artifact contract is missing"
+        )
+    build_id = str(diagnostics.get("buildId") or "")
+    corpus_sha256 = str(
+        diagnostics.get("corpusSha256") or ""
+    ).lower()
+    if (
+        diagnostics.get("schema") != QUERY_DIAGNOSTICS_SCHEMA
+        or not build_id
+        or (
+            expected_build_id is not None
+            and build_id != expected_build_id
+        )
+        or corpus_sha256
+        != str(gold_set.get("sha256") or "").lower()
+        or int(benchmark.get("total") or 0) != len(raw_results)
+    ):
+        raise ValueError(
+            "Query diagnostic build or corpus binding is invalid"
+        )
+    case_results = [
+        item for item in raw_results if isinstance(item, Mapping)
+    ]
+    case_bytes = query_case_results_jsonl_bytes(case_results)
+    case_contract = diagnostics.get("caseResults")
+    if (
+        not isinstance(case_contract, Mapping)
+        or case_contract.get("schema") != QUERY_CASE_RESULT_SCHEMA
+        or case_contract.get("uri")
+        != "reports/query_case_results.jsonl"
+        or int(case_contract.get("count") or 0)
+        != len(case_results)
+        or str(case_contract.get("sha256") or "").lower()
+        != hashlib.sha256(case_bytes).hexdigest()
+    ):
+        raise ValueError("query case results digest is invalid")
+    matrix = build_query_failure_matrix(
+        case_results,
+        build_id=build_id,
+        corpus_sha256=corpus_sha256,
+    )
+    matrix_bytes = query_failure_matrix_json_bytes(matrix)
+    matrix_contract = diagnostics.get("failureMatrix")
+    if (
+        not isinstance(matrix_contract, Mapping)
+        or matrix_contract.get("schema")
+        != QUERY_FAILURE_MATRIX_SCHEMA
+        or matrix_contract.get("uri")
+        != "reports/query_failure_matrix.json"
+        or int(matrix_contract.get("caseCount") or 0)
+        != len(case_results)
+        or str(matrix_contract.get("sha256") or "").lower()
+        != hashlib.sha256(matrix_bytes).hexdigest()
+    ):
+        raise ValueError("query failure matrix digest is invalid")
+    return case_bytes, matrix_bytes
+
+
 def _metric(
     results: Sequence[Mapping[str, object]],
     key: str,
@@ -2856,7 +2936,9 @@ def _degree_latency(
 def _copy_snapshot_for_benchmark(
     snapshot_root: Path,
     isolated_root: Path,
-) -> None:
+    *,
+    allow_unsealed_snapshot: bool = False,
+) -> bool:
     snapshot_root = snapshot_root.resolve()
     isolated_root = isolated_root.resolve()
     # Local imports avoid snapshot -> storage -> benchmark import cycles.
@@ -2980,10 +3062,24 @@ def _copy_snapshot_for_benchmark(
     if source_layout != "legacy-v1":
         quality = manifest.get("qualityGates")
         if not isinstance(quality, Mapping):
+            if allow_unsealed_snapshot:
+                return True
             raise ValueError(
                 "Immutable benchmark snapshot has no sealed quality report"
             )
-        for key in ("reportUri", "benchmarkUri"):
+        report_keys = ["reportUri", "benchmarkUri"]
+        diagnostic_keys = (
+            "caseResultsUri",
+            "failureMatrixUri",
+        )
+        if any(quality.get(key) for key in diagnostic_keys):
+            if not all(quality.get(key) for key in diagnostic_keys):
+                raise ValueError(
+                    "Immutable benchmark snapshot has incomplete "
+                    "query diagnostics"
+                )
+            report_keys.extend(diagnostic_keys)
+        for key in report_keys:
             raw_name = str(quality.get(key) or "")
             relative = Path(raw_name)
             if (
@@ -3007,6 +3103,7 @@ def _copy_snapshot_for_benchmark(
                 )
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
+    return False
 
 
 def _connection_latency(
@@ -3222,6 +3319,7 @@ def run_storage_path_benchmark(
     snapshot_root: Path,
     *,
     sample_count: int = PERFORMANCE_SAMPLE_TARGET,
+    allow_unsealed_snapshot: bool = False,
 ) -> dict[str, object]:
     """Exercise Search and Cache through an isolated copy of a real snapshot."""
 
@@ -3263,11 +3361,29 @@ def run_storage_path_benchmark(
         ) as temporary:
             isolated_root = Path(temporary) / "snapshot"
             isolated_root.mkdir()
-            _copy_snapshot_for_benchmark(
+            copied_unsealed_snapshot = _copy_snapshot_for_benchmark(
                 snapshot_root.resolve(),
                 isolated_root,
+                allow_unsealed_snapshot=allow_unsealed_snapshot,
             )
-            service = VNextKnowledgeService(isolated_root)
+            service = VNextKnowledgeService(
+                isolated_root,
+                _allow_unsealed_benchmark=copied_unsealed_snapshot,
+            )
+            runtime_health = service.health()
+            if runtime_health.get("status") == "INVALID":
+                gaps = runtime_health.get("gap")
+                detail = next(
+                    (
+                        str(item.get("detail") or "")
+                        for item in gaps
+                        if isinstance(item, Mapping)
+                        and item.get("code")
+                        == "KB_VNEXT_SNAPSHOT_INVALID"
+                    ),
+                    "Snapshot runtime binding is invalid.",
+                )
+                raise ValueError(detail)
             active_root = service.root
             search_path = service.search_path
             cache_path = service.cache_path
@@ -3310,7 +3426,10 @@ def run_storage_path_benchmark(
             cold_search_query = queries.get("EXACT_CANONICAL_URI")
             if cold_search_query is not None:
                 cold_search_service = VNextKnowledgeService(
-                    isolated_root
+                    isolated_root,
+                    _allow_unsealed_benchmark=(
+                        copied_unsealed_snapshot
+                    ),
                 )
                 started = time.perf_counter()
                 cold_search_service.search_entities(
@@ -3354,7 +3473,10 @@ def run_storage_path_benchmark(
             request = _cache_probe_request(search_path)
             fingerprint = _query_fingerprint(request)
             _clear_cache_probe(cache_path, fingerprint)
-            cache_service = VNextKnowledgeService(isolated_root)
+            cache_service = VNextKnowledgeService(
+                isolated_root,
+                _allow_unsealed_benchmark=copied_unsealed_snapshot,
+            )
             started = time.perf_counter()
             first = cache_service.query(request)
             cold_cache_ms = (
@@ -3739,6 +3861,7 @@ def run_query_benchmark(
     core_path: Path,
     *,
     gold_set_path: Path = DEFAULT_GOLD_SET_PATH,
+    allow_unsealed_snapshot: bool = False,
 ) -> dict[str, object]:
     gold = load_benchmark_gold_set(gold_set_path)
     cases = list(gold["cases"])
@@ -3831,7 +3954,10 @@ def run_query_benchmark(
         degree_latency = _degree_latency(connection)
     finally:
         connection.close()
-    storage_performance = run_storage_path_benchmark(core_path.parent)
+    storage_performance = run_storage_path_benchmark(
+        core_path.parent,
+        allow_unsealed_snapshot=allow_unsealed_snapshot,
+    )
     performance_gates = _runtime_performance_gates(
         storage_performance,
         degree_latency,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -32,6 +33,12 @@ from blueprint_translator.kb_vnext.map_usage import (  # noqa: E402
 )
 from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     _query_benchmark_gates,
+)
+from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
+    SourceManifest,
+    SourceRevision,
+    source_id,
+    source_manifest_binding,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     FULL_CORE_SCHEMA_SQL,
@@ -235,6 +242,126 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
                 )
         self.assertEqual(original_cache_rows, 0)
 
+    def test_preseal_staging_storage_benchmark_requires_explicit_context(self):
+        test_root = PROJECT_ROOT / "tests"
+        if str(test_root) not in sys.path:
+            sys.path.insert(0, str(test_root))
+        from test_kb_api import _snapshot
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            legacy = base / "legacy-fixture"
+            _snapshot(legacy)
+            staging = base / "candidate-staging"
+            staging.mkdir()
+            for name in (
+                "catalog.sqlite",
+                "core.sqlite",
+                "search.sqlite",
+                "cache.sqlite",
+            ):
+                shutil.copy2(legacy / name, staging / name)
+            shutil.copytree(
+                legacy / "domain_exports",
+                staging / "domain_exports",
+            )
+            manifest = json.loads(
+                (legacy / "manifests" / "current.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            generated_at = str(manifest["generatedAt"])
+            semantic_inputs = manifest["source"]["inputs"]
+            source_manifest = SourceManifest(
+                entries=tuple(
+                    SourceRevision(
+                        source_id=source_id(
+                            "SEMANTIC_INPUT",
+                            f"semantic-input://{key}",
+                        ),
+                        source_kind="SEMANTIC_INPUT",
+                        source_uri=f"semantic-input://{key}",
+                        fingerprint=str(fingerprint),
+                    )
+                    for key, fingerprint in semantic_inputs.items()
+                )
+                + (
+                    SourceRevision(
+                        source_id=source_id(
+                            "SEMANTIC_INPUT",
+                            "semantic-input://runtimeObservations",
+                        ),
+                        source_kind="SEMANTIC_INPUT",
+                        source_uri=(
+                            "semantic-input://runtimeObservations"
+                        ),
+                        fingerprint="9" * 64,
+                    ),
+                ),
+                generated_at=generated_at,
+            )
+            manifest["incrementalUpdate"] = source_manifest_binding(
+                source_manifest
+            )
+            (staging / "manifest.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+
+            rejected = run_storage_path_benchmark(
+                staging,
+                sample_count=1,
+            )
+            measured = run_storage_path_benchmark(
+                staging,
+                sample_count=1,
+                allow_unsealed_snapshot=True,
+            )
+
+        self.assertIn(
+            "no sealed quality report",
+            rejected["error"],
+        )
+        self.assertFalse(rejected["coverage"]["complete"])
+        self.assertEqual(measured["error"], "")
+        self.assertTrue(measured["coverage"]["complete"])
+        self.assertTrue(measured["search"]["ftsPlanUsed"])
+        self.assertTrue(measured["cache"]["validHit"])
+
+    def test_unsealed_context_never_bypasses_a_declared_seal(self):
+        test_root = PROJECT_ROOT / "tests"
+        if str(test_root) not in sys.path:
+            sys.path.insert(0, str(test_root))
+        from test_kb_snapshot_atomicity import (
+            _fixture_build_id,
+            _staging,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            build_id = _fixture_build_id("11:22:33")
+            staging, manifest = _staging(base, build_id)
+            (staging / "manifest.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            report_path = (
+                staging / "reports" / "quality_gates.json"
+            )
+            report_path.write_bytes(report_path.read_bytes() + b" ")
+
+            measured = run_storage_path_benchmark(
+                staging,
+                sample_count=1,
+                allow_unsealed_snapshot=True,
+            )
+
+        self.assertIn(
+            "sealed quality report hash is invalid",
+            measured["error"],
+        )
+        self.assertFalse(measured["coverage"]["complete"])
+
     def test_storage_benchmark_rejects_manifest_path_escape(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -309,6 +436,12 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
                 "qualityGates": {
                     "reportUri": "reports/quality_gates.json",
                     "benchmarkUri": "reports/query_benchmark.json",
+                    "caseResultsUri": (
+                        "reports/query_case_results.jsonl"
+                    ),
+                    "failureMatrixUri": (
+                        "reports/query_failure_matrix.json"
+                    ),
                 },
             }
             reports = snapshot / "reports"
@@ -318,6 +451,14 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (reports / "query_benchmark.json").write_text(
+                '{"fixture": true}',
+                encoding="utf-8",
+            )
+            (reports / "query_case_results.jsonl").write_text(
+                '{"caseId":"fixture"}\n',
+                encoding="utf-8",
+            )
+            (reports / "query_failure_matrix.json").write_text(
                 '{"fixture": true}',
                 encoding="utf-8",
             )
@@ -367,6 +508,17 @@ class KnowledgeBenchmarkContractTests(unittest.TestCase):
                 )
                 self.assertTrue(
                     all((copied / name).is_file() for name in database_names)
+                )
+                self.assertTrue(
+                    all(
+                        (copied / "reports" / name).is_file()
+                        for name in (
+                            "quality_gates.json",
+                            "query_benchmark.json",
+                            "query_case_results.jsonl",
+                            "query_failure_matrix.json",
+                        )
+                    )
                 )
 
     def test_runtime_performance_gates_are_fail_closed_and_sample_bound(self):

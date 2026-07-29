@@ -12,7 +12,11 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .benchmark import run_query_benchmark
+from .benchmark import (
+    QUERY_DIAGNOSTICS_SCHEMA,
+    query_diagnostic_artifact_bytes,
+    run_query_benchmark,
+)
 from .invalidation import validate_effective_resolution_dependencies
 from .ontology import load_ontology
 from .projections import DOMAIN_PROJECTIONS
@@ -1722,6 +1726,15 @@ def _query_benchmark_gates(
     return gates
 
 
+def _query_execution_detail(
+    benchmark: Mapping[str, object],
+) -> str:
+    return (
+        f"{int(benchmark.get('total') or 0)} "
+        "read-only planner/context executions."
+    )
+
+
 def _typed_map_usage_metrics(
     core: sqlite3.Connection,
 ) -> dict[str, object]:
@@ -1999,6 +2012,7 @@ def evaluate_quality_gates(
     snapshot_root: Path,
     discovery_database: Path,
     generated_at: str | None = None,
+    allow_unsealed_snapshot: bool = False,
 ) -> dict[str, object]:
     """Evaluate real snapshot metrics; absent independent evidence fails closed."""
 
@@ -2010,7 +2024,10 @@ def evaluate_quality_gates(
     current_ontology_version = load_ontology(
         project_root / "ontology"
     ).version
-    benchmark = run_query_benchmark(snapshot_dir / "core.sqlite")
+    benchmark = run_query_benchmark(
+        snapshot_dir / "core.sqlite",
+        allow_unsealed_snapshot=allow_unsealed_snapshot,
+    )
     core = _read_only(snapshot_dir / "core.sqlite")
     discovery = _read_only(discovery_database)
     gates: list[dict[str, object]] = []
@@ -2685,7 +2702,7 @@ def evaluate_quality_gates(
                     target="<250",
                     actual=benchmark["latencyMs"]["p95"],
                     passed=float(benchmark["latencyMs"]["p95"]) < 250,
-                    detail="120 read-only planner/context executions.",
+                    detail=_query_execution_detail(benchmark),
                 ),
                 _gate(
                     "queries.two_hop_p95_ms",
@@ -2820,16 +2837,51 @@ def evaluate_quality_gates(
     return report
 
 
-def _write_json_atomic(path: Path, payload: object) -> bytes:
+def _write_bytes_atomic(path: Path, contents: bytes) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(contents)
+    os.replace(temporary, path)
+    return contents
+
+
+def _write_json_atomic(path: Path, payload: object) -> bytes:
     contents = (
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
         + "\n"
     ).encode("utf-8")
-    temporary.write_bytes(contents)
-    os.replace(temporary, path)
-    return contents
+    return _write_bytes_atomic(path, contents)
+
+
+def _query_diagnostic_artifacts(
+    benchmark: object,
+    *,
+    build_id: str,
+) -> dict[str, object] | None:
+    """Rebuild and verify declared diagnostic artifacts before publishing."""
+
+    if not isinstance(benchmark, Mapping):
+        raise ValueError("query benchmark must be an object")
+    if benchmark.get("diagnosticArtifacts") is None:
+        return None
+    case_results_bytes, failure_matrix_bytes = (
+        query_diagnostic_artifact_bytes(
+            benchmark,
+            expected_build_id=build_id,
+        )
+    )
+    case_results_sha256 = hashlib.sha256(
+        case_results_bytes
+    ).hexdigest()
+    failure_matrix_sha256 = hashlib.sha256(
+        failure_matrix_bytes
+    ).hexdigest()
+    return {
+        "caseResultsBytes": case_results_bytes,
+        "caseResultsSha256": case_results_sha256,
+        "failureMatrixBytes": failure_matrix_bytes,
+        "failureMatrixSha256": failure_matrix_sha256,
+    }
 
 
 def publish_gate_report(
@@ -2847,9 +2899,22 @@ def publish_gate_report(
         )
     eligible = bool(report["summary"]["cutoverEligible"])
     benchmark = report["benchmark"]
+    diagnostics = _query_diagnostic_artifacts(
+        benchmark,
+        build_id=report_build_id,
+    )
     if location.layout.startswith("immutable-v2"):
         configured_root = _immutable_configured_root(location)
         reports = configured_root / "reports" / location.build_id
+        if diagnostics is not None:
+            _write_bytes_atomic(
+                reports / "query_case_results.jsonl",
+                diagnostics["caseResultsBytes"],
+            )
+            _write_bytes_atomic(
+                reports / "query_failure_matrix.json",
+                diagnostics["failureMatrixBytes"],
+            )
         benchmark_bytes = _write_json_atomic(
             reports / "query_benchmark.json",
             benchmark,
@@ -2899,6 +2964,24 @@ def publish_gate_report(
             },
             "cutover": cutover,
         }
+        if diagnostics is not None:
+            attestation["queryDiagnostics"] = {
+                "schema": QUERY_DIAGNOSTICS_SCHEMA,
+                "caseResults": {
+                    "reportUri": (
+                        f"reports/{location.build_id}/"
+                        "query_case_results.jsonl"
+                    ),
+                    "sha256": diagnostics["caseResultsSha256"],
+                },
+                "failureMatrix": {
+                    "reportUri": (
+                        f"reports/{location.build_id}/"
+                        "query_failure_matrix.json"
+                    ),
+                    "sha256": diagnostics["failureMatrixSha256"],
+                },
+            }
         _write_json_atomic(
             reports / "cutover_attestation.json",
             attestation,
@@ -2906,6 +2989,15 @@ def publish_gate_report(
         return cutover
 
     reports = location.root / "reports"
+    if diagnostics is not None:
+        _write_bytes_atomic(
+            reports / "query_case_results.jsonl",
+            diagnostics["caseResultsBytes"],
+        )
+        _write_bytes_atomic(
+            reports / "query_failure_matrix.json",
+            diagnostics["failureMatrixBytes"],
+        )
     _write_json_atomic(reports / "query_benchmark.json", benchmark)
     gate_bytes = _write_json_atomic(reports / "quality_gates.json", report)
     gate_sha = hashlib.sha256(gate_bytes).hexdigest()

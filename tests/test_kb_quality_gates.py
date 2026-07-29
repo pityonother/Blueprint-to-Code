@@ -18,6 +18,14 @@ if str(SCRIPT_ROOT) not in sys.path:
 from blueprint_translator.kb_vnext.adapters import (  # noqa: E402
     ADAPTER_VERSION,
 )
+from blueprint_translator.kb_vnext.benchmark import (  # noqa: E402
+    QUERY_CASE_RESULT_SCHEMA,
+    QUERY_DIAGNOSTICS_SCHEMA,
+    QUERY_FAILURE_MATRIX_SCHEMA,
+    build_query_failure_matrix,
+    query_case_results_jsonl_bytes,
+    query_failure_matrix_json_bytes,
+)
 from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     QUALITY_GATE_SCHEMA,
     _class_closure_metrics,
@@ -26,6 +34,7 @@ from blueprint_translator.kb_vnext.quality_gates import (  # noqa: E402
     _native_gold_metrics,
     _privacy_scan,
     _query_benchmark_gates,
+    _query_execution_detail,
     _registration_confidence_gate,
     _registration_confidence_metrics,
     _registration_gold_metrics,
@@ -597,6 +606,12 @@ def _set_artifact_ontology_version(
 
 
 class KnowledgeQualityGateTests(unittest.TestCase):
+    def test_query_execution_detail_uses_measured_corpus_count(self):
+        self.assertEqual(
+            _query_execution_detail({"total": 130}),
+            "130 read-only planner/context executions.",
+        )
+
     def _manifest_root(self, root: Path) -> Path:
         manifests = root / "manifests"
         manifests.mkdir()
@@ -639,6 +654,73 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             ],
             "benchmark": {"total": 120},
         }
+
+    def _report_with_diagnostics(
+        self,
+        *,
+        eligible: bool,
+    ) -> tuple[dict[str, object], bytes, bytes]:
+        report = self._report(eligible=eligible)
+        case_results = [
+            {
+                "schema": QUERY_CASE_RESULT_SCHEMA,
+                "caseId": "fixture-001",
+                "category": "IDENTITY",
+                "domain": "cross_domain",
+                "failureClass": "PASS",
+                "failureClasses": [],
+                "protocolViolations": [],
+                "leakage": {
+                    "stale": False,
+                    "candidate": False,
+                    "legacy": False,
+                },
+                "latencySpansMs": {
+                    "planner": 1.0,
+                    "context": 2.0,
+                    "total": 3.0,
+                },
+            }
+        ]
+        corpus_sha256 = "c" * 64
+        case_results_bytes = query_case_results_jsonl_bytes(case_results)
+        failure_matrix = build_query_failure_matrix(
+            case_results,
+            build_id="fixture-build",
+            corpus_sha256=corpus_sha256,
+        )
+        failure_matrix_bytes = query_failure_matrix_json_bytes(
+            failure_matrix
+        )
+        report["benchmark"] = {
+            "schema": "ark-kb-query-benchmark/v2",
+            "total": len(case_results),
+            "goldSet": {"sha256": corpus_sha256},
+            "results": case_results,
+            "diagnosticArtifacts": {
+                "schema": QUERY_DIAGNOSTICS_SCHEMA,
+                "buildId": "fixture-build",
+                "buildBinding": "SNAPSHOT_METADATA",
+                "corpusSha256": corpus_sha256,
+                "caseResults": {
+                    "schema": QUERY_CASE_RESULT_SCHEMA,
+                    "uri": "reports/query_case_results.jsonl",
+                    "sha256": hashlib.sha256(
+                        case_results_bytes
+                    ).hexdigest(),
+                    "count": len(case_results),
+                },
+                "failureMatrix": {
+                    "schema": QUERY_FAILURE_MATRIX_SCHEMA,
+                    "uri": "reports/query_failure_matrix.json",
+                    "sha256": hashlib.sha256(
+                        failure_matrix_bytes
+                    ).hexdigest(),
+                    "caseCount": len(case_results),
+                },
+            },
+        }
+        return report, case_results_bytes, failure_matrix_bytes
 
     def test_benchmark_v2_gates_replace_legacy_self_selected_metrics(self):
         benchmark = {
@@ -1734,6 +1816,123 @@ class KnowledgeQualityGateTests(unittest.TestCase):
             self.assertFalse(attestation["reportCutoverEligible"])
             self.assertFalse(attestation["sealedInSnapshotManifest"])
             self.assertEqual(attestation["cutover"], cutover)
+
+    def test_immutable_report_publishes_build_scoped_query_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_id = "fixture-build"
+            snapshot = root / "snapshots" / build_id
+            snapshot.mkdir(parents=True)
+            manifest_path = snapshot / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "ark-kb-vnext-snapshot/v1",
+                        "buildId": build_id,
+                        "databases": {},
+                        "cutover": {
+                            "mode": "shadow",
+                            "defaultQuerySource": "legacy",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "current.json").write_text(
+                json.dumps(
+                    {
+                        "buildId": build_id,
+                        "snapshotRelativePath": f"snapshots/{build_id}",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest_before = manifest_path.read_bytes()
+            report, case_results_bytes, failure_matrix_bytes = (
+                self._report_with_diagnostics(eligible=False)
+            )
+
+            publish_gate_report(snapshot_root=root, report=report)
+
+            report_root = root / "reports" / build_id
+            self.assertEqual(
+                (report_root / "query_case_results.jsonl").read_bytes(),
+                case_results_bytes,
+            )
+            self.assertEqual(
+                (report_root / "query_failure_matrix.json").read_bytes(),
+                failure_matrix_bytes,
+            )
+            attestation = json.loads(
+                (report_root / "cutover_attestation.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
+            self.assertFalse(attestation["sealedInSnapshotManifest"])
+            self.assertEqual(
+                attestation["queryDiagnostics"]["caseResults"],
+                {
+                    "reportUri": (
+                        "reports/fixture-build/"
+                        "query_case_results.jsonl"
+                    ),
+                    "sha256": hashlib.sha256(
+                        case_results_bytes
+                    ).hexdigest(),
+                },
+            )
+            self.assertEqual(
+                attestation["queryDiagnostics"]["failureMatrix"],
+                {
+                    "reportUri": (
+                        "reports/fixture-build/"
+                        "query_failure_matrix.json"
+                    ),
+                    "sha256": hashlib.sha256(
+                        failure_matrix_bytes
+                    ).hexdigest(),
+                },
+            )
+
+    def test_legacy_report_publishes_query_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._manifest_root(root)
+            report, case_results_bytes, failure_matrix_bytes = (
+                self._report_with_diagnostics(eligible=False)
+            )
+
+            publish_gate_report(snapshot_root=root, report=report)
+
+            self.assertEqual(
+                (root / "reports" / "query_case_results.jsonl").read_bytes(),
+                case_results_bytes,
+            )
+            self.assertEqual(
+                (
+                    root / "reports" / "query_failure_matrix.json"
+                ).read_bytes(),
+                failure_matrix_bytes,
+            )
+
+    def test_query_diagnostics_reject_declared_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._manifest_root(root)
+            report, _, _ = self._report_with_diagnostics(eligible=False)
+            report["benchmark"]["diagnosticArtifacts"]["caseResults"][
+                "sha256"
+            ] = "0" * 64
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "query case results digest",
+            ):
+                publish_gate_report(snapshot_root=root, report=report)
+
+            self.assertFalse((root / "reports").exists())
+
 
     def test_integrity_resolves_configured_and_direct_immutable_roots(self):
         with tempfile.TemporaryDirectory() as temporary:

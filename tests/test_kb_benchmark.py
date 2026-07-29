@@ -26,6 +26,8 @@ from blueprint_translator.kb_vnext.benchmark import (  # noqa: E402
     evaluate_benchmark_result,
     load_benchmark_gold_set,
     query_case_results_jsonl_bytes,
+    query_diagnostic_artifact_bytes,
+    query_failure_matrix_json_bytes,
     validate_benchmark_shape,
 )
 from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
@@ -1614,6 +1616,69 @@ class QueryCaseDiagnosticTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "schema"):
             query_case_results_jsonl_bytes([wrong_schema])
+
+    def test_artifact_bundle_recomputes_and_rejects_digest_tampering(self):
+        case, result = self._fixtures()
+        diagnostic = build_query_case_result(
+            case,
+            result,
+            latency_spans_ms={"total": 1.0},
+        )
+        case_bytes = query_case_results_jsonl_bytes([diagnostic])
+        matrix = build_query_failure_matrix(
+            [diagnostic],
+            build_id="fixture-build",
+            corpus_sha256="a" * 64,
+        )
+        matrix_bytes = query_failure_matrix_json_bytes(matrix)
+        benchmark = {
+            "schema": "ark-kb-query-benchmark/v2",
+            "total": 1,
+            "goldSet": {"sha256": "a" * 64},
+            "results": [diagnostic],
+            "diagnosticArtifacts": {
+                "schema": "ark-kb-query-diagnostics/v1",
+                "buildId": "fixture-build",
+                "buildBinding": "SNAPSHOT_METADATA",
+                "corpusSha256": "a" * 64,
+                "caseResults": {
+                    "schema": "ark-kb-query-case-result/v1",
+                    "uri": "reports/query_case_results.jsonl",
+                    "sha256": __import__("hashlib").sha256(
+                        case_bytes
+                    ).hexdigest(),
+                    "count": 1,
+                },
+                "failureMatrix": {
+                    "schema": "ark-kb-query-failure-matrix/v1",
+                    "uri": "reports/query_failure_matrix.json",
+                    "sha256": __import__("hashlib").sha256(
+                        matrix_bytes
+                    ).hexdigest(),
+                    "caseCount": 1,
+                },
+            },
+        }
+
+        actual_case_bytes, actual_matrix_bytes = (
+            query_diagnostic_artifact_bytes(
+                benchmark,
+                expected_build_id="fixture-build",
+            )
+        )
+
+        self.assertEqual(actual_case_bytes, case_bytes)
+        self.assertEqual(actual_matrix_bytes, matrix_bytes)
+        tampered = deepcopy(benchmark)
+        tampered["results"][0]["failureClass"] = "WRONG_ANSWER"
+        with self.assertRaisesRegex(
+            ValueError,
+            "case results? digest",
+        ):
+            query_diagnostic_artifact_bytes(
+                tampered,
+                expected_build_id="fixture-build",
+            )
 
 
 if __name__ == "__main__":

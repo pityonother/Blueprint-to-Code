@@ -506,8 +506,18 @@ def _provenance_gaps(
 
 
 class VNextKnowledgeService:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        _allow_unsealed_benchmark: bool = False,
+    ) -> None:
         self.configured_root = root.resolve()
+        # Builder-only context for an isolated pre-seal copy. Normal
+        # services never set this and continue to require a sealed report.
+        self._allow_unsealed_benchmark = bool(
+            _allow_unsealed_benchmark
+        )
         self._snapshot_resolution_error = ""
         self._snapshot_layout = "unresolved"
         try:
@@ -673,10 +683,11 @@ class VNextKnowledgeService:
         if self._snapshot_layout == "immutable-v2":
             try:
                 validate_snapshot_source_identity(manifest)
-                validate_sealed_snapshot_quality(
-                    snapshot_dir=self.root,
-                    manifest=manifest,
-                )
+                if not self._allow_unsealed_benchmark:
+                    validate_sealed_snapshot_quality(
+                        snapshot_dir=self.root,
+                        manifest=manifest,
+                    )
             except ValueError as exc:
                 return f"sealed snapshot quality binding is invalid: {exc}"
 

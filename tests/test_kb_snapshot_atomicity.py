@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -19,6 +20,7 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from blueprint_translator.kb_vnext import snapshot as snapshot_module  # noqa: E402
+from blueprint_translator.kb_vnext import benchmark as benchmark_module  # noqa: E402
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
     DOMAIN_PROJECTIONS,
     PROJECTION_SCHEMA_SQL,
@@ -335,7 +337,201 @@ def _staging(
     return staging, manifest
 
 
+def _attach_query_diagnostics(
+    staging: Path,
+    manifest: dict[str, object],
+) -> None:
+    build_id = str(manifest["buildId"])
+    corpus_sha256 = SOURCE_INPUTS["benchmarkGold"]
+    case_result = {
+        "schema": benchmark_module.QUERY_CASE_RESULT_SCHEMA,
+        "caseId": "fixture-query-001",
+        "category": "FACT",
+        "domain": "item_use",
+        "failureClass": "PASS",
+        "failureClasses": [],
+        "protocolViolations": [],
+        "leakage": {
+            "stale": False,
+            "candidate": False,
+            "legacy": False,
+        },
+        "latencySpansMs": {"total": 1.0},
+    }
+    case_bytes = benchmark_module.query_case_results_jsonl_bytes(
+        [case_result]
+    )
+    matrix = benchmark_module.build_query_failure_matrix(
+        [case_result],
+        build_id=build_id,
+        corpus_sha256=corpus_sha256,
+    )
+    matrix_bytes = (
+        benchmark_module.query_failure_matrix_json_bytes(matrix)
+    )
+    benchmark = {
+        "schema": "ark-kb-query-benchmark/v2",
+        "total": 1,
+        "goldSet": {"sha256": corpus_sha256},
+        "results": [case_result],
+        "diagnosticArtifacts": {
+            "schema": benchmark_module.QUERY_DIAGNOSTICS_SCHEMA,
+            "buildId": build_id,
+            "buildBinding": "SNAPSHOT_METADATA",
+            "corpusSha256": corpus_sha256,
+            "caseResults": {
+                "schema": benchmark_module.QUERY_CASE_RESULT_SCHEMA,
+                "uri": "reports/query_case_results.jsonl",
+                "sha256": hashlib.sha256(case_bytes).hexdigest(),
+                "count": 1,
+            },
+            "failureMatrix": {
+                "schema": benchmark_module.QUERY_FAILURE_MATRIX_SCHEMA,
+                "uri": "reports/query_failure_matrix.json",
+                "sha256": hashlib.sha256(matrix_bytes).hexdigest(),
+                "caseCount": 1,
+            },
+        },
+    }
+    reports = staging / "reports"
+    report_path = reports / "quality_gates.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["benchmark"] = benchmark
+    snapshot_module._write_json(report_path, report)
+    benchmark_path = reports / "query_benchmark.json"
+    snapshot_module._write_json(benchmark_path, benchmark)
+    case_path = reports / "query_case_results.jsonl"
+    case_path.write_bytes(case_bytes)
+    matrix_path = reports / "query_failure_matrix.json"
+    matrix_path.write_bytes(matrix_bytes)
+    quality = dict(manifest["qualityGates"])
+    quality.update(
+        {
+            "sha256": snapshot_module._sha256_file(report_path),
+            "benchmarkSha256": snapshot_module._sha256_file(
+                benchmark_path
+            ),
+            "diagnosticsSchema": (
+                benchmark_module.QUERY_DIAGNOSTICS_SCHEMA
+            ),
+            "caseResultsUri": (
+                "reports/query_case_results.jsonl"
+            ),
+            "caseResultsSha256": snapshot_module._sha256_file(
+                case_path
+            ),
+            "failureMatrixUri": (
+                "reports/query_failure_matrix.json"
+            ),
+            "failureMatrixSha256": snapshot_module._sha256_file(
+                matrix_path
+            ),
+        }
+    )
+    quality["diagnosticsBindingSha256"] = (
+        snapshot_module._query_diagnostics_binding_sha256(
+            build_id=build_id,
+            corpus_sha256=corpus_sha256,
+            quality_report_sha256=str(quality["sha256"]),
+            benchmark_report_sha256=str(
+                quality["benchmarkSha256"]
+            ),
+            case_results_sha256=str(
+                quality["caseResultsSha256"]
+            ),
+            failure_matrix_sha256=str(
+                quality["failureMatrixSha256"]
+            ),
+        )
+    )
+    manifest["qualityGates"] = quality
+
+
 class ImmutableSnapshotPublicationTests(unittest.TestCase):
+    def test_query_diagnostic_byte_tamper_blocks_pointer_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            build_id = _fixture_build_id("01:02:03")
+            staging, manifest = _staging(root, build_id)
+            _attach_query_diagnostics(staging, manifest)
+            case_path = (
+                staging / "reports" / "query_case_results.jsonl"
+            )
+            case_path.write_bytes(case_path.read_bytes() + b" ")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "diagnostic report hash",
+            ):
+                snapshot_module._promote_snapshot(
+                    staging=staging,
+                    output_dir=root,
+                    manifest=manifest,
+                )
+
+            self.assertFalse((root / "current.json").exists())
+            self.assertFalse((root / "snapshots" / build_id).exists())
+
+    def test_query_diagnostic_binding_tamper_fails_after_digest_update(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            build_id = _fixture_build_id("01:02:03")
+            staging, manifest = _staging(root, build_id)
+            _attach_query_diagnostics(staging, manifest)
+            matrix_path = (
+                staging / "reports" / "query_failure_matrix.json"
+            )
+            matrix = json.loads(
+                matrix_path.read_text(encoding="utf-8")
+            )
+            matrix["buildId"] = "attacker-build"
+            snapshot_module._write_json(matrix_path, matrix)
+            quality = dict(manifest["qualityGates"])
+            quality["failureMatrixSha256"] = (
+                snapshot_module._sha256_file(matrix_path)
+            )
+            diagnostics = json.loads(
+                (
+                    staging / "reports" / "query_benchmark.json"
+                ).read_text(encoding="utf-8")
+            )["diagnosticArtifacts"]
+            quality["diagnosticsBindingSha256"] = (
+                snapshot_module._query_diagnostics_binding_sha256(
+                    build_id=build_id,
+                    corpus_sha256=str(
+                        diagnostics["corpusSha256"]
+                    ),
+                    quality_report_sha256=str(quality["sha256"]),
+                    benchmark_report_sha256=str(
+                        quality["benchmarkSha256"]
+                    ),
+                    case_results_sha256=str(
+                        quality["caseResultsSha256"]
+                    ),
+                    failure_matrix_sha256=str(
+                        quality["failureMatrixSha256"]
+                    ),
+                )
+            )
+            manifest["qualityGates"] = quality
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "diagnostic artifact content",
+            ):
+                snapshot_module._promote_snapshot(
+                    staging=staging,
+                    output_dir=root,
+                    manifest=manifest,
+                )
+
+            self.assertFalse((root / "current.json").exists())
+            self.assertFalse((root / "snapshots" / build_id).exists())
+
     def test_pointer_rejects_extra_fields_and_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "vnext"

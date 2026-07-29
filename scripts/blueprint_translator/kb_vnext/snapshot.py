@@ -29,6 +29,12 @@ from .projections import (
     compute_core_projection_content_digest,
     compute_projection_artifact_content_digest,
 )
+from .benchmark import (
+    QUERY_CASE_RESULT_SCHEMA,
+    QUERY_DIAGNOSTICS_SCHEMA,
+    QUERY_FAILURE_MATRIX_SCHEMA,
+    query_diagnostic_artifact_bytes,
+)
 from .query_planner import (
     is_valid_generic_evidence_uri,
     source_revision_is_fresh,
@@ -624,6 +630,34 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _query_diagnostics_binding_sha256(
+    *,
+    build_id: str,
+    corpus_sha256: str,
+    quality_report_sha256: str,
+    benchmark_report_sha256: str,
+    case_results_sha256: str,
+    failure_matrix_sha256: str,
+) -> str:
+    payload = {
+        "schema": QUERY_DIAGNOSTICS_SCHEMA,
+        "buildId": build_id,
+        "corpusSha256": corpus_sha256,
+        "qualityReportSha256": quality_report_sha256,
+        "benchmarkReportSha256": benchmark_report_sha256,
+        "caseResultsSha256": case_results_sha256,
+        "failureMatrixSha256": failure_matrix_sha256,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _sha256_file_set(
     root: Path,
     paths: list[Path],
@@ -1148,6 +1182,16 @@ def _write_json(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
+def _write_bytes(path: Path, contents: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temporary.open("wb") as handle:
+        handle.write(contents)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
 def _write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -1171,6 +1215,7 @@ def _evaluate_staged_quality_gates(
     staging: Path,
     discovery_database: Path,
     generated_at: str,
+    allow_unsealed_snapshot: bool = False,
 ) -> dict[str, object]:
     """Run gates against the complete candidate before it becomes current."""
 
@@ -1181,6 +1226,7 @@ def _evaluate_staged_quality_gates(
         snapshot_root=staging,
         discovery_database=discovery_database,
         generated_at=generated_at,
+        allow_unsealed_snapshot=allow_unsealed_snapshot,
     )
 
 
@@ -1207,6 +1253,48 @@ def _seal_staged_quality_report(
     _write_json(benchmark_path, benchmark)
     gate_sha = _sha256_file(gate_path)
     benchmark_sha = _sha256_file(benchmark_path)
+    diagnostic_quality: dict[str, object] = {}
+    diagnostics = benchmark.get("diagnosticArtifacts")
+    if isinstance(diagnostics, Mapping):
+        if diagnostics.get("buildBinding") != "SNAPSHOT_METADATA":
+            raise ValueError(
+                "sealed query diagnostics are not snapshot-bound"
+            )
+        case_bytes, matrix_bytes = query_diagnostic_artifact_bytes(
+            benchmark,
+            expected_build_id=str(manifest.get("buildId") or ""),
+        )
+        case_path = reports / "query_case_results.jsonl"
+        matrix_path = reports / "query_failure_matrix.json"
+        _write_bytes(case_path, case_bytes)
+        _write_bytes(matrix_path, matrix_bytes)
+        diagnostic_quality = {
+            "diagnosticsSchema": QUERY_DIAGNOSTICS_SCHEMA,
+            "caseResultsUri": (
+                "reports/query_case_results.jsonl"
+            ),
+            "caseResultsSha256": _sha256_file(case_path),
+            "failureMatrixUri": (
+                "reports/query_failure_matrix.json"
+            ),
+            "failureMatrixSha256": _sha256_file(matrix_path),
+        }
+        diagnostic_quality["diagnosticsBindingSha256"] = (
+            _query_diagnostics_binding_sha256(
+                build_id=str(manifest.get("buildId") or ""),
+                corpus_sha256=str(
+                    diagnostics.get("corpusSha256") or ""
+                ),
+                quality_report_sha256=gate_sha,
+                benchmark_report_sha256=benchmark_sha,
+                case_results_sha256=str(
+                    diagnostic_quality["caseResultsSha256"]
+                ),
+                failure_matrix_sha256=str(
+                    diagnostic_quality["failureMatrixSha256"]
+                ),
+            )
+        )
     eligible = bool(summary.get("cutoverEligible"))
     failed = int(summary.get("failed") or 0)
     sealed = dict(manifest)
@@ -1220,6 +1308,7 @@ def _seal_staged_quality_report(
         "failed": failed,
         "cutoverEligible": eligible,
         "sealedInSnapshotManifest": True,
+        **diagnostic_quality,
     }
     sealed["cutover"] = {
         "mode": "ready" if eligible else "shadow",
@@ -1870,6 +1959,95 @@ def validate_sealed_snapshot_quality(
         benchmark_path,
         label="sealed benchmark report",
     )
+    diagnostics = benchmark.get("diagnosticArtifacts")
+    diagnostic_quality_keys = {
+        "diagnosticsSchema",
+        "caseResultsUri",
+        "caseResultsSha256",
+        "failureMatrixUri",
+        "failureMatrixSha256",
+        "diagnosticsBindingSha256",
+    }
+    declared_quality_keys = diagnostic_quality_keys & set(quality)
+    if isinstance(diagnostics, Mapping) or declared_quality_keys:
+        if (
+            not isinstance(diagnostics, Mapping)
+            or declared_quality_keys != diagnostic_quality_keys
+            or quality.get("diagnosticsSchema")
+            != QUERY_DIAGNOSTICS_SCHEMA
+            or diagnostics.get("buildBinding")
+            != "SNAPSHOT_METADATA"
+        ):
+            raise ValueError(
+                "sealed query diagnostic binding is incomplete"
+            )
+        case_path = _staged_relative_path(
+            snapshot_dir,
+            quality.get("caseResultsUri"),
+            label="query case results",
+        )
+        matrix_path = _staged_relative_path(
+            snapshot_dir,
+            quality.get("failureMatrixUri"),
+            label="query failure matrix",
+        )
+        if (
+            not case_path.is_file()
+            or not matrix_path.is_file()
+            or str(
+                quality.get("caseResultsSha256") or ""
+            ).lower()
+            != _sha256_file(case_path)
+            or str(
+                quality.get("failureMatrixSha256") or ""
+            ).lower()
+            != _sha256_file(matrix_path)
+        ):
+            raise ValueError(
+                "sealed query diagnostic report hash is invalid"
+            )
+        expected_binding_sha256 = (
+            _query_diagnostics_binding_sha256(
+                build_id=build_id,
+                corpus_sha256=str(
+                    diagnostics.get("corpusSha256") or ""
+                ),
+                quality_report_sha256=str(
+                    quality.get("sha256") or ""
+                ),
+                benchmark_report_sha256=str(
+                    quality.get("benchmarkSha256") or ""
+                ),
+                case_results_sha256=str(
+                    quality.get("caseResultsSha256") or ""
+                ),
+                failure_matrix_sha256=str(
+                    quality.get("failureMatrixSha256") or ""
+                ),
+            )
+        )
+        if (
+            str(
+                quality.get("diagnosticsBindingSha256") or ""
+            ).lower()
+            != expected_binding_sha256
+        ):
+            raise ValueError(
+                "sealed query diagnostic report binding is invalid"
+            )
+        expected_case_bytes, expected_matrix_bytes = (
+            query_diagnostic_artifact_bytes(
+                benchmark,
+                expected_build_id=build_id,
+            )
+        )
+        if (
+            case_path.read_bytes() != expected_case_bytes
+            or matrix_path.read_bytes() != expected_matrix_bytes
+        ):
+            raise ValueError(
+                "sealed query diagnostic artifact content is invalid"
+            )
     summary = report.get("summary")
     gates = report.get("gates")
     if not isinstance(gates, list) or not gates:
@@ -2363,6 +2541,7 @@ def build_vnext_snapshot(
             staging=staging,
             discovery_database=discovery_database,
             generated_at=generated_at,
+            allow_unsealed_snapshot=True,
         )
         manifest = _seal_staged_quality_report(
             staging=staging,
