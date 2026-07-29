@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -399,6 +399,28 @@ def _staging(
     return staging, manifest
 
 
+def _promote_snapshot(
+    *,
+    staging: Path,
+    output_dir: Path,
+    manifest: dict[str, object],
+    expected_current_pointer: (
+        snapshot_module.CurrentPointerBaseline | None
+    ) = None,
+) -> dict[str, object]:
+    baseline = (
+        expected_current_pointer
+        if expected_current_pointer is not None
+        else snapshot_module.read_current_pointer_baseline(output_dir)
+    )
+    return snapshot_module._promote_snapshot(
+        staging=staging,
+        output_dir=output_dir,
+        manifest=manifest,
+        expected_current_pointer=baseline,
+    )
+
+
 def _attach_query_diagnostics(
     staging: Path,
     manifest: dict[str, object],
@@ -526,7 +548,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "diagnostic report hash",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=staging,
                     output_dir=root,
                     manifest=manifest,
@@ -585,7 +607,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "diagnostic artifact content",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=staging,
                     output_dir=root,
                     manifest=manifest,
@@ -629,7 +651,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             root.mkdir()
             build_id = _fixture_build_id("01:02:03")
             staging, manifest = _staging(root, build_id)
-            snapshot_module._promote_snapshot(
+            _promote_snapshot(
                 staging=staging,
                 output_dir=root,
                 manifest=manifest,
@@ -645,7 +667,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             )
 
             with self.assertRaises(FileExistsError):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=replacement,
                     output_dir=root,
                     manifest=replacement_manifest,
@@ -666,7 +688,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             build_id = _fixture_build_id("01:02:03")
             staging, manifest = _staging(root, build_id)
 
-            snapshot_module._promote_snapshot(
+            pointer_receipt = _promote_snapshot(
                 staging=staging,
                 output_dir=root,
                 manifest=manifest,
@@ -689,6 +711,23 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 (root / "snapshots" / build_id).resolve(),
             )
             self.assertEqual(location.manifest, manifest)
+            self.assertEqual(
+                pointer_receipt["schema"],
+                "ark-kb-current-pointer-cas-receipt/v1",
+            )
+            self.assertIsNone(
+                pointer_receipt["beforePointerSha256"]
+            )
+            self.assertEqual(
+                pointer_receipt["afterPointerSha256"],
+                hashlib.sha256(
+                    (root / "current.json").read_bytes()
+                ).hexdigest(),
+            )
+            self.assertEqual(
+                pointer_receipt["afterBuildId"],
+                build_id,
+            )
             for name in DATABASE_NAMES:
                 self.assertFalse((root / name).exists())
                 self.assertTrue((location.snapshot_dir / name).is_file())
@@ -709,7 +748,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             root.mkdir()
             old_id = _fixture_build_id("01:02:03")
             old_staging, old_manifest = _staging(root, old_id)
-            snapshot_module._promote_snapshot(
+            _promote_snapshot(
                 staging=old_staging,
                 output_dir=root,
                 manifest=old_manifest,
@@ -725,7 +764,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(RuntimeError, "simulated crash"),
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=new_staging,
                     output_dir=root,
                     manifest=new_manifest,
@@ -738,13 +777,61 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             for name in DATABASE_NAMES:
                 self.assertTrue((orphan / name).is_file())
 
+    def test_promotion_expected_raw_pointer_conflict_preserves_newer_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            old_id = _fixture_build_id("01:02:03")
+            old_staging, old_manifest = _staging(root, old_id)
+            _promote_snapshot(
+                staging=old_staging,
+                output_dir=root,
+                manifest=old_manifest,
+            )
+            expected = snapshot_module.read_current_pointer_baseline(root)
+            concurrent_bytes = (
+                json.dumps(
+                    {
+                        "buildId": old_id,
+                        "snapshotRelativePath": f"snapshots/{old_id}",
+                    },
+                    indent=4,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+            (root / "current.json").write_bytes(concurrent_bytes)
+            new_id = _fixture_build_id("02:03:04")
+            new_staging, new_manifest = _staging(root, new_id)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "current pointer changed before locked CAS",
+            ):
+                _promote_snapshot(
+                    staging=new_staging,
+                    output_dir=root,
+                    manifest=new_manifest,
+                    expected_current_pointer=expected,
+                )
+
+            self.assertEqual(
+                (root / "current.json").read_bytes(),
+                concurrent_bytes,
+            )
+            self.assertTrue(
+                (root / "snapshots" / new_id / "manifest.json").is_file()
+            )
+
     def test_corrupt_staging_is_rejected_before_pointer_swap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "vnext"
             root.mkdir()
             old_id = _fixture_build_id("01:02:03")
             old_staging, old_manifest = _staging(root, old_id)
-            snapshot_module._promote_snapshot(
+            _promote_snapshot(
                 staging=old_staging,
                 output_dir=root,
                 manifest=old_manifest,
@@ -760,7 +847,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "database manifest mismatch",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=new_staging,
                     output_dir=root,
                     manifest=new_manifest,
@@ -781,7 +868,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             root.mkdir()
             old_id = _fixture_build_id("01:02:03")
             old_staging, old_manifest = _staging(root, old_id)
-            snapshot_module._promote_snapshot(
+            _promote_snapshot(
                 staging=old_staging,
                 output_dir=root,
                 manifest=old_manifest,
@@ -796,7 +883,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "quality gates are not sealed",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=new_staging,
                     output_dir=root,
                     manifest=new_manifest,
@@ -814,7 +901,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
             root.mkdir()
             old_id = _fixture_build_id("01:02:03")
             old_staging, old_manifest = _staging(root, old_id)
-            snapshot_module._promote_snapshot(
+            _promote_snapshot(
                 staging=old_staging,
                 output_dir=root,
                 manifest=old_manifest,
@@ -863,7 +950,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "gate contract",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=new_staging,
                     output_dir=root,
                     manifest=new_manifest,
@@ -943,7 +1030,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 "legacy",
             )
 
-            snapshot_module._promote_snapshot(
+            _promote_snapshot(
                 staging=staging,
                 output_dir=root,
                 manifest=manifest,
@@ -983,7 +1070,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "quality report identity",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=staging,
                     output_dir=root,
                     manifest=manifest,
@@ -1014,7 +1101,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "schema contract is incomplete",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=staging,
                     output_dir=root,
                     manifest=manifest,
@@ -1037,7 +1124,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "WAL sidecar",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=staging,
                     output_dir=root,
                     manifest=manifest,
@@ -1069,7 +1156,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 ValueError,
                 "metadata mismatch|not bound",
             ):
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=staging_a,
                     output_dir=root,
                     manifest=manifest_a,
@@ -1088,7 +1175,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 old_id,
                 sqlite_payload=True,
             )
-            snapshot_module._promote_snapshot(
+            _promote_snapshot(
                 staging=old_staging,
                 output_dir=root,
                 manifest=old_manifest,
@@ -1104,7 +1191,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                     new_id,
                     sqlite_payload=True,
                 )
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=new_staging,
                     output_dir=root,
                     manifest=new_manifest,
@@ -1148,7 +1235,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                 old_id,
                 sqlite_payload=True,
             )
-            snapshot_module._promote_snapshot(
+            _promote_snapshot(
                 staging=old_staging,
                 output_dir=root,
                 manifest=old_manifest,
@@ -1198,7 +1285,7 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                     new_id,
                     sqlite_payload=True,
                 )
-                snapshot_module._promote_snapshot(
+                _promote_snapshot(
                     staging=new_staging,
                     output_dir=root,
                     manifest=new_manifest,
