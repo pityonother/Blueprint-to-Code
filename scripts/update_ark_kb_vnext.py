@@ -1106,7 +1106,11 @@ def _safe_ingest_summary(
     if value.get("schema") != (
         "ark-kb-additive-blueprint-ingest-receipt/v1"
     ):
-        return {"completed": True}
+        raise UpdateBlocked(
+            "BLUEPRINT_INGEST_RECEIPT_INVALID",
+            "The Blueprint ingestor returned an unknown receipt schema.",
+            full_rebuild_required=True,
+        )
     proof = str(value.get("proof") or "")
     metrics = {
         key: value.get(key)

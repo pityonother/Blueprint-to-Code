@@ -174,6 +174,30 @@ def _default_run(
     return result, calls
 
 
+def _fixture_ingest_receipt() -> dict[str, object]:
+    body: dict[str, object] = {
+        "schema": "ark-kb-additive-blueprint-ingest-receipt/v1",
+        "verifiedSources": 1,
+        "affectedEntities": 1,
+        "materializedFacts": 1,
+        "factEvidence": 1,
+        "eventId": "invalidation://fixture",
+        "sourceIds": ["0" * 64],
+    }
+    proof = "ingest-proof://" + hashlib.sha256(
+        json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        **body,
+        "completed": True,
+        "proof": proof,
+    }
+
+
 def _success_hooks(
     tmp_path: Path,
     previous: update.SourceManifest,
@@ -216,7 +240,7 @@ def _success_hooks(
             "SELECT phase FROM phase_log"
         ).fetchall() == [("planned",)]
         connection.close()
-        return {"verifiedSources": 1}
+        return _fixture_ingest_receipt()
 
     def drain(
         workspace: update.UpdateWorkspace,
@@ -1155,6 +1179,52 @@ def test_self_attested_receipt_without_independent_binding_is_rejected(
     ]
     assert result["status"] == "uncertain_after_switch"
     assert result["published"] is None
+
+
+def test_unknown_ingest_receipt_schema_cannot_self_attest(
+    tmp_path: Path,
+) -> None:
+    previous = _manifest(_revision("old"))
+    current = _manifest(_revision("new"))
+    phases: list[str] = []
+    hooks = _success_hooks(tmp_path, previous, current, phases)
+
+    def unknown_ingest(
+        workspace: update.UpdateWorkspace,
+        diff: update.SourceDiff,
+        paths: update.UpdatePaths,
+    ) -> dict[str, object]:
+        del workspace, diff, paths
+        phases.append("ingest")
+        return {
+            "schema": "unknown-ingest-receipt/v1",
+            "completed": True,
+        }
+
+    unknown_hooks = update.UpdateHooks(
+        load_previous_manifest=hooks.load_previous_manifest,
+        scan_manifest=hooks.scan_manifest,
+        check_capability=hooks.check_capability,
+        stage_snapshot=hooks.stage_snapshot,
+        plan_changes=hooks.plan_changes,
+        ingest_changes=unknown_ingest,
+        drain_worker=hooks.drain_worker,
+        run_narrow_gates=hooks.run_narrow_gates,
+        publish_atomic=hooks.publish_atomic,
+        verify_publication=hooks.verify_publication,
+    )
+
+    result = update.run_incremental_update(
+        _paths(tmp_path),
+        hooks=unknown_hooks,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["gapCodes"] == [
+        "BLUEPRINT_INGEST_RECEIPT_INVALID"
+    ]
+    assert result["published"] is False
+    assert phases == ["stage", "plan", "ingest"]
 
 
 def test_gate_failure_and_worker_block_never_publish(
