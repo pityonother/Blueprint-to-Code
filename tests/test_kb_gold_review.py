@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -18,9 +20,12 @@ from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
     READY_TO_FREEZE,
     GoldReviewError,
     build_query_review_pack,
+    build_registration_review_pack,
     build_review_pack,
+    registration_review_source_from_sqlite,
     review_content_sha256,
     validate_review_pack,
+    validate_registration_review_source,
     validate_review_set,
 )
 
@@ -112,7 +117,219 @@ def _receipt(
     return receipt
 
 
+def _registration_discovery_db(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE source_inventory (
+            source_id TEXT PRIMARY KEY,
+            source_kind TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            record_count INTEGER NOT NULL,
+            generated_at TEXT NOT NULL,
+            limitations_json TEXT NOT NULL
+        );
+        CREATE TABLE system_registrations (
+            registration_id TEXT PRIMARY KEY,
+            owner_object_path TEXT NOT NULL,
+            registration_type TEXT NOT NULL,
+            target_object_path TEXT NOT NULL,
+            source_property TEXT NOT NULL,
+            source_evidence_id TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            source_kind TEXT NOT NULL
+        );
+        """
+    )
+    connection.executemany(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        (
+            ("schema", "blueprint-to-code-kb-discovery/v2"),
+            ("generated_at_utc", "2026-07-29T00:00:00+00:00"),
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO source_inventory(
+            source_id, source_kind, schema_version, source_fingerprint,
+            status, confidence, record_count, generated_at,
+            limitations_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "source://existing-knowledge-databases",
+            "existing_knowledge_database",
+            "sqlite-snapshot-inventory/v1",
+            SOURCE_SHA256,
+            "COMPLETE",
+            "HIGH",
+            3,
+            "2026-07-29T00:00:00+00:00",
+            "[]",
+        ),
+    )
+    rows = (
+        (
+            "registration://b",
+            "/Game/Owner/B.Owner",
+            "buff_registration",
+            "/Game/Target/B.Target_C",
+            "BuffClass",
+            "existing-kb://registrations/b",
+            "MEDIUM",
+            "existing_knowledge_database",
+        ),
+        (
+            "registration://a",
+            "/Game/Owner/A.Owner",
+            "item_registration",
+            "/Game/Target/A.Target_C",
+            "ItemClass",
+            "existing-kb://registrations/a",
+            "HIGH",
+            "existing_knowledge_database",
+        ),
+        (
+            "registration://c",
+            "/Game/Owner/C.Owner",
+            "creature_registration",
+            "/Game/Target/C.Target_C",
+            "NPCClass",
+            "existing-kb://registrations/c",
+            "LOW",
+            "existing_knowledge_database",
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO system_registrations(
+            registration_id, owner_object_path, registration_type,
+            target_object_path, source_property, source_evidence_id,
+            confidence, source_kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    connection.commit()
+    connection.close()
+
+
 class GoldReviewPackTests(unittest.TestCase):
+    def test_registration_pack_uses_independent_typed_source_without_labels(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "discovery.sqlite"
+            _registration_discovery_db(database)
+
+            source = registration_review_source_from_sqlite(database)
+            first = build_registration_review_pack(
+                source_manifest=source,
+                author_id="registration-pack-author",
+                author_key_fingerprint="registration-author-key",
+                seed="stage10-registration-v1",
+                created_at="2026-07-29T00:00:00+00:00",
+                tool_version="ark-kb-gold-review/v1",
+                limit=120,
+            )
+            second = build_registration_review_pack(
+                source_manifest=source,
+                author_id="registration-pack-author",
+                author_key_fingerprint="registration-author-key",
+                seed="stage10-registration-v1",
+                created_at="2026-07-29T00:00:00+00:00",
+                tool_version="ark-kb-gold-review/v1",
+                limit=120,
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["kind"], "registration")
+        self.assertEqual(len(first["candidates"]), 3)
+        self.assertEqual(
+            first["selectionRule"],
+            "INDEPENDENT_TYPED_REGISTRATIONS_STABLE_HASH_V1_LIMIT_120",
+        )
+        expected_fields = {
+            "ownerUri",
+            "targetUri",
+            "registrationType",
+            "sourceProperty",
+            "evidenceUri",
+            "sourceKind",
+        }
+        for candidate in first["candidates"]:
+            self.assertEqual(
+                set(candidate["payload"]),
+                expected_fields,
+            )
+        serialized = json.dumps(first, sort_keys=True).casefold()
+        for forbidden in (
+            "expectededgetype",
+            "expectedstatus",
+            "reviewstatus",
+            "prediction",
+            "confidence",
+        ):
+            self.assertNotIn(forbidden, serialized)
+        validate_review_pack(first)
+
+    def test_registration_source_rejects_classifier_generated_candidates(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "discovery.sqlite"
+            _registration_discovery_db(database)
+            source = registration_review_source_from_sqlite(database)
+        source["generatedFromClassifier"] = True
+
+        with self.assertRaisesRegex(
+            GoldReviewError,
+            "independent source",
+        ):
+            validate_registration_review_source(source)
+
+    def test_registration_payload_rejects_label_or_prediction_fields(self):
+        for forbidden_field in (
+            "expectedEdgeType",
+            "expectedStatus",
+            "reviewStatus",
+            "prediction",
+            "confidence",
+        ):
+            candidate = {
+                "caseId": "registration://leak",
+                "payload": {
+                    "ownerUri": "/Game/Owner/A.Owner",
+                    "targetUri": "/Game/Target/A.Target_C",
+                    "registrationType": "item_registration",
+                    "sourceProperty": "ItemClass",
+                    "evidenceUri": "existing-kb://registrations/a",
+                    "sourceKind": "existing_knowledge_database",
+                    forbidden_field: "leaked",
+                },
+            }
+            with self.subTest(field=forbidden_field), self.assertRaises(
+                GoldReviewError,
+            ):
+                build_review_pack(
+                    kind="registration",
+                    author_id="registration-pack-author",
+                    author_key_fingerprint="registration-author-key",
+                    seed="stage10-registration-v1",
+                    selection_rule="test",
+                    source_manifest_sha256=SOURCE_SHA256,
+                    candidates=[candidate],
+                    created_at="2026-07-29T00:00:00+00:00",
+                    tool_version="ark-kb-gold-review/v1",
+                )
+
     def test_query_pack_covers_fixed_cases_without_answer_leakage(self):
         gold_path = (
             PROJECT_ROOT / "tests" / "fixtures" / "kb_query_gold_set.v1.json"

@@ -95,6 +95,35 @@ Exit code `2` means `BLOCKED_BY_INDEPENDENT_REVIEW`. Even a successful import
 only creates a validation bundle with `productionGoldWritten=false`. Freezing
 reviewed cases into `tests/fixtures/` remains a separately reviewed action.
 
+## Blind registration export
+
+Registration candidates are read from the independent Discovery SQLite
+`system_registrations` table. The source manifest records the Discovery schema,
+snapshot fingerprint, raw row-set digest, and row count. The reviewer payload
+contains only `ownerUri`, `targetUri`, `registrationType`, `sourceProperty`,
+`evidenceUri`, and `sourceKind`. Source confidence and all expected edge,
+expected status, review status, and current classifier fields are omitted.
+
+PowerShell:
+
+```powershell
+.\runtime\python\python.exe scripts\export_ark_kb_gold_review_packs.py `
+  --kind registration `
+  --discovery-db <independent-discovery.sqlite> `
+  --limit 120 `
+  --author-id "<real pack author or truthful automation identity>" `
+  --author-key-fingerprint "<author key fingerprint>" `
+  --seed "stage10-registration-v1"
+```
+
+The exporter opens SQLite with `mode=ro`, validates the Discovery source
+identity, and emits both `source_manifest.json` and `review_pack.json`. It does
+not read the vNext Core tables, invoke the registration classifier, infer
+expected edge labels, or write `kb_registration_gold_set.json`.
+
+If the source contains fewer than 120 real typed registrations, the pack keeps
+the true lower count. Rows are never cloned or synthesized to satisfy a target.
+
 ## Tamper and leakage behavior
 
 The validators reject:

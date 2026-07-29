@@ -7,7 +7,8 @@
     {"$ref": "#/$defs/reviewReceipt"},
     {"$ref": "#/$defs/validationResult"},
     {"$ref": "#/$defs/reviewerRegistry"},
-    {"$ref": "#/$defs/queryReviewProvenance"}
+    {"$ref": "#/$defs/queryReviewProvenance"},
+    {"$ref": "#/$defs/registrationReviewSource"}
   ],
   "$defs": {
     "sha256": {
@@ -25,6 +26,85 @@
           "description": "Blind reviewer payload. Current expected answers, routes, predictions, roles, and confidence fields are forbidden by the validator."
         },
         "candidateSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "registrationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerUri",
+        "targetUri",
+        "registrationType",
+        "sourceProperty",
+        "evidenceUri",
+        "sourceKind"
+      ],
+      "properties": {
+        "ownerUri": {"type": "string", "minLength": 1},
+        "targetUri": {"type": "string", "minLength": 1},
+        "registrationType": {"type": "string", "minLength": 1},
+        "sourceProperty": {"type": "string", "minLength": 1},
+        "evidenceUri": {"type": "string", "minLength": 1},
+        "sourceKind": {"type": "string", "minLength": 1}
+      }
+    },
+    "registrationSourceCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caseId", "payload"],
+      "properties": {
+        "caseId": {"type": "string", "minLength": 1},
+        "payload": {"$ref": "#/$defs/registrationPayload"}
+      }
+    },
+    "registrationReviewSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "kind",
+        "generatedFromCore",
+        "generatedFromClassifier",
+        "sourceIdentity",
+        "candidates"
+      ],
+      "properties": {
+        "schema": {
+          "const": "ark-kb-registration-review-source/v1"
+        },
+        "kind": {"const": "registration"},
+        "generatedFromCore": {"const": false},
+        "generatedFromClassifier": {"const": false},
+        "sourceIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "databaseSchema",
+            "generatedAt",
+            "sourceInventoryId",
+            "sourceFingerprint",
+            "sourceRowSetSha256",
+            "sourceRowCount"
+          ],
+          "properties": {
+            "databaseSchema": {
+              "enum": [
+                "blueprint-to-code-kb-discovery/v1",
+                "blueprint-to-code-kb-discovery/v2"
+              ]
+            },
+            "generatedAt": {"type": "string", "format": "date-time"},
+            "sourceInventoryId": {"type": "string", "minLength": 1},
+            "sourceFingerprint": {"$ref": "#/$defs/sha256"},
+            "sourceRowSetSha256": {"$ref": "#/$defs/sha256"},
+            "sourceRowCount": {"type": "integer", "minimum": 1}
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/registrationSourceCandidate"}
+        }
       }
     },
     "reviewPack": {

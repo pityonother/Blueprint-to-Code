@@ -21,14 +21,30 @@ The checked-in query, registration, and role production-gold counts remain
 
 - common review schema;
 - deterministic and blind query pack export;
+- deterministic and blind registration pack export from read-only Discovery;
+- exact registration payload schema and independent-source manifest checks;
 - pack, candidate, and receipt SHA validation;
 - duplicate, self-review, stale-evidence, leakage, and adjudicator checks;
 - export, validate, and import command-line entry points;
 - benchmark rejection of label-only `EMPIRICAL` cases;
 - ignored local review workspace.
 
-Registration and role candidate exporters are not part of this first vertical
-slice. Their production gates remain red.
+The actual independent Discovery source exposed 27 unique typed registration
+rows, below the requested 120-candidate preparation target:
+
+- pack: `registration-87110e3aae010067`;
+- pack SHA-256:
+  `8f070fd9fd34084842fb92f9475b4a63b8d481daa8b054bb84f75ffa9a7cbc2e`;
+- candidates: 27;
+- source shortfall: `SOURCE_CANDIDATE_SHORTFALL:27/120`;
+- validation: `VALID_REVIEW_PACK`;
+- import status: `BLOCKED_BY_INDEPENDENT_REVIEW`;
+- production gold written: false.
+
+The shortfall is reported rather than filled with generic references,
+classifier fixtures, repeated rows, or inferred labels. The role candidate
+exporter is not part of this registration slice. Both production gates remain
+red.
 
 ## Cutover
 

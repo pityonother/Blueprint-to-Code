@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import re
+import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -21,6 +22,9 @@ REVIEW_SCHEMA = "ark-kb-gold-review/v1"
 VALIDATION_SCHEMA = "ark-kb-gold-review-validation/v1"
 QUERY_REVIEW_PROVENANCE_SCHEMA = "ark-kb-query-review-provenance/v1"
 REVIEWER_REGISTRY_SCHEMA = "ark-kb-trusted-reviewer-registry/v1"
+REGISTRATION_REVIEW_SOURCE_SCHEMA = (
+    "ark-kb-registration-review-source/v1"
+)
 READY_TO_FREEZE = "READY_TO_FREEZE"
 BLOCKED_BY_INDEPENDENT_REVIEW = "BLOCKED_BY_INDEPENDENT_REVIEW"
 
@@ -83,6 +87,47 @@ _LEAKAGE_PREFIXES = (
     "knowledgeroles",
     "currentroles",
     "currentanswer",
+)
+_REGISTRATION_PAYLOAD_FIELDS = frozenset(
+    {
+        "ownerUri",
+        "targetUri",
+        "registrationType",
+        "sourceProperty",
+        "evidenceUri",
+        "sourceKind",
+    }
+)
+_REGISTRATION_SOURCE_FIELDS = frozenset(
+    {
+        "schema",
+        "kind",
+        "generatedFromCore",
+        "generatedFromClassifier",
+        "sourceIdentity",
+        "candidates",
+    }
+)
+_REGISTRATION_SOURCE_IDENTITY_FIELDS = frozenset(
+    {
+        "databaseSchema",
+        "generatedAt",
+        "sourceInventoryId",
+        "sourceFingerprint",
+        "sourceRowSetSha256",
+        "sourceRowCount",
+    }
+)
+_SUPPORTED_DISCOVERY_SCHEMAS = frozenset(
+    {
+        "blueprint-to-code-kb-discovery/v1",
+        "blueprint-to-code-kb-discovery/v2",
+    }
+)
+_FORBIDDEN_SOURCE_MARKERS = (
+    "classifier",
+    "kb_vnext_core",
+    "semantic_core",
 )
 
 
@@ -161,6 +206,34 @@ def _reject_prediction_leakage(value: object, *, path: str) -> None:
                 child,
                 path=f"{path}[{index}]",
             )
+
+
+def _validate_candidate_payload(
+    kind: str,
+    payload: Mapping[str, object],
+    *,
+    path: str,
+) -> None:
+    _reject_prediction_leakage(payload, path=path)
+    if kind != "registration":
+        return
+    if set(payload) != _REGISTRATION_PAYLOAD_FIELDS:
+        raise GoldReviewError(
+            "registration payload fields do not match v1 contract"
+        )
+    for field in sorted(_REGISTRATION_PAYLOAD_FIELDS):
+        _required_text(
+            payload.get(field),
+            field=f"{path}.{field}",
+        )
+    source_kind = _normalized_key(payload.get("sourceKind"))
+    if any(
+        marker in source_kind
+        for marker in _FORBIDDEN_SOURCE_MARKERS
+    ):
+        raise GoldReviewError(
+            "registration candidates require an independent source"
+        )
 
 
 def _candidate_identity(candidate: Mapping[str, object]) -> dict[str, object]:
@@ -289,6 +362,288 @@ def query_candidate_from_gold_case(
     return {"caseId": case_id, "payload": payload}
 
 
+def _sqlite_read_only(path: Path) -> sqlite3.Connection:
+    try:
+        resolved = path.resolve(strict=True)
+        connection = sqlite3.connect(
+            f"{resolved.as_uri()}?mode=ro",
+            uri=True,
+        )
+    except (OSError, sqlite3.Error) as error:
+        raise GoldReviewError(
+            f"cannot open Discovery database read-only: {path}"
+        ) from error
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _discovery_metadata(
+    connection: sqlite3.Connection,
+) -> dict[str, str]:
+    try:
+        rows = connection.execute(
+            "SELECT key, value FROM metadata ORDER BY key"
+        ).fetchall()
+    except sqlite3.Error as error:
+        raise GoldReviewError(
+            "Discovery database metadata table is unavailable"
+        ) from error
+    metadata = {str(row["key"]): str(row["value"]) for row in rows}
+    if metadata.get("schema") not in _SUPPORTED_DISCOVERY_SCHEMAS:
+        raise GoldReviewError("unsupported Discovery database schema")
+    _validate_timestamp(
+        metadata.get("generated_at_utc"),
+        field="Discovery generated_at_utc",
+    )
+    return metadata
+
+
+def registration_review_source_from_sqlite(
+    database_path: Path,
+) -> dict[str, object]:
+    """Extract blind typed registrations from a read-only Discovery DB."""
+
+    connection = _sqlite_read_only(database_path)
+    try:
+        metadata = _discovery_metadata(connection)
+        try:
+            inventory = connection.execute(
+                """
+                SELECT source_id, source_fingerprint
+                FROM source_inventory
+                WHERE source_id = ?
+                """,
+                ("source://existing-knowledge-databases",),
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT
+                    registration_id,
+                    owner_object_path,
+                    registration_type,
+                    target_object_path,
+                    source_property,
+                    source_evidence_id,
+                    confidence,
+                    source_kind
+                FROM system_registrations
+                ORDER BY registration_id
+                """
+            ).fetchall()
+        except sqlite3.Error as error:
+            raise GoldReviewError(
+                "Discovery typed-registration source is unavailable"
+            ) from error
+    finally:
+        connection.close()
+    if inventory is None or not _is_sha256(
+        inventory["source_fingerprint"]
+    ):
+        raise GoldReviewError(
+            "Discovery registration source fingerprint is unavailable"
+        )
+    if not rows:
+        raise GoldReviewError(
+            "Discovery database has no typed registrations"
+        )
+
+    raw_rows: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
+    for row in rows:
+        raw_row = {
+            key: row[key]
+            for key in (
+                "registration_id",
+                "owner_object_path",
+                "registration_type",
+                "target_object_path",
+                "source_property",
+                "source_evidence_id",
+                "confidence",
+                "source_kind",
+            )
+        }
+        raw_rows.append(raw_row)
+        candidates.append(
+            {
+                "caseId": _required_text(
+                    row["registration_id"],
+                    field="registration_id",
+                ),
+                "payload": {
+                    "ownerUri": _required_text(
+                        row["owner_object_path"],
+                        field="owner_object_path",
+                    ),
+                    "targetUri": _required_text(
+                        row["target_object_path"],
+                        field="target_object_path",
+                    ),
+                    "registrationType": _required_text(
+                        row["registration_type"],
+                        field="registration_type",
+                    ),
+                    "sourceProperty": _required_text(
+                        row["source_property"],
+                        field="source_property",
+                    ),
+                    "evidenceUri": _required_text(
+                        row["source_evidence_id"],
+                        field="source_evidence_id",
+                    ),
+                    "sourceKind": _required_text(
+                        row["source_kind"],
+                        field="source_kind",
+                    ),
+                },
+            }
+        )
+
+    source_manifest: dict[str, object] = {
+        "schema": REGISTRATION_REVIEW_SOURCE_SCHEMA,
+        "kind": "registration",
+        "generatedFromCore": False,
+        "generatedFromClassifier": False,
+        "sourceIdentity": {
+            "databaseSchema": metadata["schema"],
+            "generatedAt": metadata["generated_at_utc"],
+            "sourceInventoryId": str(inventory["source_id"]),
+            "sourceFingerprint": str(inventory["source_fingerprint"]),
+            "sourceRowSetSha256": _sha256_json(raw_rows),
+            "sourceRowCount": len(raw_rows),
+        },
+        "candidates": candidates,
+    }
+    return validate_registration_review_source(source_manifest)
+
+
+def validate_registration_review_source(
+    source_manifest: Mapping[str, object],
+) -> dict[str, object]:
+    """Validate an independently sourced blind registration manifest."""
+
+    if (
+        not isinstance(source_manifest, Mapping)
+        or set(source_manifest) != _REGISTRATION_SOURCE_FIELDS
+        or source_manifest.get("schema")
+        != REGISTRATION_REVIEW_SOURCE_SCHEMA
+        or source_manifest.get("kind") != "registration"
+    ):
+        raise GoldReviewError(
+            "registration review source fields do not match v1 contract"
+        )
+    if (
+        source_manifest.get("generatedFromCore") is not False
+        or source_manifest.get("generatedFromClassifier") is not False
+    ):
+        raise GoldReviewError(
+            "registration candidates require an independent source"
+        )
+    identity = source_manifest.get("sourceIdentity")
+    if (
+        not isinstance(identity, Mapping)
+        or set(identity) != _REGISTRATION_SOURCE_IDENTITY_FIELDS
+        or identity.get("databaseSchema")
+        not in _SUPPORTED_DISCOVERY_SCHEMAS
+    ):
+        raise GoldReviewError(
+            "registration source identity is malformed"
+        )
+    _validate_timestamp(
+        identity.get("generatedAt"),
+        field="registration source generatedAt",
+    )
+    _required_text(
+        identity.get("sourceInventoryId"),
+        field="registration source inventory ID",
+    )
+    for field in ("sourceFingerprint", "sourceRowSetSha256"):
+        if not _is_sha256(identity.get(field)):
+            raise GoldReviewError(
+                f"registration source {field} must be SHA-256"
+            )
+    row_count = identity.get("sourceRowCount")
+    candidates = source_manifest.get("candidates")
+    if (
+        isinstance(row_count, bool)
+        or not isinstance(row_count, int)
+        or row_count < 1
+        or not isinstance(candidates, list)
+        or len(candidates) != row_count
+    ):
+        raise GoldReviewError(
+            "registration source row count does not match candidates"
+        )
+    case_ids: set[str] = set()
+    for index, candidate in enumerate(candidates):
+        if (
+            not isinstance(candidate, Mapping)
+            or set(candidate) != {"caseId", "payload"}
+            or not isinstance(candidate.get("payload"), Mapping)
+        ):
+            raise GoldReviewError(
+                "registration source candidate is malformed"
+            )
+        case_id = _required_text(
+            candidate.get("caseId"),
+            field=f"registration candidate {index + 1} caseId",
+        )
+        if case_id in case_ids:
+            raise GoldReviewError(
+                f"duplicate registration caseId: {case_id}"
+            )
+        _validate_candidate_payload(
+            "registration",
+            candidate["payload"],
+            path=f"registrationSource.candidates[{index}].payload",
+        )
+        case_ids.add(case_id)
+    return copy.deepcopy(dict(source_manifest))
+
+
+def build_registration_review_pack(
+    *,
+    source_manifest: Mapping[str, object],
+    author_id: str,
+    author_key_fingerprint: str,
+    seed: str,
+    created_at: str,
+    tool_version: str,
+    limit: int = 120,
+) -> dict[str, object]:
+    """Build a blind pack from independent typed registration rows."""
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise GoldReviewError("registration candidate limit must be positive")
+    normalized_source = validate_registration_review_source(source_manifest)
+    candidates = list(normalized_source["candidates"])
+    candidates.sort(
+        key=lambda candidate: (
+            hashlib.sha256(
+                (
+                    f"{seed}\0{candidate['caseId']}"
+                ).encode("utf-8")
+            ).hexdigest(),
+            str(candidate["caseId"]),
+        )
+    )
+    selected = candidates[:limit]
+    return build_review_pack(
+        kind="registration",
+        author_id=author_id,
+        author_key_fingerprint=author_key_fingerprint,
+        seed=seed,
+        selection_rule=(
+            "INDEPENDENT_TYPED_REGISTRATIONS_STABLE_HASH_V1_"
+            f"LIMIT_{limit}"
+        ),
+        source_manifest_sha256=_sha256_json(normalized_source),
+        candidates=selected,
+        created_at=created_at,
+        tool_version=tool_version,
+    )
+
+
 def build_review_pack(
     *,
     kind: str,
@@ -355,7 +710,8 @@ def build_review_pack(
             raise GoldReviewError(
                 f"candidate {case_id} payload must be an object"
             )
-        _reject_prediction_leakage(
+        _validate_candidate_payload(
+            normalized_kind,
             payload,
             path=f"candidates[{index}].payload",
         )
@@ -499,7 +855,8 @@ def validate_review_pack(
             raise GoldReviewError(
                 f"candidate {case_id} payload must be an object"
             )
-        _reject_prediction_leakage(
+        _validate_candidate_payload(
+            kind,
             payload,
             path=f"candidates[{index}].payload",
         )
@@ -927,19 +1284,23 @@ __all__ = [
     "BLOCKED_BY_INDEPENDENT_REVIEW",
     "PACK_SCHEMA",
     "QUERY_REVIEW_PROVENANCE_SCHEMA",
+    "REGISTRATION_REVIEW_SOURCE_SCHEMA",
     "READY_TO_FREEZE",
     "REVIEW_SCHEMA",
     "REVIEWER_REGISTRY_SCHEMA",
     "VALIDATION_SCHEMA",
     "GoldReviewError",
     "build_query_review_pack",
+    "build_registration_review_pack",
     "build_review_pack",
     "candidate_content_sha256",
     "load_trusted_reviewer_registry",
     "pack_content_sha256",
     "query_candidate_from_gold_case",
+    "registration_review_source_from_sqlite",
     "review_content_sha256",
     "validate_query_review_provenance",
+    "validate_registration_review_source",
     "validate_review_pack",
     "validate_review_set",
 ]
