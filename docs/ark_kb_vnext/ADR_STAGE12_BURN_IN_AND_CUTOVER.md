@@ -76,6 +76,11 @@ attestation 必须证明：
 burn-in，本身会形成循环依赖。第四个新 build 才能在引用前三个通过质量门
 的 shadow builds 后成为 `ready/vnext`。
 
+构建器会从现有 `snapshots/<buildId>/manifest.json` 重新读取历史，要求
+attestation 中的 build 顺序正好等于最新的连续 builds，并重算每份密封
+quality report 的 SHA-256。仅填写三个看似合法的 build ID 或 hash 不能
+通过生产构建。
+
 12 个生产增量场景比最小 burn-in 建议更严格。原因是当前系统仍有 9 个
 backend 属于 `BLOCKED_GAP`；在这些场景获得真实 production receipt 前，
 不能把 fixture、planner 或 staging-copy 测试当作生产增量完成。

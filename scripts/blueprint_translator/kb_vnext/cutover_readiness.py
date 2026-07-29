@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Mapping
 
 
@@ -42,7 +45,7 @@ def _nonempty(value: object, *, label: str) -> str:
     return text
 
 
-def _timestamp(value: object, *, label: str) -> str:
+def _timestamp(value: object, *, label: str) -> datetime:
     text = _nonempty(value, label=label)
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -50,7 +53,7 @@ def _timestamp(value: object, *, label: str) -> str:
         raise ValueError(f"{label} must be an ISO-8601 timestamp") from exc
     if parsed.utcoffset() is None:
         raise ValueError(f"{label} must include a timezone")
-    return text
+    return parsed
 
 
 def _passed(value: object, *, label: str) -> None:
@@ -287,3 +290,131 @@ def validate_burn_in_attestation(
             + ", ".join(missing)
         )
     return attestation
+
+
+def _read_json(path: Path, *, label: str) -> Mapping[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is unreadable") from exc
+    return _mapping(value, label=label)
+
+
+def _sealed_report_path(
+    snapshot_dir: Path,
+    report_uri: object,
+) -> Path:
+    text = _nonempty(report_uri, label="quality report URI")
+    posix = PurePosixPath(text)
+    windows = PureWindowsPath(text)
+    if (
+        posix.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or any(part in {"", ".", ".."} for part in posix.parts)
+    ):
+        raise ValueError("quality report URI must stay inside the snapshot")
+    root = snapshot_dir.resolve()
+    path = (root / Path(*posix.parts)).resolve()
+    if path == root or not path.is_relative_to(root):
+        raise ValueError("quality report URI escapes the snapshot")
+    return path
+
+
+def validate_burn_in_snapshot_history(
+    attestation: Mapping[str, object],
+    *,
+    snapshot_root: Path,
+) -> None:
+    """Bind burn-in claims to the latest consecutive immutable snapshots."""
+
+    validate_burn_in_attestation(attestation)
+    snapshots_root = snapshot_root.resolve() / "snapshots"
+    if not snapshots_root.is_dir():
+        raise ValueError("burn-in snapshot history is unavailable")
+
+    published: list[tuple[datetime, str, Path, Mapping[str, object]]] = []
+    for manifest_path in sorted(snapshots_root.glob("*/manifest.json")):
+        manifest = _read_json(
+            manifest_path,
+            label="published snapshot manifest",
+        )
+        build_id = str(manifest.get("buildId") or "")
+        if (
+            manifest.get("schema") != "ark-kb-vnext-snapshot/v1"
+            or build_id != manifest_path.parent.name
+            or not _BUILD_ID.fullmatch(build_id)
+        ):
+            raise ValueError("published snapshot history is invalid")
+        generated_at = _timestamp(
+            manifest.get("generatedAt"),
+            label=f"published snapshot {build_id} generatedAt",
+        )
+        published.append(
+            (generated_at, build_id, manifest_path.parent, manifest)
+        )
+
+    raw_snapshots = attestation["sealedSnapshots"]
+    if len(published) < len(raw_snapshots):
+        raise ValueError("burn-in snapshot history is incomplete")
+    published.sort(key=lambda item: (item[0], item[1]))
+    expected_ids = [
+        build_id
+        for _generated_at, build_id, _path, _manifest in published[
+            -len(raw_snapshots) :
+        ]
+    ]
+    attested_ids = [
+        str(snapshot["buildId"])
+        for snapshot in raw_snapshots
+    ]
+    if attested_ids != expected_ids:
+        raise ValueError(
+            "burn-in snapshots must be the latest consecutive builds"
+        )
+
+    by_id = {item[1]: item for item in published}
+    for raw_snapshot in raw_snapshots:
+        build_id = str(raw_snapshot["buildId"])
+        _generated_at, _ignored, snapshot_dir, manifest = by_id[build_id]
+        quality = _mapping(
+            manifest.get("qualityGates"),
+            label=f"published snapshot {build_id} qualityGates",
+        )
+        if (
+            quality.get("qualityReportCutoverEligible") is not True
+            or quality.get("sealedInSnapshotManifest") is not True
+        ):
+            raise ValueError(
+                "burn-in snapshot quality was not sealed as passing"
+            )
+        report_path = _sealed_report_path(
+            snapshot_dir,
+            quality.get("reportUri"),
+        )
+        try:
+            report_bytes = report_path.read_bytes()
+        except OSError as exc:
+            raise ValueError("burn-in quality report is unavailable") from exc
+        report_sha = hashlib.sha256(report_bytes).hexdigest()
+        if (
+            report_sha != quality.get("sha256")
+            or report_sha != raw_snapshot["qualityReportSha256"]
+        ):
+            raise ValueError("burn-in quality report SHA-256 is invalid")
+        report = _read_json(
+            report_path,
+            label=f"published snapshot {build_id} quality report",
+        )
+        summary = _mapping(
+            report.get("summary"),
+            label=f"published snapshot {build_id} quality summary",
+        )
+        if (
+            str(report.get("buildId") or "") != build_id
+            or summary.get("cutoverEligible") is not True
+            or int(summary.get("failed") or 0) != 0
+        ):
+            raise ValueError(
+                "burn-in quality report is not a sealed passing result"
+            )

@@ -23,6 +23,7 @@ from .cutover_readiness import (
     BURN_IN_ATTESTATION_SCHEMA,
     BURN_IN_POLICY_VERSION,
     validate_burn_in_attestation,
+    validate_burn_in_snapshot_history,
 )
 from .native_ingest import native_evidence_input_sha256
 from .ontology import load_ontology
@@ -1247,6 +1248,7 @@ def _stage_burn_in_attestation(
     *,
     staging: Path,
     source_path: Path | None,
+    snapshot_root: Path | None = None,
 ) -> dict[str, object]:
     if source_path is None:
         return _missing_burn_in_binding()
@@ -1255,6 +1257,11 @@ def _stage_burn_in_attestation(
         label="burn-in attestation",
     )
     validate_burn_in_attestation(attestation)
+    if snapshot_root is not None:
+        validate_burn_in_snapshot_history(
+            attestation,
+            snapshot_root=snapshot_root,
+        )
     report_path = staging / "reports" / "burn_in_attestation.json"
     _write_json(report_path, attestation)
     snapshots = attestation.get("sealedSnapshots")
@@ -2598,6 +2605,7 @@ def build_vnext_snapshot(
         burn_in_binding = _stage_burn_in_attestation(
             staging=staging,
             source_path=burn_in_attestation_path,
+            snapshot_root=output_dir,
         )
         catalog_counts = build_catalog_database(
             discovery_path=discovery_database,

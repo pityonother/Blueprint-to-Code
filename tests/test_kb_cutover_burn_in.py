@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import sys
@@ -21,6 +22,9 @@ from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     _seal_staged_quality_report,
     _stage_burn_in_attestation,
     validate_sealed_snapshot_quality,
+)
+from blueprint_translator.kb_vnext.cutover_readiness import (  # noqa: E402
+    validate_burn_in_snapshot_history,
 )
 
 
@@ -117,6 +121,52 @@ def _valid_fixture_attestation() -> dict[str, object]:
             "scenarios": scenarios,
         },
     }
+
+
+def _publish_fixture_history(
+    root: Path,
+    attestation: dict[str, object],
+) -> None:
+    for snapshot in attestation["sealedSnapshots"]:
+        build_id = snapshot["buildId"]
+        snapshot_dir = root / "snapshots" / build_id
+        reports = snapshot_dir / "reports"
+        reports.mkdir(parents=True)
+        report = {
+            "schema": "ark-kb-vnext-quality-gates/v1",
+            "buildId": build_id,
+            "summary": {
+                "total": 75,
+                "passed": 75,
+                "failed": 0,
+                "cutoverEligible": True,
+                "recommendation": "ready_for_default",
+            },
+        }
+        report_path = reports / "quality_gates.json"
+        report_path.write_text(
+            json.dumps(report, sort_keys=True),
+            encoding="utf-8",
+        )
+        report_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+        snapshot["qualityReportSha256"] = report_sha
+        (snapshot_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ark-kb-vnext-snapshot/v1",
+                    "buildId": build_id,
+                    "generatedAt": snapshot["passedAt"],
+                    "qualityGates": {
+                        "reportUri": "reports/quality_gates.json",
+                        "sha256": report_sha,
+                        "qualityReportCutoverEligible": True,
+                        "sealedInSnapshotManifest": True,
+                    },
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
 
 
 class KnowledgeCutoverBurnInTests(unittest.TestCase):
@@ -284,6 +334,61 @@ class KnowledgeCutoverBurnInTests(unittest.TestCase):
                 _stage_burn_in_attestation(
                     staging=root / "staging",
                     source_path=source,
+                )
+
+    def test_burn_in_history_binds_latest_consecutive_sealed_builds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attestation = _valid_fixture_attestation()
+            _publish_fixture_history(root, attestation)
+
+            validate_burn_in_snapshot_history(
+                attestation,
+                snapshot_root=root,
+            )
+
+            newer = root / "snapshots" / "fixture-newer"
+            newer.mkdir()
+            (newer / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "ark-kb-vnext-snapshot/v1",
+                        "buildId": "fixture-newer",
+                        "generatedAt": "2026-07-29T01:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "latest consecutive builds",
+            ):
+                validate_burn_in_snapshot_history(
+                    attestation,
+                    snapshot_root=root,
+                )
+
+    def test_burn_in_history_rejects_report_tampering(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attestation = _valid_fixture_attestation()
+            _publish_fixture_history(root, attestation)
+            report = (
+                root
+                / "snapshots"
+                / "fixture-pass-2"
+                / "reports"
+                / "quality_gates.json"
+            )
+            report.write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "quality report SHA-256 is invalid",
+            ):
+                validate_burn_in_snapshot_history(
+                    attestation,
+                    snapshot_root=root,
                 )
 
 
