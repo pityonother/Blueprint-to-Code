@@ -124,6 +124,32 @@ expected edge labels, or write `kb_registration_gold_set.json`.
 If the source contains fewer than 120 real typed registrations, the pack keeps
 the true lower count. Rows are never cloned or synthesized to satisfy a target.
 
+## Blind role export
+
+Role candidates come from the independent Discovery `assets` inventory. The
+selector reads only observable canonical identity, class ancestry, top-level
+domain, plugin or DLC, asset type, degree counts, identity status, and evidence
+freshness. It uses a fixed seed to select one candidate per diverse observable
+cohort first, then a stable-hash fallback if more candidates are needed.
+
+PowerShell:
+
+```powershell
+.\runtime\python\python.exe scripts\export_ark_kb_gold_review_packs.py `
+  --kind role `
+  --discovery-db <independent-discovery.sqlite> `
+  --limit 360 `
+  --author-id "<real pack author or truthful automation identity>" `
+  --author-key-fingerprint "<author key fingerprint>" `
+  --seed "stage10-role-v1"
+```
+
+The role payload omits expected roles, `knowledge_roles`, current roles,
+classifier predictions, confidence, and provisional tiers. The source
+manifest binds the eligible row set, fixed seed, selection rule, source
+fingerprint, eligible count, and selected count. It is review infrastructure,
+not a role label source and not production gold.
+
 ## Tamper and leakage behavior
 
 The validators reject:

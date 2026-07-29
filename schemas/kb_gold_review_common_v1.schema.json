@@ -8,7 +8,8 @@
     {"$ref": "#/$defs/validationResult"},
     {"$ref": "#/$defs/reviewerRegistry"},
     {"$ref": "#/$defs/queryReviewProvenance"},
-    {"$ref": "#/$defs/registrationReviewSource"}
+    {"$ref": "#/$defs/registrationReviewSource"},
+    {"$ref": "#/$defs/roleReviewSource"}
   ],
   "$defs": {
     "sha256": {
@@ -104,6 +105,137 @@
           "type": "array",
           "minItems": 1,
           "items": {"$ref": "#/$defs/registrationSourceCandidate"}
+        }
+      }
+    },
+    "degreeBucket": {
+      "type": "string",
+      "enum": ["ZERO", "LOW", "MEDIUM", "HIGH"]
+    },
+    "roleDegreeCohort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "referencer",
+        "descendant",
+        "mapUsage",
+        "registryUsage",
+        "componentReuse",
+        "crossDomain"
+      ],
+      "properties": {
+        "referencer": {"$ref": "#/$defs/degreeBucket"},
+        "descendant": {"$ref": "#/$defs/degreeBucket"},
+        "mapUsage": {"$ref": "#/$defs/degreeBucket"},
+        "registryUsage": {"$ref": "#/$defs/degreeBucket"},
+        "componentReuse": {"$ref": "#/$defs/degreeBucket"},
+        "crossDomain": {"$ref": "#/$defs/degreeBucket"}
+      }
+    },
+    "rolePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalUri",
+        "assetName",
+        "assetClassPath",
+        "blueprintKind",
+        "parentClassPath",
+        "nativeParentClassPath",
+        "domain",
+        "pluginOrDlc",
+        "assetType",
+        "ancestryCohort",
+        "degreeCohort",
+        "identityStatus",
+        "identitySourceKind",
+        "evidenceFreshness",
+        "evidenceUri",
+        "selectionCohort"
+      ],
+      "properties": {
+        "canonicalUri": {"type": "string", "minLength": 1},
+        "assetName": {"type": "string", "minLength": 1},
+        "assetClassPath": {"type": "string", "minLength": 1},
+        "blueprintKind": {"type": "string", "minLength": 1},
+        "parentClassPath": {"type": "string", "minLength": 1},
+        "nativeParentClassPath": {"type": "string", "minLength": 1},
+        "domain": {"type": "string", "minLength": 1},
+        "pluginOrDlc": {"type": "string", "minLength": 1},
+        "assetType": {"type": "string", "minLength": 1},
+        "ancestryCohort": {"type": "string", "minLength": 1},
+        "degreeCohort": {"$ref": "#/$defs/roleDegreeCohort"},
+        "identityStatus": {"type": "string", "minLength": 1},
+        "identitySourceKind": {"type": "string", "minLength": 1},
+        "evidenceFreshness": {
+          "enum": ["FRESH", "STALE", "NOT_AVAILABLE"]
+        },
+        "evidenceUri": {"type": "string", "minLength": 1},
+        "selectionCohort": {"type": "string", "minLength": 1}
+      }
+    },
+    "roleSourceCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["caseId", "payload"],
+      "properties": {
+        "caseId": {"type": "string", "minLength": 1},
+        "payload": {"$ref": "#/$defs/rolePayload"}
+      }
+    },
+    "roleReviewSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "kind",
+        "generatedFromCore",
+        "generatedFromClassifier",
+        "sourceIdentity",
+        "candidates"
+      ],
+      "properties": {
+        "schema": {"const": "ark-kb-role-review-source/v1"},
+        "kind": {"const": "role"},
+        "generatedFromCore": {"const": false},
+        "generatedFromClassifier": {"const": false},
+        "sourceIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "databaseSchema",
+            "generatedAt",
+            "sourceInventoryId",
+            "sourceFingerprint",
+            "eligibleRowSetSha256",
+            "eligibleRowCount",
+            "selectedCandidateCount",
+            "seed",
+            "candidateLimit",
+            "selectionRule"
+          ],
+          "properties": {
+            "databaseSchema": {
+              "enum": [
+                "blueprint-to-code-kb-discovery/v1",
+                "blueprint-to-code-kb-discovery/v2"
+              ]
+            },
+            "generatedAt": {"type": "string", "format": "date-time"},
+            "sourceInventoryId": {"type": "string", "minLength": 1},
+            "sourceFingerprint": {"$ref": "#/$defs/sha256"},
+            "eligibleRowSetSha256": {"$ref": "#/$defs/sha256"},
+            "eligibleRowCount": {"type": "integer", "minimum": 1},
+            "selectedCandidateCount": {"type": "integer", "minimum": 1},
+            "seed": {"type": "string", "minLength": 1},
+            "candidateLimit": {"type": "integer", "minimum": 1},
+            "selectionRule": {"type": "string", "minLength": 1}
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/roleSourceCandidate"}
         }
       }
     },

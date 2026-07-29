@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import heapq
 import json
 import re
 import sqlite3
@@ -25,6 +26,7 @@ REVIEWER_REGISTRY_SCHEMA = "ark-kb-trusted-reviewer-registry/v1"
 REGISTRATION_REVIEW_SOURCE_SCHEMA = (
     "ark-kb-registration-review-source/v1"
 )
+ROLE_REVIEW_SOURCE_SCHEMA = "ark-kb-role-review-source/v1"
 READY_TO_FREEZE = "READY_TO_FREEZE"
 BLOCKED_BY_INDEPENDENT_REVIEW = "BLOCKED_BY_INDEPENDENT_REVIEW"
 
@@ -117,6 +119,64 @@ _REGISTRATION_SOURCE_IDENTITY_FIELDS = frozenset(
         "sourceRowSetSha256",
         "sourceRowCount",
     }
+)
+_ROLE_PAYLOAD_FIELDS = frozenset(
+    {
+        "canonicalUri",
+        "assetName",
+        "assetClassPath",
+        "blueprintKind",
+        "parentClassPath",
+        "nativeParentClassPath",
+        "domain",
+        "pluginOrDlc",
+        "assetType",
+        "ancestryCohort",
+        "degreeCohort",
+        "identityStatus",
+        "identitySourceKind",
+        "evidenceFreshness",
+        "evidenceUri",
+        "selectionCohort",
+    }
+)
+_ROLE_DEGREE_FIELDS = frozenset(
+    {
+        "referencer",
+        "descendant",
+        "mapUsage",
+        "registryUsage",
+        "componentReuse",
+        "crossDomain",
+    }
+)
+_ROLE_SOURCE_FIELDS = frozenset(
+    {
+        "schema",
+        "kind",
+        "generatedFromCore",
+        "generatedFromClassifier",
+        "sourceIdentity",
+        "candidates",
+    }
+)
+_ROLE_SOURCE_IDENTITY_FIELDS = frozenset(
+    {
+        "databaseSchema",
+        "generatedAt",
+        "sourceInventoryId",
+        "sourceFingerprint",
+        "eligibleRowSetSha256",
+        "eligibleRowCount",
+        "selectedCandidateCount",
+        "seed",
+        "candidateLimit",
+        "selectionRule",
+    }
+)
+_DEGREE_BUCKETS = frozenset({"ZERO", "LOW", "MEDIUM", "HIGH"})
+_EVIDENCE_SOURCE_FRESHNESS = frozenset(
+    {"FRESH", "STALE", "NOT_AVAILABLE"}
 )
 _SUPPORTED_DISCOVERY_SCHEMAS = frozenset(
     {
@@ -215,6 +275,36 @@ def _validate_candidate_payload(
     path: str,
 ) -> None:
     _reject_prediction_leakage(payload, path=path)
+    if kind == "role":
+        if set(payload) != _ROLE_PAYLOAD_FIELDS:
+            raise GoldReviewError(
+                "role payload fields do not match v1 contract"
+            )
+        for field in sorted(_ROLE_PAYLOAD_FIELDS - {"degreeCohort"}):
+            _required_text(
+                payload.get(field),
+                field=f"{path}.{field}",
+            )
+        degree = payload.get("degreeCohort")
+        if not isinstance(degree, Mapping) or set(
+            degree
+        ) != _ROLE_DEGREE_FIELDS:
+            raise GoldReviewError(
+                "role degree cohort fields do not match v1 contract"
+            )
+        if any(
+            str(value).upper() not in _DEGREE_BUCKETS
+            for value in degree.values()
+        ):
+            raise GoldReviewError("unsupported role degree cohort")
+        if (
+            str(payload.get("evidenceFreshness") or "").upper()
+            not in _EVIDENCE_SOURCE_FRESHNESS
+        ):
+            raise GoldReviewError(
+                "unsupported role source evidence freshness"
+            )
+        return
     if kind != "registration":
         return
     if set(payload) != _REGISTRATION_PAYLOAD_FIELDS:
@@ -639,6 +729,483 @@ def build_registration_review_pack(
         ),
         source_manifest_sha256=_sha256_json(normalized_source),
         candidates=selected,
+        created_at=created_at,
+        tool_version=tool_version,
+    )
+
+
+def _degree_bucket(value: object) -> str:
+    if isinstance(value, bool):
+        count = 0
+    else:
+        try:
+            count = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            count = 0
+    if count == 0:
+        return "ZERO"
+    if count <= 4:
+        return "LOW"
+    if count <= 24:
+        return "MEDIUM"
+    return "HIGH"
+
+
+def _role_asset_type(row: Mapping[str, object]) -> str:
+    ordered_flags = (
+        ("is_map", "MAP"),
+        ("is_data_table", "DATA_TABLE"),
+        ("is_data_asset", "DATA_ASSET"),
+        ("is_function_library", "FUNCTION_LIBRARY"),
+        ("is_blueprint_interface", "BLUEPRINT_INTERFACE"),
+        ("is_user_defined_struct", "USER_DEFINED_STRUCT"),
+        ("is_user_defined_enum", "USER_DEFINED_ENUM"),
+        ("is_blueprint", "BLUEPRINT"),
+    )
+    for field, label in ordered_flags:
+        if row.get(field) == 1:
+            return label
+    asset_class = str(row.get("asset_class_path") or "")
+    if any(
+        marker in asset_class
+        for marker in (
+            "Texture",
+            "Material",
+            "StaticMesh",
+            "SkeletalMesh",
+            "Niagara",
+            "Particle",
+        )
+    ):
+        return "VISUAL_ASSET"
+    if any(
+        marker in asset_class
+        for marker in ("Sound", "Audio", "Dialogue")
+    ):
+        return "AUDIO_ASSET"
+    return "OTHER"
+
+
+def _role_ancestry_cohort(row: Mapping[str, object]) -> str:
+    for field in ("native_parent_class_path", "parent_class_path"):
+        value = str(row.get(field) or "").strip()
+        if value and value != "UNKNOWN" and value.startswith("/Script/"):
+            return value
+    return _required_text(
+        row.get("asset_class_path"),
+        field="role asset class path",
+    )
+
+
+def _role_candidate_from_asset(
+    row: Mapping[str, object],
+) -> tuple[dict[str, object], str]:
+    object_path = _required_text(
+        row.get("object_path"),
+        field="role object_path",
+    )
+    degree = {
+        "referencer": _degree_bucket(row.get("referencer_count")),
+        "descendant": _degree_bucket(row.get("descendant_count")),
+        "mapUsage": _degree_bucket(row.get("map_usage_count")),
+        "registryUsage": _degree_bucket(row.get("registry_usage_count")),
+        "componentReuse": _degree_bucket(
+            row.get("component_reuse_count")
+        ),
+        "crossDomain": _degree_bucket(
+            row.get("cross_domain_reference_count")
+        ),
+    }
+    total_degree = sum(
+        max(0, int(row.get(field) or 0))
+        for field in (
+            "referencer_count",
+            "descendant_count",
+            "map_usage_count",
+            "registry_usage_count",
+            "component_reuse_count",
+            "cross_domain_reference_count",
+        )
+    )
+    asset_type = _role_asset_type(row)
+    ancestry = _role_ancestry_cohort(row)
+    domain = _required_text(
+        row.get("top_folder"),
+        field="role top_folder",
+    )
+    stratum = "\0".join(
+        (
+            asset_type,
+            domain,
+            _degree_bucket(total_degree),
+            ancestry,
+        )
+    )
+    cohort = (
+        "cohort-"
+        + hashlib.sha256(stratum.encode("utf-8")).hexdigest()[:16]
+    )
+    evidence_freshness = _required_text(
+        row.get("evidence_freshness"),
+        field="role evidence_freshness",
+    ).upper()
+    if evidence_freshness == "SOURCE_NOT_AVAILABLE":
+        evidence_freshness = "NOT_AVAILABLE"
+    payload = {
+        "canonicalUri": object_path,
+        "assetName": _required_text(
+            row.get("asset_name"),
+            field="role asset_name",
+        ),
+        "assetClassPath": _required_text(
+            row.get("asset_class_path"),
+            field="role asset_class_path",
+        ),
+        "blueprintKind": _required_text(
+            row.get("blueprint_kind"),
+            field="role blueprint_kind",
+        ),
+        "parentClassPath": _required_text(
+            row.get("parent_class_path"),
+            field="role parent_class_path",
+        ),
+        "nativeParentClassPath": _required_text(
+            row.get("native_parent_class_path"),
+            field="role native_parent_class_path",
+        ),
+        "domain": domain,
+        "pluginOrDlc": _required_text(
+            row.get("plugin_or_dlc"),
+            field="role plugin_or_dlc",
+        ),
+        "assetType": asset_type,
+        "ancestryCohort": ancestry,
+        "degreeCohort": degree,
+        "identityStatus": _required_text(
+            row.get("identity_status"),
+            field="role identity_status",
+        ),
+        "identitySourceKind": _required_text(
+            row.get("identity_source_kind"),
+            field="role identity_source_kind",
+        ),
+        "evidenceFreshness": evidence_freshness,
+        "evidenceUri": (
+            "discovery://assets/"
+            + hashlib.sha256(object_path.encode("utf-8")).hexdigest()
+        ),
+        "selectionCohort": cohort,
+    }
+    _validate_candidate_payload(
+        "role",
+        payload,
+        path=f"roleAsset[{object_path}]",
+    )
+    return {"caseId": object_path, "payload": payload}, stratum
+
+
+def role_review_source_from_sqlite(
+    database_path: Path,
+    *,
+    seed: str,
+    limit: int = 360,
+) -> dict[str, object]:
+    """Select role candidates from observable independent Discovery fields."""
+
+    normalized_seed = _required_text(seed, field="role seed")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise GoldReviewError("role candidate limit must be positive")
+    connection = _sqlite_read_only(database_path)
+    try:
+        metadata = _discovery_metadata(connection)
+        try:
+            inventory = connection.execute(
+                """
+                SELECT source_id, source_fingerprint
+                FROM source_inventory
+                WHERE source_id = ?
+                """,
+                ("source://filesystem-inventory",),
+            ).fetchone()
+            cursor = connection.execute(
+                """
+                SELECT
+                    object_path,
+                    asset_name,
+                    asset_class_path,
+                    blueprint_kind,
+                    parent_class_path,
+                    native_parent_class_path,
+                    top_folder,
+                    plugin_or_dlc,
+                    is_blueprint,
+                    is_map,
+                    is_data_asset,
+                    is_data_table,
+                    is_function_library,
+                    is_blueprint_interface,
+                    is_user_defined_struct,
+                    is_user_defined_enum,
+                    identity_status,
+                    identity_source_kind,
+                    evidence_freshness,
+                    referencer_count,
+                    descendant_count,
+                    map_usage_count,
+                    registry_usage_count,
+                    component_reuse_count,
+                    cross_domain_reference_count
+                FROM assets
+                WHERE identity_status = 'EXTRACTED'
+                  AND object_path <> ''
+                ORDER BY object_path
+                """
+            )
+        except sqlite3.Error as error:
+            raise GoldReviewError(
+                "Discovery observable role source is unavailable"
+            ) from error
+        if inventory is None or not _is_sha256(
+            inventory["source_fingerprint"]
+        ):
+            raise GoldReviewError(
+                "Discovery role source fingerprint is unavailable"
+            )
+
+        row_set_hasher = hashlib.sha256()
+        eligible_count = 0
+        best_by_stratum: dict[
+            str,
+            tuple[int, str, dict[str, object]],
+        ] = {}
+        global_best: list[
+            tuple[int, str, dict[str, object]]
+        ] = []
+        for sqlite_row in cursor:
+            raw_row = {key: sqlite_row[key] for key in sqlite_row.keys()}
+            row_set_hasher.update(_canonical_json_bytes(raw_row))
+            row_set_hasher.update(b"\n")
+            candidate, stratum = _role_candidate_from_asset(raw_row)
+            case_id = str(candidate["caseId"])
+            rank = int(
+                hashlib.sha256(
+                    f"{normalized_seed}\0{case_id}".encode("utf-8")
+                ).hexdigest(),
+                16,
+            )
+            observed = best_by_stratum.get(stratum)
+            if observed is None or (rank, case_id) < (
+                observed[0],
+                observed[1],
+            ):
+                best_by_stratum[stratum] = (
+                    rank,
+                    case_id,
+                    candidate,
+                )
+            heapq.heappush(
+                global_best,
+                (-rank, case_id, candidate),
+            )
+            if len(global_best) > limit:
+                heapq.heappop(global_best)
+            eligible_count += 1
+    finally:
+        connection.close()
+    if eligible_count < 1:
+        raise GoldReviewError(
+            "Discovery database has no eligible role entities"
+        )
+
+    stratified = sorted(
+        best_by_stratum.items(),
+        key=lambda item: (
+            hashlib.sha256(
+                f"{normalized_seed}\0{item[0]}".encode("utf-8")
+            ).hexdigest(),
+            item[1][0],
+            item[1][1],
+        ),
+    )
+    selected: list[dict[str, object]] = [
+        value[2] for _, value in stratified[:limit]
+    ]
+    selected_ids = {str(item["caseId"]) for item in selected}
+    if len(selected) < min(limit, eligible_count):
+        fallback = sorted(
+            (
+                (-negative_rank, case_id, candidate)
+                for negative_rank, case_id, candidate in global_best
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        for _, case_id, candidate in fallback:
+            if case_id in selected_ids:
+                continue
+            selected.append(candidate)
+            selected_ids.add(case_id)
+            if len(selected) >= min(limit, eligible_count):
+                break
+
+    selection_rule = (
+        "INDEPENDENT_DISCOVERY_OBSERVABLE_STRATIFIED_V1_"
+        f"LIMIT_{limit}"
+    )
+    source_manifest: dict[str, object] = {
+        "schema": ROLE_REVIEW_SOURCE_SCHEMA,
+        "kind": "role",
+        "generatedFromCore": False,
+        "generatedFromClassifier": False,
+        "sourceIdentity": {
+            "databaseSchema": metadata["schema"],
+            "generatedAt": metadata["generated_at_utc"],
+            "sourceInventoryId": str(inventory["source_id"]),
+            "sourceFingerprint": str(inventory["source_fingerprint"]),
+            "eligibleRowSetSha256": row_set_hasher.hexdigest(),
+            "eligibleRowCount": eligible_count,
+            "selectedCandidateCount": len(selected),
+            "seed": normalized_seed,
+            "candidateLimit": limit,
+            "selectionRule": selection_rule,
+        },
+        "candidates": selected,
+    }
+    return validate_role_review_source(source_manifest)
+
+
+def validate_role_review_source(
+    source_manifest: Mapping[str, object],
+) -> dict[str, object]:
+    """Validate an independent observable role-candidate manifest."""
+
+    if (
+        not isinstance(source_manifest, Mapping)
+        or set(source_manifest) != _ROLE_SOURCE_FIELDS
+        or source_manifest.get("schema") != ROLE_REVIEW_SOURCE_SCHEMA
+        or source_manifest.get("kind") != "role"
+    ):
+        raise GoldReviewError(
+            "role review source fields do not match v1 contract"
+        )
+    if (
+        source_manifest.get("generatedFromCore") is not False
+        or source_manifest.get("generatedFromClassifier") is not False
+    ):
+        raise GoldReviewError(
+            "role candidates require an independent source"
+        )
+    identity = source_manifest.get("sourceIdentity")
+    if (
+        not isinstance(identity, Mapping)
+        or set(identity) != _ROLE_SOURCE_IDENTITY_FIELDS
+        or identity.get("databaseSchema")
+        not in _SUPPORTED_DISCOVERY_SCHEMAS
+    ):
+        raise GoldReviewError("role source identity is malformed")
+    _validate_timestamp(
+        identity.get("generatedAt"),
+        field="role source generatedAt",
+    )
+    _required_text(
+        identity.get("sourceInventoryId"),
+        field="role source inventory ID",
+    )
+    _required_text(identity.get("seed"), field="role source seed")
+    _required_text(
+        identity.get("selectionRule"),
+        field="role source selection rule",
+    )
+    for field in ("sourceFingerprint", "eligibleRowSetSha256"):
+        if not _is_sha256(identity.get(field)):
+            raise GoldReviewError(f"role source {field} must be SHA-256")
+    eligible_count = identity.get("eligibleRowCount")
+    selected_count = identity.get("selectedCandidateCount")
+    candidate_limit = identity.get("candidateLimit")
+    candidates = source_manifest.get("candidates")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 1
+        for value in (eligible_count, selected_count, candidate_limit)
+    ):
+        raise GoldReviewError("role source counts must be positive")
+    if (
+        not isinstance(candidates, list)
+        or len(candidates) != selected_count
+        or selected_count > eligible_count
+        or selected_count > candidate_limit
+    ):
+        raise GoldReviewError(
+            "role source counts do not match candidates"
+        )
+    expected_rule = (
+        "INDEPENDENT_DISCOVERY_OBSERVABLE_STRATIFIED_V1_"
+        f"LIMIT_{candidate_limit}"
+    )
+    if identity.get("selectionRule") != expected_rule:
+        raise GoldReviewError("role source selection rule is malformed")
+    case_ids: set[str] = set()
+    for index, candidate in enumerate(candidates):
+        if (
+            not isinstance(candidate, Mapping)
+            or set(candidate) != {"caseId", "payload"}
+            or not isinstance(candidate.get("payload"), Mapping)
+        ):
+            raise GoldReviewError("role source candidate is malformed")
+        case_id = _required_text(
+            candidate.get("caseId"),
+            field=f"role candidate {index + 1} caseId",
+        )
+        if case_id in case_ids:
+            raise GoldReviewError(f"duplicate role caseId: {case_id}")
+        _validate_candidate_payload(
+            "role",
+            candidate["payload"],
+            path=f"roleSource.candidates[{index}].payload",
+        )
+        if candidate["payload"].get("canonicalUri") != case_id:
+            raise GoldReviewError(
+                "role caseId must match canonicalUri"
+            )
+        case_ids.add(case_id)
+    return copy.deepcopy(dict(source_manifest))
+
+
+def build_role_review_pack(
+    *,
+    source_manifest: Mapping[str, object],
+    author_id: str,
+    author_key_fingerprint: str,
+    seed: str,
+    created_at: str,
+    tool_version: str,
+) -> dict[str, object]:
+    """Build a blind role pack from observable independent identity data."""
+
+    normalized_source = validate_role_review_source(source_manifest)
+    identity = normalized_source["sourceIdentity"]
+    normalized_seed = _required_text(seed, field="seed")
+    if identity["seed"] != normalized_seed:
+        raise GoldReviewError(
+            "role pack seed does not match source selection seed"
+        )
+    candidates = list(normalized_source["candidates"])
+    candidates.sort(
+        key=lambda candidate: (
+            hashlib.sha256(
+                (
+                    f"{normalized_seed}\0{candidate['caseId']}"
+                ).encode("utf-8")
+            ).hexdigest(),
+            str(candidate["caseId"]),
+        )
+    )
+    return build_review_pack(
+        kind="role",
+        author_id=author_id,
+        author_key_fingerprint=author_key_fingerprint,
+        seed=normalized_seed,
+        selection_rule=str(identity["selectionRule"]),
+        source_manifest_sha256=_sha256_json(normalized_source),
+        candidates=candidates,
         created_at=created_at,
         tool_version=tool_version,
     )
@@ -1285,6 +1852,7 @@ __all__ = [
     "PACK_SCHEMA",
     "QUERY_REVIEW_PROVENANCE_SCHEMA",
     "REGISTRATION_REVIEW_SOURCE_SCHEMA",
+    "ROLE_REVIEW_SOURCE_SCHEMA",
     "READY_TO_FREEZE",
     "REVIEW_SCHEMA",
     "REVIEWER_REGISTRY_SCHEMA",
@@ -1293,14 +1861,17 @@ __all__ = [
     "build_query_review_pack",
     "build_registration_review_pack",
     "build_review_pack",
+    "build_role_review_pack",
     "candidate_content_sha256",
     "load_trusted_reviewer_registry",
     "pack_content_sha256",
     "query_candidate_from_gold_case",
     "registration_review_source_from_sqlite",
     "review_content_sha256",
+    "role_review_source_from_sqlite",
     "validate_query_review_provenance",
     "validate_registration_review_source",
     "validate_review_pack",
     "validate_review_set",
+    "validate_role_review_source",
 ]

@@ -23,6 +23,8 @@ The checked-in query, registration, and role production-gold counts remain
 - deterministic and blind query pack export;
 - deterministic and blind registration pack export from read-only Discovery;
 - exact registration payload schema and independent-source manifest checks;
+- deterministic, observable-cohort role selection from read-only Discovery;
+- exact role payload schema with current-role and confidence leakage checks;
 - pack, candidate, and receipt SHA validation;
 - duplicate, self-review, stale-evidence, leakage, and adjudicator checks;
 - export, validate, and import command-line entry points;
@@ -43,8 +45,19 @@ rows, below the requested 120-candidate preparation target:
 
 The shortfall is reported rather than filled with generic references,
 classifier fixtures, repeated rows, or inferred labels. The role candidate
-exporter is not part of this registration slice. Both production gates remain
-red.
+exporter produced the requested primary review pool:
+
+- pack: `role-c43e2571a8d0d505`;
+- pack SHA-256:
+  `d59708d6a06f31beadee98f53ed4af111e52ab4b1d0056e9ee4afeb17f7f2022`;
+- eligible independent canonical entities: 576,207;
+- selected blind candidates: 360 in 360 observable cohorts;
+- observed breadth: 9 asset types, 92 domains, 196 ancestry cohorts;
+- validation: `VALID_REVIEW_PACK`;
+- import status: `BLOCKED_BY_INDEPENDENT_REVIEW`;
+- production gold written: false.
+
+Both production gates remain red.
 
 ## Cutover
 

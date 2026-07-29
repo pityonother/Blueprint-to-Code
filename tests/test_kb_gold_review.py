@@ -22,11 +22,14 @@ from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
     build_query_review_pack,
     build_registration_review_pack,
     build_review_pack,
+    build_role_review_pack,
     registration_review_source_from_sqlite,
     review_content_sha256,
+    role_review_source_from_sqlite,
     validate_review_pack,
     validate_registration_review_source,
     validate_review_set,
+    validate_role_review_source,
 )
 
 
@@ -221,7 +224,373 @@ def _registration_discovery_db(path: Path) -> None:
     connection.close()
 
 
+def _role_discovery_db(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE source_inventory (
+            source_id TEXT PRIMARY KEY,
+            source_kind TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            record_count INTEGER NOT NULL,
+            generated_at TEXT NOT NULL,
+            limitations_json TEXT NOT NULL
+        );
+        CREATE TABLE assets (
+            object_path TEXT PRIMARY KEY,
+            asset_name TEXT NOT NULL,
+            asset_class_path TEXT NOT NULL,
+            blueprint_kind TEXT NOT NULL,
+            parent_class_path TEXT NOT NULL,
+            native_parent_class_path TEXT NOT NULL,
+            top_folder TEXT NOT NULL,
+            plugin_or_dlc TEXT NOT NULL,
+            is_blueprint INTEGER,
+            is_map INTEGER NOT NULL,
+            is_data_asset INTEGER,
+            is_data_table INTEGER,
+            is_function_library INTEGER,
+            is_blueprint_interface INTEGER,
+            is_user_defined_struct INTEGER,
+            is_user_defined_enum INTEGER,
+            identity_status TEXT NOT NULL,
+            identity_source_kind TEXT NOT NULL,
+            evidence_freshness TEXT NOT NULL,
+            referencer_count INTEGER NOT NULL,
+            descendant_count INTEGER NOT NULL,
+            map_usage_count INTEGER NOT NULL,
+            registry_usage_count INTEGER NOT NULL,
+            component_reuse_count INTEGER NOT NULL,
+            cross_domain_reference_count INTEGER NOT NULL
+        );
+        """
+    )
+    connection.executemany(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        (
+            ("schema", "blueprint-to-code-kb-discovery/v2"),
+            ("generated_at_utc", "2026-07-29T00:00:00+00:00"),
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO source_inventory(
+            source_id, source_kind, schema_version, source_fingerprint,
+            status, confidence, record_count, generated_at,
+            limitations_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "source://filesystem-inventory",
+            "filesystem_inventory",
+            "blueprint-to-code-kb-discovery-state/v1",
+            REVISION_SHA256,
+            "COMPLETE",
+            "HIGH",
+            4,
+            "2026-07-29T00:00:00+00:00",
+            "[]",
+        ),
+    )
+    rows = (
+        (
+            "/Game/PrimalEarth/Buffs/Buff_Base.Buff_Base",
+            "Buff_Base",
+            "/Script/Engine.Blueprint",
+            "NORMAL",
+            "/Script/ShooterGame.PrimalBuff",
+            "/Script/ShooterGame.PrimalBuff",
+            "PrimalEarth",
+            "PrimalEarth",
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "EXTRACTED",
+            "unreal_asset_registry",
+            "FRESH",
+            100,
+            30,
+            0,
+            0,
+            0,
+            5,
+        ),
+        (
+            "/Game/PrimalEarth/Items/PrimalItem_A.PrimalItem_A",
+            "PrimalItem_A",
+            "/Script/Engine.Blueprint",
+            "NORMAL",
+            "/Script/ShooterGame.PrimalItem",
+            "/Script/ShooterGame.PrimalItem",
+            "PrimalEarth",
+            "PrimalEarth",
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "EXTRACTED",
+            "unreal_asset_registry",
+            "NOT_AVAILABLE",
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ),
+        (
+            "/Game/TheIsland/Maps/TestMap.TestMap",
+            "TestMap",
+            "/Script/Engine.World",
+            "NOT_BLUEPRINT",
+            "UNKNOWN",
+            "UNKNOWN",
+            "TheIsland",
+            "TheIsland",
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "EXTRACTED",
+            "unreal_asset_registry",
+            "SOURCE_NOT_AVAILABLE",
+            0,
+            0,
+            12,
+            0,
+            0,
+            0,
+        ),
+        (
+            "/Game/PrimalEarth/Textures/T_Test.T_Test",
+            "T_Test",
+            "/Script/Engine.Texture2D",
+            "NOT_BLUEPRINT",
+            "UNKNOWN",
+            "UNKNOWN",
+            "PrimalEarth",
+            "PrimalEarth",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            "EXTRACTED",
+            "unreal_asset_registry",
+            "NOT_AVAILABLE",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO assets VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?
+        )
+        """,
+        rows,
+    )
+    connection.commit()
+    connection.close()
+
+
 class GoldReviewPackTests(unittest.TestCase):
+    def test_role_pack_stratifies_observable_identity_without_predictions(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "discovery.sqlite"
+            _role_discovery_db(database)
+            first_source = role_review_source_from_sqlite(
+                database,
+                seed="stage10-role-v1",
+                limit=3,
+            )
+            second_source = role_review_source_from_sqlite(
+                database,
+                seed="stage10-role-v1",
+                limit=3,
+            )
+            first = build_role_review_pack(
+                source_manifest=first_source,
+                author_id="role-pack-author",
+                author_key_fingerprint="role-author-key",
+                seed="stage10-role-v1",
+                created_at="2026-07-29T00:00:00+00:00",
+                tool_version="ark-kb-gold-review/v1",
+            )
+            second = build_role_review_pack(
+                source_manifest=second_source,
+                author_id="role-pack-author",
+                author_key_fingerprint="role-author-key",
+                seed="stage10-role-v1",
+                created_at="2026-07-29T00:00:00+00:00",
+                tool_version="ark-kb-gold-review/v1",
+            )
+
+        self.assertEqual(first_source, second_source)
+        self.assertEqual(first, second)
+        self.assertEqual(first["kind"], "role")
+        self.assertEqual(len(first["candidates"]), 3)
+        self.assertEqual(
+            first["selectionRule"],
+            "INDEPENDENT_DISCOVERY_OBSERVABLE_STRATIFIED_V1_LIMIT_3",
+        )
+        expected_fields = {
+            "canonicalUri",
+            "assetName",
+            "assetClassPath",
+            "blueprintKind",
+            "parentClassPath",
+            "nativeParentClassPath",
+            "domain",
+            "pluginOrDlc",
+            "assetType",
+            "ancestryCohort",
+            "degreeCohort",
+            "identityStatus",
+            "identitySourceKind",
+            "evidenceFreshness",
+            "evidenceUri",
+            "selectionCohort",
+        }
+        for candidate in first["candidates"]:
+            self.assertEqual(set(candidate["payload"]), expected_fields)
+            self.assertEqual(
+                candidate["caseId"],
+                candidate["payload"]["canonicalUri"],
+            )
+            self.assertEqual(
+                set(candidate["payload"]["degreeCohort"]),
+                {
+                    "referencer",
+                    "descendant",
+                    "mapUsage",
+                    "registryUsage",
+                    "componentReuse",
+                    "crossDomain",
+                },
+            )
+            self.assertIn(
+                candidate["payload"]["evidenceFreshness"],
+                {"FRESH", "STALE", "NOT_AVAILABLE"},
+            )
+        serialized = json.dumps(first, sort_keys=True).casefold()
+        for forbidden in (
+            "knowledgeroles",
+            "currentroles",
+            "expectedroles",
+            "prediction",
+            "confidence",
+            "provisionaltier",
+        ):
+            self.assertNotIn(forbidden, serialized)
+        validate_review_pack(first)
+
+    def test_role_source_rejects_core_or_classifier_generated_candidates(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "discovery.sqlite"
+            _role_discovery_db(database)
+            source = role_review_source_from_sqlite(
+                database,
+                seed="stage10-role-v1",
+                limit=3,
+            )
+
+        for field in ("generatedFromCore", "generatedFromClassifier"):
+            tampered = copy.deepcopy(source)
+            tampered[field] = True
+            with self.subTest(field=field), self.assertRaisesRegex(
+                GoldReviewError,
+                "independent source",
+            ):
+                validate_role_review_source(tampered)
+
+    def test_role_payload_rejects_current_role_prediction_fields(self):
+        base_payload = {
+            "canonicalUri": "/Game/Test/Asset.Asset",
+            "assetName": "Asset",
+            "assetClassPath": "/Script/Engine.Blueprint",
+            "blueprintKind": "NORMAL",
+            "parentClassPath": "/Script/CoreUObject.Object",
+            "nativeParentClassPath": "/Script/CoreUObject.Object",
+            "domain": "Test",
+            "pluginOrDlc": "Test",
+            "assetType": "BLUEPRINT",
+            "ancestryCohort": "/Script/CoreUObject.Object",
+            "degreeCohort": {
+                "referencer": "ZERO",
+                "descendant": "ZERO",
+                "mapUsage": "ZERO",
+                "registryUsage": "ZERO",
+                "componentReuse": "ZERO",
+                "crossDomain": "ZERO",
+            },
+            "identityStatus": "EXTRACTED",
+            "identitySourceKind": "unreal_asset_registry",
+            "evidenceFreshness": "FRESH",
+            "evidenceUri": "discovery://assets/test",
+            "selectionCohort": "cohort-test",
+        }
+        for forbidden_field in (
+            "knowledgeRoles",
+            "currentRoles",
+            "expectedRoles",
+            "prediction",
+            "confidence",
+        ):
+            payload = copy.deepcopy(base_payload)
+            payload[forbidden_field] = ["leaf_variant"]
+            with self.subTest(field=forbidden_field), self.assertRaises(
+                GoldReviewError,
+            ):
+                build_review_pack(
+                    kind="role",
+                    author_id="role-pack-author",
+                    author_key_fingerprint="role-author-key",
+                    seed="stage10-role-v1",
+                    selection_rule="test",
+                    source_manifest_sha256=SOURCE_SHA256,
+                    candidates=[
+                        {
+                            "caseId": "/Game/Test/Asset.Asset",
+                            "payload": payload,
+                        }
+                    ],
+                    created_at="2026-07-29T00:00:00+00:00",
+                    tool_version="ark-kb-gold-review/v1",
+                )
+
     def test_registration_pack_uses_independent_typed_source_without_labels(
         self,
     ):

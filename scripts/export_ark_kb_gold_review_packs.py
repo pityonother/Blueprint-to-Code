@@ -17,8 +17,11 @@ from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
     GoldReviewError,
     build_query_review_pack,
     build_registration_review_pack,
+    build_role_review_pack,
     registration_review_source_from_sqlite,
+    role_review_source_from_sqlite,
     validate_registration_review_source,
+    validate_role_review_source,
 )
 
 
@@ -31,7 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--kind",
-        choices=("query", "registration"),
+        choices=("query", "registration", "role"),
         required=True,
     )
     parser.add_argument(
@@ -110,35 +113,57 @@ def main(argv: list[str] | None = None) -> int:
                 args.source_manifest is None
             ):
                 raise GoldReviewError(
-                    "registration export requires exactly one of "
+                    f"{args.kind} export requires exactly one of "
                     "--discovery-db or --source-manifest"
                 )
             if args.discovery_db is not None:
-                source_manifest = (
-                    registration_review_source_from_sqlite(
-                        _absolute(args.discovery_db)
+                if args.kind == "registration":
+                    source_manifest = (
+                        registration_review_source_from_sqlite(
+                            _absolute(args.discovery_db)
+                        )
                     )
-                )
+                else:
+                    source_manifest = role_review_source_from_sqlite(
+                        _absolute(args.discovery_db),
+                        seed=args.seed,
+                        limit=args.limit or 360,
+                    )
             else:
                 raw_source = _read_json(
                     _absolute(args.source_manifest)
                 )
                 if not isinstance(raw_source, dict):
                     raise GoldReviewError(
-                        "registration review source must be an object"
+                        f"{args.kind} review source must be an object"
                     )
-                source_manifest = validate_registration_review_source(
-                    raw_source
+                if args.kind == "registration":
+                    source_manifest = (
+                        validate_registration_review_source(raw_source)
+                    )
+                else:
+                    source_manifest = validate_role_review_source(
+                        raw_source
+                    )
+            if args.kind == "registration":
+                pack = build_registration_review_pack(
+                    source_manifest=source_manifest,
+                    author_id=args.author_id,
+                    author_key_fingerprint=args.author_key_fingerprint,
+                    seed=args.seed,
+                    created_at=created_at,
+                    tool_version=TOOL_VERSION,
+                    limit=args.limit or 120,
                 )
-            pack = build_registration_review_pack(
-                source_manifest=source_manifest,
-                author_id=args.author_id,
-                author_key_fingerprint=args.author_key_fingerprint,
-                seed=args.seed,
-                created_at=created_at,
-                tool_version=TOOL_VERSION,
-                limit=args.limit or 120,
-            )
+            else:
+                pack = build_role_review_pack(
+                    source_manifest=source_manifest,
+                    author_id=args.author_id,
+                    author_key_fingerprint=args.author_key_fingerprint,
+                    seed=args.seed,
+                    created_at=created_at,
+                    tool_version=TOOL_VERSION,
+                )
         output_root = (
             _absolute(args.output)
             if args.output is not None
