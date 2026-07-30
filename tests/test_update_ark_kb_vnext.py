@@ -113,6 +113,7 @@ def _fixture_staging_receipt(
         "sourceTreeDigest": "7" * 64,
         "stagedTreeDigest": "7" * 64,
         "authorityDigest": "8" * 64,
+        "coreFileIdentitySha256": "9" * 64,
         "sameVolume": True,
         "sourceVerifiedUnchanged": True,
         "reparsePointCount": 0,
@@ -658,9 +659,11 @@ def test_production_preflight_rejects_blueprint_batch_above_bound() -> None:
     )
 
 
+@pytest.mark.parametrize("receipt_invalid", [False, True])
 def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    receipt_invalid: bool,
 ) -> None:
     previous = _manifest(_semantic("captures", "old"))
     added = _revision(
@@ -706,10 +709,7 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
     monkeypatch.setattr(
         update,
         "freeze_additive_blueprint_input",
-        lambda *args, **kwargs: (
-            setattr(workspace, "staged_baseline", None),
-            frozen,
-        )[1],
+        lambda *args, **kwargs: frozen,
     )
     monkeypatch.setattr(
         update,
@@ -790,11 +790,50 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         ingest_fixture,
     )
 
+    def build_receipt(*args, **kwargs):
+        del args, kwargs
+        if receipt_invalid:
+            raise update.UpdateBaselineBlockedGap(
+                "DELTA_RECEIPT_BASE_BINDING_MISMATCH",
+                "fixture receipt mismatch",
+            )
+        return {"status": "BLOCKED_GAP"}
+
+    monkeypatch.setattr(
+        update,
+        "build_base_bound_add_only_delta_receipt",
+        build_receipt,
+    )
+    monkeypatch.setattr(
+        update,
+        "inspect_base_bound_prepublication_delta_receipt",
+        lambda *args, **kwargs: SimpleNamespace(
+            payload=lambda: {
+                "schema": (
+                    "ark-kb-prepublication-delta-inspection/v2"
+                ),
+                "status": "BLOCKED_GAP",
+                "baseBindingVerified": True,
+                "receiptArtifactSha256": "1" * 64,
+                "receiptContentSha256": "2" * 64,
+                "baseBuildId": "build-current",
+                "sourceDiffSha256": "3" * 64,
+                "blockedGapCount": 1,
+            }
+        ),
+    )
+
     result = update.run_incremental_update(paths)
 
     assert result["status"] == "blocked"
     assert result["published"] is False
-    assert result["gapCodes"] == ["REBUILD_QUEUE_NOT_DRAINED"]
+    assert result["gapCodes"] == [
+        (
+            "DELTA_RECEIPT_BASE_BINDING_MISMATCH"
+            if receipt_invalid
+            else "REBUILD_QUEUE_NOT_DRAINED"
+        )
+    ]
     assert "FACT" in result["worker"]["succeededKinds"]
     assert "BACKEND_NOT_CONFIGURED_EDGE_ENTITY" in (
         result["worker"]["blockedGapCodes"]
@@ -803,6 +842,21 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         proof.startswith("rebuild-proof://")
         for proof in result["worker"]["receiptProofs"]
     )
+    if receipt_invalid:
+        assert "deltaReceipt" not in result
+        assert "narrowGates" not in result
+        assert "publication" not in result
+    else:
+        assert result["deltaReceipt"] == {
+            "schema": "ark-kb-prepublication-delta-inspection/v2",
+            "status": "BLOCKED_GAP",
+            "baseBindingVerified": True,
+            "receiptRawSha256": "1" * 64,
+            "receiptContentSha256": "2" * 64,
+            "baseBuildId": "build-current",
+            "sourceDiffSha256": "3" * 64,
+            "blockedGapCount": 1,
+        }
     assert result["ingest"]["verifiedSources"] == 1
     assert str(result["ingest"]["proof"]).startswith("ingest-proof://")
     assert result["staging"]["sourceVerifiedUnchanged"] is True

@@ -145,7 +145,7 @@ quarantine tree digest. It records only controlled relative paths and fixes
 `e4Scenario2Complete=false`, `cutoverEligible=false`, `mode=shadow`, and
 `defaultQuerySource=legacy`.
 
-## Two-stage receipt inspection
+## Legacy v2 diagnostic inspection
 
 `inspect_prepublication_delta_receipt()` first requires a lowercase raw receipt
 SHA-256 supplied separately from the artifact. Missing input fails with:
@@ -199,7 +199,36 @@ PRODUCTION_ARTIFACT_AUTHORIZATION_REQUIRED
 
 There is no fallback that relabels a TEST_ONLY artifact as production.
 
-## Deliberately not wired
+## Base-bound v3 receipt and inspection
+
+`build_base_bound_add_only_delta_receipt()` accepts only the typed
+`UpdateBaseline`, `StagedBaselineSnapshot`,
+`FrozenAdditiveBlueprintInput`, `BlueprintIngestResult`, and
+`InvalidationPlan`, plus the durable backend event ID. It opens the base and
+staged Core databases itself. The `v3` receipt binds the exact current
+pointer and manifest, manifest-declared base Core bytes, opaque no-follow file
+identities, the same-volume independent staged Core, staging proof and tree
+digests, the frozen quarantine proof and artifact identities, the canonical
+source diff, both live logical database digests, protected truth tables, and
+the staged Core's durable event and terminal receipts.
+
+`inspect_base_bound_prepublication_delta_receipt()` produces:
+
+```text
+ark-kb-prepublication-delta-inspection/v2
+UNSIGNED_LOCAL_BASE_BOUND_PREPUBLICATION_INSPECTION
+baseBindingVerified=true
+```
+
+It authenticates canonical raw bytes with an independently supplied SHA-256
+before parsing, accepts only the `v3` receipt, then independently reopens and
+revalidates the typed baseline, staging, quarantine, both Core databases,
+durable event, and terminal receipts. All authority flags remain false and
+the mode remains `shadow` with `defaultQuerySource=legacy`. The legacy `v2`
+receipt and v1 inspection remain diagnostic-only with
+`baseBindingVerified=false`.
+
+## Runner order and deliberately unavailable capabilities
 
 `run_incremental_update()` now captures and validates the current pointer,
 manifest, live source manifest, source diff, and `UpdateBaseline` under the
@@ -211,12 +240,17 @@ the quarantine before opening the staged Core, and passes only
 `frozen_input.ingest_root` to the materializer. It does not use a lock-external
 scan or `paths.capture_root` as the ingest input.
 
+After worker drain, the default path builds and immediately inspects the v3
+receipt before processing worker blockers and before any gate or publisher
+hook. A real `BLOCKED_GAP` terminal result still produces a valid base-bound
+receipt and remains blocked; it is never upgraded to
+`FOUNDATION_VERIFIED`.
+
 The following downstream capabilities remain deliberately unavailable:
 
 - the default narrow-gate hook remains unavailable;
 - the default publisher remains unavailable;
-- no pointer write is reachable from `update_baseline.py`;
-- verified delta receipt base binding remains unavailable.
+- no pointer write is reachable from `update_baseline.py`.
 
 ## Real blockers
 
@@ -231,7 +265,6 @@ BLOCKED_BY_MISSING_AUTHORIZED_ADDITIVE_BLUEPRINT_EVIDENCE
 BLOCKED_BY_MISSING_SIGNED_PRODUCTION_ARTIFACT_AUTHORIZATION
 BLOCKED_BY_UNPROVEN_ADDITIVE_DERIVED_DEPENDENCY_SCOPE
 BLOCKED_BY_MISSING_PRODUCTION_BACKEND_TERMINAL_RECEIPTS
-BLOCKED_BY_UNVERIFIED_DELTA_RECEIPT_BASE_BINDING
 ```
 
 ## Verification
@@ -241,6 +274,7 @@ Focused checks:
 ```powershell
 python -m pytest -q tests/test_kb_pointer_cas.py
 python -m pytest -q tests/test_kb_additive_quarantine.py
+python -m pytest -q tests/test_kb_delta_receipt_base_binding.py
 python -m pytest -q tests/test_kb_update_baseline.py
 python -m pytest -q tests/test_kb_incremental_delta.py
 python -m pytest -q tests/test_update_ark_kb_vnext.py

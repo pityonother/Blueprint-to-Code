@@ -39,7 +39,11 @@ from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
     BlueprintIngestResult,
     materialize_blueprint_defaults,
 )
+from blueprint_translator.kb_vnext.incremental_delta import (  # noqa: E402
+    AddOnlyDeltaBlockedGap,
+)
 from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
+    InvalidationPlan,
     apply_invalidation_plan,
     plan_invalidation,
 )
@@ -74,9 +78,11 @@ from blueprint_translator.kb_vnext.update_baseline import (  # noqa: E402
     StagedBaselineSnapshot,
     UpdateBaseline,
     UpdateBaselineBlockedGap,
+    build_base_bound_add_only_delta_receipt,
     build_update_baseline,
     cleanup_staged_baseline_snapshot,
     freeze_additive_blueprint_input,
+    inspect_base_bound_prepublication_delta_receipt,
     stage_snapshot_from_baseline,
     validate_frozen_additive_blueprint_input,
     validate_final_source_manifest,
@@ -167,6 +173,9 @@ class UpdateWorkspace:
     staging_receipt: dict[str, object] = field(default_factory=dict)
     staged_baseline: StagedBaselineSnapshot | None = None
     frozen_additive_input: FrozenAdditiveBlueprintInput | None = None
+    ingest_result: BlueprintIngestResult | None = None
+    invalidation_plan: InvalidationPlan | None = None
+    backend_event_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -761,6 +770,9 @@ def ingest_additive_blueprint_changes(
                 "proof": receipt["proof"],
             }
         )
+        workspace.ingest_result = result
+        workspace.invalidation_plan = plan
+        workspace.backend_event_id = event_id
         return receipt
     except UpdateBlocked:
         core.rollback()
@@ -931,6 +943,7 @@ def _safe_staging_receipt(
         "sourceTreeDigest",
         "stagedTreeDigest",
         "authorityDigest",
+        "coreFileIdentitySha256",
         "sameVolume",
         "sourceVerifiedUnchanged",
         "reparsePointCount",
@@ -976,6 +989,7 @@ def _safe_staging_receipt(
         "sourceTreeDigest",
         "stagedTreeDigest",
         "authorityDigest",
+        "coreFileIdentitySha256",
     )
     count_keys = (
         "reparsePointCount",
@@ -1202,6 +1216,67 @@ def _safe_worker_summary(
         "succeededKinds": sorted(succeeded_kinds),
         "blockedGapCodes": sorted(blocked_gap_codes),
     }
+
+
+def _base_bound_delta_summary(
+    *,
+    receipt: Mapping[str, object],
+    inspection: Mapping[str, object],
+) -> dict[str, object]:
+    summary = {
+        "schema": inspection.get("schema"),
+        "status": inspection.get("status"),
+        "baseBindingVerified": inspection.get(
+            "baseBindingVerified"
+        ),
+        "receiptRawSha256": inspection.get(
+            "receiptArtifactSha256"
+        ),
+        "receiptContentSha256": inspection.get(
+            "receiptContentSha256"
+        ),
+        "baseBuildId": inspection.get("baseBuildId"),
+        "sourceDiffSha256": inspection.get("sourceDiffSha256"),
+        "blockedGapCount": inspection.get("blockedGapCount"),
+    }
+    if (
+        set(summary)
+        != {
+            "schema",
+            "status",
+            "baseBindingVerified",
+            "receiptRawSha256",
+            "receiptContentSha256",
+            "baseBuildId",
+            "sourceDiffSha256",
+            "blockedGapCount",
+        }
+        or summary["schema"]
+        != "ark-kb-prepublication-delta-inspection/v2"
+        or summary["status"] not in {"FOUNDATION_VERIFIED", "BLOCKED_GAP"}
+        or summary["baseBindingVerified"] is not True
+        or any(
+            not isinstance(summary[key], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", summary[key])
+            for key in (
+                "receiptRawSha256",
+                "receiptContentSha256",
+                "sourceDiffSha256",
+            )
+        )
+        or not isinstance(summary["baseBuildId"], str)
+        or not summary["baseBuildId"]
+        or isinstance(summary["blockedGapCount"], bool)
+        or not isinstance(summary["blockedGapCount"], int)
+        or summary["blockedGapCount"] < 0
+        or receipt.get("status") != summary["status"]
+    ):
+        raise UpdateBlocked(
+            "DELTA_RECEIPT_INSPECTION_INVALID",
+            "The base-bound receipt inspection summary is invalid.",
+            full_rebuild_required=True,
+        )
+    return summary
 
 
 def _worker_blockers(payload: Mapping[str, object]) -> list[str]:
@@ -1754,6 +1829,86 @@ def run_incremental_update(
                     hooks.drain_worker(workspace, max_rebuild_items)
                 )
                 base["worker"] = _safe_worker_summary(worker)
+                if hooks.ingest_changes is ingest_additive_blueprint_changes:
+                    if (
+                        baseline is None
+                        or workspace.staged_baseline is None
+                        or workspace.frozen_additive_input is None
+                        or workspace.ingest_result is None
+                        or workspace.invalidation_plan is None
+                        or not workspace.backend_event_id
+                    ):
+                        raise UpdateBlocked(
+                            "DELTA_RECEIPT_TYPED_INPUT_MISSING",
+                            "Default update did not retain the typed inputs "
+                            "required for a base-bound receipt.",
+                            full_rebuild_required=True,
+                        )
+                    try:
+                        delta_receipt = (
+                            build_base_bound_add_only_delta_receipt(
+                                baseline,
+                                staged_snapshot=(
+                                    workspace.staged_baseline
+                                ),
+                                frozen_input=(
+                                    workspace.frozen_additive_input
+                                ),
+                                ingest_result=workspace.ingest_result,
+                                invalidation_plan=(
+                                    workspace.invalidation_plan
+                                ),
+                                backend_event_id=(
+                                    workspace.backend_event_id
+                                ),
+                            )
+                        )
+                        delta_raw = json.dumps(
+                            delta_receipt,
+                            allow_nan=False,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                        expected_delta_raw_sha256 = hashlib.sha256(
+                            delta_raw
+                        ).hexdigest()
+                        delta_inspection = (
+                            inspect_base_bound_prepublication_delta_receipt(
+                                baseline,
+                                staged_snapshot=(
+                                    workspace.staged_baseline
+                                ),
+                                frozen_input=(
+                                    workspace.frozen_additive_input
+                                ),
+                                receipt_bytes=delta_raw,
+                                expected_receipt_raw_sha256=(
+                                    expected_delta_raw_sha256
+                                ),
+                            )
+                        )
+                    except (
+                        AddOnlyDeltaBlockedGap,
+                        OSError,
+                        sqlite3.DatabaseError,
+                        UpdateBaselineBlockedGap,
+                        ValueError,
+                    ) as exc:
+                        raise UpdateBlocked(
+                            getattr(
+                                exc,
+                                "gap_code",
+                                "DELTA_RECEIPT_BASE_BINDING_INVALID",
+                            ),
+                            "The add-only delta receipt could not be bound "
+                            "to the exact base and staged state.",
+                            full_rebuild_required=True,
+                        ) from exc
+                    base["deltaReceipt"] = _base_bound_delta_summary(
+                        receipt=delta_receipt,
+                        inspection=delta_inspection.payload(),
+                    )
                 blockers = _worker_blockers(worker)
                 if blockers:
                     raise UpdateBlocked(
