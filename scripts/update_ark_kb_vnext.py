@@ -17,7 +17,6 @@ import re
 import shutil
 import sqlite3
 import sys
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -72,9 +71,12 @@ from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     source_manifest_from_payload as source_manifest_from_payload,
 )
 from blueprint_translator.kb_vnext.update_baseline import (  # noqa: E402
+    StagedBaselineSnapshot,
     UpdateBaseline,
     UpdateBaselineBlockedGap,
     build_update_baseline,
+    cleanup_staged_baseline_snapshot,
+    stage_snapshot_from_baseline,
     validate_final_source_manifest,
     validate_update_baseline_identity,
 )
@@ -115,6 +117,8 @@ class UpdateBlocked(RuntimeError):
         detail: str,
         *,
         full_rebuild_required: bool,
+        status: str = "blocked",
+        residual_identifier: str = "",
     ) -> None:
         normalized = str(gap_code).strip().upper()
         if not normalized:
@@ -123,6 +127,8 @@ class UpdateBlocked(RuntimeError):
         self.gap_code = normalized
         self.detail = str(detail)
         self.full_rebuild_required = bool(full_rebuild_required)
+        self.status = str(status)
+        self.residual_identifier = str(residual_identifier)
 
 
 @dataclass(frozen=True)
@@ -159,6 +165,7 @@ class UpdateWorkspace:
     )
     base_build_id: str = ""
     staging_receipt: dict[str, object] = field(default_factory=dict)
+    staged_baseline: StagedBaselineSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -428,227 +435,60 @@ def production_capability_check(
         )
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _snapshot_files(root: Path) -> tuple[Path, ...]:
-    files: list[Path] = []
-    for path in sorted(
-        root.rglob("*"),
-        key=lambda value: value.relative_to(root).as_posix(),
-    ):
-        is_junction = bool(
-            getattr(path, "is_junction", lambda: False)()
-        )
-        if path.is_symlink() or is_junction:
-            raise UpdateBlocked(
-                "IMMUTABLE_SNAPSHOT_LINK_UNSAFE",
-                "The immutable snapshot contains a link or junction.",
-                full_rebuild_required=True,
-            )
-        if path.is_file():
-            files.append(path)
-        elif not path.is_dir():
-            raise UpdateBlocked(
-                "IMMUTABLE_SNAPSHOT_SPECIAL_FILE_UNSAFE",
-                "The immutable snapshot contains a special file.",
-                full_rebuild_required=True,
-            )
-    return tuple(files)
-
-
-def _snapshot_tree_digest(root: Path, files: Sequence[Path]) -> str:
-    digest = hashlib.sha256()
-    for path in files:
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(_sha256_file(path).encode("ascii"))
-        digest.update(b"\n")
-    return digest.hexdigest()
-
-
-def _backup_sqlite(source: Path, destination: Path) -> None:
-    source_connection = sqlite3.connect(
-        f"file:{source.resolve().as_posix()}?mode=ro&immutable=1",
-        uri=True,
-    )
-    destination_connection = sqlite3.connect(destination)
-    try:
-        source_connection.backup(destination_connection)
-        result = destination_connection.execute(
-            "PRAGMA quick_check"
-        ).fetchone()
-        if result != ("ok",):
-            raise UpdateBlocked(
-                "STAGED_SQLITE_QUICK_CHECK_FAILED",
-                "A staged SQLite backup failed quick_check.",
-                full_rebuild_required=True,
-            )
-    finally:
-        destination_connection.close()
-        source_connection.close()
-
-
-def _staging_receipt(
+def stage_current_snapshot(
+    paths: UpdatePaths,
     *,
-    build_id: str,
-    source_digest: str,
-    staged_digest: str,
-    sqlite_files: int,
-    regular_files: int,
-) -> dict[str, object]:
-    body: dict[str, object] = {
-        "schema": "ark-kb-incremental-staging-receipt/v1",
-        "baseBuildId": build_id,
-        "copyMethod": "sqlite-backup-and-file-copy",
-        "sourceSnapshotSha256": source_digest,
-        "stagedSnapshotSha256": staged_digest,
-        "sourceVerifiedUnchanged": True,
-        "writableHardlinks": False,
-        "sqliteFiles": sqlite_files,
-        "regularFiles": regular_files,
-    }
-    proof = hashlib.sha256(
-        json.dumps(
-            body,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return {**body, "proof": f"staging-proof://{proof}"}
-
-
-def stage_current_snapshot(paths: UpdatePaths) -> UpdateWorkspace:
-    """Clone current into same-volume staging without writable hardlinks."""
+    baseline: UpdateBaseline,
+) -> UpdateWorkspace:
+    """Stage only the exact UpdateBaseline captured under the writer lock."""
 
     paths = paths.resolved()
-    try:
-        current = resolve_current_snapshot(
-            paths.output,
-            allow_legacy=False,
-        )
-    except (FileNotFoundError, ValueError) as exc:
+    if type(baseline) is not UpdateBaseline:
+        raise TypeError("locked UpdateBaseline is required")
+    if baseline.snapshot_root != paths.output:
         raise UpdateBlocked(
-            "CURRENT_IMMUTABLE_SNAPSHOT_UNAVAILABLE",
-            "The current immutable snapshot cannot be staged safely.",
+            "UPDATE_BASELINE_IDENTITY_CHANGED",
+            "The staging output does not match the locked UpdateBaseline.",
             full_rebuild_required=True,
-        ) from exc
-    source = current.snapshot_dir.resolve()
+        )
     try:
-        files = _snapshot_files(source)
-        if any(
-            path.name.endswith(("-wal", "-shm"))
-            and ".sqlite-" in path.name
-            for path in files
-        ):
-            raise UpdateBlocked(
-                "IMMUTABLE_SNAPSHOT_SQLITE_SIDECAR",
-                "The immutable snapshot contains SQLite WAL/SHM sidecars.",
-                full_rebuild_required=True,
-            )
-        source_digest_before = _snapshot_tree_digest(source, files)
-    except UpdateBlocked:
-        raise
-    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        staged = stage_snapshot_from_baseline(
+            baseline,
+            destination=paths.output / ".incremental-staging",
+        )
+    except UpdateBaselineBlockedGap as exc:
         raise UpdateBlocked(
-            "IMMUTABLE_SNAPSHOT_VERIFICATION_FAILED",
-            "The immutable source snapshot could not be read and hashed.",
+            exc.gap_code,
+            str(exc),
             full_rebuild_required=True,
-        ) from exc
-    staging_root = paths.output / ".incremental-staging"
-    staging_root.mkdir(parents=True, exist_ok=True)
-    temporary_root = staging_root / uuid.uuid4().hex
-    temporary_root.mkdir()
-    snapshot_dir = temporary_root / "snapshot"
-    snapshot_dir.mkdir()
-    try:
-        if temporary_root.stat().st_dev != paths.output.stat().st_dev:
-            raise UpdateBlocked(
-                "STAGING_NOT_ON_TARGET_VOLUME",
-                "Incremental staging is not on the target output volume.",
-                full_rebuild_required=True,
-            )
-        sqlite_files = 0
-        regular_files = 0
-        for source_path in files:
-            relative = source_path.relative_to(source)
-            destination = snapshot_dir / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if source_path.suffix.casefold() == ".sqlite":
-                _backup_sqlite(source_path, destination)
-                sqlite_files += 1
-            else:
-                shutil.copy2(source_path, destination)
-                regular_files += 1
-            if os.path.samefile(source_path, destination):
-                raise UpdateBlocked(
-                    "STAGING_WRITABLE_HARDLINK_REJECTED",
-                    "A staged file aliases the immutable source inode.",
-                    full_rebuild_required=True,
-                )
-        source_digest_after = _snapshot_tree_digest(
-            source,
-            _snapshot_files(source),
-        )
-        if source_digest_before != source_digest_after:
-            raise UpdateBlocked(
-                "IMMUTABLE_SNAPSHOT_CHANGED_DURING_STAGE",
-                "The immutable source snapshot changed during staging.",
-                full_rebuild_required=True,
-            )
-        staged_files = _snapshot_files(snapshot_dir)
-        staged_digest = _snapshot_tree_digest(
-            snapshot_dir,
-            staged_files,
-        )
-        workspace = UpdateWorkspace(
-            temporary_root=temporary_root,
-            snapshot_dir=snapshot_dir,
-            core_path=snapshot_dir / "core.sqlite",
-            cache_path=snapshot_dir / "cache.sqlite",
-            projection_dir=snapshot_dir / "domain_exports",
-            base_build_id=current.build_id,
-            staging_receipt=_staging_receipt(
-                build_id=current.build_id,
-                source_digest=source_digest_before,
-                staged_digest=staged_digest,
-                sqlite_files=sqlite_files,
-                regular_files=regular_files,
+            status=(
+                "uncertain"
+                if exc.status == "UNCERTAIN"
+                else "blocked"
             ),
-        )
-        if (
-            not workspace.core_path.is_file()
-            or not workspace.cache_path.is_file()
-            or not workspace.projection_dir.is_dir()
-        ):
-            raise UpdateBlocked(
-                "STAGED_SNAPSHOT_LAYOUT_INCOMPLETE",
-                "The staged snapshot lacks Core, Cache, or projections.",
-                full_rebuild_required=True,
-            )
-        return workspace
-    except UpdateBlocked:
-        shutil.rmtree(temporary_root, ignore_errors=True)
-        raise
-    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
-        shutil.rmtree(temporary_root, ignore_errors=True)
-        raise UpdateBlocked(
-            "STAGING_COPY_FAILED",
-            "The immutable snapshot could not be copied and verified.",
-            full_rebuild_required=True,
+            residual_identifier=exc.residual_identifier,
         ) from exc
+    return UpdateWorkspace(
+        temporary_root=staged.temporary_root,
+        snapshot_dir=staged.snapshot_dir,
+        core_path=staged.snapshot_dir / "core.sqlite",
+        cache_path=staged.snapshot_dir / "cache.sqlite",
+        projection_dir=staged.snapshot_dir / "domain_exports",
+        base_build_id=staged.base_build_id,
+        staging_receipt=staged.receipt,
+        staged_baseline=staged,
+    )
 
 
 def _unavailable_stage(paths: UpdatePaths) -> UpdateWorkspace:
-    """Compatibility hook name; staging itself is now production-safe."""
+    """Injected hooks cannot stage without the locked UpdateBaseline."""
 
-    return stage_current_snapshot(paths)
+    del paths
+    raise UpdateBlocked(
+        "LOCKED_UPDATE_BASELINE_REQUIRED",
+        "Production staging requires the locked UpdateBaseline.",
+        full_rebuild_required=True,
+    )
 
 
 def _unavailable_plan(
@@ -1045,74 +885,132 @@ def _worker_payload(report: object) -> dict[str, object]:
 def _safe_staging_receipt(
     value: Mapping[str, object],
 ) -> dict[str, object]:
-    expected = {
-        "schema": "ark-kb-incremental-staging-receipt/v1",
-        "copyMethod": "sqlite-backup-and-file-copy",
-        "sourceVerifiedUnchanged": True,
-        "writableHardlinks": False,
-    }
+    body_keys = (
+        "schema",
+        "evidenceClass",
+        "baseBuildId",
+        "pointerSha256",
+        "manifestSha256",
+        "baseSourceManifestFingerprint",
+        "sourceManifestFingerprint",
+        "sourceDiffSha256",
+        "updateBaselineIdentitySha256",
+        "sourceTreeDigest",
+        "stagedTreeDigest",
+        "authorityDigest",
+        "sameVolume",
+        "sourceVerifiedUnchanged",
+        "reparsePointCount",
+        "hardlinkAliasCount",
+        "copiedAuthorityFileCount",
+        "copiedNonAuthorityFileCount",
+        "cacheDisposition",
+        "fileCount",
+        "totalBytes",
+        "createdAt",
+        "stagingRelativePath",
+        "published",
+        "productionAuthority",
+        "e4Scenario2Complete",
+        "cutoverEligible",
+        "mode",
+        "defaultQuerySource",
+    )
+    body = {key: value.get(key) for key in body_keys}
     proof = str(value.get("proof") or "")
-    source_digest = str(value.get("sourceSnapshotSha256") or "")
-    staged_digest = str(value.get("stagedSnapshotSha256") or "")
-    counts = {
-        key: value.get(key)
-        for key in ("sqliteFiles", "regularFiles")
+    try:
+        expected_proof = "staging-proof://" + hashlib.sha256(
+            json.dumps(
+                body,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError) as exc:
+        raise UpdateBlocked(
+            "STAGING_RECEIPT_INVALID",
+            "Safe staging returned a non-canonical receipt.",
+            full_rebuild_required=True,
+        ) from exc
+    digest_keys = (
+        "pointerSha256",
+        "manifestSha256",
+        "baseSourceManifestFingerprint",
+        "sourceManifestFingerprint",
+        "sourceDiffSha256",
+        "updateBaselineIdentitySha256",
+        "sourceTreeDigest",
+        "stagedTreeDigest",
+        "authorityDigest",
+    )
+    count_keys = (
+        "reparsePointCount",
+        "hardlinkAliasCount",
+        "copiedAuthorityFileCount",
+        "copiedNonAuthorityFileCount",
+        "fileCount",
+        "totalBytes",
+    )
+    staging_relative = str(value.get("stagingRelativePath") or "")
+    fixed = {
+        "schema": "ark-kb-reparse-safe-staging-receipt/v1",
+        "evidenceClass": "UNSIGNED_LOCAL_REPARSE_SAFE_STAGING",
+        "sameVolume": True,
+        "sourceVerifiedUnchanged": True,
+        "reparsePointCount": 0,
+        "hardlinkAliasCount": 0,
+        "published": False,
+        "productionAuthority": False,
+        "e4Scenario2Complete": False,
+        "cutoverEligible": False,
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
     }
-    body = {
-        "schema": value.get("schema"),
-        "baseBuildId": value.get("baseBuildId"),
-        "copyMethod": value.get("copyMethod"),
-        "sourceSnapshotSha256": source_digest,
-        "stagedSnapshotSha256": staged_digest,
-        "sourceVerifiedUnchanged": value.get(
-            "sourceVerifiedUnchanged"
-        ),
-        "writableHardlinks": value.get("writableHardlinks"),
-        **counts,
-    }
-    expected_proof = "staging-proof://" + hashlib.sha256(
-        json.dumps(
-            body,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
     if (
         any(
-            value.get(key) != expected_value
-            for key, expected_value in expected.items()
+            value.get(key) != expected
+            for key, expected in fixed.items()
         )
         or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._+-]*",
             str(value.get("baseBuildId") or ""),
         )
+        or any(
+            not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(value.get(key) or ""),
+            )
+            for key in digest_keys
+        )
+        or value.get("sourceTreeDigest")
+        != value.get("stagedTreeDigest")
+        or value.get("cacheDisposition")
+        not in {"ABSENT", "COPIED_BUILD_BOUND_DISPOSABLE"}
+        or not isinstance(value.get("createdAt"), str)
+        or not value.get("createdAt")
+        or not re.fullmatch(
+            r"\.incremental-staging/[0-9a-f]{32}/snapshot",
+            staging_relative,
+        )
         or not re.fullmatch(r"staging-proof://[0-9a-f]{64}", proof)
         or proof != expected_proof
-        or not re.fullmatch(r"[0-9a-f]{64}", source_digest)
-        or not re.fullmatch(r"[0-9a-f]{64}", staged_digest)
         or any(
             isinstance(count, bool)
             or not isinstance(count, int)
             or count < 0
-            for count in counts.values()
+            for count in (value.get(key) for key in count_keys)
         )
+        or value.get("copiedAuthorityFileCount")
+        + value.get("copiedNonAuthorityFileCount")
+        != value.get("fileCount")
     ):
         raise UpdateBlocked(
             "STAGING_RECEIPT_INVALID",
-            "The staging copy did not provide a valid content receipt.",
+            "Safe staging did not provide a valid non-publication receipt.",
             full_rebuild_required=True,
         )
-    return {
-        "schema": expected["schema"],
-        "baseBuildId": str(value.get("baseBuildId") or ""),
-        "copyMethod": expected["copyMethod"],
-        "sourceSnapshotSha256": source_digest,
-        "stagedSnapshotSha256": staged_digest,
-        "sourceVerifiedUnchanged": True,
-        "writableHardlinks": False,
-        **counts,
-        "proof": proof,
-    }
+    return {**body, "proof": proof}
 
 
 def _safe_ingest_summary(
@@ -1355,6 +1253,34 @@ def _validate_staging_workspace(
 
 
 @contextmanager
+def _staging_workspace_lifecycle(
+    paths: UpdatePaths,
+    workspace: UpdateWorkspace,
+    *,
+    cleanup_injected: Callable[[], bool],
+) -> Iterator[None]:
+    """Clean only this staging instance and surface uncertain cleanup."""
+
+    staged = workspace.staged_baseline
+    try:
+        yield
+    finally:
+        if staged is not None:
+            try:
+                cleanup_staged_baseline_snapshot(
+                    staged,
+                    snapshot_root=paths.output,
+                )
+            except UpdateBaselineBlockedGap as exc:
+                raise _locked_baseline_error(exc) from exc
+        elif (
+            cleanup_injected()
+            and workspace.temporary_root.exists()
+        ):
+            shutil.rmtree(workspace.temporary_root, ignore_errors=True)
+
+
+@contextmanager
 def _single_writer_lock(output: Path) -> Iterator[None]:
     output_preexisted = output.exists()
     output.mkdir(parents=True, exist_ok=True)
@@ -1415,15 +1341,20 @@ def _blocked_result(
     base: Mapping[str, object],
     error: UpdateBlocked,
 ) -> dict[str, object]:
-    return {
+    result = {
         **base,
-        "status": "blocked",
+        "status": error.status,
         "cacheHit": False,
         "published": False,
         "gapCodes": [error.gap_code],
         "reason": error.detail,
         "fullRebuildRequired": error.full_rebuild_required,
     }
+    if error.residual_identifier:
+        result["stagingResidualIdentifier"] = (
+            error.residual_identifier
+        )
+    return result
 
 
 def _uncertain_after_switch_result(
@@ -1479,6 +1410,12 @@ def _locked_baseline_error(error: Exception) -> UpdateBlocked:
             error.gap_code,
             str(error),
             full_rebuild_required=True,
+            status=(
+                "uncertain"
+                if error.status == "UNCERTAIN"
+                else "blocked"
+            ),
+            residual_identifier=error.residual_identifier,
         )
     return UpdateBlocked(
         "UPDATE_BASELINE_IDENTITY_CHANGED",
@@ -1659,127 +1596,136 @@ def run_incremental_update(
             # The production check admits only the bounded additive Blueprint
             # diagnostic slice; every other source change stops before staging.
             hooks.check_capability(previous, diff)
-            workspace = hooks.stage_snapshot(paths)
-            _validate_staging_workspace(paths, workspace)
-            workspace_is_confined = True
-            if (
-                baseline is not None
-                and workspace.base_build_id
-                and workspace.base_build_id != baseline.base_build_id
+            workspace = (
+                stage_current_snapshot(paths, baseline=baseline)
+                if baseline is not None
+                else hooks.stage_snapshot(paths)
+            )
+            with _staging_workspace_lifecycle(
+                paths,
+                workspace,
+                cleanup_injected=lambda: workspace_is_confined,
             ):
-                raise UpdateBlocked(
-                    "UPDATE_BASELINE_IDENTITY_CHANGED",
-                    "The staged snapshot does not match the locked base build.",
-                    full_rebuild_required=True,
+                _validate_staging_workspace(paths, workspace)
+                workspace_is_confined = True
+                if (
+                    baseline is not None
+                    and workspace.base_build_id
+                    and workspace.base_build_id != baseline.base_build_id
+                ):
+                    raise UpdateBlocked(
+                        "UPDATE_BASELINE_IDENTITY_CHANGED",
+                        "The staged snapshot does not match the locked "
+                        "base build.",
+                        full_rebuild_required=True,
+                    )
+                if workspace.staging_receipt:
+                    base["staging"] = _safe_staging_receipt(
+                        workspace.staging_receipt
+                    )
+                _validate_locked_update_state(
+                    paths=paths,
+                    hooks=hooks,
+                    previous=previous,
+                    candidate=current,
+                    diff=diff,
+                    baseline=baseline,
+                    expected_current_snapshot=(
+                        expected_current_snapshot
+                    ),
                 )
-            if workspace.staging_receipt:
-                base["staging"] = _safe_staging_receipt(
-                    workspace.staging_receipt
+                plans = list(hooks.plan_changes(workspace, diff))
+                if not plans:
+                    raise UpdateBlocked(
+                        "EMPTY_INVALIDATION_PLAN",
+                        "Changed sources produced no invalidation work.",
+                        full_rebuild_required=True,
+                    )
+                base["selectiveInvalidationPlan"] = _safe_plan_summary(
+                    plans
                 )
-            _validate_locked_update_state(
-                paths=paths,
-                hooks=hooks,
-                previous=previous,
-                candidate=current,
-                diff=diff,
-                baseline=baseline,
-                expected_current_snapshot=expected_current_snapshot,
-            )
-            plans = list(hooks.plan_changes(workspace, diff))
-            if not plans:
-                raise UpdateBlocked(
-                    "EMPTY_INVALIDATION_PLAN",
-                    "Changed sources produced no invalidation work.",
-                    full_rebuild_required=True,
+                ingest = hooks.ingest_changes(workspace, diff, paths)
+                base["ingest"] = _safe_ingest_summary(ingest)
+                worker = _worker_payload(
+                    hooks.drain_worker(workspace, max_rebuild_items)
                 )
-            base["selectiveInvalidationPlan"] = _safe_plan_summary(plans)
-            ingest = hooks.ingest_changes(workspace, diff, paths)
-            base["ingest"] = _safe_ingest_summary(ingest)
-            worker = _worker_payload(
-                hooks.drain_worker(workspace, max_rebuild_items)
-            )
-            base["worker"] = _safe_worker_summary(worker)
-            blockers = _worker_blockers(worker)
-            if blockers:
-                raise UpdateBlocked(
-                    "REBUILD_QUEUE_NOT_DRAINED",
-                    ", ".join(blockers),
-                    full_rebuild_required=True,
+                base["worker"] = _safe_worker_summary(worker)
+                blockers = _worker_blockers(worker)
+                if blockers:
+                    raise UpdateBlocked(
+                        "REBUILD_QUEUE_NOT_DRAINED",
+                        ", ".join(blockers),
+                        full_rebuild_required=True,
+                    )
+                gates = hooks.run_narrow_gates(workspace)
+                gate_payload = _validated_gate_payload(gates)
+                base["narrowGates"] = gate_payload
+                if not bool(gate_payload["passed"]):
+                    return {
+                        **base,
+                        "status": "gate_failed",
+                        "cacheHit": False,
+                        "reason": (
+                            "narrow gates failed; snapshot not published"
+                        ),
+                    }
+                _validate_locked_update_state(
+                    paths=paths,
+                    hooks=hooks,
+                    previous=previous,
+                    candidate=current,
+                    diff=diff,
+                    baseline=baseline,
+                    expected_current_snapshot=(
+                        expected_current_snapshot
+                    ),
                 )
-            gates = hooks.run_narrow_gates(workspace)
-            gate_payload = _validated_gate_payload(gates)
-            base["narrowGates"] = gate_payload
-            if not bool(gate_payload["passed"]):
+                try:
+                    raw_publication = hooks.publish_atomic(
+                        workspace,
+                        paths,
+                        current,
+                        diff,
+                    )
+                except Exception:
+                    return _uncertain_after_switch_result(
+                        base=base,
+                        gap_code="PUBLISHER_OUTCOME_UNCERTAIN",
+                    )
+                try:
+                    publication = _safe_publication(
+                        raw_publication,
+                        current,
+                    )
+                except UpdateBlocked as exc:
+                    return _uncertain_after_switch_result(
+                        base=base,
+                        gap_code=exc.gap_code,
+                    )
+                try:
+                    verified = hooks.verify_publication(
+                        paths,
+                        str(publication["buildId"]),
+                        current,
+                    )
+                except Exception:
+                    verified = False
+                if not verified:
+                    return _uncertain_after_switch_result(
+                        base=base,
+                        gap_code=(
+                            "PUBLISHED_SNAPSHOT_BINDING_NOT_VERIFIED"
+                        ),
+                    )
                 return {
                     **base,
-                    "status": "gate_failed",
+                    "status": "published",
                     "cacheHit": False,
-                    "reason": (
-                        "narrow gates failed; snapshot not published"
-                    ),
+                    "published": True,
+                    "publication": publication,
                 }
-            _validate_locked_update_state(
-                paths=paths,
-                hooks=hooks,
-                previous=previous,
-                candidate=current,
-                diff=diff,
-                baseline=baseline,
-                expected_current_snapshot=expected_current_snapshot,
-            )
-            try:
-                raw_publication = hooks.publish_atomic(
-                    workspace,
-                    paths,
-                    current,
-                    diff,
-                )
-            except Exception:
-                return _uncertain_after_switch_result(
-                    base=base,
-                    gap_code="PUBLISHER_OUTCOME_UNCERTAIN",
-                )
-            try:
-                publication = _safe_publication(
-                    raw_publication,
-                    current,
-                )
-            except UpdateBlocked as exc:
-                return _uncertain_after_switch_result(
-                    base=base,
-                    gap_code=exc.gap_code,
-                )
-            try:
-                verified = hooks.verify_publication(
-                    paths,
-                    str(publication["buildId"]),
-                    current,
-                )
-            except Exception:
-                verified = False
-            if not verified:
-                return _uncertain_after_switch_result(
-                    base=base,
-                    gap_code="PUBLISHED_SNAPSHOT_BINDING_NOT_VERIFIED",
-                )
-            return {
-                **base,
-                "status": "published",
-                "cacheHit": False,
-                "published": True,
-                "publication": publication,
-            }
     except UpdateBlocked as exc:
         return _blocked_result(base=base, error=exc)
-    finally:
-        if (
-            workspace is not None
-            and workspace_is_confined
-            and workspace.temporary_root.exists()
-        ):
-            # Staging owns only this explicit temporary root.  A blocked
-            # diagnostic never mutates the immutable snapshot or current.
-            shutil.rmtree(workspace.temporary_root, ignore_errors=True)
 
 
 def _parser() -> argparse.ArgumentParser:

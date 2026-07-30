@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import shutil
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,6 +95,55 @@ def _workspace(tmp_path: Path) -> update.UpdateWorkspace:
     )
 
 
+def _fixture_staging_receipt(
+    *,
+    build_id: str = "fixture-base",
+) -> dict[str, object]:
+    body: dict[str, object] = {
+        "schema": "ark-kb-reparse-safe-staging-receipt/v1",
+        "evidenceClass": "UNSIGNED_LOCAL_REPARSE_SAFE_STAGING",
+        "baseBuildId": build_id,
+        "pointerSha256": "1" * 64,
+        "manifestSha256": "2" * 64,
+        "baseSourceManifestFingerprint": "3" * 64,
+        "sourceManifestFingerprint": "4" * 64,
+        "sourceDiffSha256": "5" * 64,
+        "updateBaselineIdentitySha256": "6" * 64,
+        "sourceTreeDigest": "7" * 64,
+        "stagedTreeDigest": "7" * 64,
+        "authorityDigest": "8" * 64,
+        "sameVolume": True,
+        "sourceVerifiedUnchanged": True,
+        "reparsePointCount": 0,
+        "hardlinkAliasCount": 0,
+        "copiedAuthorityFileCount": 2,
+        "copiedNonAuthorityFileCount": 1,
+        "cacheDisposition": "COPIED_BUILD_BOUND_DISPOSABLE",
+        "fileCount": 3,
+        "totalBytes": 100,
+        "createdAt": "2026-07-30T00:00:00+00:00",
+        "stagingRelativePath": (
+            ".incremental-staging/"
+            "0123456789abcdef0123456789abcdef/snapshot"
+        ),
+        "published": False,
+        "productionAuthority": False,
+        "e4Scenario2Complete": False,
+        "cutoverEligible": False,
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
+    }
+    proof = hashlib.sha256(
+        json.dumps(
+            body,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {**body, "proof": f"staging-proof://{proof}"}
+
+
 def _production_workspace(tmp_path: Path) -> update.UpdateWorkspace:
     root = tmp_path / "output" / ".incremental-staging" / "production"
     snapshot = root / "snapshot"
@@ -135,13 +182,7 @@ def _production_workspace(tmp_path: Path) -> update.UpdateWorkspace:
         cache_path=cache_path,
         projection_dir=projection_dir,
         base_build_id="fixture-base",
-        staging_receipt=update._staging_receipt(
-            build_id="fixture-base",
-            source_digest="a" * 64,
-            staged_digest="b" * 64,
-            sqlite_files=2,
-            regular_files=1,
-        ),
+        staging_receipt=_fixture_staging_receipt(),
     )
 
 
@@ -840,6 +881,129 @@ def test_default_candidate_scan_runs_under_incremental_writer_lock(
     assert scan_lock_states == [True, True]
 
 
+def test_default_staging_uses_locked_update_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    previous = _manifest(_semantic("captures", "old"))
+    candidate = _manifest(
+        _semantic("captures", "new"),
+        _revision("added", uri="capture://Added"),
+    )
+    _write_bound_current_snapshot(paths, previous)
+    monkeypatch.setattr(
+        update,
+        "scan_source_manifest",
+        lambda locked_paths: candidate,
+    )
+    observed: list[update.UpdateBaseline] = []
+
+    def stage(
+        locked_paths: update.UpdatePaths,
+        *,
+        baseline: update.UpdateBaseline,
+    ) -> update.UpdateWorkspace:
+        assert (
+            locked_paths.output / ".incremental-update.lock"
+        ).is_file()
+        observed.append(baseline)
+        raise update.UpdateBlocked(
+            "STAGING_TEST_SENTINEL",
+            "stop after proving default staging wiring",
+            full_rebuild_required=True,
+        )
+
+    monkeypatch.setattr(update, "stage_current_snapshot", stage)
+
+    result = update.run_incremental_update(paths)
+
+    assert result["gapCodes"] == ["STAGING_TEST_SENTINEL"]
+    assert len(observed) == 1
+    assert observed[0].candidate_source_manifest == candidate
+    assert observed[0].base_pointer_sha256 == hashlib.sha256(
+        (paths.output / "current.json").read_bytes()
+    ).hexdigest()
+
+
+def test_default_runner_rescans_sources_after_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    previous = _manifest(_semantic("captures", "old"))
+    candidate = _manifest(
+        _semantic("captures", "new"),
+        _revision("added", uri="capture://Added"),
+    )
+    changed = _manifest(
+        _semantic("captures", "changed-again"),
+        _revision("added", uri="capture://Added"),
+    )
+    _write_bound_current_snapshot(paths, previous)
+    observed = iter((candidate, candidate, changed))
+    monkeypatch.setattr(
+        update,
+        "scan_source_manifest",
+        lambda locked_paths: next(observed),
+    )
+    workspace = _workspace(tmp_path)
+    workspace.base_build_id = "build-current"
+    monkeypatch.setattr(
+        update,
+        "stage_current_snapshot",
+        lambda locked_paths, baseline: workspace,
+    )
+
+    result = update.run_incremental_update(paths)
+
+    assert result["gapCodes"] == [
+        "SOURCE_MANIFEST_CHANGED_DURING_UPDATE"
+    ]
+    assert result["published"] is False
+
+
+def test_default_runner_rechecks_pointer_after_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    previous = _manifest(_semantic("captures", "old"))
+    candidate = _manifest(
+        _semantic("captures", "new"),
+        _revision("added", uri="capture://Added"),
+    )
+    _, pointer_bytes, _ = _write_bound_current_snapshot(paths, previous)
+    monkeypatch.setattr(
+        update,
+        "scan_source_manifest",
+        lambda locked_paths: candidate,
+    )
+    workspace = _workspace(tmp_path)
+    workspace.base_build_id = "build-current"
+
+    def stage(
+        locked_paths: update.UpdatePaths,
+        *,
+        baseline: update.UpdateBaseline,
+    ) -> update.UpdateWorkspace:
+        del baseline
+        locked_paths.output.joinpath("current.json").write_bytes(
+            json.dumps(
+                json.loads(pointer_bytes),
+                indent=2,
+            ).encode("utf-8")
+        )
+        return workspace
+
+    monkeypatch.setattr(update, "stage_current_snapshot", stage)
+
+    result = update.run_incremental_update(paths)
+
+    assert result["gapCodes"] == ["UPDATE_BASELINE_IDENTITY_CHANGED"]
+    assert result["published"] is False
+
+
 def test_default_runner_fails_closed_on_raw_pointer_change_during_scan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -966,153 +1130,53 @@ def test_default_runner_fails_closed_on_source_change_after_locked_scan(
     assert result["published"] is False
 
 
-def _write_stage_source_snapshot(
-    paths: update.UpdatePaths,
-) -> tuple[Path, bytes]:
-    build_id = "build-stage-source"
-    snapshot = paths.output / "snapshots" / build_id
-    (snapshot / "domain_exports").mkdir(parents=True)
-    for relative in (
-        "catalog.sqlite",
-        "core.sqlite",
-        "search.sqlite",
-        "cache.sqlite",
-        "domain_exports/items.sqlite",
-    ):
-        database = snapshot / relative
-        connection = sqlite3.connect(database)
-        connection.execute(
-            "CREATE TABLE marker(value TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO marker VALUES (?)",
-            (relative,),
-        )
-        connection.commit()
-        connection.close()
-    (snapshot / "reports").mkdir()
-    (snapshot / "reports" / "note.json").write_text(
-        '{"sealed":true}\n',
-        encoding="utf-8",
-    )
-    (snapshot / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema": "ark-kb-vnext-snapshot/v1",
-                "buildId": build_id,
-            }
-        ),
-        encoding="utf-8",
-    )
-    pointer = json.dumps(
-        {
-            "buildId": build_id,
-            "snapshotRelativePath": f"snapshots/{build_id}",
-        },
-        sort_keys=True,
-    ).encode("utf-8")
-    paths.output.mkdir(exist_ok=True)
-    (paths.output / "current.json").write_bytes(pointer)
-    return snapshot, pointer
-
-
-def _file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def test_safe_stage_uses_independent_copies_and_preserves_old_snapshot(
+def test_stage_current_snapshot_requires_locked_update_baseline(
     tmp_path: Path,
 ) -> None:
-    paths = _paths(tmp_path)
-    source, pointer = _write_stage_source_snapshot(paths)
-    source_hashes = {
-        path.relative_to(source).as_posix(): _file_sha256(path)
-        for path in source.rglob("*")
-        if path.is_file()
-    }
-
-    workspace = update.stage_current_snapshot(paths)
-
-    try:
-        assert workspace.temporary_root.parent == (
-            paths.output / ".incremental-staging"
+    with pytest.raises(TypeError, match="locked UpdateBaseline"):
+        update.stage_current_snapshot(  # type: ignore[arg-type]
+            _paths(tmp_path),
+            baseline=object(),
         )
-        assert workspace.base_build_id == "build-stage-source"
-        assert (
-            workspace.staging_receipt["sourceVerifiedUnchanged"]
-            is True
-        )
-        assert (
-            workspace.staging_receipt["copyMethod"]
-            == "sqlite-backup-and-file-copy"
-        )
-        assert workspace.staging_receipt["writableHardlinks"] is False
-        assert str(workspace.staging_receipt["proof"]).startswith(
-            "staging-proof://"
-        )
-        for relative, expected_hash in source_hashes.items():
-            staged = workspace.snapshot_dir / relative
-            original = source / relative
-            assert staged.is_file()
-            assert not os.path.samefile(original, staged)
-            assert _file_sha256(original) == expected_hash
-        staged_core = sqlite3.connect(workspace.core_path)
-        staged_core.execute(
-            "INSERT INTO marker VALUES ('staging-only')"
-        )
-        staged_core.commit()
-        staged_core.close()
-        (workspace.snapshot_dir / "reports" / "note.json").write_text(
-            '{"staging":true}\n',
-            encoding="utf-8",
-        )
-        assert {
-            path.relative_to(source).as_posix(): _file_sha256(path)
-            for path in source.rglob("*")
-            if path.is_file()
-        } == source_hashes
-        assert (paths.output / "current.json").read_bytes() == pointer
-    finally:
-        shutil.rmtree(workspace.temporary_root)
 
 
-def test_safe_stage_rejects_sqlite_sidecars_and_cleans_temporary_copy(
-    tmp_path: Path,
-) -> None:
-    paths = _paths(tmp_path)
-    source, pointer = _write_stage_source_snapshot(paths)
-    (source / "core.sqlite-wal").write_bytes(b"unsafe-sidecar")
-
-    with pytest.raises(update.UpdateBlocked) as caught:
-        update.stage_current_snapshot(paths)
-
-    assert caught.value.gap_code == "IMMUTABLE_SNAPSHOT_SQLITE_SIDECAR"
-    assert (paths.output / "current.json").read_bytes() == pointer
-    staging_root = paths.output / ".incremental-staging"
-    assert not staging_root.exists() or not any(staging_root.iterdir())
-
-
-def test_safe_stage_fails_closed_when_source_hash_cannot_be_read(
+def test_safe_staging_cleanup_uncertainty_is_reported(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     paths = _paths(tmp_path)
-    _, pointer = _write_stage_source_snapshot(paths)
+    workspace = _workspace(tmp_path)
+    workspace.staged_baseline = SimpleNamespace()  # type: ignore[assignment]
     monkeypatch.setattr(
         update,
-        "_snapshot_tree_digest",
-        lambda root, files: (_ for _ in ()).throw(
-            OSError("simulated read failure")
+        "cleanup_staged_baseline_snapshot",
+        lambda staged, snapshot_root: (_ for _ in ()).throw(
+            update.UpdateBaselineBlockedGap(
+                "STAGING_CLEANUP_UNCERTAIN",
+                "cleanup identity could not be verified",
+                status="UNCERTAIN",
+                residual_identifier=(
+                    ".incremental-staging/"
+                    "0123456789abcdef0123456789abcdef"
+                ),
+            )
         ),
     )
 
     with pytest.raises(update.UpdateBlocked) as caught:
-        update.stage_current_snapshot(paths)
+        with update._staging_workspace_lifecycle(
+            paths,
+            workspace,
+            cleanup_injected=lambda: False,
+        ):
+            pass
 
-    assert caught.value.gap_code == "IMMUTABLE_SNAPSHOT_VERIFICATION_FAILED"
-    assert (paths.output / "current.json").read_bytes() == pointer
-    staging_root = paths.output / ".incremental-staging"
-    assert not staging_root.exists() or not any(staging_root.iterdir())
+    result = update._blocked_result(base={}, error=caught.value)
+    assert result["status"] == "uncertain"
+    assert result["gapCodes"] == ["STAGING_CLEANUP_UNCERTAIN"]
+    assert result["stagingResidualIdentifier"] == (
+        ".incremental-staging/0123456789abcdef0123456789abcdef"
+    )
 
 
 def test_scan_covers_snapshot_ten_inputs_and_runtime(

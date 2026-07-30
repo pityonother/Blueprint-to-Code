@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -48,9 +49,18 @@ class UpdateBaselineBlockedGap(ValueError):
 
     status = "BLOCKED_GAP"
 
-    def __init__(self, gap_code: str, message: str) -> None:
+    def __init__(
+        self,
+        gap_code: str,
+        message: str,
+        *,
+        status: str = "BLOCKED_GAP",
+        residual_identifier: str = "",
+    ) -> None:
         super().__init__(message)
         self.gap_code = gap_code
+        self.status = status
+        self.residual_identifier = residual_identifier
 
 
 def _gap(code: str, message: str) -> UpdateBaselineBlockedGap:
@@ -353,31 +363,96 @@ def validate_final_source_manifest(
 
 @dataclass(frozen=True)
 class StagedBaselineSnapshot:
-    """Reserved result type; whole-tree staging is currently blocked."""
+    """One independent unpublished copy of a verified baseline snapshot."""
 
     base_build_id: str
+    staging_id: str
+    temporary_root: Path
     snapshot_dir: Path
     manifest_sha256: str
     copied_files: int
+    receipt: dict[str, object]
+    cleanup_identity: tuple[object, ...]
 
 
 def stage_snapshot_from_baseline(
     baseline: UpdateBaseline,
     *,
     destination: Path,
+    fault_injector: Callable[[str, str], None] | None = None,
 ) -> StagedBaselineSnapshot:
-    """Fail closed until a reparse-safe whole-tree copier is available."""
+    """Stage one exact whole tree through no-follow parent handles."""
 
     if type(baseline) is not UpdateBaseline:
         raise TypeError("update baseline is required")
     if not isinstance(destination, Path):
         raise TypeError("staging destination must be a Path")
-    raise _gap(
-        "REPARSE_SAFE_STAGING_COPY_UNAVAILABLE",
-        "whole-tree staging is unavailable until source and destination "
-        "handles, file identities, and every manifest-bound artifact can "
-        "be verified without path races",
+    if fault_injector is not None and not callable(fault_injector):
+        raise TypeError("staging fault injector must be callable")
+
+    from .safe_staging import SafeStagingError, stage_snapshot_tree
+
+    def revalidate() -> None:
+        validate_update_baseline_identity(
+            baseline,
+            expected_current_snapshot=baseline.current_snapshot,
+            expected_candidate_source_manifest=(
+                baseline.candidate_source_manifest
+            ),
+        )
+
+    try:
+        staged = stage_snapshot_tree(
+            baseline,
+            staging_root=destination,
+            validate_baseline=revalidate,
+            fault_injector=fault_injector,
+        )
+    except SafeStagingError as exc:
+        raise UpdateBaselineBlockedGap(
+            exc.gap_code,
+            str(exc),
+            status=exc.status,
+            residual_identifier=exc.residual_identifier,
+        ) from exc
+    return StagedBaselineSnapshot(
+        base_build_id=staged.base_build_id,
+        staging_id=staged.staging_id,
+        temporary_root=staged.temporary_root,
+        snapshot_dir=staged.snapshot_dir,
+        manifest_sha256=staged.manifest_sha256,
+        copied_files=staged.copied_files,
+        receipt=staged.receipt,
+        cleanup_identity=staged.cleanup_identity,
     )
+
+
+def cleanup_staged_baseline_snapshot(
+    staged: StagedBaselineSnapshot,
+    *,
+    snapshot_root: Path,
+) -> None:
+    """Remove one returned staging tree or report cleanup uncertainty."""
+
+    if type(staged) is not StagedBaselineSnapshot:
+        raise TypeError("staged baseline snapshot is required")
+    if not isinstance(snapshot_root, Path):
+        raise TypeError("snapshot root must be a Path")
+    from .safe_staging import SafeStagingError, cleanup_staged_snapshot
+
+    try:
+        cleanup_staged_snapshot(
+            snapshot_root=snapshot_root,
+            staging_id=staged.staging_id,
+            expected_identity=staged.cleanup_identity,
+        )
+    except SafeStagingError as exc:
+        raise UpdateBaselineBlockedGap(
+            exc.gap_code,
+            str(exc),
+            status=exc.status,
+            residual_identifier=exc.residual_identifier,
+        ) from exc
 
 
 def freeze_additive_blueprint_input(

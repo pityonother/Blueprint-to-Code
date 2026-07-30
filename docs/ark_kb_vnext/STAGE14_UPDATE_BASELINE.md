@@ -52,17 +52,22 @@ This baseline deliberately records `tree_validated=false`. A matching manifest
 does not by itself prove that every database, report, or projection file still
 matches that manifest.
 
-`stage_snapshot_from_baseline()` therefore fails closed with:
+`stage_snapshot_from_baseline()` now creates one same-volume, independently
+copied tree under `.incremental-staging/<unique-id>/snapshot`. Windows
+traversal uses parent-relative `NtCreateFile` opens, no-reparse object
+attributes, handle-based enumeration, volume serials, and 128-bit file IDs.
+POSIX traversal uses `dir_fd`/`openat` semantics with `O_NOFOLLOW`. Both paths
+reject links, reparse points, hard-link aliases, and special files.
 
-```text
-REPARSE_SAFE_STAGING_COPY_UNAVAILABLE
-```
-
-No directory is created. Whole-tree staging remains unavailable until a later
-implementation can pin source and destination handles without path races,
-reject links/reparse points/hard-link aliases at open time, validate the exact
-manifest-declared file set and hashes, and rescan the final staged tree. This
-slice must not be described as having staged an exact snapshot.
+The copier validates the manifest-declared databases and sealed reports,
+separately identifies `cache.sqlite` as copied build-bound disposable state,
+and verifies source and staged tree membership, file identities, sizes, and
+SHA-256 values. SQLite files must be sealed in DELETE-journal mode, have no
+WAL/SHM sidecars, and pass `quick_check` and foreign-key checks. The returned
+receipt is explicitly unsigned, unpublished, non-authoritative, shadow-mode,
+legacy-default evidence. Cleanup uncertainty returns
+`STAGING_CLEANUP_UNCERTAIN` with only the controlled relative residual
+identifier.
 
 ## Source-diff identity
 
@@ -181,25 +186,20 @@ There is no fallback that relabels a TEST_ONLY artifact as production.
 
 ## Deliberately not wired
 
-`run_incremental_update()` and its default hooks are not changed by this
-slice. In particular:
+`run_incremental_update()` now captures and validates the current pointer,
+manifest, live source manifest, source diff, and `UpdateBaseline` under the
+incremental writer lock. The default path passes that same baseline into safe
+whole-tree staging, then repeats the live source scan and complete baseline
+identity validation before using the staging receipt. It does not use a
+lock-external scan as production staging input.
+
+The following downstream capabilities remain deliberately unavailable:
 
 - the default narrow-gate hook remains unavailable;
 - the default publisher remains unavailable;
 - no pointer write is reachable from `update_baseline.py`;
-- whole-tree snapshot staging is deliberately unavailable;
 - additive source quarantine is deliberately unavailable;
-- the existing runner's scan-before-writer-lock orchestration remains a P0
-  integration gap and must not be described as closed merely because these
-  reusable primitives exist.
-
-A later reviewed orchestration PR must acquire the incremental writer lock
-before candidate scan, first implement a reparse-safe quarantine, materialize
-only from its verified output, build the verified delta before invalidation
-queue writes, consume a real independently supplied receipt artifact SHA,
-bind the receipt's base database identity independently, perform the final live
-rescan and baseline recheck, then stop until gates/reseal/publication are
-separately implemented.
+- verified delta receipt base binding remains unavailable.
 
 ## Real blockers
 
@@ -214,7 +214,6 @@ BLOCKED_BY_MISSING_AUTHORIZED_ADDITIVE_BLUEPRINT_EVIDENCE
 BLOCKED_BY_MISSING_SIGNED_PRODUCTION_ARTIFACT_AUTHORIZATION
 BLOCKED_BY_UNPROVEN_ADDITIVE_DERIVED_DEPENDENCY_SCOPE
 BLOCKED_BY_MISSING_PRODUCTION_BACKEND_TERMINAL_RECEIPTS
-BLOCKED_BY_REPARSE_SAFE_WHOLE_TREE_STAGING
 BLOCKED_BY_REPARSE_SAFE_ADDITIVE_QUARANTINE
 BLOCKED_BY_UNVERIFIED_DELTA_RECEIPT_BASE_BINDING
 ```
@@ -228,6 +227,7 @@ python -m pytest -q tests/test_kb_pointer_cas.py
 python -m pytest -q tests/test_kb_update_baseline.py
 python -m pytest -q tests/test_kb_incremental_delta.py
 python -m pytest -q tests/test_update_ark_kb_vnext.py
-ruff check scripts/blueprint_translator/kb_vnext/pointer_cas.py scripts/blueprint_translator/kb_vnext/source_manifest.py scripts/blueprint_translator/kb_vnext/incremental_delta.py scripts/blueprint_translator/kb_vnext/update_baseline.py tests/test_kb_pointer_cas.py tests/test_kb_update_baseline.py
+python -m pytest -q tests/test_kb_safe_staging.py
+ruff check scripts/update_ark_kb_vnext.py scripts/blueprint_translator/kb_vnext/pointer_cas.py scripts/blueprint_translator/kb_vnext/source_manifest.py scripts/blueprint_translator/kb_vnext/incremental_delta.py scripts/blueprint_translator/kb_vnext/update_baseline.py scripts/blueprint_translator/kb_vnext/safe_staging.py tests/test_update_ark_kb_vnext.py tests/test_kb_pointer_cas.py tests/test_kb_update_baseline.py tests/test_kb_safe_staging.py
 git diff --check
 ```
