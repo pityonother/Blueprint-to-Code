@@ -11,6 +11,7 @@ DOC_ROOT = PROJECT_ROOT / "docs" / "ark_kb_vnext"
 SNAPSHOT_ROOT = PROJECT_ROOT / "knowledge_base" / "vnext"
 
 REPORT_PATHS = (
+    DOC_ROOT / "CURRENT_STATUS.md",
     DOC_ROOT / "COMPLETION_REPORT.md",
     DOC_ROOT / "COVERAGE_AND_CUTOVER.md",
 )

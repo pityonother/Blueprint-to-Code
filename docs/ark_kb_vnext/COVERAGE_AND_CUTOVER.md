@@ -17,8 +17,8 @@ vNext 不能改为默认。
 
 | 项目 | 值 |
 |---|---:|
-| Build ID | `20260729T115548-1a203b594bb6` |
-| Source SHA-256 | `1a203b594bb6119dbf29d5a0c8789bd653c716eaf72e5915ee5a176675576450` |
+| Build ID | `20260730T051513-345699a11f21` |
+| Source SHA-256 | `345699a11f21831a5abff9ad86e8417dc8143c874810cc277105477ea1b3910e` |
 | Discovery SHA-256 | `028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f` |
 | Discovery bytes | 3,816,792,064 |
 | Snapshot schema | `ark-kb-vnext-snapshot/v1` |
@@ -161,6 +161,12 @@ Queue worker 的任务状态、receipt、恢复和 fail-closed 行为已经实�
 并只接通真实 FACT materializer；其余 EDGE/ROLE/DOMAIN/NATIVE/
 REGISTRATION/PROJECTION backend、update/delete/rename 和混合变化仍返回
 稳定 `BLOCKED_GAP` 或 full-rebuild-required。
+
+`main` 的后续加固已经把同一 writer lock 内的 current baseline、no-follow
+whole-tree staging、单资产 quarantine、live rescan、v3 base-bound receipt
+和 additive invalidation scope 绑到同一 verified delta。它们证明 staging 与
+诊断不会越界或误绑旧 base，但所有 authority flag 仍为 false，不能替代签名
+production authorization、narrow gates 或 publisher。
 
 `scripts/update_ark_kb_vnext.py` 的生产默认路径会：
 

@@ -2,10 +2,12 @@
 
 ## 总体状态
 
-Stage 8–12 的工程实现已完成以下收口：typed registration 语义拆分、角色真实
-信号接线、独立 gold fail-closed 计分、盲审工厂、逐 case 查询诊断、真实性能
-分析、受限增量 rebuild、immutable snapshot、发布前门禁密封、原子 current
-pointer、burn-in attestation 和 rollback 边界。
+Stage 8–12 建立了 typed registration 语义拆分、真实角色信号、独立 gold
+fail-closed 计分、逐 case 查询诊断、immutable snapshot、发布前门禁密封、
+原子 current pointer、burn-in attestation 和 rollback 边界。Stage 13–15 与
+后续 `main` 加固又补上签名/registry 基础、artifact-bound review、durable
+worker row scope、reparse-safe staging/quarantine、pointer CAS、writer lock、
+UpdateBaseline 和 base-bound delta receipt。
 
 这不等于“已经可以替换 legacy”。当前人工/实证 gold 和部分生产增量能力
 仍缺失，所以交付状态是：
@@ -21,8 +23,8 @@ implementation hardened
 
 以下身份来自本机规范 current 指向的真实全量 post-hardening 快照：
 
-- Build：`20260729T115548-1a203b594bb6`
-- Source SHA-256：`1a203b594bb6119dbf29d5a0c8789bd653c716eaf72e5915ee5a176675576450`
+- Build：`20260730T051513-345699a11f21`
+- Source SHA-256：`345699a11f21831a5abff9ad86e8417dc8143c874810cc277105477ea1b3910e`
 - Discovery SHA-256：`028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f`
 - 当前发布布局：`immutable-v2`
 - 发布合同：根 `current.json` 指向
@@ -154,13 +156,17 @@ role gold。
   Native evidence set 的 path-free identity；
 - `generatedAt` 不参与 fingerprint 的 unchanged input cache hit；
 - single-writer lock 和 publisher receipt 合同；
+- current pointer/manifest 的 exact baseline 与发布前二次核验；
+- Windows/POSIX no-follow whole-tree staging 和单资产 additive quarantine；
+- v3 base-bound delta receipt、独立 raw SHA 与 staged/live Core 复核；
+- 从已验证 durable event 与 terminal receipt 推导的 additive invalidation scope；
 - gate/worker 失败时禁止 publication。
 
 尚未交付为生产可用：
 
 - 选择性 Blueprint/source ingest；
 - 除 `CLASS_CLOSURE` 和 `EFFECTIVE_ENTITY` 外的完整 rebuild backend；
-- selective narrow gates；
+- production narrow-gate 执行与签名 artifact authorization；
 - 绑定 source manifest 的生产 atomic incremental publisher。
 
 当前没有可验证的 runtime observation-set loader，所以 runtime 只绑定汇总

@@ -4,6 +4,42 @@ All notable changes are recorded here. The project version is sourced from
 `VERSION`; release tooling verifies that `package.json` and `package-lock.json`
 match it.
 
+## [Unreleased]
+
+### Added
+
+- Immutable-v2 ARK KB snapshots with an atomic root `current.json`, sealed
+  quality reports, previous-snapshot identity binding, rollback checks, and
+  fail-closed burn-in/cutover contracts.
+- Typed registration and domain projections, independent Gold review packs,
+  signed receipt/registry foundations, and proposal-only Gold freeze tooling.
+- Durable rebuild worker row scope, add-only Blueprint evidence foundations,
+  exact narrow-gate diagnostics, and UpdateBaseline pre-publication inspection.
+
+### Changed
+
+- Production KB updates now use reparse-safe whole-tree staging, explicit
+  staging quarantine, current-pointer compare-and-swap, and source-manifest
+  base binding.
+- Incremental update planning now binds the scan, writer lock, delta receipt,
+  base snapshot, and publication decision to one verified scope.
+- GitHub-facing status documentation now separates current `main` behavior from
+  dated GPT Pro handoff/audit records.
+
+### Fixed
+
+- Reparse points cannot escape staging or additive quarantine boundaries.
+- A stale or mismatched delta receipt cannot be treated as evidence for the
+  current base snapshot.
+- Documentation no longer presents the 2026-07-27 `58/75` snapshot or a
+  machine-specific Capture count as current.
+
+### Operations
+
+- Documented retention and validation rules for temporary KB builds,
+  immutable snapshots, Registry generations, Git LFS objects, worktrees, and
+  legacy Capture artifacts.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added
