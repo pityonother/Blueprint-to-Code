@@ -15,6 +15,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from release_content_policy import (
+    ReleaseContentEntry,
+    require_release_entries_safe,
+)
+
 
 ARCHIVE_ROOT = "BlueprintToCode"
 SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
@@ -296,6 +301,38 @@ def _verify_archive(
             )
 
 
+def _write_archive(
+    root: Path,
+    path: Path,
+    entries: dict[str, Path | bytes],
+) -> None:
+    """Apply the shared release policy before creating any archive bytes."""
+
+    policy_entries = tuple(
+        ReleaseContentEntry(
+            name.removeprefix(f"{ARCHIVE_ROOT}/"),
+            source,
+        )
+        for name, source in sorted(entries.items())
+    )
+    require_release_entries_safe(
+        policy_entries,
+        repository_root=root,
+    )
+    with zipfile.ZipFile(
+        path,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+        allowZip64=True,
+    ) as archive:
+        for name, source in sorted(entries.items()):
+            if isinstance(source, bytes):
+                archive.writestr(name, source)
+            else:
+                archive.write(source, name)
+
+
 def _resolve_input(root: Path, value: Path) -> Path:
     path = value.expanduser()
     return (path if path.is_absolute() else root / path).resolve()
@@ -480,18 +517,7 @@ def main(argv: list[str] | None = None) -> int:
         temporary_output = output_path.with_suffix(".tmp.zip")
         if temporary_output.exists():
             temporary_output.unlink()
-        with zipfile.ZipFile(
-            temporary_output,
-            mode="w",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
-            allowZip64=True,
-        ) as archive:
-            for name, source in sorted(entries.items()):
-                if isinstance(source, bytes):
-                    archive.writestr(name, source)
-                else:
-                    archive.write(source, name)
+        _write_archive(root, temporary_output, entries)
 
         _verify_archive(temporary_output, hashes, sums)
         temporary_output.replace(output_path)

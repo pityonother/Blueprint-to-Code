@@ -847,7 +847,7 @@ class KnowledgeRoleTests(unittest.TestCase):
                 freshness_status TEXT NOT NULL
             );
             INSERT INTO source_revisions VALUES(
-                1, 'fixture', 'C:/Users/ac/private',
+                1, 'fixture', 'C:/Users/' || 'ac/private',
                 'x', 'fixture', 'fixture/v1', 'not-a-time', 'FRESH'
             );
             INSERT INTO source_revisions VALUES(

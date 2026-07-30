@@ -57,6 +57,9 @@ jobs:
             git diff --check HEAD^ HEAD
           fi
 
+      - name: Check release source archive for local path leaks
+        run: python scripts/check_release_content.py --git-ref HEAD
+
       - name: Run full Python suite
         run: python -m pytest -q
 
