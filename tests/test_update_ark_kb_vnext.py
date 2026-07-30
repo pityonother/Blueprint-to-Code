@@ -20,6 +20,7 @@ from blueprint_translator.kb_vnext.native_ingest import (  # noqa: E402
     NativeEvidenceSet,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
+    CACHE_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
 )
 
@@ -146,8 +147,112 @@ def _fixture_staging_receipt(
     return {**body, "proof": f"staging-proof://{proof}"}
 
 
+QUERY_CACHE_TABLES = (
+    "query_snapshots",
+    "context_packs",
+    "answer_plans",
+    "materialized_neighborhoods",
+)
+
+
+def _write_query_cache_fixture(path: Path, *, label: str) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.executescript(CACHE_SCHEMA_SQL)
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            ("business_metadata", label),
+        )
+        connection.execute(
+            """
+            INSERT INTO query_snapshots VALUES (
+                ?, ?, '{}', '{}', 'source-set', 'token',
+                '2026-07-30T00:00:00Z', '2026-07-31T00:00:00Z',
+                'FRESH'
+            )
+            """,
+            (f"{label}-snapshot", f"{label}-query"),
+        )
+        connection.execute(
+            """
+            INSERT INTO context_packs VALUES (
+                ?, ?, 'context', 10, 1, 0, '2026-07-30T00:00:00Z'
+            )
+            """,
+            (f"{label}-context", f"{label}-snapshot"),
+        )
+        connection.execute(
+            """
+            INSERT INTO answer_plans VALUES (
+                ?, ?, '{}', 'source-set', 'token',
+                '2026-07-30T00:00:00Z', '2026-07-31T00:00:00Z'
+            )
+            """,
+            (f"{label}-plan", f"{label}-query"),
+        )
+        connection.execute(
+            """
+            INSERT INTO materialized_neighborhoods VALUES (
+                ?, 1, 1, '[]', '{}', 'source-set', 'token',
+                '2026-07-30T00:00:00Z', '2026-07-31T00:00:00Z'
+            )
+            """,
+            (f"{label}-neighborhood",),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _queue_query_snapshot(core_path: Path, *, target_id: int) -> None:
+    connection = sqlite3.connect(core_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO invalidation_events VALUES (
+                'event-query', 'TEST', NULL, '{}',
+                '2026-07-30T00:00:00Z', 'APPLIED'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO invalidation_queue VALUES (
+                'event-query', 'QUERY_SNAPSHOT', ?,
+                'ADDITIVE_QUERY_CACHE', 'PENDING_REBUILD'
+            )
+            """,
+            (target_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _query_cache_counts(path: Path) -> dict[str, int]:
+    connection = sqlite3.connect(path)
+    try:
+        return {
+            table: int(
+                connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+            )
+            for table in QUERY_CACHE_TABLES
+        }
+    finally:
+        connection.close()
+
+
 def _production_workspace(tmp_path: Path) -> update.UpdateWorkspace:
-    root = tmp_path / "output" / ".incremental-staging" / "production"
+    staging_id = "0123456789abcdef0123456789abcdef"
+    root = (
+        tmp_path
+        / "output"
+        / ".incremental-staging"
+        / staging_id
+    )
     snapshot = root / "snapshot"
     projection_dir = snapshot / "domain_exports"
     projection_dir.mkdir(parents=True)
@@ -198,7 +303,7 @@ def _production_workspace(tmp_path: Path) -> update.UpdateWorkspace:
     core.commit()
     core.close()
     cache_path = snapshot / "cache.sqlite"
-    sqlite3.connect(cache_path).close()
+    _write_query_cache_fixture(cache_path, label="staging")
     return update.UpdateWorkspace(
         temporary_root=root,
         snapshot_dir=snapshot,
@@ -208,6 +313,237 @@ def _production_workspace(tmp_path: Path) -> update.UpdateWorkspace:
         base_build_id="fixture-base",
         staging_receipt=_fixture_staging_receipt(),
     )
+
+
+def _bind_production_staged_baseline(
+    workspace: update.UpdateWorkspace,
+) -> None:
+    workspace.staged_baseline = update.StagedBaselineSnapshot(
+        base_build_id=workspace.base_build_id,
+        staging_id="0123456789abcdef0123456789abcdef",
+        temporary_root=workspace.temporary_root,
+        snapshot_dir=workspace.snapshot_dir,
+        manifest_sha256="2" * 64,
+        copied_files=3,
+        receipt=workspace.staging_receipt,
+        cleanup_identity=(),
+    )
+
+
+def test_production_query_backend_uses_only_staged_cache_and_worker_receipt(
+    tmp_path: Path,
+) -> None:
+    workspace = _production_workspace(tmp_path)
+    _bind_production_staged_baseline(workspace)
+    target_id = 576701
+    _queue_query_snapshot(workspace.core_path, target_id=target_id)
+    current_cache = (
+        tmp_path
+        / "output"
+        / "snapshots"
+        / "fixture-base"
+        / "cache.sqlite"
+    )
+    current_cache.parent.mkdir(parents=True)
+    _write_query_cache_fixture(current_cache, label="current")
+    current_cache_sha256 = hashlib.sha256(
+        current_cache.read_bytes()
+    ).hexdigest()
+
+    report = update.drain_production_rebuilds(workspace, 1)
+
+    assert report.succeeded == 1
+    assert report.blocked_gap == 0
+    assert report.failed == 0
+    assert report.outcomes[0].cache_hit is False
+    assert report.outcomes[0].touched_tables == tuple(
+        sorted(QUERY_CACHE_TABLES)
+    )
+    assert _query_cache_counts(workspace.cache_path) == {
+        table: 0 for table in QUERY_CACHE_TABLES
+    }
+    assert _query_cache_counts(current_cache) == {
+        table: 1 for table in QUERY_CACHE_TABLES
+    }
+    assert (
+        hashlib.sha256(current_cache.read_bytes()).hexdigest()
+        == current_cache_sha256
+    )
+    cache = sqlite3.connect(workspace.cache_path)
+    try:
+        metadata = dict(cache.execute("SELECT key, value FROM metadata"))
+    finally:
+        cache.close()
+    assert metadata["business_metadata"] == "staging"
+    assert any(
+        key.startswith("_rebuild_worker_marker:") for key in metadata
+    )
+    core = sqlite3.connect(workspace.core_path)
+    try:
+        event_payload = json.loads(
+            core.execute(
+                """
+                SELECT payload_json
+                FROM invalidation_events
+                WHERE event_id='event-query'
+                """
+            ).fetchone()[0]
+        )
+    finally:
+        core.close()
+    receipt = event_payload["_rebuildReceipts"][
+        f"QUERY_SNAPSHOT:{target_id}"
+    ]
+    assert receipt["downstreamKind"] == "QUERY_SNAPSHOT"
+    assert receipt["downstreamId"] == target_id
+    assert receipt["status"] == "SUCCEEDED"
+    assert receipt["complete"] is True
+    assert receipt["cacheHit"] is False
+    assert receipt["touchedTables"] == sorted(QUERY_CACHE_TABLES)
+    assert receipt["verification"]["rowScope"] == {
+        "mode": "EXPLICIT_WHOLE_CACHE_BATCH",
+        "eventId": "event-query",
+        "targetId": target_id,
+        "tables": sorted(QUERY_CACHE_TABLES),
+    }
+    assert receipt["proof"].startswith("rebuild-proof://")
+
+
+def test_production_query_backend_proves_already_empty_cache_invalidation(
+    tmp_path: Path,
+) -> None:
+    workspace = _production_workspace(tmp_path)
+    _bind_production_staged_baseline(workspace)
+    cache = sqlite3.connect(workspace.cache_path)
+    try:
+        cache.execute("PRAGMA foreign_keys=ON")
+        for table in (
+            "context_packs",
+            "answer_plans",
+            "materialized_neighborhoods",
+            "query_snapshots",
+        ):
+            cache.execute(f'DELETE FROM "{table}"')
+        cache.commit()
+    finally:
+        cache.close()
+    _queue_query_snapshot(workspace.core_path, target_id=576701)
+
+    report = update.drain_production_rebuilds(workspace, 1)
+
+    assert report.succeeded == 1
+    assert report.failed == 0
+    assert report.blocked_gap == 0
+    assert report.outcomes[0].cache_hit is False
+    assert report.outcomes[0].touched_tables == tuple(
+        sorted(QUERY_CACHE_TABLES)
+    )
+    core = sqlite3.connect(workspace.core_path)
+    try:
+        payload = json.loads(
+            core.execute(
+                """
+                SELECT payload_json
+                FROM invalidation_events
+                WHERE event_id='event-query'
+                """
+            ).fetchone()[0]
+        )
+    finally:
+        core.close()
+    receipt = payload["_rebuildReceipts"]["QUERY_SNAPSHOT:576701"]
+    assert receipt["verification"]["basis"] == (
+        "EXPLICIT_WHOLE_CACHE_INVALIDATION"
+    )
+    assert receipt["verification"]["writeOperations"] == [
+        f"{table}:DELETE" for table in sorted(QUERY_CACHE_TABLES)
+    ]
+
+
+def test_production_query_backend_rejects_cache_outside_staged_snapshot(
+    tmp_path: Path,
+) -> None:
+    workspace = _production_workspace(tmp_path)
+    _bind_production_staged_baseline(workspace)
+    outside_cache = tmp_path / "current-cache.sqlite"
+    _write_query_cache_fixture(outside_cache, label="current")
+    outside_sha256 = hashlib.sha256(
+        outside_cache.read_bytes()
+    ).hexdigest()
+    workspace.cache_path = outside_cache
+
+    with pytest.raises(update.UpdateBlocked) as caught:
+        update.drain_production_rebuilds(workspace, 1)
+
+    assert caught.value.gap_code == "QUERY_CACHE_PATH_OUTSIDE_STAGING"
+    assert (
+        hashlib.sha256(outside_cache.read_bytes()).hexdigest()
+        == outside_sha256
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_table",
+    (
+        "metadata",
+        "query_snapshots",
+        "context_packs",
+        "answer_plans",
+        "materialized_neighborhoods",
+    ),
+)
+def test_production_query_backend_rejects_incomplete_cache_schema(
+    tmp_path: Path,
+    missing_table: str,
+) -> None:
+    workspace = _production_workspace(tmp_path)
+    _bind_production_staged_baseline(workspace)
+    connection = sqlite3.connect(workspace.cache_path)
+    try:
+        connection.execute(f'DROP TABLE "{missing_table}"')
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(update.UpdateBlocked) as caught:
+        update.drain_production_rebuilds(workspace, 1)
+
+    assert caught.value.gap_code == "QUERY_CACHE_SCHEMA_INVALID"
+
+
+def test_production_query_backend_rejects_missing_or_corrupt_cache(
+    tmp_path: Path,
+) -> None:
+    missing_workspace = _production_workspace(tmp_path / "missing")
+    _bind_production_staged_baseline(missing_workspace)
+    missing_workspace.cache_path.unlink()
+
+    with pytest.raises(update.UpdateBlocked) as missing:
+        update.drain_production_rebuilds(missing_workspace, 1)
+
+    assert missing.value.gap_code == "QUERY_CACHE_NOT_AVAILABLE"
+
+    corrupt_workspace = _production_workspace(tmp_path / "corrupt")
+    _bind_production_staged_baseline(corrupt_workspace)
+    corrupt_workspace.cache_path.write_bytes(b"not a sqlite database")
+
+    with pytest.raises(update.UpdateBlocked) as corrupt:
+        update.drain_production_rebuilds(corrupt_workspace, 1)
+
+    assert corrupt.value.gap_code == "QUERY_CACHE_INTEGRITY_FAILED"
+
+
+def test_production_query_backend_revalidates_staging_receipt(
+    tmp_path: Path,
+) -> None:
+    workspace = _production_workspace(tmp_path)
+    _bind_production_staged_baseline(workspace)
+    workspace.staging_receipt = {}
+
+    with pytest.raises(update.UpdateBlocked) as caught:
+        update.drain_production_rebuilds(workspace, 1)
+
+    assert caught.value.gap_code == "STAGING_RECEIPT_INVALID"
 
 
 def _default_run(
@@ -707,7 +1043,10 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         lambda candidate_paths: current,
     )
     workspace.base_build_id = "build-current"
-    workspace.staged_baseline = object()
+    workspace.staging_receipt = _fixture_staging_receipt(
+        build_id="build-current"
+    )
+    _bind_production_staged_baseline(workspace)
     workspace.update_baseline = object()
     monkeypatch.setattr(
         update,
@@ -975,15 +1314,16 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         )
     ]
     assert "FACT" in result["worker"]["succeededKinds"]
-    assert "BACKEND_NOT_CONFIGURED_QUERY_SNAPSHOT" in (
+    assert "QUERY_SNAPSHOT" in result["worker"]["succeededKinds"]
+    assert "BACKEND_NOT_CONFIGURED_QUERY_SNAPSHOT" not in (
         result["worker"]["blockedGapCodes"]
     )
     assert "BACKEND_NOT_CONFIGURED_EDGE_ENTITY" not in (
         result["worker"]["blockedGapCodes"]
     )
     assert result["worker"]["attempted"] == 12
-    assert result["worker"]["succeeded"] == 3
-    assert result["worker"]["blocked_gap"] == 9
+    assert result["worker"]["succeeded"] == 4
+    assert result["worker"]["blocked_gap"] == 8
     assert result["worker"]["failed"] == 0
     assert len(verified_scope_calls) == 1
     assert strict_scope_calls == [

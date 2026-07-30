@@ -246,8 +246,22 @@ hook. A real `BLOCKED_GAP` terminal result still produces a valid base-bound
 receipt and remains blocked; it is never upgraded to
 `FOUNDATION_VERIFIED`.
 
+The default add-only runner now opens only the staged baseline's
+`snapshot/cache.sqlite` in read-write, no-create mode. Before drain it
+revalidates the staging receipt, exact cache path, regular-file presence,
+foreign-key mode, SQLite `quick_check`, and the five-table cache schema.
+`ProductionIncrementalRebuildBackend` preserves the existing Core
+materializers and adds only `QUERY_SNAPSHOT`: inside the worker-owned guarded
+cache transaction it deletes `context_packs`, `answer_plans`,
+`materialized_neighborhoods`, then `query_snapshots`. The existing whole-cache
+row-scope receipt, external marker, cache-first commit, and recovered
+`RUNNING` replay remain authoritative; `metadata` is preserved apart from the
+worker marker.
+
 The following downstream capabilities remain deliberately unavailable:
 
+- role and domain entity materialization;
+- projection materialization;
 - the default narrow-gate hook remains unavailable;
 - the default publisher remains unavailable;
 - no pointer write is reachable from `update_baseline.py`.
