@@ -1037,6 +1037,30 @@ def _changed_tables(
     return changed
 
 
+def _durable_truth_changed_tables(
+    before: LogicalDatabaseState,
+    after: LogicalDatabaseState,
+) -> tuple[str, ...]:
+    """Identify the exact truth delta after derived rebuild writes."""
+
+    if (
+        before.schema_sha256 != after.schema_sha256
+        or set(before.table_sha256) != set(after.table_sha256)
+    ):
+        raise _gap("CORE_SCHEMA_CHANGED", "base/staged schemas differ")
+    changed = tuple(
+        table
+        for table in sorted(_WRITE_TABLES)
+        if before.table_sha256[table] != after.table_sha256[table]
+    )
+    if set(changed) != _WRITE_TABLES:
+        raise _gap(
+            "ADDITIVE_ASSET_WRITE_SCOPE_UNSUPPORTED",
+            "post-rebuild Core does not retain the exact additive truth delta",
+        )
+    return changed
+
+
 def _verify_row_delta(
     base: sqlite3.Connection,
     staged: sqlite3.Connection,
@@ -1093,9 +1117,12 @@ def build_add_only_blueprint_delta(
     artifact_root: Path,
     artifact_bindings: Iterable[Mapping[str, object]],
     trust_context: str = PRODUCTION,
+    durable_derived_state: bool = False,
 ) -> AddOnlyBlueprintDelta:
     """Verify a staged add-only ingest without applying or publishing it."""
 
+    if type(durable_derived_state) is not bool:
+        raise TypeError("durable_derived_state must be a boolean")
     context = _context(trust_context)
     if context != TEST_ONLY:
         raise _gap(
@@ -1119,7 +1146,11 @@ def build_add_only_blueprint_delta(
         with _database_snapshot(staged, immediate=True, require_new=True):
             before = logical_database_state(base)
             after = logical_database_state(staged)
-            changed = _changed_tables(before, after)
+            changed = (
+                _durable_truth_changed_tables(before, after)
+                if durable_derived_state
+                else _changed_tables(before, after)
+            )
             source_ids = _source_revision_ids(base, staged, artifacts)
             entity_ids, fact_ids = _scoped_ids(
                 staged,
@@ -2186,3 +2217,75 @@ def validate_add_only_delta_receipt(
             "terminal receipt set does not match blocked gaps",
         )
     return _frozen_mapping(receipt)
+
+
+def validate_add_only_delta_receipt_durable_state(
+    receipt: Mapping[str, object],
+    *,
+    connection: sqlite3.Connection,
+) -> None:
+    """Rebind a validated v2 diagnostic receipt to one live staged Core."""
+
+    if not isinstance(connection, sqlite3.Connection):
+        raise TypeError("SQLite connection is required")
+    proof = receipt.get("proof") if isinstance(receipt, Mapping) else None
+    content_sha256 = (
+        proof.removeprefix("delta-proof://")
+        if isinstance(proof, str)
+        else ""
+    )
+    validate_add_only_delta_receipt(
+        receipt,
+        expected_receipt_sha256=content_sha256,
+    )
+    plan = _receipt_plan(receipt.get("invalidationPlan"))
+    backend_event = receipt.get("backendEvent")
+    if not isinstance(backend_event, Mapping):
+        raise _gap(
+            "DELTA_RECEIPT_INVALID",
+            "receipt backend event is invalid",
+        )
+    event_id = _text(backend_event.get("eventId"), "backend eventId")
+    with _database_snapshot(
+        connection,
+        immediate=True,
+        require_new=True,
+    ):
+        before = logical_database_state(connection)
+        if (
+            receipt.get("receiptDatabaseSha256")
+            != before.database_sha256
+            or receipt.get("afterDatabaseSha256")
+            != before.database_sha256
+            or dict(receipt.get("protectedTableSha256") or {})
+            != _protected_table_sha256(before)
+        ):
+            raise _gap(
+                "DELTA_RECEIPT_DATABASE_BINDING_MISMATCH",
+                "receipt does not match the live staged Core",
+            )
+        durable_receipts, durable_event = _durable_terminal_receipts(
+            connection,
+            event_id=event_id,
+            plan=plan,
+        )
+        terminal, gaps = _bind_terminal_receipts(
+            plan,
+            durable_receipts,
+        )
+        if (
+            list(terminal)
+            != list(receipt.get("backendTerminalReceipts") or ())
+            or durable_event != dict(backend_event)
+            or gaps != list(receipt.get("blockedGaps") or ())
+        ):
+            raise _gap(
+                "DELTA_RECEIPT_DURABLE_EVENT_MISMATCH",
+                "receipt event or terminal outcomes differ from staged Core",
+            )
+        after = logical_database_state(connection)
+        if after.database_sha256 != before.database_sha256:
+            raise _gap(
+                "DELTA_RECEIPT_SNAPSHOT_DRIFT",
+                "staged Core changed during durable receipt inspection",
+            )

@@ -70,6 +70,7 @@ class SafeCopiedArtifact:
     relative: str
     sha256: str
     size_bytes: int
+    file_identity_sha256: str
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,17 @@ class SafeFrozenBlueprintBundle:
 class SafeValidatedBlueprintBundle:
     quarantine_tree_digest: str
     artifacts: tuple[tuple[str, bytes], ...]
+
+
+@dataclass(frozen=True)
+class SafeBoundFileObservation:
+    """Content and opaque filesystem identity from one no-follow open."""
+
+    relative_path: str
+    raw_sha256: str
+    size_bytes: int
+    file_identity_sha256: str
+    volume_identity_sha256: str
 
 
 @dataclass
@@ -1855,6 +1867,169 @@ def _quarantine_error(error: Exception) -> SafeStagingError:
     )
 
 
+def _opaque_identity_sha256(domain: bytes, value: object) -> str:
+    def normalize(child: object) -> object:
+        if isinstance(child, bytes):
+            return {"bytesHex": child.hex()}
+        if isinstance(child, tuple | list):
+            return [normalize(item) for item in child]
+        if isinstance(child, dict):
+            return {
+                str(key): normalize(item)
+                for key, item in child.items()
+            }
+        if child is None or isinstance(child, str | bool | int):
+            return child
+        raise TypeError("filesystem identity is not canonical")
+
+    encoded = json.dumps(
+        normalize(value),
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(domain + b"\0" + encoded).hexdigest()
+
+
+def inspect_bound_regular_file(
+    *,
+    root: Path,
+    relative_path: str,
+) -> SafeBoundFileObservation:
+    """Observe one private file through pinned no-follow parent handles."""
+
+    if not isinstance(root, Path) or type(relative_path) is not str:
+        raise TypeError("bound file root and relative path are required")
+    relative = PurePosixPath(relative_path)
+    if (
+        not relative_path
+        or "\\" in relative_path
+        or relative.is_absolute()
+        or any(
+            part in {"", ".", ".."} or ":" in part
+            for part in relative.parts
+        )
+    ):
+        raise _error(
+            "BOUND_FILE_PATH_INVALID",
+            "the bound file relative path is invalid",
+        )
+    absolute_root = Path(os.path.abspath(root))
+    if root != absolute_root:
+        raise _error(
+            "BOUND_FILE_ROOT_INVALID",
+            "the bound file root must be an absolute normalized path",
+        )
+
+    chain: list[int] = []
+    directories: list[_Entry] = []
+    file_entry: _Entry | None = None
+    observed_entry: _Entry | None = None
+    try:
+        chain = (
+            _win_open_absolute_chain(root)
+            if os.name == "nt"
+            else _posix_open_absolute_chain(root)
+        )
+        current = chain[-1]
+        for index, name in enumerate(relative.parts[:-1]):
+            directory = _open_directory_entry(
+                current,
+                name,
+                relative="/".join(relative.parts[: index + 1]),
+                share_delete=True,
+            )
+            directories.append(directory)
+            current = directory.handle
+        file_entry = _open_file_entry(
+            current,
+            relative.name,
+            relative=relative_path,
+        )
+        if (
+            file_entry.is_dir
+            or file_entry.links != 1
+            or file_entry.size < 1
+        ):
+            raise _error(
+                "BOUND_FILE_IDENTITY_INVALID",
+                "the bound file is not a private non-empty regular file",
+            )
+        raw_sha256 = _hash_handle(file_entry.handle)
+        observed_entry = _open_file_entry(
+            current,
+            relative.name,
+            relative=relative_path,
+        )
+        if (
+            observed_entry.identity != file_entry.identity
+            or observed_entry.size != file_entry.size
+            or observed_entry.links != file_entry.links
+            or observed_entry.change_marker != file_entry.change_marker
+            or _hash_handle(observed_entry.handle) != raw_sha256
+        ):
+            raise _error(
+                "BOUND_FILE_IDENTITY_CHANGED",
+                "the bound file changed during observation",
+            )
+        _validate_absolute_directory_chain(
+            root,
+            chain,
+            source=False,
+        )
+        for index, directory in enumerate(directories):
+            parent = chain[-1] if index == 0 else directories[index - 1].handle
+            _validate_named_directory(
+                parent,
+                directory.name,
+                directory.handle,
+                source=False,
+            )
+        file_volume = _volume_identity(file_entry.handle)
+        root_volume = _volume_identity(chain[-1])
+        if file_volume != root_volume:
+            raise _error(
+                "BOUND_FILE_VOLUME_CHANGED",
+                "the bound file is not on its pinned root volume",
+            )
+        return SafeBoundFileObservation(
+            relative_path=relative_path,
+            raw_sha256=raw_sha256,
+            size_bytes=file_entry.size,
+            file_identity_sha256=_opaque_identity_sha256(
+                b"ark-kb-bound-file-identity/v1",
+                {
+                    "platform": os.name,
+                    "identity": list(file_entry.identity),
+                },
+            ),
+            volume_identity_sha256=_opaque_identity_sha256(
+                b"ark-kb-bound-volume-identity/v1",
+                {
+                    "platform": os.name,
+                    "identity": file_volume,
+                },
+            ),
+        )
+    except SafeStagingError:
+        raise
+    except Exception as exc:
+        raise _error(
+            "BOUND_FILE_OBSERVATION_FAILED",
+            "the bound file could not be observed safely",
+        ) from exc
+    finally:
+        _close_unique_handles(
+            [
+                *directories,
+                *([file_entry] if file_entry is not None else []),
+                *([observed_entry] if observed_entry is not None else []),
+            ],
+            [chain],
+        )
+
+
 def freeze_blueprint_evidence_bundle(
     *,
     source_root: Path,
@@ -2235,6 +2410,13 @@ def freeze_blueprint_evidence_bundle(
                     relative=entry.relative,
                     sha256=entry.sha256,
                     size_bytes=entry.size,
+                    file_identity_sha256=_opaque_identity_sha256(
+                        b"ark-kb-bound-file-identity/v1",
+                        {
+                            "platform": os.name,
+                            "identity": list(entry.identity),
+                        },
+                    ),
                 )
                 for entry in sorted(
                     destination_entries,
@@ -2395,6 +2577,14 @@ def validate_frozen_blueprint_bundle(
             if (
                 entry.size != artifact.size_bytes
                 or entry.sha256 != artifact.sha256
+                or _opaque_identity_sha256(
+                    b"ark-kb-bound-file-identity/v1",
+                    {
+                        "platform": os.name,
+                        "identity": list(entry.identity),
+                    },
+                )
+                != artifact.file_identity_sha256
             ):
                 raise _error(
                     "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
@@ -2721,6 +2911,9 @@ def stage_snapshot_tree(
         files = [
             entry for entry in state.destination_entries if not entry.is_dir
         ]
+        core_entry = next(
+            entry for entry in files if entry.relative == "core.sqlite"
+        )
         body: dict[str, object] = {
             "schema": STAGING_RECEIPT_SCHEMA,
             "evidenceClass": STAGING_EVIDENCE_CLASS,
@@ -2740,6 +2933,13 @@ def stage_snapshot_tree(
             "authorityDigest": _authority_digest(
                 state.destination_entries,
                 authority,
+            ),
+            "coreFileIdentitySha256": _opaque_identity_sha256(
+                b"ark-kb-bound-file-identity/v1",
+                {
+                    "platform": os.name,
+                    "identity": list(core_entry.identity),
+                },
             ),
             "sameVolume": True,
             "sourceVerifiedUnchanged": True,
@@ -2884,8 +3084,10 @@ def cleanup_staged_snapshot(
 __all__ = [
     "STAGING_EVIDENCE_CLASS",
     "STAGING_RECEIPT_SCHEMA",
+    "SafeBoundFileObservation",
     "SafeStagedSnapshot",
     "SafeStagingError",
     "cleanup_staged_snapshot",
+    "inspect_bound_regular_file",
     "stage_snapshot_tree",
 ]

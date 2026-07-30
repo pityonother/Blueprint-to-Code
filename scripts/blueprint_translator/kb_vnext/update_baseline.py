@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,12 +18,19 @@ from types import MappingProxyType
 from typing import Final
 from urllib.parse import quote, unquote
 
+from .blueprint_ingest import BlueprintIngestResult
 from .incremental_delta import (
     AddOnlyDeltaBlockedGap,
     BlueprintEvidenceBundleInspection,
+    TEST_ONLY,
+    build_add_only_blueprint_delta,
+    build_add_only_delta_receipt,
     inspect_blueprint_evidence_bundle,
+    logical_database_state,
     validate_add_only_delta_receipt,
+    validate_add_only_delta_receipt_durable_state,
 )
+from .invalidation import InvalidationPlan
 from .pointer_cas import (
     SNAPSHOT_SCHEMA,
     CurrentSnapshotBaseline,
@@ -43,6 +51,18 @@ from .source_manifest import (
 UPDATE_BASELINE_SCHEMA: Final = "ark-kb-update-baseline/v1"
 PREPUBLICATION_DELTA_INSPECTION_SCHEMA: Final = (
     "ark-kb-prepublication-delta-inspection/v1"
+)
+BASE_BOUND_DELTA_RECEIPT_SCHEMA: Final = (
+    "ark-kb-add-only-blueprint-delta-receipt/v3"
+)
+BASE_BOUND_DELTA_RECEIPT_EVIDENCE_CLASS: Final = (
+    "UNSIGNED_LOCAL_BASE_BOUND_DELTA_RECEIPT"
+)
+BASE_BOUND_PREPUBLICATION_DELTA_INSPECTION_SCHEMA: Final = (
+    "ark-kb-prepublication-delta-inspection/v2"
+)
+BASE_BOUND_PREPUBLICATION_DELTA_INSPECTION_EVIDENCE_CLASS: Final = (
+    "UNSIGNED_LOCAL_BASE_BOUND_PREPUBLICATION_INSPECTION"
 )
 ADDITIVE_QUARANTINE_RECEIPT_SCHEMA: Final = (
     "ark-kb-reparse-safe-additive-quarantine-receipt/v1"
@@ -496,14 +516,18 @@ def _freeze_json(value: object) -> object:
 
 def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(
-        json.dumps(
-            _json_value(value),
-            allow_nan=False,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        _canonical_bytes(value)
     ).hexdigest()
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        _json_value(value),
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _staging_baseline_identity_sha256(
@@ -524,6 +548,7 @@ class FrozenQuarantineArtifact:
     artifact_uri: str
     artifact_sha256: str
     artifact_bytes: int
+    file_identity_sha256: str
 
     def __post_init__(self) -> None:
         relative = (
@@ -541,6 +566,7 @@ class FrozenQuarantineArtifact:
                 for part in path.parts
             )
             or not _SHA256.fullmatch(self.artifact_sha256)
+            or not _SHA256.fullmatch(self.file_identity_sha256)
             or isinstance(self.artifact_bytes, bool)
             or not isinstance(self.artifact_bytes, int)
             or self.artifact_bytes < 0
@@ -552,6 +578,12 @@ class FrozenQuarantineArtifact:
             "artifactUri": self.artifact_uri,
             "artifactSha256": self.artifact_sha256,
             "artifactBytes": self.artifact_bytes,
+        }
+
+    def identity_payload(self) -> dict[str, object]:
+        return {
+            **self.payload(),
+            "fileIdentitySha256": self.file_identity_sha256,
         }
 
 
@@ -594,6 +626,7 @@ _QUARANTINE_RECEIPT_FIELDS: Final = {
     "artifactUri",
     "artifactSha256",
     "artifactBytes",
+    "artifactFileIdentitySha256",
     "manifestArtifact",
     "sourceAggregateSha256",
     "quarantineTreeDigest",
@@ -647,7 +680,7 @@ def _validate_quarantine_receipt(
     expected_proof = "quarantine-proof://" + _canonical_sha256(body)
     manifest_artifact = receipt.get("manifestArtifact")
     expected_manifest = (
-        binding.manifest.payload()
+        binding.manifest.identity_payload()
         if binding.manifest is not None
         else None
     )
@@ -676,6 +709,9 @@ def _validate_quarantine_receipt(
         "artifactUri": binding.evidence.artifact_uri,
         "artifactSha256": binding.evidence.artifact_sha256,
         "artifactBytes": binding.evidence.artifact_bytes,
+        "artifactFileIdentitySha256": (
+            binding.evidence.file_identity_sha256
+        ),
         "manifestArtifact": expected_manifest,
         "sourceAggregateSha256": binding.source_fingerprint,
         "quarantineTreeDigest": quarantine_tree_digest,
@@ -737,6 +773,21 @@ class FrozenAdditiveBlueprintInput:
     def __post_init__(self) -> None:
         from .safe_staging import SafeFrozenBlueprintBundle
 
+        safe_artifacts = (
+            {
+                artifact.relative: artifact
+                for artifact in self.safe_bundle.artifacts
+            }
+            if type(self.safe_bundle) is SafeFrozenBlueprintBundle
+            else {}
+        )
+        binding = (
+            self.artifact_bindings[0]
+            if type(self.artifact_bindings) is tuple
+            and len(self.artifact_bindings) == 1
+            and type(self.artifact_bindings[0]) is FrozenArtifactBinding
+            else None
+        )
         if not isinstance(self.receipt, MappingProxyType):
             raise ValueError(
                 "frozen additive Blueprint receipt must be immutable"
@@ -778,6 +829,24 @@ class FrozenAdditiveBlueprintInput:
             or not isinstance(self.cleanup_identity, tuple)
             or not self.cleanup_identity
             or type(self.safe_bundle) is not SafeFrozenBlueprintBundle
+            or set(safe_artifacts)
+            != (
+                {"evidence.sqlite", "manifest.json"}
+                if binding is not None and binding.manifest is not None
+                else {"evidence.sqlite"}
+            )
+            or binding is None
+            or safe_artifacts[
+                "evidence.sqlite"
+            ].file_identity_sha256
+            != binding.evidence.file_identity_sha256
+            or (
+                binding.manifest is not None
+                and safe_artifacts[
+                    "manifest.json"
+                ].file_identity_sha256
+                != binding.manifest.file_identity_sha256
+            )
         ):
             raise ValueError("frozen additive Blueprint input is invalid")
         _validate_quarantine_receipt(
@@ -932,6 +1001,9 @@ def _validate_staged_quarantine_binding(
         or staged.receipt.get("updateBaselineIdentitySha256")
         != expected_baseline_identity
         or not _SHA256.fullmatch(staging_tree_digest)
+        or not _SHA256.fullmatch(
+            str(staged.receipt.get("coreFileIdentitySha256") or "")
+        )
     ):
         raise _gap(
             "ADDITIVE_QUARANTINE_BASELINE_CHANGED",
@@ -1053,6 +1125,9 @@ def freeze_additive_blueprint_input(
         ),
         artifact_sha256=inspection.evidence_sha256,
         artifact_bytes=inspection.evidence_bytes,
+        file_identity_sha256=(
+            by_name["evidence.sqlite"].file_identity_sha256
+        ),
     )
     if (
         by_name["evidence.sqlite"].sha256
@@ -1071,6 +1146,9 @@ def freeze_additive_blueprint_input(
             ),
             artifact_sha256=str(inspection.manifest_sha256),
             artifact_bytes=int(inspection.manifest_bytes),
+            file_identity_sha256=(
+                by_name["manifest.json"].file_identity_sha256
+            ),
         )
         if inspection.manifest_sha256 is not None
         and inspection.manifest_bytes is not None
@@ -1119,8 +1197,11 @@ def freeze_additive_blueprint_input(
         "revisionLabel": revision.revision_label,
         "sourceFingerprint": revision.fingerprint,
         **evidence_artifact.payload(),
+        "artifactFileIdentitySha256": (
+            evidence_artifact.file_identity_sha256
+        ),
         "manifestArtifact": (
-            manifest_artifact.payload()
+            manifest_artifact.identity_payload()
             if manifest_artifact is not None
             else None
         ),
@@ -1269,6 +1350,775 @@ def validate_frozen_additive_blueprint_input(
             "quarantine bytes differ from the frozen receipt",
         )
     return frozen
+
+
+_LEGACY_DELTA_RECEIPT_FIELDS: Final = {
+    "schema",
+    "operation",
+    "trustContext",
+    "status",
+    "sourceDiffSha256",
+    "artifacts",
+    "beforeDatabaseSha256",
+    "afterDatabaseSha256",
+    "protectedTableSha256",
+    "receiptDatabaseSha256",
+    "changedTables",
+    "sourceRevisionIds",
+    "entityIds",
+    "factIds",
+    "invalidationPlan",
+    "backendEvent",
+    "backendTerminalReceipts",
+    "blockedGaps",
+    "published",
+    "e4Scenario2Complete",
+    "proof",
+}
+_BASE_BOUND_DELTA_RECEIPT_FIELDS: Final = (
+    _LEGACY_DELTA_RECEIPT_FIELDS
+    | {
+        "evidenceClass",
+        "baseBinding",
+        "productionAuthority",
+        "cutoverEligible",
+        "mode",
+        "defaultQuerySource",
+    }
+)
+
+
+def _base_core_manifest_metrics(
+    baseline: UpdateBaseline,
+) -> tuple[int, str]:
+    manifest = _strict_json_object(
+        baseline.current_snapshot.manifest_bytes,
+        label="base snapshot manifest",
+        maximum_bytes=_MAX_SNAPSHOT_MANIFEST_BYTES,
+    )
+    databases = manifest.get("databases")
+    core = (
+        databases.get("core.sqlite")
+        if isinstance(databases, Mapping)
+        else None
+    )
+    size = core.get("bytes") if isinstance(core, Mapping) else None
+    digest = core.get("sha256") if isinstance(core, Mapping) else None
+    if (
+        isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 1
+        or type(digest) is not str
+        or not _SHA256.fullmatch(digest)
+    ):
+        raise _gap(
+            "DELTA_BASE_CORE_MANIFEST_INVALID",
+            "base manifest does not declare exact core.sqlite bytes",
+        )
+    return size, digest
+
+
+def _artifact_binding_payload(
+    frozen: FrozenAdditiveBlueprintInput,
+) -> tuple[dict[str, object], ...]:
+    binding = frozen.artifact_bindings[0]
+    return (
+        {
+            "sourceId": binding.source_id,
+            "sourceFingerprint": binding.source_fingerprint,
+            **binding.evidence.payload(),
+            "trustContext": TEST_ONLY,
+        },
+    )
+
+
+def _validate_base_bound_typed_inputs(
+    baseline: UpdateBaseline,
+    staged_snapshot: StagedBaselineSnapshot,
+    frozen_input: FrozenAdditiveBlueprintInput,
+) -> None:
+    if type(baseline) is not UpdateBaseline:
+        raise TypeError("update baseline is required")
+    if type(staged_snapshot) is not StagedBaselineSnapshot:
+        raise TypeError("staged baseline snapshot is required")
+    if type(frozen_input) is not FrozenAdditiveBlueprintInput:
+        raise TypeError("frozen additive Blueprint input is required")
+    try:
+        validate_update_baseline_identity(
+            baseline,
+            expected_current_snapshot=baseline.current_snapshot,
+            expected_candidate_source_manifest=(
+                baseline.candidate_source_manifest
+            ),
+        )
+        staging_proof, staging_tree_digest = (
+            _validate_staged_quarantine_binding(
+                baseline,
+                staged_snapshot,
+            )
+        )
+        validate_frozen_additive_blueprint_input(frozen_input)
+    except UpdateBaselineBlockedGap:
+        raise
+    except (OSError, ValueError) as exc:
+        raise _gap(
+            "DELTA_RECEIPT_BASE_BINDING_MISMATCH",
+            "live baseline, staging, or quarantine identity changed",
+        ) from exc
+    if (
+        frozen_input.base_build_id != baseline.base_build_id
+        or frozen_input.staging_id != staged_snapshot.staging_id
+        or frozen_input.pointer_sha256
+        != baseline.base_pointer_sha256
+        or frozen_input.manifest_sha256
+        != baseline.base_manifest_sha256
+        or frozen_input.base_source_manifest_fingerprint
+        != baseline.base_source_manifest_fingerprint
+        or frozen_input.candidate_source_manifest_fingerprint
+        != baseline.candidate_source_manifest_fingerprint
+        or frozen_input.source_diff_sha256
+        != baseline.source_diff_sha256
+        or frozen_input.update_baseline_identity_sha256
+        != _staging_baseline_identity_sha256(baseline)
+        or frozen_input.staging_receipt_proof != staging_proof
+        or frozen_input.staging_tree_digest != staging_tree_digest
+    ):
+        raise _gap(
+            "DELTA_RECEIPT_BASE_BINDING_MISMATCH",
+            "baseline, staging, and quarantine identities differ",
+        )
+
+
+def _observe_bound_files(
+    baseline: UpdateBaseline,
+    staged_snapshot: StagedBaselineSnapshot,
+    frozen_input: FrozenAdditiveBlueprintInput,
+):
+    from .safe_staging import (
+        SafeStagingError,
+        inspect_bound_regular_file,
+    )
+
+    try:
+        base_core = inspect_bound_regular_file(
+            root=baseline.current_snapshot.snapshot_dir,
+            relative_path="core.sqlite",
+        )
+        staged_core = inspect_bound_regular_file(
+            root=staged_snapshot.snapshot_dir,
+            relative_path="core.sqlite",
+        )
+        evidence = inspect_bound_regular_file(
+            root=frozen_input.ingest_root,
+            relative_path="evidence.sqlite",
+        )
+        manifest = (
+            inspect_bound_regular_file(
+                root=frozen_input.ingest_root,
+                relative_path="manifest.json",
+            )
+            if frozen_input.artifact_bindings[0].manifest is not None
+            else None
+        )
+    except SafeStagingError as exc:
+        raise UpdateBaselineBlockedGap(
+            exc.gap_code,
+            str(exc),
+            status=exc.status,
+            residual_identifier=exc.residual_identifier,
+        ) from exc
+    declared_bytes, declared_sha256 = _base_core_manifest_metrics(
+        baseline
+    )
+    if (
+        base_core.size_bytes != declared_bytes
+        or base_core.raw_sha256 != declared_sha256
+    ):
+        raise _gap(
+            "DELTA_BASE_CORE_MANIFEST_MISMATCH",
+            "base Core bytes differ from the current snapshot manifest",
+        )
+    if (
+        base_core.file_identity_sha256
+        == staged_core.file_identity_sha256
+        or base_core.volume_identity_sha256
+        != staged_core.volume_identity_sha256
+        or staged_core.file_identity_sha256
+        != staged_snapshot.receipt.get("coreFileIdentitySha256")
+    ):
+        raise _gap(
+            "DELTA_STAGED_CORE_IDENTITY_INVALID",
+            "staged Core is not a same-volume independent file",
+        )
+    binding = frozen_input.artifact_bindings[0]
+    if (
+        evidence.raw_sha256 != binding.evidence.artifact_sha256
+        or evidence.size_bytes != binding.evidence.artifact_bytes
+        or evidence.file_identity_sha256
+        != binding.evidence.file_identity_sha256
+        or (
+            manifest is None
+            and binding.manifest is not None
+        )
+        or (
+            manifest is not None
+            and (
+                binding.manifest is None
+                or manifest.raw_sha256
+                != binding.manifest.artifact_sha256
+                or manifest.size_bytes
+                != binding.manifest.artifact_bytes
+                or manifest.file_identity_sha256
+                != binding.manifest.file_identity_sha256
+            )
+        )
+    ):
+        raise _gap(
+            "DELTA_QUARANTINE_IDENTITY_MISMATCH",
+            "quarantine file identity differs from its frozen binding",
+        )
+    return base_core, staged_core, evidence, manifest
+
+
+def _base_binding_payload(
+    baseline: UpdateBaseline,
+    staged_snapshot: StagedBaselineSnapshot,
+    frozen_input: FrozenAdditiveBlueprintInput,
+    *,
+    base_core,
+    staged_core,
+    evidence,
+    manifest,
+    base_database_sha256: str,
+    staged_database_sha256: str,
+) -> dict[str, object]:
+    declared_bytes, declared_sha256 = _base_core_manifest_metrics(
+        baseline
+    )
+    staging_receipt = staged_snapshot.receipt
+    quarantine_receipt = frozen_input.receipt
+    return {
+        "baseBuildId": baseline.base_build_id,
+        "pointerSha256": baseline.base_pointer_sha256,
+        "manifestSha256": baseline.base_manifest_sha256,
+        "manifestBytes": len(
+            baseline.current_snapshot.manifest_bytes
+        ),
+        "baseSourceManifestFingerprint": (
+            baseline.base_source_manifest_fingerprint
+        ),
+        "candidateSourceManifestFingerprint": (
+            baseline.candidate_source_manifest_fingerprint
+        ),
+        "sourceDiffSha256": baseline.source_diff_sha256,
+        "updateBaselineIdentitySha256": (
+            _staging_baseline_identity_sha256(baseline)
+        ),
+        "baseCore": {
+            "relativePath": (
+                f"snapshots/{baseline.base_build_id}/core.sqlite"
+            ),
+            "manifestSha256": declared_sha256,
+            "manifestBytes": declared_bytes,
+            "observedRawSha256": base_core.raw_sha256,
+            "logicalDatabaseSha256": base_database_sha256,
+            "fileIdentitySha256": (
+                base_core.file_identity_sha256
+            ),
+        },
+        "staging": {
+            "stagingId": staged_snapshot.staging_id,
+            "receiptProof": staging_receipt.get("proof"),
+            "sourceTreeDigest": staging_receipt.get(
+                "sourceTreeDigest"
+            ),
+            "stagedTreeDigest": staging_receipt.get(
+                "stagedTreeDigest"
+            ),
+            "authorityDigest": staging_receipt.get(
+                "authorityDigest"
+            ),
+            "coreRelativePath": (
+                ".incremental-staging/"
+                f"{staged_snapshot.staging_id}/snapshot/core.sqlite"
+            ),
+            "coreRawSha256": staged_core.raw_sha256,
+            "coreFileIdentitySha256": (
+                staged_core.file_identity_sha256
+            ),
+            "coreLogicalDatabaseSha256": staged_database_sha256,
+            "physicallyIndependent": True,
+            "sameVolume": True,
+        },
+        "quarantine": {
+            "receiptProof": quarantine_receipt.get("proof"),
+            "treeDigest": frozen_input.quarantine_tree_digest,
+            "sourceId": frozen_input.source_id,
+            "entityUri": frozen_input.entity_uri,
+            "revisionLabel": frozen_input.revision_label,
+            "sourceFingerprint": frozen_input.source_fingerprint,
+            "sourceAggregateSha256": quarantine_receipt.get(
+                "sourceAggregateSha256"
+            ),
+            "artifact": {
+                **frozen_input.artifact_bindings[0].evidence.payload(),
+                "fileIdentitySha256": (
+                    evidence.file_identity_sha256
+                ),
+            },
+            "manifestArtifact": (
+                {
+                    **frozen_input.artifact_bindings[
+                        0
+                    ].manifest.payload(),
+                    "fileIdentitySha256": (
+                        manifest.file_identity_sha256
+                    ),
+                }
+                if manifest is not None
+                and frozen_input.artifact_bindings[0].manifest
+                is not None
+                else None
+            ),
+        },
+    }
+
+
+def _legacy_receipt_from_base_bound(
+    receipt: Mapping[str, object],
+) -> dict[str, object]:
+    body = {
+        key: _json_value(value)
+        for key, value in receipt.items()
+        if key in _LEGACY_DELTA_RECEIPT_FIELDS
+        and key != "proof"
+    }
+    body["schema"] = "ark-kb-add-only-blueprint-delta-receipt/v2"
+    return {
+        **body,
+        "proof": "delta-proof://" + _canonical_sha256(body),
+    }
+
+
+def _validate_base_bound_delta_receipt(
+    receipt: Mapping[str, object],
+    *,
+    expected_content_sha256: str,
+) -> tuple[Mapping[str, object], dict[str, object]]:
+    if (
+        not isinstance(receipt, Mapping)
+        or set(receipt) != _BASE_BOUND_DELTA_RECEIPT_FIELDS
+    ):
+        raise AddOnlyDeltaBlockedGap(
+            "DELTA_RECEIPT_INVALID",
+            "base-bound receipt fields are invalid",
+        )
+    body = {
+        key: _json_value(value)
+        for key, value in receipt.items()
+        if key != "proof"
+    }
+    observed = _canonical_sha256(body)
+    if (
+        receipt.get("proof") != "delta-proof://" + observed
+        or observed != expected_content_sha256
+    ):
+        raise AddOnlyDeltaBlockedGap(
+            "DELTA_RECEIPT_PROOF_INVALID",
+            "base-bound receipt proof is invalid",
+        )
+    if (
+        receipt.get("schema") != BASE_BOUND_DELTA_RECEIPT_SCHEMA
+        or receipt.get("evidenceClass")
+        != BASE_BOUND_DELTA_RECEIPT_EVIDENCE_CLASS
+        or receipt.get("trustContext") != TEST_ONLY
+        or receipt.get("productionAuthority") is not False
+        or receipt.get("published") is not False
+        or receipt.get("e4Scenario2Complete") is not False
+        or receipt.get("cutoverEligible") is not False
+        or receipt.get("mode") != "shadow"
+        or receipt.get("defaultQuerySource") != "legacy"
+        or not isinstance(receipt.get("baseBinding"), Mapping)
+    ):
+        raise AddOnlyDeltaBlockedGap(
+            "DELTA_RECEIPT_INVALID",
+            "base-bound receipt contract is invalid",
+        )
+    legacy = _legacy_receipt_from_base_bound(receipt)
+    legacy_content = str(legacy["proof"]).removeprefix(
+        "delta-proof://"
+    )
+    validated = validate_add_only_delta_receipt(
+        legacy,
+        expected_receipt_sha256=legacy_content,
+    )
+    return validated, dict(receipt.get("baseBinding") or {})
+
+
+def build_base_bound_add_only_delta_receipt(
+    baseline: UpdateBaseline,
+    *,
+    staged_snapshot: StagedBaselineSnapshot,
+    frozen_input: FrozenAdditiveBlueprintInput,
+    ingest_result: BlueprintIngestResult,
+    invalidation_plan: InvalidationPlan,
+    backend_event_id: str,
+    fault_injector: Callable[[str], None] | None = None,
+) -> dict[str, object]:
+    """Build a v3 receipt from typed inputs and live Core files only."""
+
+    if type(ingest_result) is not BlueprintIngestResult:
+        raise TypeError("Blueprint ingest result is required")
+    if type(invalidation_plan) is not InvalidationPlan:
+        raise TypeError("invalidation plan is required")
+    if (
+        type(backend_event_id) is not str
+        or not backend_event_id
+        or backend_event_id != backend_event_id.strip()
+    ):
+        raise TypeError("backend event ID is required")
+    if fault_injector is not None and not callable(fault_injector):
+        raise TypeError("fault injector must be callable")
+    _validate_base_bound_typed_inputs(
+        baseline,
+        staged_snapshot,
+        frozen_input,
+    )
+    before_files = _observe_bound_files(
+        baseline,
+        staged_snapshot,
+        frozen_input,
+    )
+    if fault_injector is not None:
+        fault_injector("after_initial_file_observation")
+    base_path = baseline.current_snapshot.snapshot_dir / "core.sqlite"
+    staged_path = staged_snapshot.snapshot_dir / "core.sqlite"
+    base = sqlite3.connect(f"{base_path.as_uri()}?mode=ro", uri=True)
+    staged = sqlite3.connect(staged_path)
+    try:
+        base.execute("PRAGMA query_only=ON")
+        staged.execute("PRAGMA foreign_keys=ON")
+        delta = build_add_only_blueprint_delta(
+            base,
+            staged,
+            source_diff=baseline.source_diff,
+            ingest_result=ingest_result,
+            artifact_root=frozen_input.quarantine_root,
+            artifact_bindings=_artifact_binding_payload(frozen_input),
+            trust_context=TEST_ONLY,
+            durable_derived_state=True,
+        )
+        legacy = build_add_only_delta_receipt(
+            delta,
+            invalidation_plan,
+            backend_connection=staged,
+            backend_event_id=backend_event_id,
+        )
+    except AddOnlyDeltaBlockedGap as exc:
+        raise _gap(exc.gap_code, str(exc)) from exc
+    finally:
+        staged.close()
+        base.close()
+    if fault_injector is not None:
+        fault_injector("before_final_file_observation")
+    _validate_base_bound_typed_inputs(
+        baseline,
+        staged_snapshot,
+        frozen_input,
+    )
+    after_files = _observe_bound_files(
+        baseline,
+        staged_snapshot,
+        frozen_input,
+    )
+    if before_files != after_files:
+        raise _gap(
+            "DELTA_RECEIPT_FILE_IDENTITY_DRIFT",
+            "base, staging, or quarantine files changed during build",
+        )
+    if (
+        legacy.get("beforeDatabaseSha256")
+        == legacy.get("afterDatabaseSha256")
+        or legacy.get("afterDatabaseSha256")
+        != legacy.get("receiptDatabaseSha256")
+    ):
+        raise _gap(
+            "DELTA_RECEIPT_DATABASE_BINDING_MISMATCH",
+            "receipt does not identify the actual base and staged Core",
+        )
+    base_core, staged_core, evidence, manifest = after_files
+    legacy_body = {
+        key: _json_value(value)
+        for key, value in legacy.items()
+        if key != "proof"
+    }
+    legacy_body["schema"] = BASE_BOUND_DELTA_RECEIPT_SCHEMA
+    body: dict[str, object] = {
+        **legacy_body,
+        "evidenceClass": BASE_BOUND_DELTA_RECEIPT_EVIDENCE_CLASS,
+        "baseBinding": _base_binding_payload(
+            baseline,
+            staged_snapshot,
+            frozen_input,
+            base_core=base_core,
+            staged_core=staged_core,
+            evidence=evidence,
+            manifest=manifest,
+            base_database_sha256=str(
+                legacy["beforeDatabaseSha256"]
+            ),
+            staged_database_sha256=str(
+                legacy["receiptDatabaseSha256"]
+            ),
+        ),
+        "productionAuthority": False,
+        "cutoverEligible": False,
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
+    }
+    receipt = {
+        **body,
+        "proof": "delta-proof://" + _canonical_sha256(body),
+    }
+    _validate_base_bound_delta_receipt(
+        receipt,
+        expected_content_sha256=_canonical_sha256(body),
+    )
+    return receipt
+
+
+@dataclass(frozen=True)
+class BaseBoundPrepublicationDeltaInspection:
+    source_diff_sha256: str
+    base_build_id: str
+    expected_receipt_raw_sha256: str
+    receipt_artifact_sha256: str
+    receipt_content_sha256: str
+    status: str
+    blocked_gap_count: int
+    trust_context: str = TEST_ONLY
+    schema: str = BASE_BOUND_PREPUBLICATION_DELTA_INSPECTION_SCHEMA
+    evidence_class: str = (
+        BASE_BOUND_PREPUBLICATION_DELTA_INSPECTION_EVIDENCE_CLASS
+    )
+    base_binding_verified: bool = True
+    production_authority: bool = False
+    published: bool = False
+    e4_scenario_2_complete: bool = False
+    cutover_eligible: bool = False
+    mode: str = "shadow"
+    default_query_source: str = "legacy"
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema
+            != BASE_BOUND_PREPUBLICATION_DELTA_INSPECTION_SCHEMA
+            or self.evidence_class
+            != BASE_BOUND_PREPUBLICATION_DELTA_INSPECTION_EVIDENCE_CLASS
+            or self.trust_context != TEST_ONLY
+            or self.base_binding_verified is not True
+            or self.production_authority is not False
+            or self.published is not False
+            or self.e4_scenario_2_complete is not False
+            or self.cutover_eligible is not False
+            or self.mode != "shadow"
+            or self.default_query_source != "legacy"
+            or not self.base_build_id
+            or self.status not in {"FOUNDATION_VERIFIED", "BLOCKED_GAP"}
+            or isinstance(self.blocked_gap_count, bool)
+            or self.blocked_gap_count < 0
+        ):
+            raise ValueError(
+                "base-bound prepublication inspection is invalid"
+            )
+        for label, value in (
+            ("sourceDiffSha256", self.source_diff_sha256),
+            (
+                "expectedReceiptRawSha256",
+                self.expected_receipt_raw_sha256,
+            ),
+            (
+                "receiptArtifactSha256",
+                self.receipt_artifact_sha256,
+            ),
+            ("receiptContentSha256", self.receipt_content_sha256),
+        ):
+            _sha256(value, label=label)
+        if (
+            self.expected_receipt_raw_sha256
+            != self.receipt_artifact_sha256
+        ):
+            raise ValueError(
+                "base-bound inspection raw identity is invalid"
+            )
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "schema": self.schema,
+            "evidenceClass": self.evidence_class,
+            "status": self.status,
+            "baseBindingVerified": True,
+            "expectedReceiptRawSha256": (
+                self.expected_receipt_raw_sha256
+            ),
+            "receiptArtifactSha256": self.receipt_artifact_sha256,
+            "receiptContentSha256": self.receipt_content_sha256,
+            "baseBuildId": self.base_build_id,
+            "sourceDiffSha256": self.source_diff_sha256,
+            "blockedGapCount": self.blocked_gap_count,
+            "trustContext": TEST_ONLY,
+            "productionAuthority": False,
+            "published": False,
+            "e4Scenario2Complete": False,
+            "cutoverEligible": False,
+            "mode": "shadow",
+            "defaultQuerySource": "legacy",
+        }
+
+
+def inspect_base_bound_prepublication_delta_receipt(
+    baseline: UpdateBaseline,
+    *,
+    staged_snapshot: StagedBaselineSnapshot,
+    frozen_input: FrozenAdditiveBlueprintInput,
+    receipt_bytes: bytes,
+    expected_receipt_raw_sha256: str,
+) -> BaseBoundPrepublicationDeltaInspection:
+    """Strictly inspect one canonical v3 receipt against live typed state."""
+
+    if not expected_receipt_raw_sha256:
+        raise _gap(
+            "MISSING_OUT_OF_BAND_DELTA_RECEIPT_SHA256",
+            "expected raw delta receipt SHA-256 is required out of band",
+        )
+    try:
+        expected_raw = _sha256(
+            expected_receipt_raw_sha256,
+            label="expected raw delta receipt SHA-256",
+        )
+    except UpdateBaselineBlockedGap as exc:
+        raise _gap(
+            "OUT_OF_BAND_DELTA_RECEIPT_SHA256_INVALID",
+            "expected raw delta receipt SHA-256 is invalid",
+        ) from exc
+    if (
+        type(receipt_bytes) is not bytes
+        or not receipt_bytes
+        or len(receipt_bytes) > MAX_DELTA_RECEIPT_BYTES
+    ):
+        raise _gap(
+            "DELTA_RECEIPT_ARTIFACT_INVALID",
+            "delta receipt artifact size is invalid",
+        )
+    observed_raw = hashlib.sha256(receipt_bytes).hexdigest()
+    if observed_raw != expected_raw:
+        raise _gap(
+            "OUT_OF_BAND_DELTA_RECEIPT_SHA256_MISMATCH",
+            "delta receipt raw bytes do not match the OOB SHA-256",
+        )
+    try:
+        receipt = _strict_json_object(
+            receipt_bytes,
+            label="base-bound delta receipt",
+            maximum_bytes=MAX_DELTA_RECEIPT_BYTES,
+        )
+        if _canonical_bytes(receipt) != receipt_bytes:
+            raise ValueError("delta receipt is not canonical JSON")
+        proof = receipt.get("proof")
+        match = (
+            _DELTA_PROOF.fullmatch(proof)
+            if type(proof) is str
+            else None
+        )
+        if match is None:
+            raise ValueError("delta receipt proof is invalid")
+        content_sha256 = match.group(1)
+        legacy, receipt_binding = _validate_base_bound_delta_receipt(
+            receipt,
+            expected_content_sha256=content_sha256,
+        )
+    except (AddOnlyDeltaBlockedGap, TypeError, ValueError) as exc:
+        raise _gap(
+            "DELTA_RECEIPT_ARTIFACT_INVALID",
+            "OOB-authenticated v3 receipt semantics are invalid",
+        ) from exc
+    _validate_base_bound_typed_inputs(
+        baseline,
+        staged_snapshot,
+        frozen_input,
+    )
+    before_files = _observe_bound_files(
+        baseline,
+        staged_snapshot,
+        frozen_input,
+    )
+    base_path = baseline.current_snapshot.snapshot_dir / "core.sqlite"
+    staged_path = staged_snapshot.snapshot_dir / "core.sqlite"
+    base = sqlite3.connect(f"{base_path.as_uri()}?mode=ro", uri=True)
+    staged = sqlite3.connect(staged_path)
+    try:
+        base.execute("PRAGMA query_only=ON")
+        base_state = logical_database_state(base)
+        staged_state = logical_database_state(staged)
+        expected_binding = _base_binding_payload(
+            baseline,
+            staged_snapshot,
+            frozen_input,
+            base_core=before_files[0],
+            staged_core=before_files[1],
+            evidence=before_files[2],
+            manifest=before_files[3],
+            base_database_sha256=base_state.database_sha256,
+            staged_database_sha256=staged_state.database_sha256,
+        )
+        if (
+            receipt_binding != expected_binding
+            or legacy.get("sourceDiffSha256")
+            != baseline.source_diff_sha256
+            or legacy.get("beforeDatabaseSha256")
+            != base_state.database_sha256
+            or legacy.get("afterDatabaseSha256")
+            != staged_state.database_sha256
+            or legacy.get("receiptDatabaseSha256")
+            != staged_state.database_sha256
+        ):
+            raise _gap(
+                "DELTA_RECEIPT_BASE_BINDING_MISMATCH",
+                "receipt is replayed across base, staging, or quarantine",
+            )
+        validate_add_only_delta_receipt_durable_state(
+            _legacy_receipt_from_base_bound(receipt),
+            connection=staged,
+        )
+    except AddOnlyDeltaBlockedGap as exc:
+        raise _gap(exc.gap_code, str(exc)) from exc
+    finally:
+        staged.close()
+        base.close()
+    if before_files != _observe_bound_files(
+        baseline,
+        staged_snapshot,
+        frozen_input,
+    ):
+        raise _gap(
+            "DELTA_RECEIPT_FILE_IDENTITY_DRIFT",
+            "live receipt inputs changed during inspection",
+        )
+    gaps = receipt.get("blockedGaps")
+    if not isinstance(gaps, list):
+        raise _gap(
+            "DELTA_RECEIPT_ARTIFACT_INVALID",
+            "receipt blocked gaps are invalid",
+        )
+    return BaseBoundPrepublicationDeltaInspection(
+        source_diff_sha256=baseline.source_diff_sha256,
+        base_build_id=baseline.base_build_id,
+        expected_receipt_raw_sha256=expected_raw,
+        receipt_artifact_sha256=observed_raw,
+        receipt_content_sha256=content_sha256,
+        status=str(receipt.get("status")),
+        blocked_gap_count=len(gaps),
+    )
 
 
 @dataclass(frozen=True)
@@ -1443,6 +2293,9 @@ def inspect_prepublication_delta_receipt(
 
 
 __all__ = [
+    "BASE_BOUND_DELTA_RECEIPT_SCHEMA",
+    "BASE_BOUND_PREPUBLICATION_DELTA_INSPECTION_SCHEMA",
+    "BaseBoundPrepublicationDeltaInspection",
     "MAX_DELTA_RECEIPT_BYTES",
     "PREPUBLICATION_DELTA_INSPECTION_SCHEMA",
     "UPDATE_BASELINE_SCHEMA",
@@ -1450,8 +2303,10 @@ __all__ = [
     "StagedBaselineSnapshot",
     "UpdateBaseline",
     "UpdateBaselineBlockedGap",
+    "build_base_bound_add_only_delta_receipt",
     "build_update_baseline",
     "freeze_additive_blueprint_input",
+    "inspect_base_bound_prepublication_delta_receipt",
     "inspect_prepublication_delta_receipt",
     "stage_snapshot_from_baseline",
     "validate_final_source_manifest",
