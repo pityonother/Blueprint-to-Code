@@ -847,6 +847,19 @@ class NoopQueryBackend(RebuildBackend):
         return None
 
 
+class MetadataWritingQueryBackend(RebuildBackend):
+    def rebuild_query_snapshot(self, scope: RebuildScope) -> None:
+        assert scope.cache is not None
+        for table in (
+            "context_packs",
+            "answer_plans",
+            "materialized_neighborhoods",
+            "query_snapshots",
+        ):
+            scope.cache.execute(f'DELETE FROM "{table}"')
+        scope.cache.execute("DELETE FROM metadata")
+
+
 class RawCacheEscapeBackend(RebuildBackend):
     def rebuild_query_snapshot(self, scope: RebuildScope) -> None:
         self.cache_connection.execute("DELETE FROM query_snapshots")
@@ -2198,6 +2211,42 @@ class RebuildWorkerTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM query_snapshots"
             ).fetchone()[0],
             1,
+        )
+        core.close()
+        cache.close()
+
+    def test_query_backend_cannot_write_outside_four_table_scope(
+        self,
+    ) -> None:
+        core = _core()
+        cache = _cache()
+        _seed_cache(cache)
+        cache.execute(
+            "INSERT INTO metadata VALUES ('business-key', 'preserved')"
+        )
+        cache.commit()
+        _queue(core, [("QUERY_SNAPSHOT", 1)])
+
+        report = drain_rebuild_queue(
+            core,
+            MetadataWritingQueryBackend(cache_connection=cache),
+            max_items=1,
+            recover_running=False,
+        )
+
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.succeeded, 0)
+        self.assertEqual(
+            cache.execute(
+                "SELECT COUNT(*) FROM query_snapshots"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            cache.execute(
+                "SELECT value FROM metadata WHERE key='business-key'"
+            ).fetchone(),
+            ("preserved",),
         )
         core.close()
         cache.close()

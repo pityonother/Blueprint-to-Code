@@ -62,6 +62,12 @@ _TOUCHED_TABLE = {
     "PROJECTION": "projection_runs",
     "QUERY_SNAPSHOT": "query_snapshots",
 }
+_QUERY_CACHE_TABLES = (
+    "answer_plans",
+    "context_packs",
+    "materialized_neighborhoods",
+    "query_snapshots",
+)
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -317,10 +323,38 @@ def _terminal_receipt(
     }
 
 
+def _explicit_query_terminal_receipt(
+    receipt: dict[str, object],
+) -> dict[str, object]:
+    body = copy.deepcopy(receipt)
+    body.pop("proof")
+    body["afterDigest"] = body["beforeDigest"]
+    body["touchedTables"] = list(_QUERY_CACHE_TABLES)
+    body["verification"] = {
+        "basis": "EXPLICIT_WHOLE_CACHE_INVALIDATION",
+        "coreWriteChanges": 0,
+        "writeOperations": [
+            f"{table}:DELETE" for table in _QUERY_CACHE_TABLES
+        ],
+        "rowScope": {
+            "mode": "EXPLICIT_WHOLE_CACHE_BATCH",
+            "eventId": EVENT_ID,
+            "targetId": body["downstreamId"],
+            "tables": list(_QUERY_CACHE_TABLES),
+        },
+    }
+    return {
+        **body,
+        "proof": "rebuild-proof://" + _sha256_bytes(_canonical_bytes(body)),
+    }
+
+
 def _persist_plan(
     core_path: Path,
     *,
     blocked_gap: bool = False,
+    explicit_query_invalidation: bool = False,
+    block_unimplemented: bool = False,
 ) -> InvalidationPlan:
     connection = sqlite3.connect(core_path)
     try:
@@ -364,18 +398,38 @@ def _persist_plan(
                 reason=plan.reasons[kind],
                 status=(
                     BLOCKED_GAP
-                    if blocked_gap and kind == "QUERY_SNAPSHOT"
+                    if (
+                        blocked_gap and kind == "QUERY_SNAPSHOT"
+                        or block_unimplemented
+                        and kind
+                        in {"ROLE_ENTITY", "DOMAIN_ENTITY", "PROJECTION"}
+                    )
                     else "SUCCEEDED"
                 ),
                 gap_code=(
                     "QUERY_BACKEND_UNAVAILABLE"
                     if blocked_gap and kind == "QUERY_SNAPSHOT"
-                    else ""
+                    else (
+                        f"BACKEND_NOT_CONFIGURED_{kind}"
+                        if block_unimplemented
+                        and kind
+                        in {"ROLE_ENTITY", "DOMAIN_ENTITY", "PROJECTION"}
+                        else ""
+                    )
                 ),
             )
             for kind, values in sorted(plan.downstream.items())
             for target_id in values
         ]
+        if explicit_query_invalidation:
+            receipts = [
+                (
+                    _explicit_query_terminal_receipt(receipt)
+                    if receipt["downstreamKind"] == "QUERY_SNAPSHOT"
+                    else receipt
+                )
+                for receipt in receipts
+            ]
         payload = {
             **{
                 kind: list(values)
@@ -398,7 +452,11 @@ def _persist_plan(
             )
             for receipt in receipts
         ]
-        event_status = BLOCKED_GAP if blocked_gap else "SUCCEEDED"
+        event_status = (
+            BLOCKED_GAP
+            if any(receipt["status"] == BLOCKED_GAP for receipt in receipts)
+            else "SUCCEEDED"
+        )
         connection.execute(
             """
             INSERT INTO invalidation_events(
@@ -433,6 +491,8 @@ def _fixture(
     *,
     build_id: str = "build-a",
     blocked_gap: bool = False,
+    explicit_query_invalidation: bool = False,
+    block_unimplemented: bool = False,
 ) -> dict[str, object]:
     root = tmp_path / "vnext"
     snapshot = root / "snapshots" / build_id
@@ -481,6 +541,8 @@ def _fixture(
     plan = _persist_plan(
         staged.snapshot_dir / "core.sqlite",
         blocked_gap=blocked_gap,
+        explicit_query_invalidation=explicit_query_invalidation,
+        block_unimplemented=block_unimplemented,
     )
     return {
         "root": root,
@@ -549,6 +611,63 @@ def test_builds_and_inspects_v3_receipt_bound_to_live_base_and_staging(
         assert receipt["schema"] == (
             "ark-kb-add-only-blueprint-delta-receipt/v3"
         )
+        assert inspection.schema == (
+            "ark-kb-prepublication-delta-inspection/v2"
+        )
+        assert inspection.base_binding_verified is True
+        assert inspection.production_authority is False
+        assert inspection.published is False
+        assert inspection.e4_scenario_2_complete is False
+    finally:
+        _cleanup(fixture)
+
+
+def test_explicit_query_invalidation_builds_blocked_v3_receipt_and_inspection(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(
+        tmp_path,
+        explicit_query_invalidation=True,
+        block_unimplemented=True,
+    )
+    try:
+        receipt = _build(fixture)
+        raw = _canonical_bytes(receipt)
+        inspection = inspect_base_bound_prepublication_delta_receipt(
+            fixture["baseline"],
+            staged_snapshot=fixture["staged"],
+            frozen_input=fixture["frozen"],
+            receipt_bytes=raw,
+            expected_receipt_raw_sha256=_sha256_bytes(raw),
+        )
+
+        assert receipt["schema"] == (
+            "ark-kb-add-only-blueprint-delta-receipt/v3"
+        )
+        assert receipt["status"] == BLOCKED_GAP
+        assert receipt["productionAuthority"] is False
+        assert receipt["published"] is False
+        assert receipt["e4Scenario2Complete"] is False
+        assert receipt["cutoverEligible"] is False
+        assert receipt["mode"] == "shadow"
+        assert receipt["defaultQuerySource"] == "legacy"
+        terminal = receipt["backendTerminalReceipts"]
+        query = next(
+            item
+            for item in terminal
+            if item["downstreamKind"] == "QUERY_SNAPSHOT"
+        )
+        assert query["beforeDigest"] == query["afterDigest"]
+        assert query["verification"]["basis"] == (
+            "EXPLICIT_WHOLE_CACHE_INVALIDATION"
+        )
+        blocked = [
+            item for item in terminal if item["status"] == BLOCKED_GAP
+        ]
+        assert len(blocked) == 8
+        assert {
+            item["downstreamKind"] for item in blocked
+        } == {"ROLE_ENTITY", "DOMAIN_ENTITY", "PROJECTION"}
         assert inspection.schema == (
             "ark-kb-prepublication-delta-inspection/v2"
         )
