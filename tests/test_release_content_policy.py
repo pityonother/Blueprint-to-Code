@@ -71,6 +71,7 @@ class ReleaseContentPolicyTests(unittest.TestCase):
             "current-repository-root",
             {finding.category for finding in report.findings},
         )
+        self.assertNotIn(path, repr(report.findings))
 
     def test_windows_user_paths_with_both_separator_styles_are_detected(self):
         for slash in ("/", "\\"):
@@ -82,6 +83,26 @@ class ReleaseContentPolicyTests(unittest.TestCase):
                     "windows-user-directory",
                     {finding.category for finding in report.findings},
                 )
+
+    def test_documents_and_settings_and_unc_workspaces_are_detected(self):
+        legacy_profile = "C:/" + "/".join(
+            ("Documents and Settings", "alice", "private.txt")
+        )
+        unc_workspace = "\\\\" + "\\".join(
+            ("build-host", "user-share", "workspace", "private.txt")
+        )
+
+        legacy_report = self._scan(legacy_profile)
+        unc_report = self._scan(unc_workspace)
+
+        self.assertIn(
+            "documents-and-settings-directory",
+            {finding.category for finding in legacy_report.findings},
+        )
+        self.assertIn(
+            "unc-workspace-path",
+            {finding.category for finding in unc_report.findings},
+        )
 
     def test_macos_and_linux_user_paths_are_detected(self):
         cases = (
