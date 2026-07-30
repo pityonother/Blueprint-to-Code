@@ -32,8 +32,11 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from blueprint_translator.kb_vnext.rebuild_worker import (  # noqa: E402
     CoreMaterializerRebuildBackend,
+    EXPECTED_REBUILD_WRITE_TABLES,
     RebuildBackend,
+    RebuildBlockedGap,
     RebuildQueueWorker,
+    RebuildScope,
 )
 from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
     BlueprintIngestResult,
@@ -100,6 +103,15 @@ from blueprint_translator.kb_vnext.update_baseline import (  # noqa: E402
 
 UPDATE_RESULT_SCHEMA: Final = "ark-kb-incremental-update/v2"
 MAX_ADDITIVE_BLUEPRINT_SOURCES: Final = 1
+_QUERY_CACHE_DELETE_ORDER: Final = (
+    "context_packs",
+    "answer_plans",
+    "materialized_neighborhoods",
+    "query_snapshots",
+)
+_QUERY_CACHE_REQUIRED_TABLES: Final = frozenset(
+    {"metadata", *_QUERY_CACHE_DELETE_ORDER}
+)
 _FULL_REBUILD_INPUTS: Final = frozenset(
     {
         "discovery",
@@ -1144,6 +1156,25 @@ def _unavailable_drain(
     )
 
 
+class ProductionIncrementalRebuildBackend(CoreMaterializerRebuildBackend):
+    """Implemented production materializers for one add-only Blueprint."""
+
+    def rebuild_query_snapshot(self, scope: RebuildScope) -> None:
+        if scope.cache is None:
+            raise RebuildBlockedGap(
+                "QUERY_CACHE_NOT_AVAILABLE",
+                "The staged query cache connection is not configured.",
+            )
+        if frozenset(_QUERY_CACHE_DELETE_ORDER) != (
+            EXPECTED_REBUILD_WRITE_TABLES["QUERY_SNAPSHOT"]
+        ):
+            raise RuntimeError(
+                "QUERY_SNAPSHOT cache tables differ from the worker contract"
+            )
+        for table in _QUERY_CACHE_DELETE_ORDER:
+            scope.cache.execute(f'DELETE FROM "{table}"')
+
+
 def drain_with_rebuild_backend(
     workspace: UpdateWorkspace,
     max_items: int,
@@ -1162,18 +1193,140 @@ def drain_with_rebuild_backend(
         connection.close()
 
 
+def _query_cache_blocked(code: str, detail: str) -> UpdateBlocked:
+    return UpdateBlocked(
+        code,
+        detail,
+        full_rebuild_required=True,
+    )
+
+
+def _open_staged_query_cache(
+    workspace: UpdateWorkspace,
+) -> sqlite3.Connection:
+    staged = workspace.staged_baseline
+    if type(staged) is not StagedBaselineSnapshot:
+        raise _query_cache_blocked(
+            "QUERY_CACHE_NOT_AVAILABLE",
+            "Production query invalidation requires a staged baseline.",
+        )
+    if workspace.staging_receipt != staged.receipt:
+        raise _query_cache_blocked(
+            "STAGING_RECEIPT_INVALID",
+            "The workspace and staged baseline receipts differ.",
+        )
+    staging_receipt = _safe_staging_receipt(staged.receipt)
+    if (
+        staging_receipt.get("cacheDisposition")
+        != "COPIED_BUILD_BOUND_DISPOSABLE"
+        or staging_receipt.get("baseBuildId") != staged.base_build_id
+        or workspace.base_build_id != staged.base_build_id
+    ):
+        raise _query_cache_blocked(
+            "QUERY_CACHE_NOT_AVAILABLE",
+            "The staging receipt does not bind a copied disposable cache.",
+        )
+
+    staged_snapshot_dir = staged.snapshot_dir.resolve()
+    workspace_snapshot_dir = workspace.snapshot_dir.resolve()
+    cache_path = workspace.cache_path.resolve()
+    expected_cache_path = (
+        staged_snapshot_dir / "cache.sqlite"
+    ).resolve()
+    if (
+        workspace_snapshot_dir != staged_snapshot_dir
+        or cache_path != expected_cache_path
+        or cache_path.parent != staged_snapshot_dir
+    ):
+        raise _query_cache_blocked(
+            "QUERY_CACHE_PATH_OUTSIDE_STAGING",
+            "The query cache path is not the staged snapshot cache.",
+        )
+    if workspace.cache_path.is_symlink() or not cache_path.is_file():
+        raise _query_cache_blocked(
+            "QUERY_CACHE_NOT_AVAILABLE",
+            "The staged query cache is missing or is not a regular file.",
+        )
+
+    try:
+        cache = sqlite3.connect(
+            f"file:{cache_path.as_posix()}?mode=rw",
+            uri=True,
+        )
+    except sqlite3.Error as exc:
+        raise _query_cache_blocked(
+            "QUERY_CACHE_NOT_AVAILABLE",
+            "The staged query cache could not be opened.",
+        ) from exc
+    try:
+        cache.execute("PRAGMA foreign_keys=ON")
+        foreign_keys = cache.execute("PRAGMA foreign_keys").fetchone()
+        if foreign_keys != (1,):
+            raise _query_cache_blocked(
+                "QUERY_CACHE_SCHEMA_INVALID",
+                "The staged query cache could not enable foreign keys.",
+            )
+        try:
+            quick_check = cache.execute("PRAGMA quick_check").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise _query_cache_blocked(
+                "QUERY_CACHE_INTEGRITY_FAILED",
+                "The staged query cache failed SQLite quick_check.",
+            ) from exc
+        if quick_check != [("ok",)]:
+            raise _query_cache_blocked(
+                "QUERY_CACHE_INTEGRITY_FAILED",
+                "The staged query cache failed SQLite quick_check.",
+            )
+        try:
+            tables = {
+                str(row[0])
+                for row in cache.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_schema
+                    WHERE type='table'
+                    """
+                )
+            }
+        except sqlite3.DatabaseError as exc:
+            raise _query_cache_blocked(
+                "QUERY_CACHE_SCHEMA_INVALID",
+                "The staged query cache schema could not be inspected.",
+            ) from exc
+        if not _QUERY_CACHE_REQUIRED_TABLES.issubset(tables):
+            raise _query_cache_blocked(
+                "QUERY_CACHE_SCHEMA_INVALID",
+                "The staged query cache is missing required tables.",
+            )
+        if cache.in_transaction or cache.row_factory is not None:
+            raise _query_cache_blocked(
+                "QUERY_CACHE_SCHEMA_INVALID",
+                "The staged query cache connection is not clean.",
+            )
+        return cache
+    except BaseException:
+        cache.close()
+        raise
+
+
 def drain_production_rebuilds(
     workspace: UpdateWorkspace,
     max_items: int,
 ) -> object:
     """Drain with only the production materializers currently implemented."""
 
+    cache = _open_staged_query_cache(workspace)
     try:
         return drain_with_rebuild_backend(
             workspace,
             max_items,
-            backend=CoreMaterializerRebuildBackend(),
+            backend=ProductionIncrementalRebuildBackend(
+                cache_connection=cache
+            ),
         )
+    except UpdateBlocked:
+        raise
     except (sqlite3.DatabaseError, RuntimeError, ValueError) as exc:
         raise UpdateBlocked(
             "PRODUCTION_REBUILD_DIAGNOSTIC_FAILED",
@@ -1181,6 +1334,8 @@ def drain_production_rebuilds(
             "staged queue.",
             full_rebuild_required=True,
         ) from exc
+    finally:
+        cache.close()
 
 
 def _unavailable_gates(workspace: UpdateWorkspace) -> GateResult:

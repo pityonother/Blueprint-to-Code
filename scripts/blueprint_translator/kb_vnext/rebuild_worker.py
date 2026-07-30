@@ -3574,8 +3574,24 @@ def _run_task(
         write_operations = (
             core_tracker.operations | cache_tracker.operations
         )
+        explicit_whole_cache_invalidation = (
+            task.downstream_kind == "QUERY_SNAPSHOT"
+            and external_marked
+            and touched == expected_tables
+            and not core_tracker.operations
+            and cache_tracker.operations
+            == {
+                (table, "DELETE")
+                for table in EXPECTED_REBUILD_WRITE_TABLES[
+                    "QUERY_SNAPSHOT"
+                ]
+            }
+        )
+        verification_basis = "TARGET_STATE_CHANGED"
+        if not semantic_changed and explicit_whole_cache_invalidation:
+            verification_basis = "EXPLICIT_WHOLE_CACHE_INVALIDATION"
         verification: dict[str, object] = {
-            "basis": "TARGET_STATE_CHANGED",
+            "basis": verification_basis,
             "coreWriteChanges": core_write_changes,
             "writeOperations": [
                 f"{table}:{operation}"
@@ -3606,6 +3622,7 @@ def _run_task(
                 relevant_write
                 and class_revision_verification is not None
             )
+            or explicit_whole_cache_invalidation
         )
         if not verified_work:
             raise RebuildVerificationError(

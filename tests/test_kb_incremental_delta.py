@@ -483,6 +483,16 @@ _TOUCHED_TABLE = {
     "QUERY_SNAPSHOT": "query_snapshots",
 }
 
+_QUERY_CACHE_TABLES = (
+    "answer_plans",
+    "context_packs",
+    "materialized_neighborhoods",
+    "query_snapshots",
+)
+_QUERY_CACHE_DELETE_OPERATIONS = tuple(
+    f"{table}:DELETE" for table in _QUERY_CACHE_TABLES
+)
+
 
 def _content_sha256(value: object) -> str:
     return hashlib.sha256(
@@ -494,6 +504,35 @@ def _content_sha256(value: object) -> str:
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _reproof_backend_receipt(
+    receipt: dict[str, object],
+) -> dict[str, object]:
+    body = dict(receipt)
+    body.pop("proof", None)
+    receipt["proof"] = "rebuild-proof://" + _content_sha256(body)
+    return receipt
+
+
+def _explicit_whole_cache_backend_receipt(
+    receipt: dict[str, object],
+) -> dict[str, object]:
+    result = copy.deepcopy(receipt)
+    result["afterDigest"] = result["beforeDigest"]
+    result["touchedTables"] = list(_QUERY_CACHE_TABLES)
+    result["verification"] = {
+        "basis": "EXPLICIT_WHOLE_CACHE_INVALIDATION",
+        "coreWriteChanges": 0,
+        "writeOperations": list(_QUERY_CACHE_DELETE_OPERATIONS),
+        "rowScope": {
+            "mode": "EXPLICIT_WHOLE_CACHE_BATCH",
+            "eventId": result["eventId"],
+            "targetId": result["downstreamId"],
+            "tables": list(_QUERY_CACHE_TABLES),
+        },
+    }
+    return _reproof_backend_receipt(result)
 
 
 def _backend_terminal_receipt(
@@ -667,6 +706,9 @@ def _receipt_sha256(receipt: dict[str, object]) -> str:
 
 def _ready_receipt_fixture(
     tmp_path: Path,
+    *,
+    explicit_query_invalidation: bool = False,
+    blocked_kinds: frozenset[str] = frozenset(),
 ) -> tuple[
     sqlite3.Connection,
     sqlite3.Connection,
@@ -698,10 +740,38 @@ def _ready_receipt_fixture(
         source_revision_ids=delta.source_revision_ids,
         actual_write_tables=delta.changed_tables,
     )
+    terminal = _successful_backend_receipts(plan)
+    if explicit_query_invalidation:
+        terminal = [
+            (
+                _explicit_whole_cache_backend_receipt(receipt)
+                if receipt["downstreamKind"] == "QUERY_SNAPSHOT"
+                else receipt
+            )
+            for receipt in terminal
+        ]
+    if blocked_kinds:
+        terminal = [
+            (
+                _backend_terminal_receipt(
+                    kind=str(receipt["downstreamKind"]),
+                    target_id=int(receipt["downstreamId"]),
+                    reason=str(receipt["dependencyReason"]),
+                    status=BLOCKED_GAP,
+                    gap_code=(
+                        "BACKEND_NOT_CONFIGURED_"
+                        + str(receipt["downstreamKind"])
+                    ),
+                )
+                if receipt["downstreamKind"] in blocked_kinds
+                else receipt
+            )
+            for receipt in terminal
+        ]
     event_id = _persist_backend_event(
         staged,
         plan,
-        _successful_backend_receipts(plan),
+        terminal,
     )
     return base, staged, delta, plan, event_id
 
@@ -1289,6 +1359,329 @@ def test_content_addressed_backend_receipt_cannot_prove_noop_outcome(
             "rebuild-proof://" + _content_sha256(attacked_body)
         )
         event_id = _persist_backend_event(staged, plan, terminal)
+
+        with pytest.raises(AddOnlyDeltaBlockedGap) as caught:
+            build_add_only_delta_receipt(
+                delta,
+                plan,
+                backend_connection=staged,
+                backend_event_id=event_id,
+            )
+
+        assert caught.value.gap_code == (
+            "BACKEND_TERMINAL_OUTCOME_UNPROVEN"
+        )
+    finally:
+        staged.close()
+        base.close()
+
+
+def test_explicit_whole_cache_invalidation_is_accepted_without_hiding_gaps(
+    tmp_path: Path,
+) -> None:
+    base, staged, delta, plan, event_id = _ready_receipt_fixture(
+        tmp_path,
+        explicit_query_invalidation=True,
+        blocked_kinds=frozenset(
+            {"ROLE_ENTITY", "DOMAIN_ENTITY", "PROJECTION"}
+        ),
+    )
+    try:
+        receipt = build_add_only_delta_receipt(
+            delta,
+            plan,
+            backend_connection=staged,
+            backend_event_id=event_id,
+        )
+
+        assert receipt["schema"] == (
+            "ark-kb-add-only-blueprint-delta-receipt/v2"
+        )
+        assert receipt["status"] == BLOCKED_GAP
+        assert receipt["published"] is False
+        assert receipt["e4Scenario2Complete"] is False
+        terminal = receipt["backendTerminalReceipts"]
+        query = next(
+            item
+            for item in terminal
+            if item["downstreamKind"] == "QUERY_SNAPSHOT"
+        )
+        assert query["status"] == "SUCCEEDED"
+        assert query["beforeDigest"] == query["afterDigest"]
+        assert query["touchedTables"] == list(_QUERY_CACHE_TABLES)
+        assert query["verification"] == {
+            "basis": "EXPLICIT_WHOLE_CACHE_INVALIDATION",
+            "coreWriteChanges": 0,
+            "writeOperations": list(_QUERY_CACHE_DELETE_OPERATIONS),
+            "rowScope": {
+                "mode": "EXPLICIT_WHOLE_CACHE_BATCH",
+                "eventId": event_id,
+                "targetId": delta.source_revision_ids[0],
+                "tables": list(_QUERY_CACHE_TABLES),
+            },
+        }
+        blocked = [
+            item for item in terminal if item["status"] == BLOCKED_GAP
+        ]
+        assert len(blocked) == 8
+        assert {
+            item["downstreamKind"] for item in blocked
+        } == {"ROLE_ENTITY", "DOMAIN_ENTITY", "PROJECTION"}
+    finally:
+        staged.close()
+        base.close()
+
+
+@pytest.mark.parametrize(
+    "attack",
+    (
+        "non-query-kind",
+        "changed-digest",
+        "forged-basis",
+        "touched-missing",
+        "touched-extra",
+        "touched-metadata",
+        "operation-missing",
+        "operation-extra",
+        "operation-insert",
+        "operation-update",
+        "operation-duplicate",
+        "core-nonzero",
+        "core-bool",
+        "core-float",
+        "core-string",
+        "cache-hit",
+        "recovered",
+        "incomplete",
+        "gap-code",
+        "detail",
+        "projection-batch",
+        "row-scope-entity-id",
+        "row-scope-event",
+        "row-scope-tables",
+        "target-state-basis",
+        "operations-empty",
+        "event-identity",
+        "verification-field-added",
+        "verification-field-deleted",
+        "receipt-field-added",
+        "receipt-field-deleted",
+    ),
+)
+def test_explicit_whole_cache_invalidation_fails_closed(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    base, staged, delta, plan, event_id = _ready_receipt_fixture(
+        tmp_path,
+        explicit_query_invalidation=True,
+    )
+    try:
+        payload = json.loads(
+            str(
+                staged.execute(
+                    """
+                    SELECT payload_json
+                    FROM invalidation_events
+                    WHERE event_id=?
+                    """,
+                    (event_id,),
+                ).fetchone()[0]
+            )
+        )
+        receipts = payload["_rebuildReceipts"]
+        key = f"QUERY_SNAPSHOT:{delta.source_revision_ids[0]}"
+        attacked = receipts[key]
+        if attack == "non-query-kind":
+            key = f"FACT:{delta.fact_ids[0]}"
+            attacked = receipts[key]
+            attacked["afterDigest"] = attacked["beforeDigest"]
+            attacked["touchedTables"] = list(_QUERY_CACHE_TABLES)
+            attacked["verification"] = {
+                "basis": "EXPLICIT_WHOLE_CACHE_INVALIDATION",
+                "coreWriteChanges": 0,
+                "writeOperations": list(
+                    _QUERY_CACHE_DELETE_OPERATIONS
+                ),
+                "rowScope": {
+                    "mode": "EXPLICIT_WHOLE_CACHE_BATCH",
+                    "eventId": event_id,
+                    "targetId": attacked["downstreamId"],
+                    "tables": list(_QUERY_CACHE_TABLES),
+                },
+            }
+        elif attack == "changed-digest":
+            attacked["afterDigest"] = "a" * 64
+        elif attack == "forged-basis":
+            attacked["verification"]["basis"] = (
+                "explicit_whole_cache_invalidation"
+            )
+        elif attack == "touched-missing":
+            attacked["touchedTables"] = list(_QUERY_CACHE_TABLES[:-1])
+        elif attack == "touched-extra":
+            attacked["touchedTables"] = [
+                *_QUERY_CACHE_TABLES,
+                "extra_cache",
+            ]
+        elif attack == "touched-metadata":
+            attacked["touchedTables"] = [
+                *_QUERY_CACHE_TABLES,
+                "metadata",
+            ]
+        elif attack == "operation-missing":
+            attacked["verification"]["writeOperations"] = list(
+                _QUERY_CACHE_DELETE_OPERATIONS[:-1]
+            )
+        elif attack == "operation-extra":
+            attacked["verification"]["writeOperations"] = [
+                *_QUERY_CACHE_DELETE_OPERATIONS,
+                "metadata:DELETE",
+            ]
+        elif attack == "operation-insert":
+            attacked["verification"]["writeOperations"][0] = (
+                "answer_plans:INSERT"
+            )
+        elif attack == "operation-update":
+            attacked["verification"]["writeOperations"][0] = (
+                "answer_plans:UPDATE"
+            )
+        elif attack == "operation-duplicate":
+            attacked["verification"]["writeOperations"].append(
+                _QUERY_CACHE_DELETE_OPERATIONS[0]
+            )
+        elif attack == "core-nonzero":
+            attacked["verification"]["coreWriteChanges"] = 1
+        elif attack == "core-bool":
+            attacked["verification"]["coreWriteChanges"] = False
+        elif attack == "core-float":
+            attacked["verification"]["coreWriteChanges"] = 0.0
+        elif attack == "core-string":
+            attacked["verification"]["coreWriteChanges"] = "0"
+        elif attack == "cache-hit":
+            attacked["cacheHit"] = True
+        elif attack == "recovered":
+            attacked["recovered"] = True
+        elif attack == "incomplete":
+            attacked["complete"] = False
+        elif attack == "gap-code":
+            attacked["gapCode"] = "FORGED_GAP"
+        elif attack == "detail":
+            attacked["detail"] = "forged detail"
+        elif attack == "projection-batch":
+            attacked["projectionBatch"] = {"1": "a" * 64}
+        elif attack == "row-scope-entity-id":
+            attacked["verification"]["rowScope"]["targetId"] = (
+                delta.entity_ids[0]
+            )
+        elif attack == "row-scope-event":
+            attacked["verification"]["rowScope"]["eventId"] = (
+                "forged-event"
+            )
+        elif attack == "row-scope-tables":
+            attacked["verification"]["rowScope"]["tables"] = list(
+                _QUERY_CACHE_TABLES[:-1]
+            )
+        elif attack == "target-state-basis":
+            attacked["verification"]["basis"] = "TARGET_STATE_CHANGED"
+        elif attack == "operations-empty":
+            attacked["verification"]["writeOperations"] = []
+        elif attack == "event-identity":
+            attacked["eventId"] = "forged-event"
+        elif attack == "verification-field-added":
+            attacked["verification"]["extra"] = True
+        elif attack == "verification-field-deleted":
+            del attacked["verification"]["coreWriteChanges"]
+        elif attack == "receipt-field-added":
+            attacked["extra"] = True
+        elif attack == "receipt-field-deleted":
+            del attacked["detail"]
+        else:
+            raise AssertionError(f"unknown attack: {attack}")
+        receipts[key] = _reproof_backend_receipt(attacked)
+        staged.execute(
+            """
+            UPDATE invalidation_events
+            SET payload_json=?
+            WHERE event_id=?
+            """,
+            (
+                json.dumps(
+                    payload,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                event_id,
+            ),
+        )
+        staged.commit()
+
+        with pytest.raises(AddOnlyDeltaBlockedGap):
+            build_add_only_delta_receipt(
+                delta,
+                plan,
+                backend_connection=staged,
+                backend_event_id=event_id,
+            )
+    finally:
+        staged.close()
+        base.close()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "FACT",
+        "EFFECTIVE_ENTITY",
+        "ROLE_ENTITY",
+        "DOMAIN_ENTITY",
+        "PROJECTION",
+    ),
+)
+def test_ordinary_backend_noop_receipts_remain_rejected(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    base, staged, delta, plan, event_id = _ready_receipt_fixture(tmp_path)
+    try:
+        payload = json.loads(
+            str(
+                staged.execute(
+                    """
+                    SELECT payload_json
+                    FROM invalidation_events
+                    WHERE event_id=?
+                    """,
+                    (event_id,),
+                ).fetchone()[0]
+            )
+        )
+        attacked = next(
+            receipt
+            for receipt in payload["_rebuildReceipts"].values()
+            if receipt["downstreamKind"] == kind
+        )
+        attacked["afterDigest"] = attacked["beforeDigest"]
+        _reproof_backend_receipt(attacked)
+        staged.execute(
+            """
+            UPDATE invalidation_events
+            SET payload_json=?
+            WHERE event_id=?
+            """,
+            (
+                json.dumps(
+                    payload,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                event_id,
+            ),
+        )
+        staged.commit()
 
         with pytest.raises(AddOnlyDeltaBlockedGap) as caught:
             build_add_only_delta_receipt(
