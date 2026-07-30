@@ -6,6 +6,8 @@ match it.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-31
+
 ### Added
 
 - Immutable-v2 ARK KB snapshots with an atomic root `current.json`, sealed
@@ -50,6 +52,9 @@ match it.
 - Recorded the real prepublication queue result
   (`SUCCEEDED=4`, `BLOCKED_GAP=8`, `FAILED=0`); Role, Domain, and Projection
   remain deliberately unavailable and no publication occurred.
+- Production Role, Domain, and Projection rebuild Backends, production narrow
+  gates, the incremental publisher, Gold thresholds, burn-in, and cutover
+  remain unfinished; vNext is not production-ready.
 
 ## [0.2.0] - 2026-07-27
 

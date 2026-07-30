@@ -97,6 +97,91 @@ class DocumentationConsistencyTests(unittest.TestCase):
         self.assertIn("不授予开源许可证", policy)
         self.assertIn("版权由项目作者保留", policy)
 
+    def test_v030_release_contract_is_complete_and_linked(self):
+        release_path = ROOT / "docs" / "releases" / "v0.3.0.md"
+
+        self.assertTrue(release_path.is_file())
+        self.assertIn(
+            "[v0.3.0 Release notes](docs/releases/v0.3.0.md)",
+            self.readme,
+        )
+        self.assertIn("Current software version: `0.3.0`", self.readme)
+
+        release = release_path.read_text(encoding="utf-8")
+        for marker in (
+            "# Blueprint to Code v0.3.0 — Engineering Foundation Milestone",
+            "Engineering Foundation Milestone",
+            "20260730T172442-19e56659d331",
+            "60/75",
+            "READY / FRESH",
+            "shadow",
+            "legacy",
+            "cutoverEligible=false",
+            "Snapshot Blueprint Evidence: 234",
+            "Live Blueprint Evidence: 235",
+            "SUCCEEDED=4",
+            "BLOCKED_GAP=8",
+            "FAILED=0",
+            "ROLE_ENTITY × 1",
+            "DOMAIN_ENTITY × 1",
+            "PROJECTION × 6",
+            "published=false",
+            "SOURCE_ARCHIVE_ONLY",
+            "版权由项目作者保留",
+            "没有默认开源许可证",
+            "../LICENSE_POLICY.md",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, release)
+
+    def test_changelog_has_empty_unreleased_and_complete_v030_section(self):
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        unreleased, versioned = changelog.split(
+            "## [0.3.0] - 2026-07-31",
+            maxsplit=1,
+        )
+        future = unreleased.split("## [Unreleased]", maxsplit=1)[1]
+
+        self.assertEqual(future.strip(), "")
+        for marker in (
+            "Immutable-v2",
+            "atomic root `current.json`",
+            "fail-closed burn-in/cutover contracts",
+            "reparse-safe whole-tree staging",
+            "staging quarantine",
+            "base-bound v3",
+            "Production `QUERY_SNAPSHOT` cache invalidation",
+            "Scarecrow",
+            "retention and validation rules",
+            "Role, Domain, and Projection",
+            "production narrow",
+            "incremental publisher",
+            "Gold thresholds",
+            "burn-in",
+            "cutover",
+            "not production-ready",
+            "no publication occurred",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, versioned)
+
+    def test_license_policy_defines_github_release_disclosures(self):
+        policy = (ROOT / "docs" / "LICENSE_POLICY.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("## GitHub Release 披露要求", policy)
+        for marker in (
+            "作者保留权利",
+            "无默认开源授权",
+            "第三方资产",
+            "Evidence",
+            "KB cutover",
+            "Release asset",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, policy)
+
     def test_readme_links_current_discovery_progress_review(self):
         review_path = (
             ROOT

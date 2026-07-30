@@ -23,6 +23,17 @@ GitHub 的[仓库许可说明](https://docs.github.com/zh/repositories/managing-
 - 第三方依赖和可选工具继续受其各自许可证约束，不因本项目策略而重新授权。
 - 接受外部贡献或向第三方授予复用权前，需要由作者另行给出明确书面授权。
 
+## GitHub Release 披露要求
+
+每次公开 GitHub Release 的 Release notes 都必须明确声明：
+
+- 作者保留权利，仓库公开可见不改变这一点；
+- 无默认开源授权：仓库当前未授予开源许可证，不因发布 Release 而自动授权；
+- 第三方资产未包含，也未由本项目重新授权；
+- 软件分析结论受记录的 Evidence、revision 与 freshness 边界约束；
+- 软件 Release 不等于 ARK Knowledge Base 的 KB cutover；
+- 完整列出本次 Release asset，明确哪些内容包含、哪些内容不包含。
+
 ## 将来如何变更
 
 如果作者以后决定把项目开放为开源项目，应明确选择一份标准许可证，在仓库根目录添加对应
