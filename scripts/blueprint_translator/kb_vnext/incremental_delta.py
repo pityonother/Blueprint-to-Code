@@ -18,7 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
-from .blueprint_ingest import BlueprintIngestResult
+from .blueprint_ingest import (
+    BlueprintIngestResult,
+    is_canonical_unreal_uri,
+)
 from .invalidation import (
     InvalidationBlockedGap,
     InvalidationPlan,
@@ -170,6 +173,22 @@ class _FrozenFile:
     content: bytes
     sha256: str
     size_bytes: int
+
+
+@dataclass(frozen=True)
+class BlueprintEvidenceBundleInspection:
+    evidence_sha256: str
+    evidence_bytes: int
+    manifest_sha256: str | None
+    manifest_bytes: int | None
+    aggregate_sha256: str
+    source_revision_label: str
+    core_source_uri: str
+    core_source_fingerprint: str
+    entity_uri: str
+    producer_version: str
+    schema_version: str
+    generated_at: str
 
 
 def _gap(code: str, message: str) -> AddOnlyDeltaBlockedGap:
@@ -577,6 +596,56 @@ def _source_aggregate_sha256(
     return digest.hexdigest()
 
 
+def inspect_blueprint_evidence_bundle(
+    evidence: bytes,
+    manifest: bytes | None,
+) -> BlueprintEvidenceBundleInspection:
+    """Parse one frozen Evidence bundle through the delta identity contract."""
+
+    if type(evidence) is not bytes or not evidence:
+        raise _gap(
+            "ARTIFACT_IDENTITY_INVALID",
+            "Evidence SQLite bytes are required",
+        )
+    if manifest is not None and (
+        type(manifest) is not bytes or not manifest
+    ):
+        raise _gap(
+            "ARTIFACT_IDENTITY_INVALID",
+            "adjacent Evidence manifest bytes are invalid",
+        )
+    identity = _evidence_identity(evidence)
+    entity_uri = identity["entityUri"]
+    if not is_canonical_unreal_uri(entity_uri):
+        raise _gap(
+            "ARTIFACT_IDENTITY_INVALID",
+            "Evidence object URI is not canonical",
+        )
+    return BlueprintEvidenceBundleInspection(
+        evidence_sha256=hashlib.sha256(evidence).hexdigest(),
+        evidence_bytes=len(evidence),
+        manifest_sha256=(
+            hashlib.sha256(manifest).hexdigest()
+            if manifest is not None
+            else None
+        ),
+        manifest_bytes=(
+            len(manifest) if manifest is not None else None
+        ),
+        aggregate_sha256=_source_aggregate_sha256(
+            evidence,
+            manifest,
+        ),
+        source_revision_label=identity["sourceRevisionLabel"],
+        core_source_uri=identity["coreSourceUri"],
+        core_source_fingerprint=identity["coreSourceFingerprint"],
+        entity_uri=entity_uri,
+        producer_version=identity["producerVersion"],
+        schema_version=identity["schemaVersion"],
+        generated_at=identity["generatedAt"],
+    )
+
+
 def _adjacent_manifest(
     root: Path,
     evidence_path: Path,
@@ -676,16 +745,27 @@ def _bindings(
                 "source diff size differs from frozen Evidence bytes",
             )
         manifest = _adjacent_manifest(root, path)
-        aggregate = _source_aggregate_sha256(
+        inspection = inspect_blueprint_evidence_bundle(
             evidence.content,
             manifest[1].content if manifest is not None else None,
         )
+        aggregate = inspection.aggregate_sha256
         if aggregate != revision.fingerprint:
             raise _gap(
                 "SOURCE_DIFF_AGGREGATE_MISMATCH",
                 "source diff fingerprint differs from frozen artifact bundle",
             )
-        identity = _evidence_identity(evidence.content)
+        identity = {
+            "sourceRevisionLabel": inspection.source_revision_label,
+            "coreSourceUri": inspection.core_source_uri,
+            "coreSourceFingerprint": (
+                inspection.core_source_fingerprint
+            ),
+            "entityUri": inspection.entity_uri,
+            "producerVersion": inspection.producer_version,
+            "schemaVersion": inspection.schema_version,
+            "generatedAt": inspection.generated_at,
+        }
         if identity["sourceRevisionLabel"] != revision.revision_label:
             raise _gap(
                 "SOURCE_DIFF_REVISION_LABEL_MISMATCH",

@@ -184,7 +184,7 @@ def _table_columns(
     return {str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')}
 
 
-def _is_canonical_unreal_uri(value: str) -> bool:
+def is_canonical_unreal_uri(value: str) -> bool:
     if value != value.strip() or any(
         marker in value for marker in ("\\", "?", "#", "%")
     ):
@@ -212,7 +212,7 @@ def _contains_local_path(value: object) -> bool:
             if expanded == decoded:
                 break
             decoded = expanded
-        if _is_canonical_unreal_uri(decoded):
+        if is_canonical_unreal_uri(decoded):
             return False
         return bool(
             decoded.startswith("/")
@@ -279,7 +279,7 @@ def _canonical_unreal_uri(value: object) -> str | None:
     text = str(value or "").strip()
     if not text or text.casefold() in {"none", "none.none", "null"}:
         return None
-    if _contains_local_path(text) or not _is_canonical_unreal_uri(text):
+    if _contains_local_path(text) or not is_canonical_unreal_uri(text):
         raise _UnsupportedValue("object reference is not a canonical Unreal URI")
     return text
 
@@ -1163,7 +1163,10 @@ def _validate_identity(
     *,
     candidate: _AssetCandidate,
     asset_root: Path,
+    evidence_directory: Path,
     expected_asset_name: str,
+    require_adjacent_manifest: bool = True,
+    verify_current_package: bool = True,
 ) -> _RevisionIdentity:
     identity = _read_revision(connection)
     if (
@@ -1171,40 +1174,45 @@ def _validate_identity(
         or identity.asset_name != expected_asset_name
         or identity.revision_id != candidate.evidence_revision
         or identity.schema_version != EVIDENCE_SCHEMA_VERSION
-        or not _is_canonical_unreal_uri(identity.object_path)
+        or not is_canonical_unreal_uri(identity.object_path)
         or not _SAFE_TOKEN.fullmatch(identity.asset_id)
         or identity.asset_id != make_asset_id(identity.object_path)
         or not _SAFE_TOKEN.fullmatch(identity.revision_id)
         or _contains_local_path(identity.generated_at)
     ):
         raise _RejectedAsset("Discovery and Evidence identities do not match")
-    manifest_path = asset_root / "evidence" / "manifest.json"
-    if not manifest_path.is_file():
+    manifest_path = evidence_directory / "manifest.json"
+    if require_adjacent_manifest and not manifest_path.is_file():
         raise _RejectedAsset("Evidence manifest is missing")
-    manifest = _read_json_object(manifest_path)
-    expected = {
-        "asset_id": identity.asset_id,
-        "asset_name": identity.asset_name,
-        "object_path": identity.object_path,
-        "revision_id": identity.revision_id,
-        "source_fingerprint": identity.source_fingerprint,
-        "parser_version": identity.parser_version,
-        "schema": identity.schema_version,
-        "database": "evidence.sqlite",
-    }
-    if any(str(manifest.get(key) or "") != value for key, value in expected.items()):
-        raise _RejectedAsset("Evidence manifest identity mismatch")
+    if manifest_path.is_file():
+        manifest = _read_json_object(manifest_path)
+        expected = {
+            "asset_id": identity.asset_id,
+            "asset_name": identity.asset_name,
+            "object_path": identity.object_path,
+            "revision_id": identity.revision_id,
+            "source_fingerprint": identity.source_fingerprint,
+            "parser_version": identity.parser_version,
+            "schema": identity.schema_version,
+            "database": "evidence.sqlite",
+        }
+        if any(
+            str(manifest.get(key) or "") != value
+            for key, value in expected.items()
+        ):
+            raise _RejectedAsset("Evidence manifest identity mismatch")
     source_manifest = _validate_source_manifest(
         connection,
         asset_root=asset_root,
         identity=identity,
     )
-    _validate_current_package(
-        candidate=candidate,
-        identity=identity,
-        asset_root=asset_root,
-        source_manifest=source_manifest,
-    )
+    if verify_current_package:
+        _validate_current_package(
+            candidate=candidate,
+            identity=identity,
+            asset_root=asset_root,
+            source_manifest=source_manifest,
+        )
     return identity
 
 
@@ -1269,7 +1277,7 @@ def _explicit_blueprint_sources(
             or "/" in capture_asset_name
             or "\\" in capture_asset_name
             or not _SAFE_TOKEN.fullmatch(capture_asset_name)
-            or not _is_canonical_unreal_uri(revision.entity_uri)
+            or not is_canonical_unreal_uri(revision.entity_uri)
             or not _SAFE_TOKEN.fullmatch(revision.revision_label)
             or revision.entity_uri in result
             or revision.source_uri in source_uris
@@ -1405,7 +1413,7 @@ def _capture_asset_name(candidate: _AssetCandidate) -> str:
         return raw_name
     if (
         raw_name != candidate.object_path
-        or not _is_canonical_unreal_uri(raw_name)
+        or not is_canonical_unreal_uri(raw_name)
         or raw_name.endswith("/")
     ):
         raise _RejectedAsset("unsafe path-like capture asset name")
@@ -1422,6 +1430,7 @@ def materialize_blueprint_defaults(
     capture_root: Path,
     ontology: OntologyBundle,
     source_revisions: Sequence[SourceRevision] | None = None,
+    frozen_evidence_root: bool = False,
 ) -> BlueprintIngestResult:
     """Read only Discovery-selected FRESH Evidence stores into Core facts.
 
@@ -1430,6 +1439,12 @@ def materialize_blueprint_defaults(
     """
 
     explicit_sources = _explicit_blueprint_sources(source_revisions)
+    if frozen_evidence_root and (
+        explicit_sources is None or len(explicit_sources) != 1
+    ):
+        raise ValueError(
+            "frozen Evidence ingest requires exactly one explicit Blueprint"
+        )
     candidates, stale_assets = _asset_candidates(
         discovery,
         explicit_sources=explicit_sources,
@@ -1472,8 +1487,19 @@ def materialize_blueprint_defaults(
             continue
         try:
             capture_asset_name = _capture_asset_name(candidate)
-            asset_root = _safe_asset_root(capture_root, capture_asset_name)
-            database_path = asset_root / "evidence" / "evidence.sqlite"
+            if frozen_evidence_root:
+                asset_root = capture_root
+                evidence_directory = capture_root
+                database_path = capture_root / "evidence.sqlite"
+            else:
+                asset_root = _safe_asset_root(
+                    capture_root,
+                    capture_asset_name,
+                )
+                evidence_directory = asset_root / "evidence"
+                database_path = (
+                    evidence_directory / "evidence.sqlite"
+                )
             if not database_path.is_file():
                 raise _RejectedAsset("Evidence database is missing")
             explicit = (
@@ -1500,7 +1526,14 @@ def materialize_blueprint_defaults(
                     evidence,
                     candidate=candidate,
                     asset_root=asset_root,
+                    evidence_directory=evidence_directory,
                     expected_asset_name=capture_asset_name,
+                    require_adjacent_manifest=(
+                        not frozen_evidence_root
+                    ),
+                    verify_current_package=(
+                        not frozen_evidence_root
+                    ),
                 )
                 columns = _table_columns(evidence, "class_defaults")
                 required = {
@@ -1547,6 +1580,14 @@ def materialize_blueprint_defaults(
                         )
             finally:
                 evidence.close()
+            if (
+                explicit is not None
+                and _blueprint_aggregate_fingerprint(database_path)
+                != explicit.fingerprint
+            ):
+                raise _RejectedAsset(
+                    "Evidence aggregate changed during materialization"
+                )
         except _FreshnessGap:
             counts["freshnessGapAssets"] += 1
             freshness_gaps.add(candidate.object_path)
@@ -1633,7 +1674,8 @@ def materialize_blueprint_defaults(
             core.execute(f"RELEASE SAVEPOINT {savepoint}")
             raise
         counts["freshAssets"] += 1
-        counts["packageVerifiedAssets"] += 1
+        if not frozen_evidence_root:
+            counts["packageVerifiedAssets"] += 1
         counts["sourceRevisions"] += 1
         materialized_entity_ids.add(entity_id)
 

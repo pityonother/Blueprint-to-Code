@@ -9,13 +9,18 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Final
+from urllib.parse import quote, unquote
 
 from .incremental_delta import (
     AddOnlyDeltaBlockedGap,
+    BlueprintEvidenceBundleInspection,
+    inspect_blueprint_evidence_bundle,
     validate_add_only_delta_receipt,
 )
 from .pointer_cas import (
@@ -27,6 +32,7 @@ from .pointer_cas import (
 from .source_manifest import (
     SourceDiff,
     SourceManifest,
+    SourceRevision,
     canonical_source_diff_bytes,
     compare_source_manifests,
     source_diff_sha256,
@@ -37,6 +43,12 @@ from .source_manifest import (
 UPDATE_BASELINE_SCHEMA: Final = "ark-kb-update-baseline/v1"
 PREPUBLICATION_DELTA_INSPECTION_SCHEMA: Final = (
     "ark-kb-prepublication-delta-inspection/v1"
+)
+ADDITIVE_QUARANTINE_RECEIPT_SCHEMA: Final = (
+    "ark-kb-reparse-safe-additive-quarantine-receipt/v1"
+)
+ADDITIVE_QUARANTINE_EVIDENCE_CLASS: Final = (
+    "UNSIGNED_LOCAL_REPARSE_SAFE_ADDITIVE_QUARANTINE"
 )
 MAX_DELTA_RECEIPT_BYTES: Final = 4 * 1024 * 1024
 _MAX_SNAPSHOT_MANIFEST_BYTES: Final = 4 * 1024 * 1024
@@ -455,26 +467,808 @@ def cleanup_staged_baseline_snapshot(
         ) from exc
 
 
+def _json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_value(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_value(child) for child in value]
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    raise ValueError("quarantine receipt contains a non-JSON value")
+
+
+def _freeze_json(value: object) -> object:
+    normalized = _json_value(value)
+    if isinstance(normalized, dict):
+        return MappingProxyType(
+            {
+                key: _freeze_json(child)
+                for key, child in normalized.items()
+            }
+        )
+    if isinstance(normalized, list):
+        return tuple(_freeze_json(child) for child in normalized)
+    return normalized
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _json_value(value),
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _staging_baseline_identity_sha256(
+    baseline: UpdateBaseline,
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            baseline.payload(),
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True)
+class FrozenQuarantineArtifact:
+    artifact_uri: str
+    artifact_sha256: str
+    artifact_bytes: int
+
+    def __post_init__(self) -> None:
+        relative = (
+            self.artifact_uri[len("artifact://") :]
+            if self.artifact_uri.startswith("artifact://")
+            else ""
+        )
+        path = PurePosixPath(relative)
+        if (
+            not relative
+            or path.is_absolute()
+            or "\\" in relative
+            or any(
+                part in {"", ".", ".."} or ":" in part
+                for part in path.parts
+            )
+            or not _SHA256.fullmatch(self.artifact_sha256)
+            or isinstance(self.artifact_bytes, bool)
+            or not isinstance(self.artifact_bytes, int)
+            or self.artifact_bytes < 0
+        ):
+            raise ValueError("frozen quarantine artifact is invalid")
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "artifactUri": self.artifact_uri,
+            "artifactSha256": self.artifact_sha256,
+            "artifactBytes": self.artifact_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class FrozenArtifactBinding:
+    source_id: str
+    source_fingerprint: str
+    evidence: FrozenQuarantineArtifact
+    manifest: FrozenQuarantineArtifact | None
+
+    def __post_init__(self) -> None:
+        if (
+            not _SHA256.fullmatch(self.source_id)
+            or not _SHA256.fullmatch(self.source_fingerprint)
+            or type(self.evidence) is not FrozenQuarantineArtifact
+            or (
+                self.manifest is not None
+                and type(self.manifest) is not FrozenQuarantineArtifact
+            )
+        ):
+            raise ValueError("frozen artifact binding is invalid")
+
+
+_QUARANTINE_RECEIPT_FIELDS: Final = {
+    "schema",
+    "evidenceClass",
+    "baseBuildId",
+    "pointerSha256",
+    "manifestSha256",
+    "baseSourceManifestFingerprint",
+    "candidateSourceManifestFingerprint",
+    "sourceDiffSha256",
+    "updateBaselineIdentitySha256",
+    "stagingReceiptProof",
+    "stagingTreeDigest",
+    "sourceId",
+    "entityUri",
+    "revisionLabel",
+    "sourceFingerprint",
+    "artifactUri",
+    "artifactSha256",
+    "artifactBytes",
+    "manifestArtifact",
+    "sourceAggregateSha256",
+    "quarantineTreeDigest",
+    "quarantineRelativePath",
+    "sameVolume",
+    "sourceVerifiedUnchanged",
+    "exactArtifactSet",
+    "reparsePointCount",
+    "hardlinkAliasCount",
+    "createdAt",
+    "published",
+    "productionAuthority",
+    "e4Scenario2Complete",
+    "cutoverEligible",
+    "mode",
+    "defaultQuerySource",
+    "proof",
+}
+
+
+def _validate_quarantine_receipt(
+    receipt: Mapping[str, object],
+    *,
+    binding: FrozenArtifactBinding,
+    base_build_id: str,
+    staging_id: str,
+    entity_uri: str,
+    revision_label: str,
+    pointer_sha256: str,
+    manifest_sha256: str,
+    base_source_manifest_fingerprint: str,
+    candidate_source_manifest_fingerprint: str,
+    source_diff_sha256_value: str,
+    update_baseline_identity_sha256: str,
+    staging_receipt_proof: str,
+    staging_tree_digest: str,
+    quarantine_tree_digest: str,
+    created_at: str,
+) -> None:
+    if set(receipt) != _QUARANTINE_RECEIPT_FIELDS:
+        raise _gap(
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            "quarantine receipt fields are invalid",
+        )
+    body = {
+        key: _json_value(value)
+        for key, value in receipt.items()
+        if key != "proof"
+    }
+    proof = receipt.get("proof")
+    expected_proof = "quarantine-proof://" + _canonical_sha256(body)
+    manifest_artifact = receipt.get("manifestArtifact")
+    expected_manifest = (
+        binding.manifest.payload()
+        if binding.manifest is not None
+        else None
+    )
+    fixed = {
+        "schema": ADDITIVE_QUARANTINE_RECEIPT_SCHEMA,
+        "evidenceClass": ADDITIVE_QUARANTINE_EVIDENCE_CLASS,
+        "baseBuildId": base_build_id,
+        "pointerSha256": pointer_sha256,
+        "manifestSha256": manifest_sha256,
+        "baseSourceManifestFingerprint": (
+            base_source_manifest_fingerprint
+        ),
+        "candidateSourceManifestFingerprint": (
+            candidate_source_manifest_fingerprint
+        ),
+        "sourceDiffSha256": source_diff_sha256_value,
+        "updateBaselineIdentitySha256": (
+            update_baseline_identity_sha256
+        ),
+        "stagingReceiptProof": staging_receipt_proof,
+        "stagingTreeDigest": staging_tree_digest,
+        "sourceId": binding.source_id,
+        "entityUri": entity_uri,
+        "revisionLabel": revision_label,
+        "sourceFingerprint": binding.source_fingerprint,
+        "artifactUri": binding.evidence.artifact_uri,
+        "artifactSha256": binding.evidence.artifact_sha256,
+        "artifactBytes": binding.evidence.artifact_bytes,
+        "manifestArtifact": expected_manifest,
+        "sourceAggregateSha256": binding.source_fingerprint,
+        "quarantineTreeDigest": quarantine_tree_digest,
+        "sameVolume": True,
+        "sourceVerifiedUnchanged": True,
+        "exactArtifactSet": True,
+        "reparsePointCount": 0,
+        "hardlinkAliasCount": 0,
+        "createdAt": created_at,
+        "published": False,
+        "productionAuthority": False,
+        "e4Scenario2Complete": False,
+        "cutoverEligible": False,
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
+    }
+    relative = str(receipt.get("quarantineRelativePath") or "")
+    if (
+        any(receipt.get(key) != value for key, value in fixed.items())
+        or manifest_artifact != expected_manifest
+        or relative
+        != (
+            f".incremental-staging/{staging_id}/quarantine/"
+            f"{binding.source_id}"
+        )
+        or proof != expected_proof
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            "quarantine receipt identity or proof is invalid",
+        )
+
+
+@dataclass(frozen=True)
+class FrozenAdditiveBlueprintInput:
+    base_build_id: str
+    staging_id: str
+    source_id: str
+    entity_uri: str
+    revision_label: str
+    source_fingerprint: str
+    pointer_sha256: str
+    manifest_sha256: str
+    base_source_manifest_fingerprint: str
+    candidate_source_manifest_fingerprint: str
+    source_diff_sha256: str
+    update_baseline_identity_sha256: str
+    staging_receipt_proof: str
+    staging_tree_digest: str
+    quarantine_tree_digest: str
+    created_at: str
+    quarantine_root: Path
+    ingest_root: Path
+    artifact_bindings: tuple[FrozenArtifactBinding, ...]
+    receipt: Mapping[str, object]
+    cleanup_identity: tuple[object, ...]
+    safe_bundle: object
+
+    def __post_init__(self) -> None:
+        from .safe_staging import SafeFrozenBlueprintBundle
+
+        if not isinstance(self.receipt, MappingProxyType):
+            raise ValueError(
+                "frozen additive Blueprint receipt must be immutable"
+            )
+        if (
+            not self.base_build_id
+            or not re.fullmatch(r"[0-9a-f]{32}", self.staging_id)
+            or not _SHA256.fullmatch(self.source_id)
+            or not self.entity_uri
+            or not self.revision_label
+            or not _SHA256.fullmatch(self.source_fingerprint)
+            or not _SHA256.fullmatch(self.pointer_sha256)
+            or not _SHA256.fullmatch(self.manifest_sha256)
+            or not _SHA256.fullmatch(
+                self.base_source_manifest_fingerprint
+            )
+            or not _SHA256.fullmatch(
+                self.candidate_source_manifest_fingerprint
+            )
+            or not _SHA256.fullmatch(self.source_diff_sha256)
+            or not _SHA256.fullmatch(
+                self.update_baseline_identity_sha256
+            )
+            or not re.fullmatch(
+                r"staging-proof://[0-9a-f]{64}",
+                self.staging_receipt_proof,
+            )
+            or not _SHA256.fullmatch(self.staging_tree_digest)
+            or not _SHA256.fullmatch(self.quarantine_tree_digest)
+            or not self.created_at.endswith("+00:00")
+            or not isinstance(self.quarantine_root, Path)
+            or self.ingest_root
+            != self.quarantine_root / self.source_id
+            or type(self.artifact_bindings) is not tuple
+            or len(self.artifact_bindings) != 1
+            or self.artifact_bindings[0].source_id != self.source_id
+            or self.artifact_bindings[0].source_fingerprint
+            != self.source_fingerprint
+            or not isinstance(self.cleanup_identity, tuple)
+            or not self.cleanup_identity
+            or type(self.safe_bundle) is not SafeFrozenBlueprintBundle
+        ):
+            raise ValueError("frozen additive Blueprint input is invalid")
+        _validate_quarantine_receipt(
+            self.receipt,
+            binding=self.artifact_bindings[0],
+            base_build_id=self.base_build_id,
+            staging_id=self.staging_id,
+            entity_uri=self.entity_uri,
+            revision_label=self.revision_label,
+            pointer_sha256=self.pointer_sha256,
+            manifest_sha256=self.manifest_sha256,
+            base_source_manifest_fingerprint=(
+                self.base_source_manifest_fingerprint
+            ),
+            candidate_source_manifest_fingerprint=(
+                self.candidate_source_manifest_fingerprint
+            ),
+            source_diff_sha256_value=self.source_diff_sha256,
+            update_baseline_identity_sha256=(
+                self.update_baseline_identity_sha256
+            ),
+            staging_receipt_proof=self.staging_receipt_proof,
+            staging_tree_digest=self.staging_tree_digest,
+            quarantine_tree_digest=self.quarantine_tree_digest,
+            created_at=self.created_at,
+        )
+
+
+def _single_additive_blueprint_revision(
+    baseline: UpdateBaseline,
+) -> SourceRevision:
+    changes = baseline.source_diff
+    captures = [
+        change
+        for change in changes.changed
+        if (
+            change.previous is not None
+            and change.current is not None
+            and change.previous.source_kind
+            == change.current.source_kind
+            == "SEMANTIC_INPUT"
+            and change.previous.source_uri
+            == change.current.source_uri
+            == "semantic-input://captures"
+        )
+    ]
+    additions = [
+        change.current
+        for change in changes.added
+        if (
+            change.previous is None
+            and change.current is not None
+            and change.current.source_kind == "BLUEPRINT_EVIDENCE"
+        )
+    ]
+    if (
+        len(additions) != 1
+        or len(captures) != 1
+        or len(changes.added) != 1
+        or len(changes.changed) != 1
+        or changes.deleted
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_REQUIRES_SINGLE_BLUEPRINT",
+            "quarantine requires exactly one add-only Blueprint Evidence "
+            "revision and the captures aggregate change",
+        )
+    revision = additions[0]
+    if (
+        revision.source_id != changes.added[0].source_id
+        or revision not in baseline.candidate_source_manifest.entries
+        or not revision.entity_uri
+        or not revision.revision_label
+        or revision.size_bytes < 1
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_BASELINE_CHANGED",
+            "the additive Blueprint revision is not bound to the candidate",
+        )
+    return revision
+
+
+def _capture_bundle_directory(revision: SourceRevision) -> str:
+    prefix = "capture://"
+    encoded = (
+        revision.source_uri[len(prefix) :]
+        if revision.source_uri.startswith(prefix)
+        else ""
+    )
+    decoded = unquote(encoded)
+    path = PurePosixPath(decoded)
+    if (
+        not encoded
+        or not decoded
+        or "\\" in decoded
+        or path.is_absolute()
+        or len(path.parts) != 1
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or not re.fullmatch(r"[A-Za-z0-9._-]+", decoded)
+        or quote(decoded, safe="._-") != encoded
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_ARTIFACT_SET_MISMATCH",
+            "the additive Blueprint source URI is not canonical",
+        )
+    return f"{path.as_posix()}/evidence"
+
+
+def _validate_staged_quarantine_binding(
+    baseline: UpdateBaseline,
+    staged: StagedBaselineSnapshot,
+) -> tuple[str, str]:
+    if (
+        type(staged) is not StagedBaselineSnapshot
+        or staged.base_build_id != baseline.base_build_id
+        or not re.fullmatch(r"[0-9a-f]{32}", staged.staging_id)
+        or staged.temporary_root
+        != (
+            baseline.snapshot_root
+            / ".incremental-staging"
+            / staged.staging_id
+        )
+        or staged.snapshot_dir != staged.temporary_root / "snapshot"
+        or not isinstance(staged.receipt, Mapping)
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_BASELINE_CHANGED",
+            "the staging workspace is not bound to the UpdateBaseline",
+        )
+    receipt_body = dict(staged.receipt)
+    proof = str(receipt_body.pop("proof", ""))
+    expected_proof = "staging-proof://" + _canonical_sha256(
+        receipt_body
+    )
+    staging_tree_digest = str(
+        staged.receipt.get("stagedTreeDigest") or ""
+    )
+    expected_baseline_identity = _staging_baseline_identity_sha256(
+        baseline
+    )
+    if (
+        proof != expected_proof
+        or staged.receipt.get("baseBuildId") != baseline.base_build_id
+        or staged.receipt.get("pointerSha256")
+        != baseline.base_pointer_sha256
+        or staged.receipt.get("manifestSha256")
+        != baseline.base_manifest_sha256
+        or staged.receipt.get("sourceDiffSha256")
+        != baseline.source_diff_sha256
+        or staged.receipt.get("sourceManifestFingerprint")
+        != baseline.candidate_source_manifest_fingerprint
+        or staged.receipt.get("updateBaselineIdentitySha256")
+        != expected_baseline_identity
+        or not _SHA256.fullmatch(staging_tree_digest)
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_BASELINE_CHANGED",
+            "the safe staging receipt does not match the UpdateBaseline",
+        )
+    return proof, staging_tree_digest
+
+
+def _inspection_matches_revision(
+    inspection: BlueprintEvidenceBundleInspection,
+    revision: SourceRevision,
+) -> None:
+    if inspection.evidence_bytes != revision.size_bytes:
+        raise _gap(
+            "ADDITIVE_QUARANTINE_AGGREGATE_MISMATCH",
+            "Evidence SQLite bytes differ from SourceRevision.sizeBytes",
+        )
+    if (
+        inspection.source_revision_label != revision.revision_label
+        or inspection.entity_uri != revision.entity_uri
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED",
+            "Evidence entity or revision differs from SourceRevision",
+        )
+    if inspection.aggregate_sha256 != revision.fingerprint:
+        raise _gap(
+            "ADDITIVE_QUARANTINE_AGGREGATE_MISMATCH",
+            "Evidence aggregate differs from SourceRevision fingerprint",
+        )
+
+
 def freeze_additive_blueprint_input(
     baseline: UpdateBaseline,
     *,
     capture_root: Path,
-    quarantine_root: Path,
-) -> None:
-    """Fail closed until reparse-safe additive quarantine is available."""
+    staged_snapshot: StagedBaselineSnapshot,
+    fault_injector: Callable[[str, str], None] | None = None,
+) -> FrozenAdditiveBlueprintInput:
+    """Freeze the exact candidate-bound Evidence bundle beside staging."""
 
     if type(baseline) is not UpdateBaseline:
         raise TypeError("update baseline is required")
-    if not isinstance(capture_root, Path) or not isinstance(
-        quarantine_root,
-        Path,
-    ):
-        raise TypeError("capture and quarantine roots must be Paths")
-    raise _gap(
-        "REPARSE_SAFE_ADDITIVE_QUARANTINE_UNAVAILABLE",
-        "additive quarantine is unavailable until source and destination "
-        "directories can be pinned against path replacement",
+    if not isinstance(capture_root, Path):
+        raise TypeError("capture root must be a Path")
+    if fault_injector is not None and not callable(fault_injector):
+        raise TypeError("quarantine fault injector must be callable")
+    revision = _single_additive_blueprint_revision(baseline)
+    staging_proof, staging_tree_digest = (
+        _validate_staged_quarantine_binding(
+            baseline,
+            staged_snapshot,
+        )
     )
+    validate_update_baseline_identity(
+        baseline,
+        expected_current_snapshot=baseline.current_snapshot,
+        expected_candidate_source_manifest=(
+            baseline.candidate_source_manifest
+        ),
+    )
+    from .safe_staging import (
+        SafeStagingError,
+        freeze_blueprint_evidence_bundle,
+        validate_frozen_blueprint_bundle,
+    )
+
+    try:
+        safe_bundle = freeze_blueprint_evidence_bundle(
+            source_root=capture_root,
+            source_relative_directory=_capture_bundle_directory(
+                revision
+            ),
+            temporary_root=staged_snapshot.temporary_root,
+            staging_id=staged_snapshot.staging_id,
+            staging_identity=staged_snapshot.cleanup_identity,
+            source_id=revision.source_id,
+            fault_injector=fault_injector,
+        )
+        validated = validate_frozen_blueprint_bundle(
+            safe_bundle,
+            temporary_root=staged_snapshot.temporary_root,
+            staging_identity=staged_snapshot.cleanup_identity,
+        )
+    except SafeStagingError as exc:
+        raise UpdateBaselineBlockedGap(
+            exc.gap_code,
+            str(exc),
+            status=exc.status,
+            residual_identifier=exc.residual_identifier,
+        ) from exc
+    artifacts = dict(validated.artifacts)
+    if set(artifacts) not in (
+        {"evidence.sqlite"},
+        {"evidence.sqlite", "manifest.json"},
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_ARTIFACT_SET_MISMATCH",
+            "quarantine does not contain the exact Evidence bundle",
+        )
+    try:
+        inspection = inspect_blueprint_evidence_bundle(
+            artifacts["evidence.sqlite"],
+            artifacts.get("manifest.json"),
+        )
+    except AddOnlyDeltaBlockedGap as exc:
+        raise _gap(
+            "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED",
+            "quarantined Evidence SQLite identity is invalid",
+        ) from exc
+    _inspection_matches_revision(inspection, revision)
+    by_name = {
+        artifact.relative: artifact
+        for artifact in safe_bundle.artifacts
+    }
+    evidence_artifact = FrozenQuarantineArtifact(
+        artifact_uri=(
+            f"artifact://{revision.source_id}/evidence.sqlite"
+        ),
+        artifact_sha256=inspection.evidence_sha256,
+        artifact_bytes=inspection.evidence_bytes,
+    )
+    if (
+        by_name["evidence.sqlite"].sha256
+        != evidence_artifact.artifact_sha256
+        or by_name["evidence.sqlite"].size_bytes
+        != evidence_artifact.artifact_bytes
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+            "quarantine Evidence identity changed after copying",
+        )
+    manifest_artifact = (
+        FrozenQuarantineArtifact(
+            artifact_uri=(
+                f"artifact://{revision.source_id}/manifest.json"
+            ),
+            artifact_sha256=str(inspection.manifest_sha256),
+            artifact_bytes=int(inspection.manifest_bytes),
+        )
+        if inspection.manifest_sha256 is not None
+        and inspection.manifest_bytes is not None
+        else None
+    )
+    if manifest_artifact is not None and (
+        by_name["manifest.json"].sha256
+        != manifest_artifact.artifact_sha256
+        or by_name["manifest.json"].size_bytes
+        != manifest_artifact.artifact_bytes
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+            "quarantine manifest identity changed after copying",
+        )
+    binding = FrozenArtifactBinding(
+        source_id=revision.source_id,
+        source_fingerprint=revision.fingerprint,
+        evidence=evidence_artifact,
+        manifest=manifest_artifact,
+    )
+    update_baseline_identity_sha256 = (
+        _staging_baseline_identity_sha256(baseline)
+    )
+    created_at = datetime.now(UTC).isoformat(timespec="seconds")
+    body: dict[str, object] = {
+        "schema": ADDITIVE_QUARANTINE_RECEIPT_SCHEMA,
+        "evidenceClass": ADDITIVE_QUARANTINE_EVIDENCE_CLASS,
+        "baseBuildId": baseline.base_build_id,
+        "pointerSha256": baseline.base_pointer_sha256,
+        "manifestSha256": baseline.base_manifest_sha256,
+        "baseSourceManifestFingerprint": (
+            baseline.base_source_manifest_fingerprint
+        ),
+        "candidateSourceManifestFingerprint": (
+            baseline.candidate_source_manifest_fingerprint
+        ),
+        "sourceDiffSha256": baseline.source_diff_sha256,
+        "updateBaselineIdentitySha256": (
+            update_baseline_identity_sha256
+        ),
+        "stagingReceiptProof": staging_proof,
+        "stagingTreeDigest": staging_tree_digest,
+        "sourceId": revision.source_id,
+        "entityUri": revision.entity_uri,
+        "revisionLabel": revision.revision_label,
+        "sourceFingerprint": revision.fingerprint,
+        **evidence_artifact.payload(),
+        "manifestArtifact": (
+            manifest_artifact.payload()
+            if manifest_artifact is not None
+            else None
+        ),
+        "sourceAggregateSha256": inspection.aggregate_sha256,
+        "quarantineTreeDigest": (
+            safe_bundle.quarantine_tree_digest
+        ),
+        "quarantineRelativePath": (
+            f".incremental-staging/{staged_snapshot.staging_id}/"
+            f"quarantine/{revision.source_id}"
+        ),
+        "sameVolume": True,
+        "sourceVerifiedUnchanged": True,
+        "exactArtifactSet": True,
+        "reparsePointCount": 0,
+        "hardlinkAliasCount": 0,
+        "createdAt": created_at,
+        "published": False,
+        "productionAuthority": False,
+        "e4Scenario2Complete": False,
+        "cutoverEligible": False,
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
+    }
+    receipt = {
+        **body,
+        "proof": "quarantine-proof://" + _canonical_sha256(body),
+    }
+    frozen_receipt = _freeze_json(receipt)
+    if not isinstance(frozen_receipt, Mapping):
+        raise AssertionError("quarantine receipt must remain an object")
+    return FrozenAdditiveBlueprintInput(
+        base_build_id=baseline.base_build_id,
+        staging_id=staged_snapshot.staging_id,
+        source_id=revision.source_id,
+        entity_uri=revision.entity_uri,
+        revision_label=revision.revision_label,
+        source_fingerprint=revision.fingerprint,
+        pointer_sha256=baseline.base_pointer_sha256,
+        manifest_sha256=baseline.base_manifest_sha256,
+        base_source_manifest_fingerprint=(
+            baseline.base_source_manifest_fingerprint
+        ),
+        candidate_source_manifest_fingerprint=(
+            baseline.candidate_source_manifest_fingerprint
+        ),
+        source_diff_sha256=baseline.source_diff_sha256,
+        update_baseline_identity_sha256=(
+            update_baseline_identity_sha256
+        ),
+        staging_receipt_proof=staging_proof,
+        staging_tree_digest=staging_tree_digest,
+        quarantine_tree_digest=(
+            safe_bundle.quarantine_tree_digest
+        ),
+        created_at=created_at,
+        quarantine_root=safe_bundle.quarantine_root,
+        ingest_root=safe_bundle.bundle_root,
+        artifact_bindings=(binding,),
+        receipt=frozen_receipt,
+        cleanup_identity=staged_snapshot.cleanup_identity,
+        safe_bundle=safe_bundle,
+    )
+
+
+def validate_frozen_additive_blueprint_input(
+    frozen: FrozenAdditiveBlueprintInput,
+) -> FrozenAdditiveBlueprintInput:
+    """Revalidate receipt, paths, bytes, and SQLite identity before ingest."""
+
+    if type(frozen) is not FrozenAdditiveBlueprintInput:
+        raise TypeError("frozen additive Blueprint input is required")
+    frozen.__post_init__()
+    from .safe_staging import (
+        SafeStagingError,
+        SafeFrozenBlueprintBundle,
+        validate_frozen_blueprint_bundle,
+    )
+
+    if type(frozen.safe_bundle) is not SafeFrozenBlueprintBundle:
+        raise _gap(
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            "the safe quarantine identity is missing",
+        )
+    try:
+        validated = validate_frozen_blueprint_bundle(
+            frozen.safe_bundle,
+            temporary_root=frozen.quarantine_root.parent,
+            staging_identity=frozen.cleanup_identity,
+        )
+    except SafeStagingError as exc:
+        code = (
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID"
+            if exc.gap_code
+            == "REPARSE_SAFE_ADDITIVE_QUARANTINE_UNAVAILABLE"
+            else exc.gap_code
+        )
+        raise UpdateBaselineBlockedGap(
+            code,
+            str(exc),
+            status=exc.status,
+            residual_identifier=exc.residual_identifier,
+        ) from exc
+    if validated.quarantine_tree_digest != frozen.receipt.get(
+        "quarantineTreeDigest"
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            "quarantine tree digest differs from its receipt",
+        )
+    artifacts = dict(validated.artifacts)
+    try:
+        inspection = inspect_blueprint_evidence_bundle(
+            artifacts["evidence.sqlite"],
+            artifacts.get("manifest.json"),
+        )
+    except (AddOnlyDeltaBlockedGap, KeyError) as exc:
+        raise _gap(
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            "quarantine Evidence identity is invalid",
+        ) from exc
+    binding = frozen.artifact_bindings[0]
+    if (
+        inspection.evidence_sha256
+        != binding.evidence.artifact_sha256
+        or inspection.evidence_bytes
+        != binding.evidence.artifact_bytes
+        or inspection.manifest_sha256
+        != (
+            binding.manifest.artifact_sha256
+            if binding.manifest is not None
+            else None
+        )
+        or inspection.manifest_bytes
+        != (
+            binding.manifest.artifact_bytes
+            if binding.manifest is not None
+            else None
+        )
+        or inspection.aggregate_sha256 != frozen.source_fingerprint
+        or inspection.entity_uri != frozen.entity_uri
+        or inspection.source_revision_label != frozen.revision_label
+    ):
+        raise _gap(
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            "quarantine bytes differ from the frozen receipt",
+        )
+    return frozen
 
 
 @dataclass(frozen=True)

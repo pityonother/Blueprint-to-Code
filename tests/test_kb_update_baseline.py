@@ -375,7 +375,7 @@ def test_stage_rejects_snapshot_without_sealed_authority_contract(
     assert not destination.exists()
 
 
-def test_freeze_additive_input_fails_before_any_filesystem_side_effect(
+def test_freeze_rejects_non_additive_scope_before_filesystem_side_effect(
     tmp_path: Path,
 ) -> None:
     root, _current = _captured(tmp_path / "baseline")
@@ -384,20 +384,20 @@ def test_freeze_additive_input_fails_before_any_filesystem_side_effect(
         candidate_source_manifest=_base_manifest(),
     )
     capture_root = tmp_path / "missing-captures"
-    quarantine_root = tmp_path / "must-not-exist"
+    staging_root = root / ".incremental-staging"
 
     with pytest.raises(UpdateBaselineBlockedGap) as caught:
         freeze_additive_blueprint_input(
             baseline,
             capture_root=capture_root,
-            quarantine_root=quarantine_root,
+            staged_snapshot=object(),
         )
 
     assert caught.value.gap_code == (
-        "REPARSE_SAFE_ADDITIVE_QUARANTINE_UNAVAILABLE"
+        "ADDITIVE_QUARANTINE_REQUIRES_SINGLE_BLUEPRINT"
     )
     assert not capture_root.exists()
-    assert not quarantine_root.exists()
+    assert not staging_root.exists()
 
 
 def test_final_source_rescan_requires_exact_source_identity(

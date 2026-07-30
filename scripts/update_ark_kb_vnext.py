@@ -37,7 +37,6 @@ from blueprint_translator.kb_vnext.rebuild_worker import (  # noqa: E402
 )
 from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
     BlueprintIngestResult,
-    MAX_EXPLICIT_BLUEPRINT_SOURCES,
     materialize_blueprint_defaults,
 )
 from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
@@ -71,21 +70,22 @@ from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     source_manifest_from_payload as source_manifest_from_payload,
 )
 from blueprint_translator.kb_vnext.update_baseline import (  # noqa: E402
+    FrozenAdditiveBlueprintInput,
     StagedBaselineSnapshot,
     UpdateBaseline,
     UpdateBaselineBlockedGap,
     build_update_baseline,
     cleanup_staged_baseline_snapshot,
+    freeze_additive_blueprint_input,
     stage_snapshot_from_baseline,
+    validate_frozen_additive_blueprint_input,
     validate_final_source_manifest,
     validate_update_baseline_identity,
 )
 
 
 UPDATE_RESULT_SCHEMA: Final = "ark-kb-incremental-update/v2"
-MAX_ADDITIVE_BLUEPRINT_SOURCES: Final = (
-    MAX_EXPLICIT_BLUEPRINT_SOURCES
-)
+MAX_ADDITIVE_BLUEPRINT_SOURCES: Final = 1
 _FULL_REBUILD_INPUTS: Final = frozenset(
     {
         "discovery",
@@ -166,6 +166,7 @@ class UpdateWorkspace:
     base_build_id: str = ""
     staging_receipt: dict[str, object] = field(default_factory=dict)
     staged_baseline: StagedBaselineSnapshot | None = None
+    frozen_additive_input: FrozenAdditiveBlueprintInput | None = None
 
 
 @dataclass(frozen=True)
@@ -427,10 +428,10 @@ def production_capability_check(
             "must update the captures aggregate fingerprint.",
             full_rebuild_required=True,
         )
-    if len(added_blueprints) > MAX_ADDITIVE_BLUEPRINT_SOURCES:
+    if len(added_blueprints) != 1:
         raise UpdateBlocked(
-            "BLUEPRINT_ADDITION_BATCH_TOO_LARGE",
-            "The additive Blueprint batch exceeds the reviewed bound.",
+            "ADDITIVE_QUARANTINE_REQUIRES_SINGLE_BLUEPRINT",
+            "The quarantine path requires exactly one add-only Blueprint.",
             full_rebuild_required=False,
         )
 
@@ -666,6 +667,37 @@ def ingest_additive_blueprint_changes(
     """Validate selected Evidence Stores, then create the real ASSET event."""
 
     revisions = _additive_blueprint_revisions(diff)
+    frozen = workspace.frozen_additive_input
+    if frozen is None:
+        raise UpdateBlocked(
+            "ADDITIVE_QUARANTINE_RECEIPT_MISSING",
+            "Default Blueprint ingest requires a frozen quarantine receipt.",
+            full_rebuild_required=True,
+        )
+    try:
+        validate_frozen_additive_blueprint_input(frozen)
+    except (UpdateBaselineBlockedGap, TypeError, ValueError) as exc:
+        raise UpdateBlocked(
+            getattr(
+                exc,
+                "gap_code",
+                "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            ),
+            "The frozen Blueprint quarantine failed pre-ingest validation.",
+            full_rebuild_required=True,
+        ) from exc
+    if (
+        len(revisions) != 1
+        or frozen.source_id != revisions[0].source_id
+        or frozen.entity_uri != revisions[0].entity_uri
+        or frozen.revision_label != revisions[0].revision_label
+        or frozen.source_fingerprint != revisions[0].fingerprint
+    ):
+        raise UpdateBlocked(
+            "ADDITIVE_QUARANTINE_BASELINE_CHANGED",
+            "The frozen Blueprint input no longer matches the source diff.",
+            full_rebuild_required=True,
+        )
     planned_source_ids, planned_entity_ids = _planned_additive_sources(
         workspace
     )
@@ -687,9 +719,10 @@ def ingest_additive_blueprint_changes(
         result = materialize_blueprint_defaults(
             discovery,
             core,
-            capture_root=paths.capture_root,
+            capture_root=frozen.ingest_root,
             ontology=load_ontology(PROJECT_ROOT / "ontology"),
             source_revisions=revisions,
+            frozen_evidence_root=True,
         )
         if (
             len(result.entity_ids) != len(revisions)
@@ -1011,6 +1044,42 @@ def _safe_staging_receipt(
             full_rebuild_required=True,
         )
     return {**body, "proof": proof}
+
+
+def _plain_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _plain_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_plain_json_value(item) for item in value]
+    return value
+
+
+def _safe_quarantine_receipt(
+    frozen: FrozenAdditiveBlueprintInput,
+) -> dict[str, object]:
+    try:
+        validate_frozen_additive_blueprint_input(frozen)
+    except (UpdateBaselineBlockedGap, TypeError, ValueError) as exc:
+        raise UpdateBlocked(
+            getattr(
+                exc,
+                "gap_code",
+                "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            ),
+            "The additive quarantine receipt is invalid.",
+            full_rebuild_required=True,
+        ) from exc
+    receipt = _plain_json_value(frozen.receipt)
+    if not isinstance(receipt, dict):
+        raise UpdateBlocked(
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            "The additive quarantine receipt is not an object.",
+            full_rebuild_required=True,
+        )
+    return receipt
 
 
 def _safe_ingest_summary(
@@ -1622,6 +1691,41 @@ def run_incremental_update(
                 if workspace.staging_receipt:
                     base["staging"] = _safe_staging_receipt(
                         workspace.staging_receipt
+                    )
+                if hooks.ingest_changes is ingest_additive_blueprint_changes:
+                    if (
+                        baseline is None
+                        or workspace.staged_baseline is None
+                    ):
+                        raise UpdateBlocked(
+                            "ADDITIVE_QUARANTINE_BASELINE_REQUIRED",
+                            "Default ingest requires the locked staged "
+                            "UpdateBaseline.",
+                            full_rebuild_required=True,
+                        )
+                    try:
+                        frozen = freeze_additive_blueprint_input(
+                            baseline,
+                            capture_root=paths.capture_root,
+                            staged_snapshot=workspace.staged_baseline,
+                        )
+                    except UpdateBaselineBlockedGap as exc:
+                        raise UpdateBlocked(
+                            exc.gap_code,
+                            str(exc),
+                            full_rebuild_required=True,
+                            status=(
+                                "uncertain"
+                                if exc.status == "UNCERTAIN"
+                                else "blocked"
+                            ),
+                            residual_identifier=(
+                                exc.residual_identifier
+                            ),
+                        ) from exc
+                    workspace.frozen_additive_input = frozen
+                    base["quarantine"] = _safe_quarantine_receipt(
+                        frozen
                     )
                 _validate_locked_update_state(
                     paths=paths,
