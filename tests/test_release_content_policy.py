@@ -68,10 +68,18 @@ class ReleaseContentPolicyTests(unittest.TestCase):
 
         self.assertTrue(report.findings)
         self.assertIn(
-            "current-repository-root",
+            "windows-user-directory",
             {finding.category for finding in report.findings},
         )
         self.assertNotIn(path, repr(report.findings))
+
+    def test_current_repository_root_is_detected_on_any_runner(self):
+        report = self._scan(str(ROOT))
+
+        self.assertIn(
+            "current-repository-root",
+            {finding.category for finding in report.findings},
+        )
 
     def test_windows_user_paths_with_both_separator_styles_are_detected(self):
         for slash in ("/", "\\"):
