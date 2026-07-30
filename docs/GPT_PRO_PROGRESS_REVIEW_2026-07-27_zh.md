@@ -1,5 +1,19 @@
 # ARK Knowledge Discovery 当前完成情况（供 GPT Pro 视察）
 
+> **历史状态说明（2026-07-30 更新）**：本文固定记录 2026-07-27 的视察范围、
+> 数值、commit 和分支复现合同。`codex/fix-partner-devkit-root` 的相关内容后来
+> 已合入 `main`；查看当前项目应从 `main` clone。下文旧分支命令仍保留，只用于
+> 复现当时的审计环境，不表示它仍是当前开发分支。
+
+当前获取方式：
+
+```text
+git clone https://github.com/pityonother/Blueprint-to-Code.git
+cd Blueprint-to-Code
+git lfs install
+git lfs pull --include="knowledge_base/discovery_bundle.zip"
+```
+
 ## 视察目的
 
 这份文档只用于让 GPT Pro 检查 Codex 当前完成的工程工作、已经发现的知识、证据强度和剩余盲区，并据此给 Codex 下一阶段的方向与优先级。它不是交接文档，也不是要求 GPT Pro 接管实现。
@@ -8,9 +22,10 @@
 
 ## 从 GitHub 获取视察 ZIP（Git LFS）
 
-`knowledge_base/discovery_bundle.zip` 已通过 Git LFS 托管在公开仓库
+`knowledge_base/discovery_bundle.zip` 最初通过 Git LFS 发布到公开仓库
 `https://github.com/pityonother/Blueprint-to-Code` 的
-`codex/fix-partner-devkit-root` 分支。它只用于让 GPT Pro 视察本轮发现结果，不是项目交接包，也不要求 GPT Pro 接管或重写实现。
+`codex/fix-partner-devkit-root` 分支，现也可从 `main` 获取。它只用于让 GPT Pro
+视察本轮发现结果，不是项目交接包，也不要求 GPT Pro 接管或重写实现。
 
 首次获取：
 

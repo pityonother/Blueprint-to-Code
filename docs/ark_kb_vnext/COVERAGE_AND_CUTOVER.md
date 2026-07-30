@@ -17,9 +17,16 @@ vNext 不能改为默认。
 
 | 项目 | 值 |
 |---|---:|
-| Build ID | `20260729T115548-1a203b594bb6` |
-| Source SHA-256 | `1a203b594bb6119dbf29d5a0c8789bd653c716eaf72e5915ee5a176675576450` |
+| Build ID | `20260730T172442-19e56659d331` |
+| Source SHA-256 | `19e56659d331489e1f82881d1a0c7dae3c51d73ba5397bc3601ccb8404054293` |
 | Discovery SHA-256 | `028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f` |
+| Snapshot manifest SHA-256 | `6c957681a6463c9e5d5e83ada999cf1d5cb24a64d53af6516eb0399c1fd29136` |
+| Current pointer SHA-256 | `de74be48111cba8d3a1241b22cf94dc0e28945e32d084419163235383c6c556f` |
+| Source-manifest fingerprint | `fbb474d8ca1073dee5305cbe0247fdbec7fa4cbea97e882cb2cabc438b8750ca` |
+| semanticProducerContract | `66a8c3d93c9cce5485e0e82fdbd8092340e0db1c225e707ee7a97b0aab4d0eab` |
+| Previous build | `20260730T162735-b46eb9304da3` |
+| Previous manifest SHA-256 | `9ae250a4dba1c01cd980cb8acee82831dd2516af822541e59afb96eb585a9e3c` |
+| Sealed quality report SHA-256 | `84a6cd1dae885d7efe00e6174be72207e27a9a4681070d266707437c3a6f700b` |
 | Discovery bytes | 3,816,792,064 |
 | Snapshot schema | `ark-kb-vnext-snapshot/v1` |
 | Published layout | `immutable-v2`：`current.json -> snapshots/<buildId>` |
@@ -33,7 +40,7 @@ vNext 不能改为默认。
 | 指标 | 当前实际 |
 |---|---:|
 | Entities / assets | 577,579 |
-| Catalog edges | 3,442,470 |
+| Catalog nodes / edges / packages | 1,197,285 / 3,442,470 / 576,341 |
 | Classes / closure rows | 26,495 / 92,033 |
 | Roles | 1,091,270 |
 | Typed registration rows / materialized edges | 145 / 26 |
@@ -43,6 +50,7 @@ vNext 不能改为默认。
 | Invalidation dependencies | 1,199,519 |
 | Exact native functions | 20 |
 | Blueprint-native candidate / confirmed links | 713 / 1 |
+| Blueprint Evidence entries | 234 |
 
 六个领域投影均已生成并通过 artifact/Core binding：
 
@@ -156,35 +164,46 @@ manifest，也不能把 default 切到 vNext；通过结果必须密封进一个
 
 ## 增量能力门禁
 
-Queue worker 的任务状态、receipt、恢复和 fail-closed 行为已经实现。生产
-更新器只接受明确的 1–32 个 add-only `BLUEPRINT_EVIDENCE` source changes，
-并只接通真实 FACT materializer；其余 EDGE/ROLE/DOMAIN/NATIVE/
-REGISTRATION/PROJECTION backend、update/delete/rename 和混合变化仍返回
-稳定 `BLOCKED_GAP` 或 full-rebuild-required。
+Queue worker 的任务状态、receipt、恢复和 fail-closed 行为已经实现。PR #27
+（merge commit `86c7715dab7dc15635c0cb18789f36d5cd8f3f69`）已经接通生产
+`QUERY_SNAPSHOT` backend：它在 worker-owned guarded cache transaction 中
+只清理 `context_packs`、`answer_plans`、`materialized_neighborhoods` 与
+`query_snapshots`，并保留 whole-cache equal-digest receipt、external marker、
+cache-first commit 和 recovered `RUNNING` replay 合同。
 
-`scripts/update_ark_kb_vnext.py` 的生产默认路径会：
+`main` 的后续加固已经把同一 writer lock 内的 current baseline、no-follow
+whole-tree staging、单资产 quarantine、live rescan、v3 base-bound receipt
+和 additive invalidation scope 绑到同一 verified delta。它们证明 staging 与
+诊断不会越界或误绑旧 base，但所有 authority flag 仍为 false，不能替代签名
+production authorization、narrow gates 或 publisher。
 
-- 与 full builder 复用同一 source-manifest scanner；
-- 在新 immutable snapshot 中原子绑定 fingerprint、10 项 semantic input、
-  runtime 汇总、每个 capture revision 和每个已验证 Native evidence set；
-- 对完成该绑定的新 full build，在输入未变化时返回 cache hit 且不 stage；
-- source 删除、修改、重命名、非选择性输入变化或缺少选择性能力时，在
-  lock/staging/queue/publication 前返回稳定 gap；
-- 设置 `fullRebuildRequired=true`；
-- 不复制现有 snapshot，不修改 current，不发布部分构建。
+真实 Scarecrow prepublication 回放得到：
 
-Source-manifest fingerprint 明确排除顶层 `generatedAt`，不会仅因扫描时间
-不同产生假变化。当前 runtime 没有可验证的 observation-set loader，因此只
-记录汇总 hash；不声称 per-set 粒度。当前快照已经绑定 source manifest；
-相同输入 update 实测返回 `cacheHit=true`、`published=false`、
-`fullRebuildPerformed=false`，current 与快照目录数均未改变。
+```text
+SUCCEEDED=4
+BLOCKED_GAP=8
+FAILED=0
+baseBindingVerified=true
+productionAuthority=false
+published=false
+e4Scenario2Complete=false
+```
 
-真实 7-capture 本地差异因同时存在 semantic producer、benchmark gold、
-quality gold 和 ontology drift，被正确判定为
-`NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，没有 publication。当前相同
-输入再次实测 `cacheHit=true`、`published=false`。因此“单资产增量摄取到
-原子发布”和计划要求的 12 个生产场景仍未闭合；不能把 add-only FACT
-原型、unchanged cache hit 或 fail-fast 安全性描述为完整增量发布。
+成功任务是 `FACT × 2`、`EFFECTIVE_ENTITY × 1` 和
+`QUERY_SNAPSHOT × 1`；剩余任务仅为 `ROLE_ENTITY × 1`、
+`DOMAIN_ENTITY × 1`、`PROJECTION × 6`。v3 receipt 的独立 raw SHA-256 为
+`6c56aa85ff43349ac20b64fae93058e51ad645d27660099c87758ca62c5e94b3`。
+因此 `REBUILD_QUEUE_NOT_DRAINED` 仍然阻止 narrow gates 和 publisher。
+
+current Snapshot 仍有 234 个 Blueprint Evidence；live captures 为 235，
+Scarecrow 是唯一未发布新增。只读 Source Diff 精确为 Scarecrow
+`BLUEPRINT_EVIDENCE added=1, changed=0, deleted=0`，同步仅有
+`captures aggregate changed=1`；没有 semantic producer、Discovery、
+Ontology、Gold、Native 或其他 semantic input drift。没有增量 Snapshot，
+current pointer 未改变。
+
+因此“单资产增量摄取到原子发布”和计划要求的 12 个生产场景仍未闭合；
+不能把 4 个成功的 prepublication tasks 描述成完整增量发布。
 
 ## 切换规则
 
@@ -214,10 +233,11 @@ attestation，才允许生成：
 4. query protocol compliance `98.46%` 和 wrong-answer rate `2.31%`
    未达到 fail-closed 门槛；expected-gap match 已通过 `95.74%`。
 
-生产选择性 ingest/backend/publisher 仍是工程能力边界，但当前 sealed
-质量报告中的 native、projection、storage、performance、expected-gap 和
-stale-leak 门已经通过。密封 benchmark P95 为 `3.786ms`；三次独立完整
-复测 P95 为 `4.857 / 4.104 / 4.935ms`，均低于固定 `<250ms` 门槛。
+Role/Domain/Projection backend、narrow gates 和 publisher 仍是工程能力
+边界，但当前 sealed 质量报告中的 native、projection、storage、performance、
+expected-gap 和 stale-leak 门已经通过。密封 benchmark P95 为 `3.786ms`；
+三次独立完整复测 P95 为 `4.857 / 4.104 / 4.935ms`，均低于固定
+`<250ms` 门槛。
 
 即使未来 quality 达到 75/75，没有 3 个连续合格 sealed builds、真实 shadow
 diff disposition、rollback/concurrent-reader 记录和 12 个生产增量场景，

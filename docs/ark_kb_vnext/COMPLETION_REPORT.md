@@ -2,10 +2,12 @@
 
 ## 总体状态
 
-Stage 8–12 的工程实现已完成以下收口：typed registration 语义拆分、角色真实
-信号接线、独立 gold fail-closed 计分、盲审工厂、逐 case 查询诊断、真实性能
-分析、受限增量 rebuild、immutable snapshot、发布前门禁密封、原子 current
-pointer、burn-in attestation 和 rollback 边界。
+Stage 8–12 建立了 typed registration 语义拆分、真实角色信号、独立 gold
+fail-closed 计分、逐 case 查询诊断、immutable snapshot、发布前门禁密封、
+原子 current pointer、burn-in attestation 和 rollback 边界。Stage 13–15 与
+后续 `main` 加固又补上签名/registry 基础、artifact-bound review、durable
+worker row scope、reparse-safe staging/quarantine、pointer CAS、writer lock、
+UpdateBaseline 和 base-bound delta receipt。
 
 这不等于“已经可以替换 legacy”。当前人工/实证 gold 和部分生产增量能力
 仍缺失，所以交付状态是：
@@ -21,9 +23,17 @@ implementation hardened
 
 以下身份来自本机规范 current 指向的真实全量 post-hardening 快照：
 
-- Build：`20260729T115548-1a203b594bb6`
-- Source SHA-256：`1a203b594bb6119dbf29d5a0c8789bd653c716eaf72e5915ee5a176675576450`
+- Build：`20260730T172442-19e56659d331`
+- Source SHA-256：`19e56659d331489e1f82881d1a0c7dae3c51d73ba5397bc3601ccb8404054293`
 - Discovery SHA-256：`028a12c429903466aa52f99c5e63c8d90813585b9d5c6a8c303fbb93a9d6a31f`
+- Snapshot manifest SHA-256：`6c957681a6463c9e5d5e83ada999cf1d5cb24a64d53af6516eb0399c1fd29136`
+- Current pointer SHA-256：`de74be48111cba8d3a1241b22cf94dc0e28945e32d084419163235383c6c556f`
+- Source-manifest fingerprint：`fbb474d8ca1073dee5305cbe0247fdbec7fa4cbea97e882cb2cabc438b8750ca`
+- semanticProducerContract：`66a8c3d93c9cce5485e0e82fdbd8092340e0db1c225e707ee7a97b0aab4d0eab`
+- Previous build：`20260730T162735-b46eb9304da3`
+- Previous manifest SHA-256：`9ae250a4dba1c01cd980cb8acee82831dd2516af822541e59afb96eb585a9e3c`
+- Sealed quality report SHA-256：`84a6cd1dae885d7efe00e6174be72207e27a9a4681070d266707437c3a6f700b`
+- Blueprint Evidence：234 entries
 - 当前发布布局：`immutable-v2`
 - 发布合同：根 `current.json` 指向
   `snapshots/<buildId>/manifest.json`
@@ -46,6 +56,9 @@ invalidation token。cache 的发布时 SHA 只描述空种子，不是运行时
 当前快照包含：
 
 - 577,579 entities；
+- 1,197,285 catalog nodes、3,442,470 edges、576,341 packages；
+- 26,495 classes、92,033 closure rows；
+- 1,091,270 roles；
 - 10,587 declared facts；
 - 102,329 effective facts；
 - 136 semantic facts；
@@ -55,6 +68,7 @@ invalidation token。cache 的发布时 SHA 只描述空种子，不是运行时
 - 1,199,519 invalidation dependencies；
 - 20 exact native functions；
 - 713 Blueprint-native candidates、1 confirmed link；
+- 234 Blueprint Evidence entries；
 - 六个核心 domain projections 共 136 行。
 
 这些是本轮 full snapshot 的真实统计。fingerprint、
@@ -154,29 +168,48 @@ role gold。
   Native evidence set 的 path-free identity；
 - `generatedAt` 不参与 fingerprint 的 unchanged input cache hit；
 - single-writer lock 和 publisher receipt 合同；
+- current pointer/manifest 的 exact baseline 与发布前二次核验；
+- Windows/POSIX no-follow whole-tree staging 和单资产 additive quarantine；
+- v3 base-bound delta receipt、独立 raw SHA 与 staged/live Core 复核；
+- 从已验证 durable event 与 terminal receipt 推导的 additive invalidation scope；
+- 生产 `QUERY_SNAPSHOT` backend：只在 worker-owned cache transaction 中按
+  顺序清理 `context_packs`、`answer_plans`、
+  `materialized_neighborhoods` 与 `query_snapshots`，保留严格的 whole-cache
+  equal-digest receipt、external marker 和崩溃恢复合同；
 - gate/worker 失败时禁止 publication。
 
 尚未交付为生产可用：
 
-- 选择性 Blueprint/source ingest；
-- 除 `CLASS_CLOSURE` 和 `EFFECTIVE_ENTITY` 外的完整 rebuild backend；
-- selective narrow gates；
+- `ROLE_ENTITY`、`DOMAIN_ENTITY` 与 `PROJECTION` rebuild backend；
+- production narrow-gate 执行与签名 artifact authorization；
 - 绑定 source manifest 的生产 atomic incremental publisher。
 
-当前没有可验证的 runtime observation-set loader，所以 runtime 只绑定汇总
-hash，不虚构 per-set entries。当前 immutable-v2 快照已绑定完整 source
-manifest。对完全相同输入运行 update，实测：
+PR #27 已以 merge commit
+`86c7715dab7dc15635c0cb18789f36d5cd8f3f69` 合入 `main`。真实 Scarecrow
+prepublication 回放证明选择性 ingest、FACT、EFFECTIVE_ENTITY 与
+QUERY_SNAPSHOT 的已接通路径：
 
 ```text
-status=cache_hit
-cacheHit=true
-fullRebuildPerformed=false
+SUCCEEDED=4
+BLOCKED_GAP=8
+FAILED=0
+baseBindingVerified=true
+productionAuthority=false
 published=false
+e4Scenario2Complete=false
 ```
 
-生产默认 `scripts/update_ark_kb_vnext.py` 对 runtime 或其他真实变化会在
-任何 lock/staging/queue/current mutation 前 fail fast，并返回稳定 gap 与
-`fullRebuildRequired=true`。这是一条安全的阻断路径，不是增量发布成功。
+4 个成功任务为 `FACT × 2`、`EFFECTIVE_ENTITY × 1` 和
+`QUERY_SNAPSHOT × 1`；8 个阻断任务为 `ROLE_ENTITY × 1`、
+`DOMAIN_ENTITY × 1` 和 `PROJECTION × 6`。v3 receipt 的独立 raw SHA-256 为
+`6c56aa85ff43349ac20b64fae93058e51ad645d27660099c87758ca62c5e94b3`。
+`REBUILD_QUEUE_NOT_DRAINED` 因此仍然正确阻断 narrow gates 和 publisher。
+
+current Snapshot 仍包含 234 个 Blueprint Evidence；live captures 为 235，
+Scarecrow 是唯一未发布新增。只读 Source Diff 是
+`BLUEPRINT_EVIDENCE added=1, changed=0, deleted=0`，同步仅有
+`captures aggregate changed=1`，没有 semantic producer、Discovery、
+Ontology、Gold、Native 或其他 semantic input drift。
 
 ## Storage
 
@@ -223,13 +256,9 @@ schema 和绑定验证。密封 `runtimeHealth` 与 Core metadata 一致，
   receipt 的 fail-closed 路径；
 - 文档 build/source identity 与当前已发布 manifest 一致性。
 
-完整堆栈的 Python 全量验收为 `1214 passed, 4 skipped`，并通过 606 个
-subtests；最终受影响矩阵为 `137 passed, 22 subtests`。前端 API/harvest
-contracts 与 production Vite build 均通过。
-Ruff 与 `git diff --check` 通过。真实 full build、sealed validator、API
-health/search、三次完整性能复测、storage integrity/FK/WAL/SHM 和 unchanged
-update 均已执行。update 返回 `cacheHit=true`、`published=false`，没有创建
-staging 或交换 current。
+本次文档基线对齐只运行文档身份测试、Markdown 链接检查、diff/秘密/路径
+检查和 GitHub CI；没有把旧的全量测试数字冒充为本次验证，也没有运行 full
+build 或再次回放 Scarecrow。运行时 health 和 Source Diff 均以只读方式复核。
 
 复现命令：
 
@@ -256,8 +285,9 @@ git diff --check
    未达门槛；expected-gap match 已达到 `95.74%`；
 5. 单实体性能已通过：密封 P95 `3.786ms`，三次独立完整复测为
    `4.857 / 4.104 / 4.935ms`；
-6. 生产增量目前只允许 1–32 个 add-only Blueprint Evidence 的 FACT
-   materialization；update/delete/rename 和其他 backend 仍 fail closed；
+6. Scarecrow 真实回放已接通 FACT、EFFECTIVE_ENTITY 和 QUERY_SNAPSHOT，
+   但 `ROLE_ENTITY`、`DOMAIN_ENTITY`、六个 `PROJECTION`、narrow gates 与
+   publisher 仍 fail closed；
 7. 没有 3 个连续合格 sealed builds、真实 shadow diff disposition、
    rollback/concurrent-reader 记录和 12 个生产增量场景 attestation。
 
