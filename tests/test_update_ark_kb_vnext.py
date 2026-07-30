@@ -173,6 +173,28 @@ def _production_workspace(tmp_path: Path) -> update.UpdateWorkspace:
         )
         """
     )
+    core.execute(
+        """
+        INSERT INTO classes(
+            class_id, class_path, class_name, module_or_package,
+            class_kind, is_native, source_revision_id, status, confidence
+        ) VALUES (
+            1, '/Script/Test.Fixture', 'Fixture', 'Test',
+            'NATIVE', 1, 1, 'IDENTIFIED', 'HIGH'
+        )
+        """
+    )
+    core.execute(
+        "INSERT INTO class_closure VALUES (1, 1, 0, 'SELF')"
+    )
+    core.execute(
+        """
+        INSERT INTO asset_class_assignments VALUES (
+            1, 1, 'GENERATED_CLASS', 'fixture://class',
+            'EXTRACTED', 'HIGH', 1
+        )
+        """
+    )
     core.commit()
     core.close()
     cache_path = snapshot / "cache.sqlite"
@@ -686,6 +708,7 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
     )
     workspace.base_build_id = "build-current"
     workspace.staged_baseline = object()
+    workspace.update_baseline = object()
     monkeypatch.setattr(
         update,
         "cleanup_staged_baseline_snapshot",
@@ -763,24 +786,51 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         )
         core.execute(
             """
-            INSERT INTO fact_evidence VALUES (
-                1, 2, 'bp://asset/default/Rate', 'DEFAULT_VALUE_ACTUAL'
+            INSERT INTO facts(
+                fact_id, subject_entity_id, fact_type, fact_name,
+                scope_kind, declared_on_entity_id, value_kind,
+                value_integer, status, confidence, ontology_version,
+                current, canonical_fact_key
+            ) VALUES (
+                2, 1, 'DECLARED_DEFAULT', 'RequiredEngramPoints',
+                'DECLARED', 1, 'INTEGER', 0, 'CONFIRMED', 'HIGH',
+                'fixture-ontology', 1, 'fact://fixture/engram-points'
             )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO fact_evidence VALUES
+                (
+                    1, 2, 'bp://asset@revision/default/Rate',
+                    'DEFAULT_VALUE_ACTUAL'
+                ),
+                (
+                    2, 2,
+                    'bp://asset@revision/default/RequiredEngramPoints',
+                    'DEFAULT_VALUE_ACTUAL'
+                )
             """
         )
         core.commit()
         return BlueprintIngestResult(
             counts={
                 "freshAssets": 1,
-                "declaredFacts": 1,
-                "factEvidence": 1,
+                "declaredFacts": 2,
+                "factEvidence": 2,
             },
             covered_properties=frozenset(
-                {("/Game/Test/Added.Added", "Rate")}
+                {
+                    ("/Game/Test/Added.Added", "Rate"),
+                    (
+                        "/Game/Test/Added.Added",
+                        "RequiredEngramPoints",
+                    ),
+                }
             ),
             freshness_gap_assets=frozenset(),
             untrusted_assets=frozenset(),
-            fact_ids=frozenset({1}),
+            fact_ids=frozenset({1, 2}),
             entity_ids=frozenset({1}),
         )
 
@@ -788,6 +838,96 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         update,
         "materialize_blueprint_defaults",
         ingest_fixture,
+    )
+    verified_scope_calls: list[tuple[object, object, object]] = []
+
+    def verify_delta_scope(
+        baseline: object,
+        *,
+        staged_snapshot: object,
+        frozen_input: object,
+        ingest_result: BlueprintIngestResult,
+    ) -> SimpleNamespace:
+        verified_scope_calls.append(
+            (staged_snapshot, frozen_input, ingest_result)
+        )
+        core = sqlite3.connect(workspace.core_path)
+        try:
+            after_database_sha256 = update.logical_database_state(
+                core
+            ).database_sha256
+        finally:
+            core.close()
+        return SimpleNamespace(
+            source_revision_ids=(2,),
+            entity_ids=(1,),
+            fact_ids=(1, 2),
+            changed_tables=(
+                "fact_evidence",
+                "facts",
+                "source_revisions",
+            ),
+            after_database_sha256=after_database_sha256,
+        )
+
+    monkeypatch.setattr(
+        update,
+        "verify_base_bound_add_only_blueprint_delta_scope",
+        verify_delta_scope,
+    )
+    strict_scope_calls: list[
+        tuple[
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[str, ...],
+        ]
+    ] = []
+    production_materializer = (
+        update.materialize_additive_asset_dependency_scope
+    )
+
+    def materialize_strict_scope(
+        connection: sqlite3.Connection,
+        *,
+        source_revision_ids: tuple[int, ...],
+        entity_ids: tuple[int, ...],
+        fact_ids: tuple[int, ...],
+        actual_write_tables: tuple[str, ...],
+    ) -> update.InvalidationPlan:
+        strict_scope_calls.append(
+            (
+                source_revision_ids,
+                entity_ids,
+                fact_ids,
+                actual_write_tables,
+            )
+        )
+        return production_materializer(
+            connection,
+            source_revision_ids=source_revision_ids,
+            entity_ids=entity_ids,
+            fact_ids=fact_ids,
+            actual_write_tables=actual_write_tables,
+        )
+
+    monkeypatch.setattr(
+        update,
+        "materialize_additive_asset_dependency_scope",
+        materialize_strict_scope,
+    )
+
+    def forbidden_generic_asset_plan(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError(
+            "default additive runner must not use generic ASSET planning"
+        )
+
+    monkeypatch.setattr(
+        update,
+        "plan_invalidation",
+        forbidden_generic_asset_plan,
+        raising=False,
     )
 
     def build_receipt(*args, **kwargs):
@@ -835,9 +975,25 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         )
     ]
     assert "FACT" in result["worker"]["succeededKinds"]
-    assert "BACKEND_NOT_CONFIGURED_EDGE_ENTITY" in (
+    assert "BACKEND_NOT_CONFIGURED_QUERY_SNAPSHOT" in (
         result["worker"]["blockedGapCodes"]
     )
+    assert "BACKEND_NOT_CONFIGURED_EDGE_ENTITY" not in (
+        result["worker"]["blockedGapCodes"]
+    )
+    assert result["worker"]["attempted"] == 12
+    assert result["worker"]["succeeded"] == 3
+    assert result["worker"]["blocked_gap"] == 9
+    assert result["worker"]["failed"] == 0
+    assert len(verified_scope_calls) == 1
+    assert strict_scope_calls == [
+        (
+            (2,),
+            (1,),
+            (1, 2),
+            ("fact_evidence", "facts", "source_revisions"),
+        )
+    ]
     assert any(
         proof.startswith("rebuild-proof://")
         for proof in result["worker"]["receiptProofs"]

@@ -809,6 +809,8 @@ def test_ingest_reads_frozen_quarantine_not_live_capture(
                 "entityIds": [1],
             }
         ],
+        staged_baseline=fixture["staged"],
+        update_baseline=fixture["baseline"],
         frozen_additive_input=frozen,
     )
     sqlite3.connect(tmp_path / "discovery.sqlite").close()
@@ -841,9 +843,36 @@ def test_ingest_reads_frozen_quarantine_not_live_capture(
         materialize,
     )
     monkeypatch.setattr(update, "load_ontology", lambda path: object())
+
+    def verified_delta_scope(*args, **kwargs):
+        del args, kwargs
+        core = sqlite3.connect(workspace.core_path)
+        try:
+            after_database_sha256 = update.logical_database_state(
+                core
+            ).database_sha256
+        finally:
+            core.close()
+        return SimpleNamespace(
+            source_revision_ids=(1,),
+            entity_ids=(1,),
+            fact_ids=(1,),
+            changed_tables=(
+                "fact_evidence",
+                "facts",
+                "source_revisions",
+            ),
+            after_database_sha256=after_database_sha256,
+        )
+
     monkeypatch.setattr(
         update,
-        "plan_invalidation",
+        "verify_base_bound_add_only_blueprint_delta_scope",
+        verified_delta_scope,
+    )
+    monkeypatch.setattr(
+        update,
+        "materialize_additive_asset_dependency_scope",
         lambda *args, **kwargs: SimpleNamespace(downstream=(1,)),
     )
     monkeypatch.setattr(
