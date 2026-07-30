@@ -1449,18 +1449,49 @@ def _terminal_receipt(
             target_id=expected_id,
             event_id=event_id,
         )
-        if (
-            complete is not True
-            or before == after
-            or cache_hit is not False
-            or not touched_tables
-            or not touched_tables.issubset(expected_tables)
-            or verification.get("basis") != "TARGET_STATE_CHANGED"
-            or not operations_valid
-            or not operation_tables
-            or not operation_tables.issubset(expected_tables)
-            or operation_tables != touched_tables
-            or normalized.get("gapCode") != ""
+        target_state_changed = (
+            complete is True
+            and before != after
+            and cache_hit is False
+            and bool(touched_tables)
+            and touched_tables.issubset(expected_tables)
+            and verification.get("basis") == "TARGET_STATE_CHANGED"
+            and operations_valid
+            and bool(operation_tables)
+            and operation_tables.issubset(expected_tables)
+            and operation_tables == touched_tables
+            and normalized.get("gapCode") == ""
+        )
+        expected_query_operations = [
+            f"{table}:DELETE" for table in sorted(expected_tables)
+        ]
+        explicit_whole_cache_invalidation = (
+            kind == "QUERY_SNAPSHOT"
+            and complete is True
+            and before == after
+            and recovered is False
+            and cache_hit is False
+            and normalized.get("gapCode") == ""
+            and normalized.get("detail") == ""
+            and not projection_batch
+            and set(verification)
+            == {
+                "basis",
+                "coreWriteChanges",
+                "writeOperations",
+                "rowScope",
+            }
+            and verification.get("basis")
+            == "EXPLICIT_WHOLE_CACHE_INVALIDATION"
+            and _is_integer(verification.get("coreWriteChanges"))
+            and verification.get("coreWriteChanges") == 0
+            and touched == sorted(expected_tables)
+            and operations == expected_query_operations
+            and operations_valid
+            and operation_tables == touched_tables
+        )
+        if not (
+            target_state_changed or explicit_whole_cache_invalidation
         ):
             raise _gap(
                 "BACKEND_TERMINAL_OUTCOME_UNPROVEN",
