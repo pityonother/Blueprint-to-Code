@@ -15,6 +15,9 @@ match it.
   signed receipt/registry foundations, and proposal-only Gold freeze tooling.
 - Durable rebuild worker row scope, add-only Blueprint evidence foundations,
   exact narrow-gate diagnostics, and UpdateBaseline pre-publication inspection.
+- Production `QUERY_SNAPSHOT` cache invalidation for the exact
+  `context_packs`, `answer_plans`, `materialized_neighborhoods`, and
+  `query_snapshots` cache tables, with external markers and crash recovery.
 
 ### Changed
 
@@ -23,6 +26,9 @@ match it.
   base binding.
 - Incremental update planning now binds the scan, writer lock, delta receipt,
   base snapshot, and publication decision to one verified scope.
+- Whole-cache equal-digest receipts are now accepted only under the strict
+  `QUERY_SNAPSHOT` contract; the real Scarecrow replay produced a base-bound v3
+  inspection with `baseBindingVerified=true`.
 - GitHub-facing status documentation now separates current `main` behavior from
   dated GPT Pro handoff/audit records.
 
@@ -31,6 +37,8 @@ match it.
 - Reparse points cannot escape staging or additive quarantine boundaries.
 - A stale or mismatched delta receipt cannot be treated as evidence for the
   current base snapshot.
+- Query cache invalidation preserves worker-owned row scope through cache-first
+  commit, recovered `RUNNING` replay, and terminal receipt validation.
 - Documentation no longer presents the 2026-07-27 `58/75` snapshot or a
   machine-specific Capture count as current.
 
@@ -39,6 +47,9 @@ match it.
 - Documented retention and validation rules for temporary KB builds,
   immutable snapshots, Registry generations, Git LFS objects, worktrees, and
   legacy Capture artifacts.
+- Recorded the real prepublication queue result
+  (`SUCCEEDED=4`, `BLOCKED_GAP=8`, `FAILED=0`); Role, Domain, and Projection
+  remain deliberately unavailable and no publication occurred.
 
 ## [0.2.0] - 2026-07-27
 

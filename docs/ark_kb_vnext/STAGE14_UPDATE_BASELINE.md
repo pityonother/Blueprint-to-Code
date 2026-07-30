@@ -268,18 +268,49 @@ The following downstream capabilities remain deliberately unavailable:
 
 ## Real blockers
 
-No current live source URI represents an authorized new Blueprint. Fixtures,
-zero-byte files outside the supported capture layout, and synthetic test
-Evidence are not production evidence.
+The real replay closed the following foundation questions:
 
-The real slice remains blocked by:
+- scan-before-writer-lock is replaced by a writer-lock-bound initial scan and
+  final live rescan;
+- reparse-safe whole-tree staging;
+- additive quarantine;
+- delta receipt base binding;
+- strict additive Query scope;
+- the production `QUERY_SNAPSHOT` backend;
+- the explicit whole-cache equal-digest receipt contract.
+
+The authorized Scarecrow Evidence was validated as the exact single live
+addition:
 
 ```text
-BLOCKED_BY_MISSING_AUTHORIZED_ADDITIVE_BLUEPRINT_EVIDENCE
-BLOCKED_BY_MISSING_SIGNED_PRODUCTION_ARTIFACT_AUTHORIZATION
-BLOCKED_BY_UNPROVEN_ADDITIVE_DERIVED_DEPENDENCY_SCOPE
-BLOCKED_BY_MISSING_PRODUCTION_BACKEND_TERMINAL_RECEIPTS
+/Game/PrimalEarth/CoreBlueprints/Engrams/EngramEntry_Scarecrow.EngramEntry_Scarecrow
+BLUEPRINT_EVIDENCE added=1, changed=0, deleted=0
+captures aggregate changed=1
 ```
+
+There was no `semanticProducerContract`, Discovery, Ontology, Gold, Native, or
+other semantic-input drift. The true prepublication worker result was:
+
+```text
+SUCCEEDED=4
+BLOCKED_GAP=8
+FAILED=0
+```
+
+The succeeded tasks were `FACT × 2`, `EFFECTIVE_ENTITY × 1`, and
+`QUERY_SNAPSHOT × 1`. The remaining blocked tasks were `ROLE_ENTITY × 1`,
+`DOMAIN_ENTITY × 1`, and `PROJECTION × 6`. The independently authenticated v3
+receipt had raw SHA-256
+`6c56aa85ff43349ac20b64fae93058e51ad645d27660099c87758ca62c5e94b3`
+and `baseBindingVerified=true`.
+
+The current real blocker is `REBUILD_QUEUE_NOT_DRAINED`, caused only by those
+Role, Domain, and Projection backends. Narrow gates, signed production
+authorization, and the publisher remain unavailable. The result therefore
+still fixes `productionAuthority=false`, `published=false`,
+`e4Scenario2Complete=false`, and never reaches a pointer write. Current
+Snapshot authority remains at 234 Blueprint Evidence entries; live captures
+have 235, with Scarecrow as the only unpublished addition.
 
 ## Verification
 

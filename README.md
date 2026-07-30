@@ -15,22 +15,31 @@ C++。伪代码、Ghidra 伪 C 和静态排行都只是有明确来源与失效�
 
 ## 当前状态
 
-截至 2026-07-30，本机规范 `current.json` 指向的密封快照为：
+截至 2026-07-31，本机规范 `current.json` 指向的密封快照为：
 
 | 项目 | 当前值 |
 |---|---|
-| Build | `20260730T051513-345699a11f21` |
+| Build | `20260730T172442-19e56659d331` |
 | Knowledge gates | `60/75` 通过，15 个 critical gate 仍开放 |
 | Runtime health | `READY / FRESH`，`activeStaleSources=0` |
 | Query mode | `shadow` |
 | 默认查询来源 | `legacy` |
 | Blueprint-native links | 713 candidates / 1 confirmed |
+| Blueprint Evidence | Snapshot `234`；live Scarecrow 是唯一未发布新增 |
 | Burn-in | `MISSING / BURN_IN_ATTESTATION_MISSING` |
+| Cutover | `false` |
 
 因此 vNext 可以用于 `vNext` / `compare` 查证，但还不能替换 legacy。人工 query、
 registration、role Gold 与连续 burn-in 证据不足时，系统会继续 fail closed。
 完整身份、统计和限制见
 [ARK KB vNext 当前状态](docs/ark_kb_vnext/CURRENT_STATUS.md)。
+
+PR #27（merge commit `86c7715dab7dc15635c0cb18789f36d5cd8f3f69`）
+已把生产 `QUERY_SNAPSHOT` backend 合入 `main`。真实 Scarecrow
+prepublication 回放得到 `SUCCEEDED=4 / BLOCKED_GAP=8 / FAILED=0`，v3
+receipt 为 `baseBindingVerified=true`；剩余 Backend 是 Role、Domain 和
+Projection。此次回放保持 `published=false`，没有创建增量 Snapshot，也没有
+修改 current pointer。
 
 ## 5 分钟快速开始
 

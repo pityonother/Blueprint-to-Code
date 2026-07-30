@@ -20,12 +20,27 @@
 - 19 个旧 worktree：7.726 GiB；
 - 合计：94.746 GiB（约 101.73 GB）。
 
-完成分阶段清理后：
+完成分阶段清理后，立即复测为：
 
-- 项目工作树：20.454 GiB；
-- 释放：约 74.292 GiB；
+- 主工作树：20.454 GiB；
+- 文档 worktree：0.040 GiB；
+- 两者合计：20.494 GiB；
+- 相对清理前净释放：74.252 GiB；
 - 当前 KB 仍为 `READY / FRESH / shadow / legacy`；
 - Git 工作区保持干净。
+
+2026-07-31 再次只读实测：
+
+| 范围 | Bytes | GiB |
+|---|---:|---:|
+| 主工作树 | 34,847,120,961 | 32.454 |
+| 文档 worktree | 43,196,334 | 0.040 |
+| 合计 | 34,890,317,295 | 32.494 |
+| 其中 5 个 immutable snapshots | 21,473,498,382 | 19.999 |
+
+后续验收构建创建了新的完整 Snapshot。相对清理完成时增加的 12.000 GiB
+来自这些仍在保留链中的可重建全量 Snapshot；这不是清理失败，也不授权删除
+任何 Snapshot。
 
 已删除：
 
@@ -41,6 +56,7 @@
 明确保留：
 
 - 当前 snapshot 与它直接绑定的 previous snapshot；
+- 被报告、回滚、attestation 或 tag 引用的 snapshot；
 - 当前 Discovery 数据库；
 - 当前 Registry generation 与 resume state；
 - `captures/*/evidence` 和尚未完成 fresh-source prune 的旧图产物；
