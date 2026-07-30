@@ -16,7 +16,7 @@ import re
 import sqlite3
 import stat
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -63,6 +63,30 @@ class SafeStagedSnapshot:
     copied_files: int
     receipt: dict[str, object]
     cleanup_identity: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class SafeCopiedArtifact:
+    relative: str
+    sha256: str
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class SafeFrozenBlueprintBundle:
+    staging_id: str
+    source_id: str
+    quarantine_root: Path
+    bundle_root: Path
+    artifacts: tuple[SafeCopiedArtifact, ...]
+    quarantine_tree_digest: str
+    quarantine_identity: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class SafeValidatedBlueprintBundle:
+    quarantine_tree_digest: str
+    artifacts: tuple[tuple[str, bytes], ...]
 
 
 @dataclass
@@ -1198,6 +1222,38 @@ def _create_destination_directories(state: _StagingState) -> None:
         state.destination_entries.append(entry)
 
 
+def _copy_file_contents(source: _Entry, destination: _Entry) -> None:
+    source_digest = hashlib.sha256()
+    destination_digest = hashlib.sha256()
+    copied = 0
+    for chunk in _read_chunks(source.handle):
+        source_digest.update(chunk)
+        copied += len(chunk)
+        if os.name == "nt":
+            _win_write(destination.handle, chunk)
+        else:
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination.handle, view)
+                if written <= 0:
+                    raise OSError("staging write made no progress")
+                view = view[written:]
+        destination_digest.update(chunk)
+    if os.name == "nt":
+        if not _kernel32.FlushFileBuffers(destination.handle):
+            raise _win_error("FlushFileBuffers failed")
+    else:
+        os.fsync(destination.handle)
+    source.sha256 = source_digest.hexdigest()
+    destination.sha256 = destination_digest.hexdigest()
+    destination.size = copied
+    if copied != source.size:
+        raise _error(
+            "STAGING_SOURCE_IDENTITY_CHANGED",
+            f"source size changed during copy: {source.relative}",
+        )
+
+
 def _copy_files(state: _StagingState) -> None:
     source_files = sorted(
         (entry for entry in state.source_entries if not entry.is_dir),
@@ -1258,35 +1314,7 @@ def _copy_files(state: _StagingState) -> None:
                 f"staged file aliases another file: {source.relative}",
             )
         destination_identities.add(destination.identity)
-        source_digest = hashlib.sha256()
-        destination_digest = hashlib.sha256()
-        copied = 0
-        for chunk in _read_chunks(source.handle):
-            source_digest.update(chunk)
-            copied += len(chunk)
-            if os.name == "nt":
-                _win_write(handle, chunk)
-            else:
-                view = memoryview(chunk)
-                while view:
-                    written = os.write(handle, view)
-                    if written <= 0:
-                        raise OSError("staging write made no progress")
-                    view = view[written:]
-            destination_digest.update(chunk)
-        if os.name == "nt":
-            if not _kernel32.FlushFileBuffers(handle):
-                raise _win_error("FlushFileBuffers failed")
-        else:
-            os.fsync(handle)
-        source.sha256 = source_digest.hexdigest()
-        destination.sha256 = destination_digest.hexdigest()
-        destination.size = copied
-        if copied != source.size:
-            raise _error(
-                "STAGING_SOURCE_IDENTITY_CHANGED",
-                f"source size changed during copy: {source.relative}",
-            )
+        _copy_file_contents(source, destination)
 
 
 def _entry_map(entries: list[_Entry]) -> dict[str, _Entry]:
@@ -1571,6 +1599,862 @@ def _baseline_identity_sha256(baseline: Any) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _quarantine_relative_parts(value: str) -> tuple[str, ...]:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise _error(
+            "ADDITIVE_QUARANTINE_ARTIFACT_SET_MISMATCH",
+            "the candidate Evidence directory is not a controlled path",
+        )
+    return path.parts
+
+
+def _directory_names(handle: int) -> list[str]:
+    if os.name == "nt":
+        return _win_names(handle)
+    names = os.listdir(handle)
+    if len(names) != len(set(names)):
+        raise OSError("directory enumeration returned duplicate names")
+    return sorted(names)
+
+
+def _open_directory_entry(
+    parent: int,
+    name: str,
+    *,
+    relative: str,
+    writable: bool = False,
+    create: bool = False,
+    share_delete: bool = False,
+) -> _Entry:
+    if os.name == "nt":
+        handle = _win_open_child(
+            parent,
+            name,
+            directory=True,
+            create=create,
+            writable=writable,
+            share_delete=share_delete,
+        )
+        return _win_entry(handle, relative, name)
+    flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    if create:
+        os.mkdir(name, mode=0o700, dir_fd=parent)
+    before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if stat.S_ISLNK(before.st_mode):
+        raise _error(
+            "ADDITIVE_QUARANTINE_REPARSE_POINT_REJECTED",
+            "a candidate Evidence directory is a symlink",
+        )
+    handle = os.open(name, flags, dir_fd=parent)
+    entry = _posix_entry(handle, relative, name)
+    if entry.identity != (int(before.st_dev), int(before.st_ino)):
+        _close_handle(handle)
+        raise _error(
+            "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED",
+            "a candidate Evidence directory changed before open",
+        )
+    return entry
+
+
+def _open_file_entry(
+    parent: int,
+    name: str,
+    *,
+    relative: str,
+    writable: bool = False,
+    create: bool = False,
+) -> _Entry:
+    if os.name == "nt":
+        handle = _win_open_child(
+            parent,
+            name,
+            directory=False,
+            create=create,
+            writable=writable,
+            share_delete=False,
+        )
+        return _win_entry(handle, relative, name)
+    flags = (
+        (os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        if create
+        else os.O_RDONLY
+    )
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    before = (
+        None
+        if create
+        else os.stat(name, dir_fd=parent, follow_symlinks=False)
+    )
+    if before is not None and stat.S_ISLNK(before.st_mode):
+        raise _error(
+            "ADDITIVE_QUARANTINE_REPARSE_POINT_REJECTED",
+            "a candidate Evidence artifact is a symlink",
+        )
+    if before is not None and not stat.S_ISREG(before.st_mode):
+        raise _error(
+            "ADDITIVE_QUARANTINE_SPECIAL_FILE_REJECTED",
+            "a candidate Evidence artifact is not a regular file",
+        )
+    handle = os.open(name, flags, 0o600, dir_fd=parent)
+    entry = _posix_entry(handle, relative, name)
+    if before is not None and entry.identity != (
+        int(before.st_dev),
+        int(before.st_ino),
+    ):
+        _close_handle(handle)
+        raise _error(
+            "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED",
+            "a candidate Evidence artifact changed before open",
+        )
+    return entry
+
+
+def _validate_named_directory(
+    parent: int,
+    name: str,
+    expected: int,
+    *,
+    source: bool,
+) -> None:
+    observed: _Entry | None = None
+    try:
+        observed = _open_directory_entry(
+            parent,
+            name,
+            relative=name,
+            share_delete=True,
+        )
+        if observed.identity != _handle_identity(expected):
+            raise OSError("directory identity changed")
+    except SafeStagingError:
+        raise
+    except Exception as exc:
+        code = (
+            "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED"
+            if source
+            else "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED"
+        )
+        raise _error(code, "a pinned directory name changed identity") from exc
+    finally:
+        if observed is not None:
+            _close_handle(observed.handle)
+
+
+def _validate_absolute_directory_chain(
+    path: Path,
+    handles: Sequence[int],
+    *,
+    source: bool,
+) -> None:
+    absolute = Path(os.path.abspath(path))
+    names = absolute.parts[1:]
+    if len(handles) != len(names) + 1:
+        code = (
+            "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED"
+            if source
+            else "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED"
+        )
+        raise _error(code, "a pinned absolute directory chain is invalid")
+    for index, name in enumerate(names):
+        _validate_named_directory(
+            handles[index],
+            name,
+            handles[index + 1],
+            source=source,
+        )
+
+
+def _validate_relative_directory_chain(
+    handles: Sequence[int],
+    *,
+    absolute_length: int,
+    names: Sequence[str],
+    source: bool,
+) -> None:
+    if len(handles) != absolute_length + len(names):
+        code = (
+            "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED"
+            if source
+            else "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED"
+        )
+        raise _error(code, "a pinned relative directory chain is invalid")
+    for index, name in enumerate(names):
+        parent_index = absolute_length - 1 + index
+        _validate_named_directory(
+            handles[parent_index],
+            name,
+            handles[parent_index + 1],
+            source=source,
+        )
+
+
+def _close_unique_handles(
+    entries: Sequence[_Entry],
+    chains: Sequence[Sequence[int]],
+) -> None:
+    closed: set[int] = set()
+    for entry in reversed(entries):
+        if entry.handle < 0 or entry.handle in closed:
+            continue
+        try:
+            _close_handle(entry.handle)
+        except OSError:
+            pass
+        closed.add(entry.handle)
+        entry.handle = -1
+    for chain in chains:
+        for handle in reversed(chain):
+            if handle < 0 or handle in closed:
+                continue
+            try:
+                _close_handle(handle)
+            except OSError:
+                pass
+            closed.add(handle)
+
+
+def _quarantine_error(error: Exception) -> SafeStagingError:
+    if isinstance(error, SafeStagingError):
+        translations = {
+            "STAGING_REPARSE_POINT_REJECTED": (
+                "ADDITIVE_QUARANTINE_REPARSE_POINT_REJECTED"
+            ),
+            "STAGING_SPECIAL_FILE_REJECTED": (
+                "ADDITIVE_QUARANTINE_SPECIAL_FILE_REJECTED"
+            ),
+            "STAGING_FILE_ID_ALIAS_REJECTED": (
+                "ADDITIVE_QUARANTINE_HARDLINK_ALIAS_REJECTED"
+            ),
+            "STAGING_SOURCE_IDENTITY_CHANGED": (
+                "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED"
+            ),
+            "STAGING_DESTINATION_IDENTITY_CHANGED": (
+                "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED"
+            ),
+        }
+        code = translations.get(error.gap_code, error.gap_code)
+        if code == error.gap_code:
+            return error
+        return _error(code, str(error))
+    return _error(
+        "REPARSE_SAFE_ADDITIVE_QUARANTINE_UNAVAILABLE",
+        "the candidate Evidence bundle could not be frozen safely",
+    )
+
+
+def freeze_blueprint_evidence_bundle(
+    *,
+    source_root: Path,
+    source_relative_directory: str,
+    temporary_root: Path,
+    staging_id: str,
+    staging_identity: tuple[object, ...],
+    source_id: str,
+    fault_injector: Callable[[str, str], None] | None = None,
+) -> SafeFrozenBlueprintBundle:
+    """Copy one exact Evidence SQLite bundle through pinned no-follow handles."""
+
+    if (
+        not isinstance(source_root, Path)
+        or not isinstance(temporary_root, Path)
+        or not re.fullmatch(r"[0-9a-f]{32}", staging_id)
+        or not re.fullmatch(r"[0-9a-f]{64}", source_id)
+        or not isinstance(staging_identity, tuple)
+        or not staging_identity
+        or (
+            fault_injector is not None
+            and not callable(fault_injector)
+        )
+    ):
+        raise TypeError("safe additive quarantine identity is invalid")
+    source_parts = _quarantine_relative_parts(
+        source_relative_directory
+    )
+    expected_temporary = (
+        temporary_root.parent / staging_id
+    )
+    if (
+        temporary_root != expected_temporary
+        or temporary_root.parent.name != ".incremental-staging"
+    ):
+        raise _error(
+            "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+            "quarantine must use the returned staging temporary root",
+        )
+
+    source_chain: list[int] = []
+    destination_chain: list[int] = []
+    source_directory_entries: list[_Entry] = []
+    source_entries: list[_Entry] = []
+    destination_entries: list[_Entry] = []
+    quarantine_entry: _Entry | None = None
+    bundle_entry: _Entry | None = None
+    cleanup_state: _StagingState | None = None
+    residual = (
+        f".incremental-staging/{staging_id}/quarantine"
+    )
+    original_error: SafeStagingError | None = None
+    source_absolute_length = 0
+    try:
+        source_chain = (
+            _win_open_absolute_chain(source_root)
+            if os.name == "nt"
+            else _posix_open_absolute_chain(source_root)
+        )
+        source_absolute_length = len(source_chain)
+        source_root_handle = source_chain[-1]
+        source_parent = source_root_handle
+        relative = ""
+        for part in source_parts:
+            relative = f"{relative}/{part}" if relative else part
+            entry = _open_directory_entry(
+                source_parent,
+                part,
+                relative=relative,
+            )
+            source_directory_entries.append(entry)
+            source_chain.append(entry.handle)
+            source_parent = entry.handle
+        source_bundle_handle = source_chain[-1]
+        names = _directory_names(source_bundle_handle)
+        if "evidence.sqlite" not in names:
+            raise _error(
+                "ADDITIVE_QUARANTINE_ARTIFACT_SET_MISMATCH",
+                "the candidate Evidence SQLite is missing",
+            )
+        artifact_names = ["evidence.sqlite"]
+        if "manifest.json" in names:
+            artifact_names.append("manifest.json")
+        for name in artifact_names:
+            entry = _open_file_entry(
+                source_bundle_handle,
+                name,
+                relative=name,
+            )
+            if entry.links != 1:
+                raise _error(
+                    "ADDITIVE_QUARANTINE_HARDLINK_ALIAS_REJECTED",
+                    "a candidate Evidence artifact has a hard-link alias",
+                )
+            source_entries.append(entry)
+        if len({entry.identity for entry in source_entries}) != len(
+            source_entries
+        ):
+            raise _error(
+                "ADDITIVE_QUARANTINE_HARDLINK_ALIAS_REJECTED",
+                "candidate Evidence artifacts alias each other",
+            )
+        try:
+            _invoke_fault(
+                fault_injector,
+                "after_source_enumeration",
+                source_relative_directory,
+            )
+        except OSError as exc:
+            raise _error(
+                "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED",
+                "the candidate Evidence directory could not remain pinned",
+            ) from exc
+        _validate_absolute_directory_chain(
+            source_root,
+            source_chain[:source_absolute_length],
+            source=True,
+        )
+        _validate_relative_directory_chain(
+            source_chain,
+            absolute_length=source_absolute_length,
+            names=source_parts,
+            source=True,
+        )
+
+        destination_chain = (
+            _win_open_absolute_chain(temporary_root)
+            if os.name == "nt"
+            else _posix_open_absolute_chain(temporary_root)
+        )
+        temporary_handle = destination_chain[-1]
+        if _handle_identity(temporary_handle) != staging_identity:
+            raise _error(
+                "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+                "the staging temporary root identity changed",
+            )
+        _validate_absolute_directory_chain(
+            temporary_root,
+            destination_chain,
+            source=False,
+        )
+        quarantine_entry = _open_directory_entry(
+            temporary_handle,
+            "quarantine",
+            relative="quarantine",
+            writable=True,
+            create=True,
+        )
+        bundle_entry = _open_directory_entry(
+            quarantine_entry.handle,
+            source_id,
+            relative=source_id,
+            writable=True,
+            create=True,
+        )
+        cleanup_state = _StagingState(
+            snapshot_root=temporary_root.parent.parent,
+            staging_root=temporary_root,
+            staging_id="quarantine",
+            relative_identifier=residual,
+            temporary_handle=quarantine_entry.handle,
+            staging_handle=temporary_handle,
+            destination_entries=[bundle_entry],
+        )
+        if _volume_identity(temporary_handle) != _volume_identity(
+            quarantine_entry.handle
+        ):
+            raise _error(
+                "ADDITIVE_QUARANTINE_NOT_ON_TARGET_VOLUME",
+                "quarantine is not on the staged snapshot volume",
+            )
+        try:
+            _invoke_fault(
+                fault_injector,
+                "after_destination_created",
+                residual,
+            )
+        except OSError as exc:
+            raise _error(
+                "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+                "the quarantine parent could not remain pinned",
+            ) from exc
+        _validate_named_directory(
+            temporary_handle,
+            "quarantine",
+            quarantine_entry.handle,
+            source=False,
+        )
+        _validate_named_directory(
+            quarantine_entry.handle,
+            source_id,
+            bundle_entry.handle,
+            source=False,
+        )
+        _invoke_fault(fault_injector, "before_copy")
+
+        source_identities = {entry.identity for entry in source_entries}
+        destination_identities: set[tuple[object, ...]] = set()
+        for source in source_entries:
+            destination = _open_file_entry(
+                bundle_entry.handle,
+                source.name,
+                relative=source.name,
+                writable=True,
+                create=True,
+            )
+            destination_entries.append(destination)
+            cleanup_state.destination_entries.append(destination)
+            if (
+                destination.links != 1
+                or destination.identity in source_identities
+                or destination.identity in destination_identities
+            ):
+                raise _error(
+                    "ADDITIVE_QUARANTINE_HARDLINK_ALIAS_REJECTED",
+                    "a quarantine artifact aliases another file",
+                )
+            destination_identities.add(destination.identity)
+            try:
+                _copy_file_contents(source, destination)
+            except SafeStagingError as exc:
+                raise _quarantine_error(exc) from exc
+        try:
+            _invoke_fault(fault_injector, "after_copy")
+        except OSError as exc:
+            raise _error(
+                "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED",
+                "a candidate Evidence artifact could not remain stable",
+            ) from exc
+        try:
+            _invoke_fault(fault_injector, "before_receipt")
+        except OSError as exc:
+            raise _error(
+                "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED",
+                "the live candidate Evidence changed after quarantine",
+            ) from exc
+
+        _validate_absolute_directory_chain(
+            source_root,
+            source_chain[:source_absolute_length],
+            source=True,
+        )
+        _validate_relative_directory_chain(
+            source_chain,
+            absolute_length=source_absolute_length,
+            names=source_parts,
+            source=True,
+        )
+        observed_names = _directory_names(source_bundle_handle)
+        if (
+            ("manifest.json" in observed_names)
+            != ("manifest.json" in artifact_names)
+            or "evidence.sqlite" not in observed_names
+        ):
+            raise _error(
+                "ADDITIVE_QUARANTINE_SOURCE_IDENTITY_CHANGED",
+                "the candidate Evidence artifact set changed",
+            )
+        observed_source = [
+            _open_file_entry(
+                source_bundle_handle,
+                source.name,
+                relative=source.name,
+            )
+            for source in source_entries
+        ]
+        try:
+            _compare_rescan(
+                source_entries,
+                observed_source,
+                source=True,
+            )
+        except SafeStagingError as exc:
+            raise _quarantine_error(exc) from exc
+        finally:
+            _close_entries(observed_source)
+
+        _validate_named_directory(
+            temporary_handle,
+            "quarantine",
+            quarantine_entry.handle,
+            source=False,
+        )
+        _validate_named_directory(
+            quarantine_entry.handle,
+            source_id,
+            bundle_entry.handle,
+            source=False,
+        )
+        observed_destination, observed_directories = _walk(
+            bundle_entry.handle,
+            share_delete=True,
+        )
+        preserve_observed_for_cleanup = False
+        try:
+            observed_paths = {
+                entry.relative for entry in observed_destination
+            }
+            if (
+                any(entry.is_dir for entry in observed_destination)
+                or observed_paths != set(artifact_names)
+            ):
+                if os.name == "nt":
+                    # Reopen the complete destination tree with DELETE access
+                    # only after the exact-set check fails.  Keeping the normal
+                    # rescan read-only avoids a sharing violation with the
+                    # pinned writable artifact handles.
+                    _close_file_entries(destination_entries)
+                    _close_entries(
+                        observed_destination,
+                        keep_directories={bundle_entry.handle},
+                    )
+                    observed_destination, observed_directories = _walk(
+                        bundle_entry.handle,
+                        writable=True,
+                        share_delete=True,
+                    )
+                    cleanup_state.destination_entries = [
+                        bundle_entry,
+                        *observed_destination,
+                    ]
+                    preserve_observed_for_cleanup = True
+                raise _error(
+                    "ADDITIVE_QUARANTINE_ARTIFACT_SET_MISMATCH",
+                    "quarantine contains an unexpected artifact",
+                )
+            _compare_rescan(
+                destination_entries,
+                observed_destination,
+                source=False,
+            )
+        except SafeStagingError as exc:
+            raise _quarantine_error(exc) from exc
+        finally:
+            if not preserve_observed_for_cleanup:
+                _close_entries(
+                    observed_destination,
+                    keep_directories={bundle_entry.handle},
+                )
+            del observed_directories
+
+        _validate_absolute_directory_chain(
+            source_root,
+            source_chain[:source_absolute_length],
+            source=True,
+        )
+        _validate_relative_directory_chain(
+            source_chain,
+            absolute_length=source_absolute_length,
+            names=source_parts,
+            source=True,
+        )
+        _validate_absolute_directory_chain(
+            temporary_root,
+            destination_chain,
+            source=False,
+        )
+        _validate_named_directory(
+            temporary_handle,
+            "quarantine",
+            quarantine_entry.handle,
+            source=False,
+        )
+        _validate_named_directory(
+            quarantine_entry.handle,
+            source_id,
+            bundle_entry.handle,
+            source=False,
+        )
+        tree_digest = _tree_digest(destination_entries)
+        result = SafeFrozenBlueprintBundle(
+            staging_id=staging_id,
+            source_id=source_id,
+            quarantine_root=temporary_root / "quarantine",
+            bundle_root=temporary_root / "quarantine" / source_id,
+            artifacts=tuple(
+                SafeCopiedArtifact(
+                    relative=entry.relative,
+                    sha256=entry.sha256,
+                    size_bytes=entry.size,
+                )
+                for entry in sorted(
+                    destination_entries,
+                    key=lambda value: value.relative,
+                )
+            ),
+            quarantine_tree_digest=tree_digest,
+            quarantine_identity=_handle_identity(
+                quarantine_entry.handle
+            ),
+        )
+        _close_unique_handles(
+            [
+                *source_entries,
+                *destination_entries,
+                *source_directory_entries,
+                bundle_entry,
+                quarantine_entry,
+            ],
+            [source_chain, destination_chain],
+        )
+        return result
+    except Exception as exc:
+        original_error = _quarantine_error(exc)
+        if original_error is not exc:
+            original_error.__cause__ = exc
+
+    try:
+        if cleanup_state is not None:
+            _cleanup_staging(cleanup_state)
+    except Exception as cleanup_error:
+        _close_unique_handles(
+            [
+                *source_entries,
+                *destination_entries,
+                *source_directory_entries,
+                *(
+                    [bundle_entry]
+                    if bundle_entry is not None
+                    else []
+                ),
+                *(
+                    [quarantine_entry]
+                    if quarantine_entry is not None
+                    else []
+                ),
+            ],
+            [source_chain, destination_chain],
+        )
+        raise SafeStagingError(
+            "ADDITIVE_QUARANTINE_CLEANUP_UNCERTAIN",
+            "quarantine cleanup could not prove removal of its directory",
+            status="UNCERTAIN",
+            residual_identifier=residual,
+        ) from cleanup_error
+    _close_unique_handles(
+        [
+            *source_entries,
+            *destination_entries,
+            *source_directory_entries,
+            *(
+                [bundle_entry]
+                if bundle_entry is not None
+                else []
+            ),
+            *(
+                [quarantine_entry]
+                if quarantine_entry is not None
+                else []
+            ),
+        ],
+        [source_chain, destination_chain],
+    )
+    assert original_error is not None
+    raise original_error
+
+
+def validate_frozen_blueprint_bundle(
+    bundle: SafeFrozenBlueprintBundle,
+    *,
+    temporary_root: Path,
+    staging_identity: tuple[object, ...],
+) -> SafeValidatedBlueprintBundle:
+    """Reopen and verify the exact quarantine before any staged Core write."""
+
+    if (
+        type(bundle) is not SafeFrozenBlueprintBundle
+        or not isinstance(temporary_root, Path)
+        or not isinstance(staging_identity, tuple)
+        or not staging_identity
+        or bundle.quarantine_root
+        != temporary_root / "quarantine"
+        or bundle.bundle_root
+        != temporary_root / "quarantine" / bundle.source_id
+    ):
+        raise _error(
+            "ADDITIVE_QUARANTINE_RECEIPT_INVALID",
+            "the frozen quarantine identity is invalid",
+        )
+    chain: list[int] = []
+    entries: list[_Entry] = []
+    quarantine: _Entry | None = None
+    source_directory: _Entry | None = None
+    try:
+        chain = (
+            _win_open_absolute_chain(temporary_root)
+            if os.name == "nt"
+            else _posix_open_absolute_chain(temporary_root)
+        )
+        temporary_handle = chain[-1]
+        if _handle_identity(temporary_handle) != staging_identity:
+            raise _error(
+                "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+                "the staging temporary root identity changed",
+            )
+        quarantine = _open_directory_entry(
+            temporary_handle,
+            "quarantine",
+            relative="quarantine",
+        )
+        if quarantine.identity != bundle.quarantine_identity:
+            raise _error(
+                "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+                "the quarantine directory identity changed",
+            )
+        source_directory = _open_directory_entry(
+            quarantine.handle,
+            bundle.source_id,
+            relative=bundle.source_id,
+        )
+        entries, directories = _walk(
+            source_directory.handle,
+        )
+        expected = {
+            artifact.relative: artifact
+            for artifact in bundle.artifacts
+        }
+        if (
+            any(entry.is_dir for entry in entries)
+            or {entry.relative for entry in entries} != set(expected)
+        ):
+            raise _error(
+                "ADDITIVE_QUARANTINE_ARTIFACT_SET_MISMATCH",
+                "quarantine artifact membership changed",
+            )
+        identities: set[tuple[object, ...]] = set()
+        contents: list[tuple[str, bytes]] = []
+        for entry in entries:
+            if entry.links != 1 or entry.identity in identities:
+                raise _error(
+                    "ADDITIVE_QUARANTINE_HARDLINK_ALIAS_REJECTED",
+                    "a quarantine artifact has a hard-link alias",
+                )
+            identities.add(entry.identity)
+            content = b"".join(_read_chunks(entry.handle))
+            entry.sha256 = hashlib.sha256(content).hexdigest()
+            artifact = expected[entry.relative]
+            if (
+                entry.size != artifact.size_bytes
+                or entry.sha256 != artifact.sha256
+            ):
+                raise _error(
+                    "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+                    "a quarantine artifact changed after freezing",
+                )
+            contents.append((entry.relative, content))
+        digest = _tree_digest(entries)
+        if digest != bundle.quarantine_tree_digest:
+            raise _error(
+                "ADDITIVE_QUARANTINE_DESTINATION_IDENTITY_CHANGED",
+                "the quarantine tree digest changed",
+            )
+        _validate_absolute_directory_chain(
+            temporary_root,
+            chain,
+            source=False,
+        )
+        _validate_named_directory(
+            temporary_handle,
+            "quarantine",
+            quarantine.handle,
+            source=False,
+        )
+        _validate_named_directory(
+            quarantine.handle,
+            bundle.source_id,
+            source_directory.handle,
+            source=False,
+        )
+        del directories
+        _close_unique_handles(
+            [
+                *entries,
+                source_directory,
+                quarantine,
+            ],
+            [chain],
+        )
+        return SafeValidatedBlueprintBundle(
+            quarantine_tree_digest=digest,
+            artifacts=tuple(sorted(contents)),
+        )
+    except Exception as exc:
+        _close_unique_handles(
+            [
+                *entries,
+                *(
+                    [source_directory]
+                    if source_directory is not None
+                    else []
+                ),
+                *(
+                    [quarantine]
+                    if quarantine is not None
+                    else []
+                ),
+            ],
+            [chain],
+        )
+        raise _quarantine_error(exc) from exc
 
 
 def stage_snapshot_tree(

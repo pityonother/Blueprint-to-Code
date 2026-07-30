@@ -115,20 +115,35 @@ exactly. It also recomputes the same canonical diff bytes and SHA. A caller of
 this helper must rescan using the initial candidate's `generatedAt`; a new
 timestamp is intentionally not normalized away.
 
-## Additive quarantine deliberately unavailable
+## Reparse-safe additive quarantine
 
-`freeze_additive_blueprint_input()` always fails before inspecting either
-filesystem path or creating any directory:
+`freeze_additive_blueprint_input()` supports exactly one added
+`BLUEPRINT_EVIDENCE` revision plus the matching `captures` aggregate change.
+Update, delete, rename, additional semantic changes, and batches larger than
+one fail closed.
+
+The function derives the exact Evidence directory from the locked
+`UpdateBaseline`; callers cannot supply an artifact list or quarantine path.
+It reuses the whole-tree staging no-follow traversal and handle identities to
+copy `evidence.sqlite` plus an actually present adjacent `manifest.json` into:
 
 ```text
-REPARSE_SAFE_ADDITIVE_QUARANTINE_UNAVAILABLE
+.incremental-staging/<staging-id>/quarantine/<source-id>/
 ```
 
-There is no frozen-input type or successful quarantine path in this slice.
-A later implementation must pin source and destination directory handles,
-reject file and parent-directory replacement at open time, verify the exact
-candidate-bound artifact set, and rescan the completed quarantine before it
-can return an ingest root.
+This directory is beside, not inside, `snapshot/`. Source and destination
+parent chains are pinned and revalidated; reparse points, special files,
+hard-link aliases, path replacement, cross-volume quarantine placement,
+unexpected artifacts, and content drift are rejected. The copied files have
+independent file identities and are rehashed before an immutable
+`FrozenAdditiveBlueprintInput` is returned.
+
+The canonical quarantine receipt binds the UpdateBaseline, staging proof,
+source identity, SQLite identity, optional manifest, exact aggregate, and
+quarantine tree digest. It records only controlled relative paths and fixes
+`published=false`, `productionAuthority=false`,
+`e4Scenario2Complete=false`, `cutoverEligible=false`, `mode=shadow`, and
+`defaultQuerySource=legacy`.
 
 ## Two-stage receipt inspection
 
@@ -189,16 +204,18 @@ There is no fallback that relabels a TEST_ONLY artifact as production.
 `run_incremental_update()` now captures and validates the current pointer,
 manifest, live source manifest, source diff, and `UpdateBaseline` under the
 incremental writer lock. The default path passes that same baseline into safe
-whole-tree staging, then repeats the live source scan and complete baseline
-identity validation before using the staging receipt. It does not use a
-lock-external scan as production staging input.
+whole-tree staging, revalidates it, freezes the exact additive Evidence bundle
+outside the staged snapshot, then repeats the live source scan before
+planning. Default Blueprint ingest requires the frozen receipt, revalidates
+the quarantine before opening the staged Core, and passes only
+`frozen_input.ingest_root` to the materializer. It does not use a lock-external
+scan or `paths.capture_root` as the ingest input.
 
 The following downstream capabilities remain deliberately unavailable:
 
 - the default narrow-gate hook remains unavailable;
 - the default publisher remains unavailable;
 - no pointer write is reachable from `update_baseline.py`;
-- additive source quarantine is deliberately unavailable;
 - verified delta receipt base binding remains unavailable.
 
 ## Real blockers
@@ -214,7 +231,6 @@ BLOCKED_BY_MISSING_AUTHORIZED_ADDITIVE_BLUEPRINT_EVIDENCE
 BLOCKED_BY_MISSING_SIGNED_PRODUCTION_ARTIFACT_AUTHORIZATION
 BLOCKED_BY_UNPROVEN_ADDITIVE_DERIVED_DEPENDENCY_SCOPE
 BLOCKED_BY_MISSING_PRODUCTION_BACKEND_TERMINAL_RECEIPTS
-BLOCKED_BY_REPARSE_SAFE_ADDITIVE_QUARANTINE
 BLOCKED_BY_UNVERIFIED_DELTA_RECEIPT_BASE_BINDING
 ```
 
@@ -224,10 +240,11 @@ Focused checks:
 
 ```powershell
 python -m pytest -q tests/test_kb_pointer_cas.py
+python -m pytest -q tests/test_kb_additive_quarantine.py
 python -m pytest -q tests/test_kb_update_baseline.py
 python -m pytest -q tests/test_kb_incremental_delta.py
 python -m pytest -q tests/test_update_ark_kb_vnext.py
 python -m pytest -q tests/test_kb_safe_staging.py
-ruff check scripts/update_ark_kb_vnext.py scripts/blueprint_translator/kb_vnext/pointer_cas.py scripts/blueprint_translator/kb_vnext/source_manifest.py scripts/blueprint_translator/kb_vnext/incremental_delta.py scripts/blueprint_translator/kb_vnext/update_baseline.py scripts/blueprint_translator/kb_vnext/safe_staging.py tests/test_update_ark_kb_vnext.py tests/test_kb_pointer_cas.py tests/test_kb_update_baseline.py tests/test_kb_safe_staging.py
+ruff check scripts/update_ark_kb_vnext.py scripts/blueprint_translator/kb_vnext/blueprint_ingest.py scripts/blueprint_translator/kb_vnext/pointer_cas.py scripts/blueprint_translator/kb_vnext/source_manifest.py scripts/blueprint_translator/kb_vnext/incremental_delta.py scripts/blueprint_translator/kb_vnext/update_baseline.py scripts/blueprint_translator/kb_vnext/safe_staging.py tests/test_update_ark_kb_vnext.py tests/test_kb_additive_quarantine.py tests/test_kb_pointer_cas.py tests/test_kb_update_baseline.py tests/test_kb_safe_staging.py
 git diff --check
 ```

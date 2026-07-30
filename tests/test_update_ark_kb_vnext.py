@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -652,7 +653,9 @@ def test_production_preflight_rejects_blueprint_batch_above_bound() -> None:
     with pytest.raises(update.UpdateBlocked) as caught:
         update.production_capability_check(previous, diff)
 
-    assert caught.value.gap_code == "BLUEPRINT_ADDITION_BATCH_TOO_LARGE"
+    assert caught.value.gap_code == (
+        "ADDITIVE_QUARANTINE_REQUIRES_SINGLE_BLUEPRINT"
+    )
 
 
 def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
@@ -669,20 +672,57 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
     paths = _paths(tmp_path)
     sqlite3.connect(paths.discovery_database).close()
     workspace = _production_workspace(tmp_path)
-    monkeypatch.setattr(
-        update,
-        "load_current_source_manifest",
-        lambda candidate_paths: previous,
+    _, pointer_bytes, _ = _write_bound_current_snapshot(
+        paths,
+        previous,
     )
     monkeypatch.setattr(
         update,
         "scan_source_manifest",
         lambda candidate_paths: current,
     )
+    workspace.base_build_id = "build-current"
+    workspace.staged_baseline = object()
     monkeypatch.setattr(
         update,
-        "_unavailable_stage",
-        lambda candidate_paths: workspace,
+        "cleanup_staged_baseline_snapshot",
+        lambda staged, snapshot_root: shutil.rmtree(
+            workspace.temporary_root,
+            ignore_errors=True,
+        ),
+    )
+    monkeypatch.setattr(
+        update,
+        "stage_current_snapshot",
+        lambda candidate_paths, baseline: workspace,
+    )
+    frozen = SimpleNamespace(
+        source_id=added.source_id,
+        entity_uri=added.entity_uri,
+        revision_label=added.revision_label,
+        source_fingerprint=added.fingerprint,
+        ingest_root=tmp_path / "quarantine",
+    )
+    monkeypatch.setattr(
+        update,
+        "freeze_additive_blueprint_input",
+        lambda *args, **kwargs: (
+            setattr(workspace, "staged_baseline", None),
+            frozen,
+        )[1],
+    )
+    monkeypatch.setattr(
+        update,
+        "_safe_quarantine_receipt",
+        lambda value: {
+            "published": False,
+            "productionAuthority": False,
+        },
+    )
+    monkeypatch.setattr(
+        update,
+        "validate_frozen_additive_blueprint_input",
+        lambda value: value,
     )
 
     def ingest_fixture(
@@ -692,9 +732,11 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         capture_root: Path,
         ontology: object,
         source_revisions: tuple[update.SourceRevision, ...],
+        frozen_evidence_root: bool,
     ) -> BlueprintIngestResult:
         del discovery, capture_root, ontology
         assert source_revisions == (added,)
+        assert frozen_evidence_root is True
         core.execute(
             """
             INSERT INTO source_revisions VALUES (
@@ -765,7 +807,7 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
     assert str(result["ingest"]["proof"]).startswith("ingest-proof://")
     assert result["staging"]["sourceVerifiedUnchanged"] is True
     assert not workspace.temporary_root.exists()
-    assert not (paths.output / "current.json").exists()
+    assert (paths.output / "current.json").read_bytes() == pointer_bytes
 
 
 def test_default_unchanged_manifest_is_cache_hit_without_write(
@@ -942,17 +984,49 @@ def test_default_runner_rescans_sources_after_staging(
     )
     _write_bound_current_snapshot(paths, previous)
     observed = iter((candidate, candidate, changed))
+    sequence: list[str] = []
+
+    def scan_after_stage(
+        locked_paths: update.UpdatePaths,
+    ) -> update.SourceManifest:
+        del locked_paths
+        sequence.append("scan")
+        return next(observed)
+
     monkeypatch.setattr(
         update,
         "scan_source_manifest",
-        lambda locked_paths: next(observed),
+        scan_after_stage,
     )
     workspace = _workspace(tmp_path)
     workspace.base_build_id = "build-current"
+    workspace.staged_baseline = object()
+    monkeypatch.setattr(
+        update,
+        "cleanup_staged_baseline_snapshot",
+        lambda staged, snapshot_root: shutil.rmtree(
+            workspace.temporary_root,
+            ignore_errors=True,
+        ),
+    )
     monkeypatch.setattr(
         update,
         "stage_current_snapshot",
         lambda locked_paths, baseline: workspace,
+    )
+    monkeypatch.setattr(
+        update,
+        "freeze_additive_blueprint_input",
+        lambda *args, **kwargs: (
+            sequence.append("freeze"),
+            setattr(workspace, "staged_baseline", None),
+            object(),
+        )[2],
+    )
+    monkeypatch.setattr(
+        update,
+        "_safe_quarantine_receipt",
+        lambda frozen: {"published": False},
     )
 
     result = update.run_incremental_update(paths)
@@ -961,6 +1035,7 @@ def test_default_runner_rescans_sources_after_staging(
         "SOURCE_MANIFEST_CHANGED_DURING_UPDATE"
     ]
     assert result["published"] is False
+    assert sequence == ["scan", "scan", "freeze", "scan"]
 
 
 def test_default_runner_rechecks_pointer_after_staging(
@@ -981,6 +1056,15 @@ def test_default_runner_rechecks_pointer_after_staging(
     )
     workspace = _workspace(tmp_path)
     workspace.base_build_id = "build-current"
+    workspace.staged_baseline = object()
+    monkeypatch.setattr(
+        update,
+        "cleanup_staged_baseline_snapshot",
+        lambda staged, snapshot_root: shutil.rmtree(
+            workspace.temporary_root,
+            ignore_errors=True,
+        ),
+    )
 
     def stage(
         locked_paths: update.UpdatePaths,
@@ -997,6 +1081,19 @@ def test_default_runner_rechecks_pointer_after_staging(
         return workspace
 
     monkeypatch.setattr(update, "stage_current_snapshot", stage)
+    monkeypatch.setattr(
+        update,
+        "freeze_additive_blueprint_input",
+        lambda *args, **kwargs: (
+            setattr(workspace, "staged_baseline", None),
+            object(),
+        )[1],
+    )
+    monkeypatch.setattr(
+        update,
+        "_safe_quarantine_receipt",
+        lambda frozen: {"published": False},
+    )
 
     result = update.run_incremental_update(paths)
 
