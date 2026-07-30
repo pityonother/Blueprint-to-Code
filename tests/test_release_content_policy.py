@@ -181,6 +181,19 @@ class ReleaseContentPolicyTests(unittest.TestCase):
 
         self.assertEqual(report.findings, ())
 
+    def test_compile_time_workspace_path_is_detected_without_blocking_installs(self):
+        workspace = "D:/" + "/".join(
+            ("build-agent", "_work", "Blueprint-to-Code", "src", "file.cpp")
+        )
+
+        report = self._scan(workspace)
+
+        self.assertIn(
+            "absolute-workspace-path",
+            {finding.category for finding in report.findings},
+        )
+        self.assertEqual(self._scan("/rooted/example.txt").findings, ())
+
     def test_synthetic_test_fixture_requires_an_exact_explained_rule(self):
         relative = "tests/test_fixture.py"
         fixture = self._synthetic_windows_path("someone", "secret.txt")

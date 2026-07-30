@@ -45,7 +45,8 @@ _LINUX_USER_RE = re.compile(
     r"(?:/[^\s\"'<>]*)?)"
 )
 _LINUX_ROOT_RE = re.compile(
-    rf"(?i)(?<![:A-Za-z0-9])(?P<path>/{_ROOT_SEGMENT}(?:/[^\s\"'<>]*)?)"
+    rf"(?i)(?<![:A-Za-z0-9])(?P<path>/{_ROOT_SEGMENT}"
+    r"(?=$|[\s\"'<>\)\]\}]|/)(?:/[^\s\"'<>]*)?)"
 )
 _FILE_URI_RE = re.compile(
     rf"(?i)(?P<path>file:/+(?:[A-Za-z]:/|Users/|home/|{_ROOT_SEGMENT}"
@@ -58,7 +59,9 @@ _UNC_BACKSLASH_RE = re.compile(
 )
 _ABSOLUTE_WORKSPACE_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9])(?P<path>[A-Za-z]:/"
-    r"(?:Desktop|Documents|repos?|source|src|workspaces?)/[^\s\"'<>]+)"
+    r"(?:[^/\s\"'<>]+/){0,4}"
+    r"(?:_work|checkouts?|Desktop|Documents|repos?|source|src|workspaces?)/"
+    r"[^\s\"'<>]+)"
 )
 _WILDCARD_MARKERS = frozenset("*?[]")
 
@@ -189,6 +192,16 @@ DEFAULT_ALLOW_RULES: tuple[ReleaseContentAllowRule, ...] = (
             "value.txt",
         ),
         reason="Synthetic Blueprint fixture proving local properties are rejected.",
+    ),
+    ReleaseContentAllowRule(
+        relative_path="tests/test_kb_blueprint_ingest.py",
+        category="absolute-workspace-path",
+        exact_match=_fixture_user_path(
+            "secret",
+            "Desktop",
+            "value.txt",
+        ),
+        reason="Same exact synthetic Desktop fixture, classified as a workspace.",
     ),
     ReleaseContentAllowRule(
         relative_path="tests/test_kb_migration.py",
