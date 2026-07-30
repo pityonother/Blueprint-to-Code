@@ -356,7 +356,7 @@ def test_update_baseline_rejects_forged_or_foreign_raw_base_binding(
         replace(baseline, current_snapshot=forged)
 
 
-def test_stage_fails_closed_until_reparse_safe_copy_is_available(
+def test_stage_rejects_snapshot_without_sealed_authority_contract(
     tmp_path: Path,
 ) -> None:
     root, _current = _captured(tmp_path)
@@ -364,14 +364,14 @@ def test_stage_fails_closed_until_reparse_safe_copy_is_available(
         snapshot_root=root,
         candidate_source_manifest=_base_manifest(),
     )
-    destination = tmp_path / "staged"
+    destination = root / ".incremental-staging"
 
     with pytest.raises(UpdateBaselineBlockedGap) as caught:
         stage_snapshot_from_baseline(
             baseline,
             destination=destination,
         )
-    assert caught.value.gap_code == "REPARSE_SAFE_STAGING_COPY_UNAVAILABLE"
+    assert caught.value.gap_code == "STAGING_BASELINE_CHANGED"
     assert not destination.exists()
 
 
