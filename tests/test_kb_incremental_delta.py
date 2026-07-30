@@ -16,6 +16,8 @@ SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
+import update_ark_kb_vnext as update_runner  # noqa: E402
+
 from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
     BlueprintIngestResult,
 )
@@ -446,53 +448,30 @@ def _materialize_complete_dependency_scope(
     source_revision_ids: tuple[int, ...],
     entity_ids: tuple[int, ...],
 ) -> None:
-    rows: list[tuple[int, str, int, str]] = []
-    for revision_id in source_revision_ids:
-        rows.extend(
-            (
-                revision_id,
-                "ROLE_ENTITY",
-                entity_id,
-                "ADDITIVE_ROLE_INPUT",
-            )
-            for entity_id in entity_ids
+    placeholders = ",".join("?" for _ in source_revision_ids)
+    fact_ids = tuple(
+        int(row[0])
+        for row in staged.execute(
+            f"""
+            SELECT DISTINCT fact_id
+            FROM fact_evidence
+            WHERE source_revision_id IN ({placeholders})
+            ORDER BY fact_id
+            """,
+            source_revision_ids,
         )
-        rows.extend(
-            (
-                revision_id,
-                "DOMAIN_ENTITY",
-                entity_id,
-                "ADDITIVE_DOMAIN_INPUT",
-            )
-            for entity_id in entity_ids
-        )
-        rows.extend(
-            (
-                revision_id,
-                "PROJECTION",
-                projection_id,
-                "ADDITIVE_FACT_PROJECTION",
-            )
-            for projection_id in range(1, len(DOMAIN_PROJECTIONS) + 1)
-        )
-        rows.append(
-            (
-                revision_id,
-                "QUERY_SNAPSHOT",
-                revision_id,
-                "ADDITIVE_QUERY_CACHE",
-            )
-        )
-    staged.executemany(
-        """
-        INSERT INTO invalidation_dependencies(
-            upstream_revision_id, downstream_kind,
-            downstream_id, dependency_reason
-        ) VALUES (?, ?, ?, ?)
-        """,
-        rows,
     )
-    staged.commit()
+    update_runner.materialize_additive_asset_dependency_scope(
+        staged,
+        source_revision_ids=source_revision_ids,
+        entity_ids=entity_ids,
+        fact_ids=fact_ids,
+        actual_write_tables=(
+            "fact_evidence",
+            "facts",
+            "source_revisions",
+        ),
+    )
 
 
 _TOUCHED_TABLE = {
@@ -868,6 +847,288 @@ def test_add_only_asset_plan_includes_complete_derived_dependency_scope(
             range(1, len(DOMAIN_PROJECTIONS) + 1)
         )
         assert plan.downstream["QUERY_SNAPSHOT"] == (2,)
+    finally:
+        staged.close()
+        base.close()
+
+
+def test_production_materializer_builds_exact_additive_dependency_scope(
+    tmp_path: Path,
+) -> None:
+    base, staged, diff, result, artifact_root, binding = _delta_fixture(
+        tmp_path
+    )
+    staged_path = Path(
+        str(staged.execute("PRAGMA database_list").fetchone()[2])
+    )
+    observer = sqlite3.connect(staged_path)
+    try:
+        delta = build_add_only_blueprint_delta(
+            base,
+            staged,
+            source_diff=diff,
+            ingest_result=result,
+            artifact_root=artifact_root,
+            artifact_bindings=(binding,),
+            trust_context=TEST_ONLY,
+        )
+        plan = update_runner.materialize_additive_asset_dependency_scope(
+            staged,
+            source_revision_ids=delta.source_revision_ids,
+            entity_ids=delta.entity_ids,
+            fact_ids=delta.fact_ids,
+            actual_write_tables=delta.changed_tables,
+        )
+
+        assert plan.downstream == {
+            "DOMAIN_ENTITY": (1,),
+            "EFFECTIVE_ENTITY": (1,),
+            "FACT": (101,),
+            "PROJECTION": tuple(
+                range(1, len(DOMAIN_PROJECTIONS) + 1)
+            ),
+            "QUERY_SNAPSHOT": (2,),
+            "ROLE_ENTITY": (1,),
+        }
+        assert plan.affected_count == 11
+        assert "EDGE_ENTITY" not in plan.downstream
+        assert staged.in_transaction is True
+        assert observer.execute(
+            """
+            SELECT COUNT(*) FROM invalidation_dependencies
+            WHERE upstream_revision_id=2
+            """
+        ).fetchone()[0] == 0
+
+        rows = staged.execute(
+            """
+            SELECT upstream_revision_id, downstream_kind,
+                   downstream_id, dependency_reason
+            FROM invalidation_dependencies
+            WHERE upstream_revision_id=2
+            ORDER BY downstream_kind, downstream_id
+            """
+        ).fetchall()
+        assert rows == [
+            (2, "DOMAIN_ENTITY", 1, "ADDITIVE_DOMAIN_INPUT"),
+            *[
+                (
+                    2,
+                    "PROJECTION",
+                    projection_id,
+                    "ADDITIVE_FACT_PROJECTION",
+                )
+                for projection_id in range(
+                    1, len(DOMAIN_PROJECTIONS) + 1
+                )
+            ],
+            (2, "QUERY_SNAPSHOT", 2, "ADDITIVE_QUERY_CACHE"),
+            (2, "ROLE_ENTITY", 1, "ADDITIVE_ROLE_INPUT"),
+        ]
+        staged.rollback()
+        assert staged.execute(
+            """
+            SELECT COUNT(*) FROM invalidation_dependencies
+            WHERE upstream_revision_id=2
+            """
+        ).fetchone()[0] == 0
+    finally:
+        observer.close()
+        staged.close()
+        base.close()
+
+
+def test_production_materializer_preserves_other_revision_dependencies(
+    tmp_path: Path,
+) -> None:
+    base, staged, diff, result, artifact_root, binding = _delta_fixture(
+        tmp_path
+    )
+    for connection in (base, staged):
+        connection.execute(
+            """
+            INSERT INTO invalidation_dependencies VALUES (
+                1, 'ROLE_ENTITY', 1, 'EXISTING_OTHER_REVISION'
+            )
+            """
+        )
+        connection.commit()
+    try:
+        delta = build_add_only_blueprint_delta(
+            base,
+            staged,
+            source_diff=diff,
+            ingest_result=result,
+            artifact_root=artifact_root,
+            artifact_bindings=(binding,),
+            trust_context=TEST_ONLY,
+        )
+        update_runner.materialize_additive_asset_dependency_scope(
+            staged,
+            source_revision_ids=delta.source_revision_ids,
+            entity_ids=delta.entity_ids,
+            fact_ids=delta.fact_ids,
+            actual_write_tables=delta.changed_tables,
+        )
+
+        assert staged.execute(
+            """
+            SELECT downstream_kind, downstream_id, dependency_reason
+            FROM invalidation_dependencies
+            WHERE upstream_revision_id=1
+            """
+        ).fetchall() == [
+            ("ROLE_ENTITY", 1, "EXISTING_OTHER_REVISION")
+        ]
+    finally:
+        staged.rollback()
+        staged.close()
+        base.close()
+
+
+def test_production_materializer_rolls_back_partial_dependency_scope(
+    tmp_path: Path,
+) -> None:
+    base, staged, diff, result, artifact_root, binding = _delta_fixture(
+        tmp_path
+    )
+    try:
+        delta = build_add_only_blueprint_delta(
+            base,
+            staged,
+            source_diff=diff,
+            ingest_result=result,
+            artifact_root=artifact_root,
+            artifact_bindings=(binding,),
+            trust_context=TEST_ONLY,
+        )
+        staged.execute(
+            """
+            CREATE TRIGGER reject_additive_projection
+            BEFORE INSERT ON invalidation_dependencies
+            WHEN NEW.upstream_revision_id=2
+             AND NEW.downstream_kind='PROJECTION'
+            BEGIN
+              SELECT RAISE(ABORT, 'injected dependency failure');
+            END
+            """
+        )
+        staged.commit()
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="injected dependency failure",
+        ):
+            update_runner.materialize_additive_asset_dependency_scope(
+                staged,
+                source_revision_ids=delta.source_revision_ids,
+                entity_ids=delta.entity_ids,
+                fact_ids=delta.fact_ids,
+                actual_write_tables=delta.changed_tables,
+            )
+
+        assert staged.in_transaction is False
+        assert staged.execute(
+            """
+            SELECT COUNT(*) FROM invalidation_dependencies
+            WHERE upstream_revision_id=2
+            """
+        ).fetchone()[0] == 0
+    finally:
+        staged.close()
+        base.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "target", "reason"),
+    (
+        ("QUERY_SNAPSHOT", 1, "ADDITIVE_QUERY_CACHE"),
+        ("ROLE_ENTITY", 999, "ADDITIVE_ROLE_INPUT"),
+        ("DOMAIN_ENTITY", 999, "ADDITIVE_DOMAIN_INPUT"),
+        ("PROJECTION", 999, "ADDITIVE_FACT_PROJECTION"),
+    ),
+)
+def test_strict_additive_plan_rejects_wrong_dependency_scope(
+    tmp_path: Path,
+    kind: str,
+    target: int,
+    reason: str,
+) -> None:
+    base, staged, diff, result, artifact_root, binding = _delta_fixture(
+        tmp_path
+    )
+    try:
+        delta = build_add_only_blueprint_delta(
+            base,
+            staged,
+            source_diff=diff,
+            ingest_result=result,
+            artifact_root=artifact_root,
+            artifact_bindings=(binding,),
+            trust_context=TEST_ONLY,
+        )
+        _materialize_complete_dependency_scope(
+            staged,
+            source_revision_ids=delta.source_revision_ids,
+            entity_ids=delta.entity_ids,
+        )
+        staged.execute(
+            """
+            INSERT INTO invalidation_dependencies VALUES (?, ?, ?, ?)
+            """,
+            (2, kind, target, reason),
+        )
+        staged.commit()
+
+        with pytest.raises(InvalidationBlockedGap):
+            plan_additive_asset_invalidation(
+                staged,
+                fact_ids=delta.fact_ids,
+                entity_ids=delta.entity_ids,
+                source_revision_ids=delta.source_revision_ids,
+                actual_write_tables=delta.changed_tables,
+            )
+    finally:
+        staged.close()
+        base.close()
+
+
+def test_strict_additive_plan_rejects_query_snapshot_revision_replay(
+    tmp_path: Path,
+) -> None:
+    base, staged, diff, result, artifact_root, binding = _delta_fixture(
+        tmp_path
+    )
+    try:
+        delta = build_add_only_blueprint_delta(
+            base,
+            staged,
+            source_diff=diff,
+            ingest_result=result,
+            artifact_root=artifact_root,
+            artifact_bindings=(binding,),
+            trust_context=TEST_ONLY,
+        )
+        staged.execute(
+            """
+            INSERT INTO invalidation_dependencies VALUES (
+                1, 'QUERY_SNAPSHOT', 2, 'ADDITIVE_QUERY_CACHE'
+            )
+            """
+        )
+        staged.commit()
+
+        with pytest.raises(
+            InvalidationBlockedGap,
+            match="replay",
+        ):
+            update_runner.materialize_additive_asset_dependency_scope(
+                staged,
+                source_revision_ids=delta.source_revision_ids,
+                entity_ids=delta.entity_ids,
+                fact_ids=delta.fact_ids,
+                actual_write_tables=delta.changed_tables,
+            )
     finally:
         staged.close()
         base.close()

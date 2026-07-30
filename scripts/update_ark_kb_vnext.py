@@ -17,7 +17,7 @@ import re
 import shutil
 import sqlite3
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -40,12 +40,17 @@ from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
     materialize_blueprint_defaults,
 )
 from blueprint_translator.kb_vnext.incremental_delta import (  # noqa: E402
+    TEST_ONLY,
+    AddOnlyBlueprintDelta,
     AddOnlyDeltaBlockedGap,
+    build_add_only_blueprint_delta,
+    logical_database_state,
 )
 from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
+    InvalidationBlockedGap,
     InvalidationPlan,
     apply_invalidation_plan,
-    plan_invalidation,
+    plan_additive_asset_invalidation,
 )
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
 from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
@@ -57,6 +62,9 @@ from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     _snapshot_semantic_input_hashes,
     resolve_current_snapshot,
+)
+from blueprint_translator.kb_vnext.projections import (  # noqa: E402
+    DOMAIN_PROJECTIONS,
 )
 from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     SNAPSHOT_SEMANTIC_INPUT_KEYS as SNAPSHOT_SEMANTIC_INPUT_KEYS,
@@ -172,8 +180,10 @@ class UpdateWorkspace:
     base_build_id: str = ""
     staging_receipt: dict[str, object] = field(default_factory=dict)
     staged_baseline: StagedBaselineSnapshot | None = None
+    update_baseline: UpdateBaseline | None = None
     frozen_additive_input: FrozenAdditiveBlueprintInput | None = None
     ingest_result: BlueprintIngestResult | None = None
+    verified_additive_delta: AddOnlyBlueprintDelta | None = None
     invalidation_plan: InvalidationPlan | None = None
     backend_event_id: str = ""
 
@@ -487,6 +497,7 @@ def stage_current_snapshot(
         base_build_id=staged.base_build_id,
         staging_receipt=staged.receipt,
         staged_baseline=staged,
+        update_baseline=baseline,
     )
 
 
@@ -668,6 +679,280 @@ def _ingest_receipt(
     }
 
 
+def verify_base_bound_add_only_blueprint_delta_scope(
+    baseline: UpdateBaseline,
+    *,
+    staged_snapshot: StagedBaselineSnapshot,
+    frozen_input: FrozenAdditiveBlueprintInput,
+    ingest_result: BlueprintIngestResult,
+) -> AddOnlyBlueprintDelta:
+    """Verify the exact pre-rebuild truth delta from bound live files."""
+
+    if (
+        type(baseline) is not UpdateBaseline
+        or type(staged_snapshot) is not StagedBaselineSnapshot
+        or type(frozen_input) is not FrozenAdditiveBlueprintInput
+        or type(ingest_result) is not BlueprintIngestResult
+    ):
+        raise TypeError("typed additive delta inputs are required")
+    validate_update_baseline_identity(
+        baseline,
+        expected_current_snapshot=baseline.current_snapshot,
+        expected_candidate_source_manifest=(
+            baseline.candidate_source_manifest
+        ),
+    )
+    validate_frozen_additive_blueprint_input(frozen_input)
+    if (
+        staged_snapshot.base_build_id != baseline.base_build_id
+        or staged_snapshot.staging_id != frozen_input.staging_id
+        or staged_snapshot.manifest_sha256
+        != baseline.base_manifest_sha256
+        or frozen_input.base_build_id != baseline.base_build_id
+        or frozen_input.pointer_sha256
+        != baseline.base_pointer_sha256
+        or frozen_input.manifest_sha256
+        != baseline.base_manifest_sha256
+        or frozen_input.source_diff_sha256
+        != baseline.source_diff_sha256
+    ):
+        raise UpdateBlocked(
+            "ADDITIVE_DELTA_SCOPE_BASE_BINDING_MISMATCH",
+            "The baseline, staging, and quarantine typed identities differ.",
+            full_rebuild_required=True,
+        )
+    binding = frozen_input.artifact_bindings[0]
+    artifact_bindings = (
+        {
+            "sourceId": binding.source_id,
+            "sourceFingerprint": binding.source_fingerprint,
+            **binding.evidence.payload(),
+            "trustContext": TEST_ONLY,
+        },
+    )
+    base_path = baseline.current_snapshot.snapshot_dir / "core.sqlite"
+    staged_path = staged_snapshot.snapshot_dir / "core.sqlite"
+    base = sqlite3.connect(f"{base_path.as_uri()}?mode=ro", uri=True)
+    staged = sqlite3.connect(staged_path)
+    try:
+        base.execute("PRAGMA query_only=ON")
+        staged.execute("PRAGMA foreign_keys=ON")
+        delta = build_add_only_blueprint_delta(
+            base,
+            staged,
+            source_diff=baseline.source_diff,
+            ingest_result=ingest_result,
+            artifact_root=frozen_input.quarantine_root,
+            artifact_bindings=artifact_bindings,
+            trust_context=TEST_ONLY,
+        )
+    finally:
+        staged.close()
+        base.close()
+    validate_update_baseline_identity(
+        baseline,
+        expected_current_snapshot=baseline.current_snapshot,
+        expected_candidate_source_manifest=(
+            baseline.candidate_source_manifest
+        ),
+    )
+    validate_frozen_additive_blueprint_input(frozen_input)
+    return delta
+
+
+def materialize_additive_asset_dependency_scope(
+    connection: sqlite3.Connection,
+    *,
+    source_revision_ids: Iterable[int],
+    entity_ids: Iterable[int],
+    fact_ids: Iterable[int],
+    actual_write_tables: Iterable[str],
+) -> InvalidationPlan:
+    """Materialize and strictly validate one verified additive scope.
+
+    This helper never commits. On success it leaves the caller's writer
+    transaction open so dependency rows, the invalidation event, and queue
+    rows share one commit or rollback boundary.
+    """
+
+    revisions = tuple(source_revision_ids)
+    entities = tuple(entity_ids)
+    facts = tuple(fact_ids)
+    tables = tuple(actual_write_tables)
+    for label, values in (
+        ("source revision", revisions),
+        ("entity", entities),
+        ("fact", facts),
+    ):
+        if (
+            not values
+            or any(type(value) is not int or value < 1 for value in values)
+            or values != tuple(sorted(set(values)))
+        ):
+            raise InvalidationBlockedGap(
+                "ADDITIVE_ASSET_DEPENDENCY_SCOPE_INVALID",
+                f"verified additive {label} IDs are invalid",
+            )
+    if (
+        any(type(value) is not str for value in tables)
+        or tables != tuple(sorted(set(tables)))
+    ):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ASSET_DEPENDENCY_SCOPE_INVALID",
+            "verified additive write tables are invalid",
+        )
+
+    expected_rows = {
+        (
+            revision_id,
+            "ROLE_ENTITY",
+            entity_id,
+            "ADDITIVE_ROLE_INPUT",
+        )
+        for revision_id in revisions
+        for entity_id in entities
+    }
+    expected_rows.update(
+        (
+            revision_id,
+            "DOMAIN_ENTITY",
+            entity_id,
+            "ADDITIVE_DOMAIN_INPUT",
+        )
+        for revision_id in revisions
+        for entity_id in entities
+    )
+    expected_rows.update(
+        (
+            revision_id,
+            "PROJECTION",
+            projection_id,
+            "ADDITIVE_FACT_PROJECTION",
+        )
+        for revision_id in revisions
+        for projection_id in range(1, len(DOMAIN_PROJECTIONS) + 1)
+    )
+    expected_rows.update(
+        (
+            revision_id,
+            "QUERY_SNAPSHOT",
+            revision_id,
+            "ADDITIVE_QUERY_CACHE",
+        )
+        for revision_id in revisions
+    )
+    placeholders = ",".join("?" for _ in revisions)
+    started_transaction = not connection.in_transaction
+    if started_transaction:
+        connection.execute("BEGIN IMMEDIATE")
+    savepoint = "materialize_additive_asset_dependency_scope"
+    savepoint_open = False
+    try:
+        connection.execute(f"SAVEPOINT {savepoint}")
+        savepoint_open = True
+        replayed_query_rows = list(
+            connection.execute(
+                f"""
+                SELECT upstream_revision_id, downstream_id
+                FROM invalidation_dependencies
+                WHERE downstream_kind='QUERY_SNAPSHOT'
+                  AND downstream_id IN ({placeholders})
+                  AND upstream_revision_id NOT IN ({placeholders})
+                ORDER BY upstream_revision_id, downstream_id
+                """,
+                (*revisions, *revisions),
+            )
+        )
+        existing = list(
+            connection.execute(
+                f"""
+                SELECT upstream_revision_id, downstream_kind,
+                       downstream_id, dependency_reason
+                FROM invalidation_dependencies
+                WHERE upstream_revision_id IN ({placeholders})
+                ORDER BY upstream_revision_id, downstream_kind,
+                         downstream_id, dependency_reason
+                """,
+                revisions,
+            )
+        )
+        if replayed_query_rows or existing:
+            raise InvalidationBlockedGap(
+                "ADDITIVE_ASSET_DERIVED_DEPENDENCY_REPLAY",
+                "additive dependency rows were replayed across revisions",
+            )
+        connection.executemany(
+            """
+            INSERT INTO invalidation_dependencies(
+                upstream_revision_id, downstream_kind,
+                downstream_id, dependency_reason
+            ) VALUES (?, ?, ?, ?)
+            """,
+            sorted(expected_rows),
+        )
+        observed_rows = list(
+            connection.execute(
+                f"""
+                SELECT upstream_revision_id, typeof(upstream_revision_id),
+                       downstream_kind, typeof(downstream_kind),
+                       downstream_id, typeof(downstream_id),
+                       dependency_reason, typeof(dependency_reason)
+                FROM invalidation_dependencies
+                WHERE upstream_revision_id IN ({placeholders})
+                ORDER BY upstream_revision_id, downstream_kind,
+                         downstream_id, dependency_reason
+                """,
+                revisions,
+            )
+        )
+        observed = {
+            (revision_id, kind, target_id, reason)
+            for (
+                revision_id,
+                revision_type,
+                kind,
+                kind_type,
+                target_id,
+                target_type,
+                reason,
+                reason_type,
+            ) in observed_rows
+            if (
+                revision_type == "integer"
+                and kind_type == "text"
+                and target_type == "integer"
+                and reason_type == "text"
+            )
+        }
+        if (
+            len(observed) != len(observed_rows)
+            or observed != expected_rows
+        ):
+            raise InvalidationBlockedGap(
+                "ADDITIVE_ASSET_DERIVED_DEPENDENCIES_UNPROVEN",
+                "materialized additive dependency rows are not exact",
+            )
+        plan = plan_additive_asset_invalidation(
+            connection,
+            fact_ids=facts,
+            entity_ids=entities,
+            source_revision_ids=revisions,
+            actual_write_tables=tables,
+        )
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        savepoint_open = False
+        return plan
+    except BaseException:
+        if savepoint_open:
+            try:
+                connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            finally:
+                connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        if started_transaction and connection.in_transaction:
+            connection.rollback()
+        raise
+
+
 def ingest_additive_blueprint_changes(
     workspace: UpdateWorkspace,
     diff: SourceDiff,
@@ -744,10 +1029,37 @@ def ingest_additive_blueprint_changes(
                 "The explicit Blueprint subset was not fully materialized.",
                 full_rebuild_required=True,
             )
-        plan = plan_invalidation(
+        baseline = workspace.update_baseline
+        staged_baseline = workspace.staged_baseline
+        if baseline is None or staged_baseline is None:
+            raise UpdateBlocked(
+                "ADDITIVE_DELTA_SCOPE_TYPED_INPUT_MISSING",
+                "Default Blueprint ingest requires the locked baseline and "
+                "staged snapshot for pre-rebuild delta verification.",
+                full_rebuild_required=True,
+            )
+        delta = verify_base_bound_add_only_blueprint_delta_scope(
+            baseline,
+            staged_snapshot=staged_baseline,
+            frozen_input=frozen,
+            ingest_result=result,
+        )
+        core.execute("BEGIN IMMEDIATE")
+        if (
+            logical_database_state(core).database_sha256
+            != delta.after_database_sha256
+        ):
+            raise UpdateBlocked(
+                "ADDITIVE_DELTA_SCOPE_CHANGED_BEFORE_INVALIDATION",
+                "The staged Core changed after verified delta scope capture.",
+                full_rebuild_required=True,
+            )
+        plan = materialize_additive_asset_dependency_scope(
             core,
-            event_kind="ASSET",
-            entity_ids=result.entity_ids,
+            source_revision_ids=delta.source_revision_ids,
+            entity_ids=delta.entity_ids,
+            fact_ids=delta.fact_ids,
+            actual_write_tables=delta.changed_tables,
         )
         if not plan.downstream:
             raise UpdateBlocked(
@@ -771,12 +1083,29 @@ def ingest_additive_blueprint_changes(
             }
         )
         workspace.ingest_result = result
+        workspace.verified_additive_delta = delta
         workspace.invalidation_plan = plan
         workspace.backend_event_id = event_id
         return receipt
     except UpdateBlocked:
         core.rollback()
         raise
+    except (
+        AddOnlyDeltaBlockedGap,
+        InvalidationBlockedGap,
+        UpdateBaselineBlockedGap,
+    ) as exc:
+        core.rollback()
+        raise UpdateBlocked(
+            getattr(
+                exc,
+                "gap_code",
+                "ADDITIVE_DELTA_SCOPE_INVALID",
+            ),
+            "The verified additive delta scope could not produce an exact "
+            "invalidation plan.",
+            full_rebuild_required=True,
+        ) from exc
     except Exception as exc:
         core.rollback()
         raise UpdateBlocked(
