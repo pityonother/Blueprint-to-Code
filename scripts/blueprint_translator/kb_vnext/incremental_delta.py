@@ -1603,8 +1603,7 @@ def _terminal_receipt(
             and cache_hit is False
             and normalized.get("gapCode") == ""
             and normalized.get("detail") == ""
-            and isinstance(projection_batch, Mapping)
-            and bool(projection_batch)
+                and not projection_batch
             and verification.get("basis")
             == "VERIFIED_PROJECTION_REBUILD"
             and touched == ["projection_runs"]
@@ -1617,10 +1616,12 @@ def _terminal_receipt(
             or verified_domain_owner_target_state
             or verified_projection_rebuild
         ):
-            raise _gap(
-                "BACKEND_TERMINAL_OUTCOME_UNPROVEN",
-                "backend receipt does not prove durable target work",
-            )
+                raise _gap(
+                    "BACKEND_TERMINAL_OUTCOME_UNPROVEN",
+                    "backend receipt does not prove durable target work for "
+                    f"{kind}:{expected_id} with basis "
+                    f"{verification.get('basis')!r}",
+                )
         return normalized, ""
     if status == BLOCKED_GAP:
         gap_code = _text(
