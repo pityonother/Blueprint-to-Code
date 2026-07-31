@@ -14,11 +14,13 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from blueprint_translator.kb_vnext.roles import (  # noqa: E402
+    compute_additive_role_dependency_scope,
     _PersistedRoleSignals,
     _collect_edge_signals,
     _fresh_revision_ids,
     classify_asset,
     enrich_type_percentiles,
+    materialize_discovery_role_entities,
     materialize_discovery_roles,
 )
 from blueprint_translator.kb_vnext.registrations import (  # noqa: E402
@@ -353,6 +355,129 @@ class KnowledgeRoleTests(unittest.TestCase):
         self.assertEqual(
             discovery.execute("SELECT COUNT(*) FROM assets").fetchone()[0],
             2,
+        )
+        discovery.close()
+        target.close()
+
+    def test_selective_role_rebuild_preserves_unrelated_entities(self) -> None:
+        discovery = sqlite3.connect(":memory:")
+        discovery.executescript(
+            """
+            CREATE TABLE assets(
+                object_path TEXT PRIMARY KEY,
+                asset_class_path TEXT NOT NULL,
+                generated_class_path TEXT NOT NULL,
+                parent_class_path TEXT NOT NULL,
+                native_parent_class_path TEXT NOT NULL,
+                identity_status TEXT NOT NULL,
+                identity_confidence TEXT NOT NULL,
+                is_blueprint INTEGER,
+                is_data_asset INTEGER,
+                is_data_table INTEGER,
+                is_function_library INTEGER,
+                is_blueprint_interface INTEGER,
+                is_map INTEGER,
+                capture_exists INTEGER,
+                evidence_freshness TEXT NOT NULL,
+                parse_status TEXT NOT NULL,
+                descendant_count INTEGER NOT NULL,
+                referencer_count INTEGER NOT NULL,
+                component_reuse_count INTEGER NOT NULL,
+                cross_domain_reference_count INTEGER NOT NULL,
+                registry_usage_count INTEGER NOT NULL,
+                query_hit_count INTEGER,
+                query_hit_status TEXT NOT NULL,
+                existing_report_count INTEGER,
+                existing_report_status TEXT NOT NULL,
+                graph_count INTEGER NOT NULL,
+                default_property_count INTEGER NOT NULL
+            );
+            """
+        )
+        discovery.executemany(
+            """
+            INSERT INTO assets VALUES (
+                ?, '/Script/Engine.Blueprint', ?, '/Script/Engine.Actor',
+                '/Script/Engine.Actor', 'CONFIRMED', 'HIGH', 1, 0, 0, 0,
+                0, 0, 1, 'FRESH', 'CONFIRMED', 0, ?, 0, 0, 0, NULL,
+                'NOT_MEASURED', NULL, 'NOT_MEASURED', 1, 1
+            )
+            """,
+            [
+                ("/Game/Test/A.A", "/Game/Test/A.A_C", 1),
+                ("/Game/Test/B.B", "/Game/Test/B.B_C", 2),
+                ("/Game/Test/C.C", "/Game/Test/C.C_C", 3),
+            ],
+        )
+        target = sqlite3.connect(":memory:")
+        target.executescript(
+            """
+            CREATE TABLE source_revisions(
+                revision_id INTEGER PRIMARY KEY,
+                freshness_status TEXT NOT NULL
+            );
+            INSERT INTO source_revisions VALUES (1, 'FRESH');
+            CREATE TABLE entities(
+                entity_id INTEGER PRIMARY KEY,
+                canonical_uri TEXT UNIQUE NOT NULL
+            );
+            INSERT INTO entities VALUES (1, '/Game/Test/A.A');
+            INSERT INTO entities VALUES (2, '/Game/Test/B.B');
+            INSERT INTO entities VALUES (3, '/Game/Test/C.C');
+            """
+        )
+        materialize_discovery_roles(
+            discovery,
+            target,
+            source_revision_id=1,
+        )
+        unrelated_before = {
+            table: target.execute(
+                f'SELECT * FROM "{table}" WHERE entity_id=1 ORDER BY 1, 2'
+            ).fetchall()
+            for table in (
+                "knowledge_roles",
+                "knowledge_depth_policies",
+                "role_metrics",
+                "role_signal_metrics",
+            )
+        }
+        discovery.execute(
+            "UPDATE assets SET referencer_count=50 WHERE object_path='/Game/Test/B.B'"
+        )
+        role_entity_ids, proof = compute_additive_role_dependency_scope(
+            discovery,
+            target,
+            changed_entity_ids=(2,),
+            source_revision_id=1,
+        )
+
+        result = materialize_discovery_role_entities(
+            discovery,
+            target,
+            entity_ids=role_entity_ids,
+            source_revision_id=1,
+        )
+
+        self.assertEqual(role_entity_ids, (2, 3))
+        self.assertEqual(proof["changedEntityIds"], [2])
+        self.assertEqual(proof["roleEntityIds"], [2, 3])
+        self.assertTrue(str(proof["proof"]).startswith("role-scope://"))
+        self.assertEqual(result["assets"], 2)
+        self.assertEqual(
+            unrelated_before,
+            {
+                table: target.execute(
+                    f'SELECT * FROM "{table}" WHERE entity_id=1 ORDER BY 1, 2'
+                ).fetchall()
+                for table in unrelated_before
+            },
+        )
+        self.assertEqual(
+            target.execute(
+                "SELECT referencer_count FROM role_metrics WHERE entity_id=2"
+            ).fetchone(),
+            (50,),
         )
         discovery.close()
         target.close()

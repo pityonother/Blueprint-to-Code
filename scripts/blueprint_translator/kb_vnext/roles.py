@@ -8,6 +8,7 @@ bounded catalog entry.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import json
 import re
@@ -1991,3 +1992,399 @@ def materialize_discovery_roles(
             for policy in DEPTH_POLICIES
         },
     }
+
+
+def materialize_discovery_role_entities(
+    discovery: sqlite3.Connection,
+    target: sqlite3.Connection,
+    *,
+    entity_ids: Sequence[int],
+    source_revision_id: int | None,
+) -> dict[str, int]:
+    """Recompute only an explicit role dependency closure.
+
+    Percentile distributions and persisted signals are read globally, but the
+    durable write set is limited to ``entity_ids``.  Callers must compute the
+    exact percentile dependency closure before invoking this primitive.
+    Transaction control remains with the caller.
+    """
+
+    selected = tuple(sorted(set(entity_ids)))
+    if (
+        not selected
+        or any(isinstance(value, bool) or not isinstance(value, int) or value < 1
+               for value in selected)
+        or tuple(entity_ids) != selected
+    ):
+        raise ValueError("role entity scope must be sorted unique positive IDs")
+    if source_revision_id is not None:
+        revision = target.execute(
+            """
+            SELECT freshness_status FROM source_revisions WHERE revision_id=?
+            """,
+            (source_revision_id,),
+        ).fetchone()
+        if revision is None or str(revision[0]).upper() != "FRESH":
+            raise ValueError("role source revision must exist and be FRESH")
+
+    entity_by_uri = {
+        str(uri): int(entity_id)
+        for uri, entity_id in target.execute(
+            "SELECT canonical_uri, entity_id FROM entities"
+        )
+    }
+    if not set(selected).issubset(set(entity_by_uri.values())):
+        raise ValueError("role entity scope contains an unknown entity")
+    _prepare_canonical_registration_counts(discovery, target)
+    fresh_revision_ids = _fresh_revision_ids(target)
+    categories_by_entity, category_source_status = (
+        _confirmed_ancestry_categories(
+            target,
+            fresh_revision_ids=fresh_revision_ids,
+        )
+    )
+    signals = _collect_persisted_role_signals(
+        target,
+        entity_ids=entity_by_uri,
+    )
+    signals.source_statuses["semanticClassAncestry"] = category_source_status
+    distributions = _percentile_distributions(
+        discovery,
+        entity_ids=entity_by_uri,
+        categories_by_entity=categories_by_entity,
+        signals=signals,
+    )
+    selected_set = set(selected)
+    decorated: list[tuple[int, dict[str, object]]] = []
+    rows = _source_role_rows(discovery)
+    while batch := rows.fetchmany(10_000):
+        for source in batch:
+            source_row = dict(source)
+            entity_id = entity_by_uri.get(_text(source_row, "object_path"))
+            if entity_id not in selected_set:
+                continue
+            decorated.append(
+                (
+                    entity_id,
+                    _decorate_role_row(
+                        source_row,
+                        entity_id=entity_id,
+                        categories_by_entity=categories_by_entity,
+                        signals=signals,
+                    ),
+                )
+            )
+    if {entity_id for entity_id, _row in decorated} != selected_set:
+        raise ValueError("role entity scope is missing from Discovery")
+    enriched = enrich_type_percentiles(
+        [row for _entity_id, row in decorated],
+        percentile_distributions=distributions,
+    )
+
+    metric_rows: list[tuple[object, ...]] = []
+    signal_rows: list[tuple[object, ...]] = []
+    role_rows: list[tuple[object, ...]] = []
+    depth_rows: list[tuple[object, ...]] = []
+    depth_counts: dict[str, int] = defaultdict(int)
+    for (entity_id, _source), row in zip(decorated, enriched, strict=True):
+        decision = classify_asset(row)
+        metric_rows.append(
+            (
+                entity_id,
+                _text(row, "percentile_group", "UNKNOWN"),
+                _integer(row, "descendant_count"),
+                _number(row, "descendant_log1p"),
+                _number(row, "descendant_percentile"),
+                _integer(row, "referencer_count"),
+                _number(row, "referencer_log1p"),
+                _number(row, "referencer_percentile"),
+                _integer(row, "component_reuse_count"),
+                _number(row, "component_reuse_log1p"),
+                _number(row, "component_reuse_percentile"),
+                _integer(row, "cross_domain_reference_count"),
+                _number(row, "cross_domain_reference_log1p"),
+                _number(row, "cross_domain_percentile"),
+                _integer(row, "registration_count"),
+                _number(row, "registration_log1p"),
+                _number(row, "registration_percentile"),
+                None if row.get("query_hit_count") is None
+                else _integer(row, "query_hit_count"),
+                _text(row, "query_hit_status", "NOT_MEASURED"),
+                None if row.get("existing_report_count") is None
+                else _integer(row, "existing_report_count"),
+                _text(row, "existing_report_status", "NOT_MEASURED"),
+                _integer(row, "distinct_query_domain_count"),
+                _integer(row, "repeated_fact_demand_count"),
+                _integer(row, "query_demand_count"),
+                _number(row, "query_demand_log1p"),
+                _number(row, "query_demand_percentile"),
+                _json(decision.semantic_qualifications),
+                ROLE_CLASSIFIER_VERSION,
+            )
+        )
+        signal_rows.append(
+            (
+                entity_id,
+                _text(row, "semantic_class_category", "UNCLASSIFIED"),
+                None if row.get("query_hit_count") is None
+                else _integer(row, "query_hit_count"),
+                _text(row, "query_hit_status", "NOT_MEASURED"),
+                *(_integer(row, field) for field in ROLE_SIGNAL_COUNT_FIELDS),
+                _role_signal_provenance(
+                    entity_id=entity_id,
+                    semantic_category=_text(
+                        row, "semantic_class_category", "UNCLASSIFIED"
+                    ),
+                    ancestry_categories=categories_by_entity.get(
+                        entity_id, set()
+                    ),
+                    signals=signals,
+                ),
+                ROLE_CLASSIFIER_VERSION,
+                source_revision_id,
+            )
+        )
+        role_rows.extend(
+            (
+                entity_id,
+                assignment.role,
+                assignment.confidence,
+                assignment.status,
+                _json(assignment.reasons),
+                ROLE_CLASSIFIER_VERSION,
+                source_revision_id,
+            )
+            for assignment in decision.roles
+        )
+        depth_rows.append(
+            (
+                entity_id,
+                decision.depth_policy,
+                _json(decision.depth_reasons),
+                ROLE_CLASSIFIER_VERSION,
+            )
+        )
+        depth_counts[decision.depth_policy] += 1
+
+    placeholders = ",".join("?" for _ in selected)
+    for table in (
+        "knowledge_roles",
+        "knowledge_depth_policies",
+        "role_metrics",
+        "role_signal_metrics",
+    ):
+        target.execute(
+            f'DELETE FROM "{table}" WHERE entity_id IN ({placeholders})',
+            selected,
+        )
+    target.executemany(
+        """
+        INSERT INTO role_metrics VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        metric_rows,
+    )
+    target.executemany(
+        """
+        INSERT INTO role_signal_metrics VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        signal_rows,
+    )
+    target.executemany(
+        "INSERT INTO knowledge_roles VALUES (?, ?, ?, ?, ?, ?, ?)",
+        role_rows,
+    )
+    target.executemany(
+        "INSERT INTO knowledge_depth_policies VALUES (?, ?, ?, ?)",
+        depth_rows,
+    )
+    return {
+        "assets": len(selected),
+        "roleSignals": len(signal_rows),
+        "roles": len(role_rows),
+        **{
+            f"depth_{policy.casefold()}": int(depth_counts.get(policy, 0))
+            for policy in DEPTH_POLICIES
+        },
+    }
+
+
+def compute_additive_role_dependency_scope(
+    discovery: sqlite3.Connection,
+    target: sqlite3.Connection,
+    *,
+    changed_entity_ids: Sequence[int],
+    source_revision_id: int,
+) -> tuple[tuple[int, ...], dict[str, object]]:
+    """Prove the exact percentile closure for an additive fact change.
+
+    Replacing one entity's metric changes the empirical CDF only for peers in
+    the same percentile group whose current value lies between the old and new
+    values.  Non-percentile role signals affect the changed entity itself.
+    """
+
+    changed = tuple(sorted(set(changed_entity_ids)))
+    if (
+        not changed
+        or tuple(changed_entity_ids) != changed
+        or any(type(value) is not int or value < 1 for value in changed)
+        or type(source_revision_id) is not int
+        or source_revision_id < 1
+    ):
+        raise ValueError("additive role dependency inputs are not canonical")
+    revision = target.execute(
+        """
+        SELECT freshness_status FROM source_revisions WHERE revision_id=?
+        """,
+        (source_revision_id,),
+    ).fetchone()
+    if revision is None or str(revision[0]).upper() != "FRESH":
+        raise ValueError("additive role dependency source is not fresh")
+
+    entity_by_uri = {
+        str(uri): int(entity_id)
+        for uri, entity_id in target.execute(
+            "SELECT canonical_uri, entity_id FROM entities"
+        )
+    }
+    if not set(changed).issubset(set(entity_by_uri.values())):
+        raise ValueError("changed role entity is missing from Core")
+    _prepare_canonical_registration_counts(discovery, target)
+    fresh_revision_ids = _fresh_revision_ids(target)
+    categories_by_entity, category_source_status = (
+        _confirmed_ancestry_categories(
+            target,
+            fresh_revision_ids=fresh_revision_ids,
+        )
+    )
+    signals = _collect_persisted_role_signals(
+        target,
+        entity_ids=entity_by_uri,
+    )
+    signals.source_statuses["semanticClassAncestry"] = category_source_status
+    distributions = _percentile_distributions(
+        discovery,
+        entity_ids=entity_by_uri,
+        categories_by_entity=categories_by_entity,
+        signals=signals,
+    )
+    decorated: list[tuple[int, dict[str, object]]] = []
+    rows = _source_role_rows(discovery)
+    while batch := rows.fetchmany(10_000):
+        for source in batch:
+            source_row = dict(source)
+            entity_id = entity_by_uri.get(_text(source_row, "object_path"))
+            if entity_id is None:
+                continue
+            decorated.append(
+                (
+                    entity_id,
+                    _decorate_role_row(
+                        source_row,
+                        entity_id=entity_id,
+                        categories_by_entity=categories_by_entity,
+                        signals=signals,
+                    ),
+                )
+            )
+    enriched = enrich_type_percentiles(
+        [row for _entity_id, row in decorated],
+        percentile_distributions=distributions,
+    )
+    current_by_id = {
+        entity_id: row
+        for (entity_id, _source), row in zip(decorated, enriched, strict=True)
+    }
+    if not set(changed).issubset(current_by_id):
+        raise ValueError("changed role entity is missing from Discovery")
+
+    old_rows = {
+        int(row[0]): row
+        for row in target.execute(
+            """
+            SELECT entity_id, percentile_group,
+                   descendant_count, referencer_count,
+                   component_reuse_count, cross_domain_reference_count,
+                   registration_count, query_demand_count
+            FROM role_metrics
+            ORDER BY entity_id
+            """
+        )
+    }
+    if not set(changed).issubset(old_rows):
+        raise ValueError("changed role entity has no prior role metrics")
+    raw_column_index = {
+        "descendant_count": 2,
+        "referencer_count": 3,
+        "component_reuse_count": 4,
+        "cross_domain_reference_count": 5,
+        "registration_count": 6,
+        "query_demand_count": 7,
+    }
+    affected = set(changed)
+    transitions: list[dict[str, object]] = []
+    for entity_id in changed:
+        old = old_rows[entity_id]
+        current = current_by_id[entity_id]
+        old_group = str(old[1])
+        new_group = _text(current, "percentile_group", "UNCLASSIFIED")
+        metric_transitions: dict[str, dict[str, int]] = {}
+        if old_group != new_group:
+            affected.update(
+                candidate_id
+                for candidate_id, row in old_rows.items()
+                if str(row[1]) == old_group
+            )
+            affected.update(
+                candidate_id
+                for candidate_id, row in current_by_id.items()
+                if _text(row, "percentile_group", "UNCLASSIFIED")
+                == new_group
+            )
+        for raw_field, _percentile_field in PERCENTILE_METRICS:
+            old_value = int(old[raw_column_index[raw_field]])
+            new_value = _integer(current, raw_field)
+            if old_value == new_value or old_group != new_group:
+                if old_value != new_value:
+                    metric_transitions[raw_field] = {
+                        "before": old_value,
+                        "after": new_value,
+                    }
+                continue
+            lower, upper = sorted((old_value, new_value))
+            affected.update(
+                candidate_id
+                for candidate_id, row in current_by_id.items()
+                if _text(row, "percentile_group", "UNCLASSIFIED")
+                == new_group
+                and lower <= _integer(row, raw_field) <= upper
+            )
+            metric_transitions[raw_field] = {
+                "before": old_value,
+                "after": new_value,
+            }
+        transitions.append(
+            {
+                "entityId": entity_id,
+                "beforeGroup": old_group,
+                "afterGroup": new_group,
+                "metrics": dict(sorted(metric_transitions.items())),
+            }
+        )
+    closure = tuple(sorted(affected))
+    proof_body: dict[str, object] = {
+        "schema": "ark-kb-additive-role-dependency-scope/v1",
+        "classifierVersion": ROLE_CLASSIFIER_VERSION,
+        "sourceRevisionId": source_revision_id,
+        "changedEntityIds": list(changed),
+        "roleEntityIds": list(closure),
+        "transitions": transitions,
+    }
+    proof_body["proof"] = "role-scope://" + hashlib.sha256(
+        _json(proof_body).encode("utf-8")
+    ).hexdigest()
+    return closure, proof_body

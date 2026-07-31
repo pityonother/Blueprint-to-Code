@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import unittest
 from pathlib import Path
@@ -14,17 +15,83 @@ from blueprint_translator.kb_vnext.ontology import (  # noqa: E402
     REQUIRED_DOMAINS,
     infer_domain_memberships,
     load_ontology,
+    materialize_domain_entity_memberships,
 )
 from blueprint_translator.kb_vnext.roles import (  # noqa: E402
     DEPTH_POLICIES,
     KNOWLEDGE_ROLES,
 )
+from blueprint_translator.kb_vnext.storage import FULL_CORE_SCHEMA_SQL  # noqa: E402
 
 
 class KnowledgeOntologyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.ontology = load_ontology(PROJECT_ROOT / "ontology")
+
+    def test_entity_domain_rebuild_preserves_other_producers(self) -> None:
+        core = sqlite3.connect(":memory:")
+        core.execute("PRAGMA foreign_keys=ON")
+        core.executescript(FULL_CORE_SCHEMA_SQL)
+        core.executescript(
+            f"""
+            INSERT INTO source_revisions VALUES (
+                1, 'ontology', 'ontology://{self.ontology.version}',
+                'ontology-sha', '{self.ontology.version}', 'v1',
+                '2026-07-31T00:00:00+00:00', 'FRESH'
+            );
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (1, '/Game/Test/Item.Item', 'BLUEPRINT_ASSET',
+                      'CONFIRMED', 'HIGH');
+            INSERT INTO classes VALUES (
+                10, '/Game/Test/Item.Item_C', 'Item_C', '/Game/Test',
+                'BLUEPRINT_GENERATED_CLASS', 0, 1, 'CONFIRMED', 'HIGH'
+            );
+            INSERT INTO asset_class_assignments VALUES (
+                1, 10, 'GENERATED_CLASS', 'fixture://class',
+                'CONFIRMED', 'HIGH', 1
+            );
+            INSERT INTO class_ancestry_categories VALUES (
+                10, 'ITEM', 10, 0, 'CONFIRMED', 'HIGH'
+            );
+            INSERT INTO domain_memberships VALUES (
+                1, 'item_use', 'CLASS_ANCESTRY', 'HIGH', 'STALE',
+                'class-category://10/ITEM', '{self.ontology.version}', 1
+            );
+            INSERT INTO domain_memberships VALUES (
+                1, 'runtime_validation', 'MANUAL', 'HIGH', 'CONFIRMED',
+                'manual://keep', 'manual/v1', NULL
+            );
+            """
+        )
+
+        result = materialize_domain_entity_memberships(
+            core,
+            ontology=self.ontology,
+            entity_id=1,
+        )
+
+        self.assertGreaterEqual(result["ownedMemberships"], 1)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT status FROM domain_memberships
+                WHERE entity_id=1 AND membership_kind='CLASS_ANCESTRY'
+                """
+            ).fetchone(),
+            ("CONFIRMED",),
+        )
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT status, ontology_version FROM domain_memberships
+                WHERE entity_id=1 AND membership_kind='MANUAL'
+                """
+            ).fetchone(),
+            ("CONFIRMED", "manual/v1"),
+        )
+        core.close()
 
     def test_versioned_ontology_has_required_domains_and_shared_roles(self):
         self.assertEqual(

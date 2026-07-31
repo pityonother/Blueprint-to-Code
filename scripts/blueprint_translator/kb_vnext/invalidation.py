@@ -84,6 +84,7 @@ class InvalidationPlan:
     class_closure_scopes: Mapping[int, tuple[int, ...]] = field(
         default_factory=dict
     )
+    role_scope_proof: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def affected_count(self) -> int:
@@ -1331,6 +1332,8 @@ def plan_additive_asset_invalidation(
     entity_ids: Iterable[int],
     source_revision_ids: Iterable[int],
     actual_write_tables: Iterable[str],
+    role_entity_ids: Iterable[int] | None = None,
+    role_scope_proof: Mapping[str, object] | None = None,
 ) -> InvalidationPlan:
     """Plan only dependencies proven by an add-only Blueprint fact delta.
 
@@ -1356,6 +1359,29 @@ def plan_additive_asset_invalidation(
     facts = strict_ids(fact_ids, "fact scope")
     entities = strict_ids(entity_ids, "entity scope")
     revisions = strict_ids(source_revision_ids, "revision scope")
+    role_entities = strict_ids(
+        role_entity_ids if role_entity_ids is not None else entities,
+        "role entity scope",
+    )
+    if not entities.issubset(role_entities):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ROLE_DEPENDENCY_SCOPE_INVALID",
+            "role dependency scope must include every changed entity",
+        )
+    role_proof = dict(role_scope_proof or {})
+    if role_scope_proof is not None and (
+        role_proof.get("schema")
+        != "ark-kb-additive-role-dependency-scope/v1"
+        or role_proof.get("changedEntityIds") != sorted(entities)
+        or role_proof.get("roleEntityIds") != sorted(role_entities)
+        or type(role_proof.get("sourceRevisionId")) is not int
+        or role_proof.get("sourceRevisionId") not in revisions
+        or not str(role_proof.get("proof") or "").startswith("role-scope://")
+    ):
+        raise InvalidationBlockedGap(
+            "ADDITIVE_ROLE_DEPENDENCY_SCOPE_INVALID",
+            "role dependency proof is missing or does not match the scope",
+        )
     raw_tables = tuple(actual_write_tables)
     if any(type(value) is not str for value in raw_tables):
         raise InvalidationBlockedGap(
@@ -1522,7 +1548,7 @@ def plan_additive_asset_invalidation(
         )
 
     required_targets = {
-        "ROLE_ENTITY": set(entities),
+        "ROLE_ENTITY": set(role_entities),
         "DOMAIN_ENTITY": set(entities),
         "PROJECTION": _all_projection_ids(),
     }
@@ -1587,6 +1613,7 @@ def plan_additive_asset_invalidation(
             for kind, values in sorted(downstream.items())
         },
         reasons=dict(sorted(reasons.items())),
+        role_scope_proof=role_proof,
     )
 
 
@@ -1597,6 +1624,7 @@ def _event_id(plan: InvalidationPlan, created_at: str) -> str:
             "revision": plan.upstream_revision_id,
             "downstream": plan.downstream,
             "classClosureScopes": plan.class_closure_scopes,
+            "roleScopeProof": plan.role_scope_proof,
             "createdAt": created_at,
         },
         sort_keys=True,
@@ -1627,6 +1655,8 @@ def apply_invalidation_plan(
             str(class_id): _class_source_revision_proof(connection, scope)
             for class_id, scope in sorted(plan.class_closure_scopes.items())
         }
+    if plan.role_scope_proof:
+        event_payload["_roleScopeProof"] = dict(plan.role_scope_proof)
     connection.execute(
         """
         INSERT INTO invalidation_events(
@@ -1690,7 +1720,14 @@ def apply_invalidation_plan(
     if domain_entities := values("DOMAIN_ENTITY"):
         placeholders = ",".join("?" for _ in domain_entities)
         connection.execute(
-            f"UPDATE domain_memberships SET status='STALE' WHERE entity_id IN ({placeholders})",
+            f"""
+            UPDATE domain_memberships
+            SET status='STALE'
+            WHERE entity_id IN ({placeholders})
+              AND membership_kind IN (
+                  'CLASS_ANCESTRY', 'TYPED_REGISTRATION'
+              )
+            """,
             domain_entities,
         )
     if native_functions := values("NATIVE_FUNCTION"):
@@ -1725,9 +1762,28 @@ def apply_invalidation_plan(
             """,
             blueprint_native_entities,
         )
-    if values("PROJECTION"):
+    if projection_ids := values("PROJECTION"):
+        if any(
+            projection_id < 1
+            or projection_id > len(DOMAIN_PROJECTIONS)
+            for projection_id in projection_ids
+        ):
+            raise InvalidationBlockedGap(
+                "PROJECTION_SCOPE_INVALID",
+                "projection downstream ID is outside the canonical mapping",
+            )
+        names = tuple(
+            tuple(DOMAIN_PROJECTIONS)[projection_id - 1]
+            for projection_id in projection_ids
+        )
+        placeholders = ",".join("?" for _ in names)
         connection.execute(
-            "UPDATE projection_runs SET validation_status='STALE'"
+            f"""
+            UPDATE projection_runs
+            SET validation_status='STALE'
+            WHERE projection_name IN ({placeholders})
+            """,
+            names,
         )
     connection.commit()
     return {

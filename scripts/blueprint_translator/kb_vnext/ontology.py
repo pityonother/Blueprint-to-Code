@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -384,3 +385,185 @@ def infer_domain_memberships(
             ),
         )
     )
+
+
+def materialize_domain_entity_memberships(
+    connection: sqlite3.Connection,
+    *,
+    ontology: OntologyBundle,
+    entity_id: int,
+) -> dict[str, int]:
+    """Replace only ontology-owned memberships for one entity.
+
+    The incremental domain owner is deliberately narrow: class ancestry and
+    typed-registration inference.  Rows from manual or future producers are
+    outside this function's ownership and therefore remain byte-for-byte
+    untouched.
+    """
+
+    if isinstance(entity_id, bool) or not isinstance(entity_id, int):
+        raise ValueError("domain entity_id must be a positive integer")
+    if entity_id < 1:
+        raise ValueError("domain entity_id must be a positive integer")
+    entity = connection.execute(
+        "SELECT canonical_uri FROM entities WHERE entity_id=?",
+        (entity_id,),
+    ).fetchone()
+    if entity is None:
+        raise ValueError("domain entity_id does not exist")
+    revision_rows = connection.execute(
+        """
+        SELECT revision_id
+        FROM source_revisions
+        WHERE source_kind='ontology'
+          AND source_uri=?
+          AND freshness_status='FRESH'
+        ORDER BY revision_id
+        """,
+        (f"ontology://{ontology.version}",),
+    ).fetchall()
+    if len(revision_rows) != 1:
+        raise ValueError(
+            "domain rebuild requires exactly one fresh ontology revision"
+        )
+    source_revision_id = int(revision_rows[0][0])
+    entity_uri = str(entity[0])
+    owned_rows: dict[tuple[object, ...], tuple[object, ...]] = {}
+
+    category_to_domains: dict[str, tuple[str, ...]] = {}
+    for domain_id, definition in ontology.domains.items():
+        for category in definition.class_categories:
+            category_to_domains[category] = tuple(
+                sorted(
+                    {
+                        *category_to_domains.get(category, ()),
+                        domain_id,
+                    }
+                )
+            )
+    for category, ancestor_class_id in connection.execute(
+        """
+        SELECT DISTINCT c.category, c.ancestor_class_id
+        FROM asset_class_assignments AS a
+        JOIN class_ancestry_categories AS c ON c.class_id=a.class_id
+        WHERE a.entity_id=?
+          AND UPPER(a.status) IN (
+              'SELF', 'EXTRACTED', 'IDENTIFIED',
+              'CONFIRMED', 'VERIFIED', 'RESOLVED'
+          )
+          AND UPPER(a.confidence) IN ('HIGH', 'CONFIRMED')
+          AND UPPER(c.status) IN (
+              'SELF', 'EXTRACTED', 'IDENTIFIED',
+              'CONFIRMED', 'VERIFIED', 'RESOLVED'
+          )
+          AND UPPER(c.confidence) IN ('HIGH', 'CONFIRMED')
+          AND a.source_revision_id IN (
+              SELECT revision_id FROM source_revisions
+              WHERE freshness_status='FRESH'
+          )
+        ORDER BY c.category, c.ancestor_class_id
+        """,
+        (entity_id,),
+    ):
+        for domain_id in category_to_domains.get(str(category), ()):
+            row = (
+                entity_id,
+                domain_id,
+                "CLASS_ANCESTRY",
+                "HIGH",
+                "CONFIRMED",
+                f"class-category://{int(ancestor_class_id)}/{category}",
+                ontology.version,
+                source_revision_id,
+            )
+            owned_rows[row] = row
+
+    registrations = connection.execute(
+        """
+        SELECT
+            r.owner_uri, r.target_uri, r.registration_type,
+            r.evidence_uri, r.confidence, r.status
+        FROM typed_registrations AS r
+        WHERE r.source_revision_id IN (
+            SELECT revision_id FROM source_revisions
+            WHERE freshness_status='FRESH'
+        )
+        ORDER BY r.registration_id
+        """
+    ).fetchall()
+    class_paths = {
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT c.class_path
+            FROM classes AS c
+            JOIN asset_class_assignments AS a ON a.class_id=c.class_id
+            WHERE a.entity_id=? AND a.assignment_kind='GENERATED_CLASS'
+            """,
+            (entity_id,),
+        )
+    }
+    matching_uris = {entity_uri, *class_paths}
+    for (
+        owner_uri,
+        target_uri,
+        registration_type,
+        evidence_uri,
+        confidence,
+        status,
+    ) in registrations:
+        contexts: list[dict[str, object]] = []
+        if str(owner_uri) in matching_uris:
+            contexts.append(
+                {
+                    "entity_uri": str(owner_uri),
+                    "registration_types": ["global_asset_reference"],
+                    "registration_status": str(status),
+                    "registration_confidence": str(confidence),
+                    "registration_evidence_uri": str(evidence_uri),
+                }
+            )
+        if str(target_uri) in matching_uris:
+            contexts.append(
+                {
+                    "entity_uri": str(target_uri),
+                    "registration_types": [str(registration_type)],
+                    "registration_status": str(status),
+                    "registration_confidence": str(confidence),
+                    "registration_evidence_uri": str(evidence_uri),
+                }
+            )
+        for context in contexts:
+            for membership in infer_domain_memberships(ontology, context):
+                if membership.membership_kind != "TYPED_REGISTRATION":
+                    continue
+                row = (
+                    entity_id,
+                    membership.domain_id,
+                    membership.membership_kind,
+                    membership.confidence,
+                    membership.status,
+                    membership.evidence_id,
+                    ontology.version,
+                    source_revision_id,
+                )
+                owned_rows[row] = row
+
+    connection.execute(
+        """
+        DELETE FROM domain_memberships
+        WHERE entity_id=?
+          AND membership_kind IN ('CLASS_ANCESTRY', 'TYPED_REGISTRATION')
+        """,
+        (entity_id,),
+    )
+    if owned_rows:
+        connection.executemany(
+            "INSERT INTO domain_memberships VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            sorted(owned_rows.values()),
+        )
+    return {
+        "entityId": entity_id,
+        "ownedMemberships": len(owned_rows),
+        "sourceRevisionId": source_revision_id,
+    }
