@@ -44,6 +44,10 @@ class KnowledgeOntologyTests(unittest.TestCase):
                 entity_id, canonical_uri, entity_kind, status, confidence
             ) VALUES (1, '/Game/Test/Item.Item', 'BLUEPRINT_ASSET',
                       'CONFIRMED', 'HIGH');
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (2, '/Game/Test/Other.Other', 'BLUEPRINT_ASSET',
+                      'CONFIRMED', 'HIGH');
             INSERT INTO classes VALUES (
                 10, '/Game/Test/Item.Item_C', 'Item_C', '/Game/Test',
                 'BLUEPRINT_GENERATED_CLASS', 0, 1, 'CONFIRMED', 'HIGH'
@@ -63,8 +67,30 @@ class KnowledgeOntologyTests(unittest.TestCase):
                 1, 'runtime_validation', 'MANUAL', 'HIGH', 'CONFIRMED',
                 'manual://keep', 'manual/v1', NULL
             );
+            INSERT INTO domain_memberships VALUES (
+                1, 'map_usage', 'MAP_PRODUCER', 'MEDIUM', 'CANDIDATE',
+                'map://keep', 'map/v1', NULL
+            );
+            INSERT INTO domain_memberships VALUES (
+                1, 'future_domain', 'FUTURE_PRODUCER', 'LOW', 'CANDIDATE',
+                'future://keep', 'future/v1', NULL
+            );
+            INSERT INTO domain_memberships VALUES (
+                2, 'item_use', 'CLASS_ANCESTRY', 'HIGH', 'CONFIRMED',
+                'class-category://other/ITEM', '{self.ontology.version}', 1
+            );
             """
         )
+        preserved_before = core.execute(
+            """
+            SELECT * FROM domain_memberships
+            WHERE entity_id<>1
+               OR membership_kind NOT IN (
+                   'CLASS_ANCESTRY', 'TYPED_REGISTRATION'
+               )
+            ORDER BY entity_id, domain_id, membership_kind, evidence_id
+            """
+        ).fetchall()
 
         result = materialize_domain_entity_memberships(
             core,
@@ -90,6 +116,289 @@ class KnowledgeOntologyTests(unittest.TestCase):
                 """
             ).fetchone(),
             ("CONFIRMED", "manual/v1"),
+        )
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT * FROM domain_memberships
+                WHERE entity_id<>1
+                   OR membership_kind NOT IN (
+                       'CLASS_ANCESTRY', 'TYPED_REGISTRATION'
+                   )
+                ORDER BY entity_id, domain_id, membership_kind, evidence_id
+                """
+            ).fetchall(),
+            preserved_before,
+        )
+        core.close()
+
+    def test_entity_domain_rebuild_rejects_wrong_ontology_producer_version(
+        self,
+    ) -> None:
+        core = sqlite3.connect(":memory:")
+        core.execute("PRAGMA foreign_keys=ON")
+        core.executescript(FULL_CORE_SCHEMA_SQL)
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                1, 'ontology', ?, 'ontology-sha', 'wrong-ontology/v999',
+                'v1', '2026-07-31T00:00:00+00:00', 'FRESH'
+            )
+            """,
+            (f"ontology://{self.ontology.version}",),
+        )
+        core.execute(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (
+                1, '/Game/Test/Item.Item', 'BLUEPRINT_ASSET',
+                'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exactly one fresh version-bound ontology revision",
+        ):
+            materialize_domain_entity_memberships(
+                core,
+                ontology=self.ontology,
+                entity_id=1,
+            )
+        core.close()
+
+    def test_entity_domain_rebuild_ignores_stale_generated_class_assignment(
+        self,
+    ) -> None:
+        core = sqlite3.connect(":memory:")
+        core.execute("PRAGMA foreign_keys=ON")
+        core.executescript(FULL_CORE_SCHEMA_SQL)
+        core.executemany(
+            """
+            INSERT INTO source_revisions VALUES (
+                ?, ?, ?, ?, ?, 'v1',
+                '2026-07-31T00:00:00+00:00', ?
+            )
+            """,
+            [
+                (
+                    1,
+                    "ontology",
+                    f"ontology://{self.ontology.version}",
+                    "ontology-sha",
+                    self.ontology.version,
+                    "FRESH",
+                ),
+                (
+                    2,
+                    "registry",
+                    "registry://fixture",
+                    "registry-sha",
+                    "fixture/v1",
+                    "FRESH",
+                ),
+                (
+                    3,
+                    "blueprint_evidence",
+                    "bp://stale-class",
+                    "stale-class-sha",
+                    "fixture/v1",
+                    "STALE",
+                ),
+            ],
+        )
+        core.execute(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (
+                1, '/Game/Test/Item.Item', 'BLUEPRINT_ASSET',
+                'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO classes VALUES (
+                10, '/Game/Test/Stale.Stale_C', 'Stale_C', '/Game/Test',
+                'BLUEPRINT_GENERATED_CLASS', 0, 3, 'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO asset_class_assignments VALUES (
+                1, 10, 'GENERATED_CLASS', 'bp://stale-class/assignment',
+                'CONFIRMED', 'HIGH', 3
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO typed_registrations VALUES (
+                'registration-stale-class', '/Game/Test/Owner.Owner',
+                '/Game/Test/Stale.Stale_C', 'item_registration',
+                'AdditionalItems', 'bp://registration/item', 'DECLARED',
+                'HIGH', 'CONFIRMED', 2, 'fixture/v1',
+                'exact_source_property'
+            )
+            """
+        )
+
+        result = materialize_domain_entity_memberships(
+            core,
+            ontology=self.ontology,
+            entity_id=1,
+        )
+
+        self.assertEqual(result["ownedMemberships"], 0)
+        self.assertEqual(
+            core.execute(
+                "SELECT COUNT(*) FROM domain_memberships WHERE entity_id=1"
+            ).fetchone()[0],
+            0,
+        )
+        core.close()
+
+    def test_entity_domain_rebuild_accepts_proven_empty_owned_target(
+        self,
+    ) -> None:
+        core = sqlite3.connect(":memory:")
+        core.execute("PRAGMA foreign_keys=ON")
+        core.executescript(FULL_CORE_SCHEMA_SQL)
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                1, 'ontology', ?, 'ontology-sha', ?, 'v1',
+                '2026-07-31T00:00:00+00:00', 'FRESH'
+            )
+            """,
+            (
+                f"ontology://{self.ontology.version}",
+                self.ontology.version,
+            ),
+        )
+        core.execute(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (
+                1, '/Game/Test/Neutral.Neutral', 'BLUEPRINT_ASSET',
+                'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO domain_memberships VALUES (
+                1, 'item_use', 'CLASS_ANCESTRY', 'HIGH', 'STALE',
+                'class-category://old/ITEM', ?, 1
+            )
+            """,
+            (self.ontology.version,),
+        )
+
+        result = materialize_domain_entity_memberships(
+            core,
+            ontology=self.ontology,
+            entity_id=1,
+        )
+
+        self.assertEqual(result["ownedMemberships"], 0)
+        self.assertEqual(result["sourceRevisionId"], 1)
+        self.assertEqual(
+            core.execute(
+                "SELECT COUNT(*) FROM domain_memberships WHERE entity_id=1"
+            ).fetchone()[0],
+            0,
+        )
+        core.close()
+
+    def test_entity_domain_rebuild_separates_owner_and_target_contexts(
+        self,
+    ) -> None:
+        core = sqlite3.connect(":memory:")
+        core.execute("PRAGMA foreign_keys=ON")
+        core.executescript(FULL_CORE_SCHEMA_SQL)
+        core.executemany(
+            """
+            INSERT INTO source_revisions VALUES (
+                ?, ?, ?, ?, ?, 'v1',
+                '2026-07-31T00:00:00+00:00', 'FRESH'
+            )
+            """,
+            [
+                (
+                    1,
+                    "ontology",
+                    f"ontology://{self.ontology.version}",
+                    "ontology-sha",
+                    self.ontology.version,
+                ),
+                (
+                    2,
+                    "registry",
+                    "registry://fixture",
+                    "registry-sha",
+                    "fixture/v1",
+                ),
+            ],
+        )
+        core.executemany(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (?, ?, 'BLUEPRINT_ASSET', 'CONFIRMED', 'HIGH')
+            """,
+            [
+                (1, "/Game/Test/Owner.Owner"),
+                (2, "/Game/Test/Item.Item"),
+            ],
+        )
+        core.executemany(
+            """
+            INSERT INTO typed_registrations VALUES (
+                ?, '/Game/Test/Owner.Owner', '/Game/Test/Item.Item',
+                'item_registration', 'AdditionalItems',
+                'bp://registration/item', 'DECLARED', 'HIGH', 'CONFIRMED',
+                2, 'fixture/v1', 'exact_source_property'
+            )
+            """,
+            [("registration-1",), ("registration-duplicate",)],
+        )
+
+        owner_result = materialize_domain_entity_memberships(
+            core,
+            ontology=self.ontology,
+            entity_id=1,
+        )
+        target_result = materialize_domain_entity_memberships(
+            core,
+            ontology=self.ontology,
+            entity_id=2,
+        )
+
+        self.assertEqual(owner_result["ownedMemberships"], 1)
+        self.assertEqual(target_result["ownedMemberships"], 1)
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT domain_id, membership_kind
+                FROM domain_memberships WHERE entity_id=1
+                """
+            ).fetchall(),
+            [("global_registration", "TYPED_REGISTRATION")],
+        )
+        self.assertEqual(
+            core.execute(
+                """
+                SELECT domain_id, membership_kind
+                FROM domain_memberships WHERE entity_id=2
+                """
+            ).fetchall(),
+            [("item_use", "TYPED_REGISTRATION")],
         )
         core.close()
 

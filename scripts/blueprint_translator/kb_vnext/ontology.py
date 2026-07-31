@@ -417,14 +417,16 @@ def materialize_domain_entity_memberships(
         FROM source_revisions
         WHERE source_kind='ontology'
           AND source_uri=?
+          AND producer_version=?
           AND freshness_status='FRESH'
         ORDER BY revision_id
         """,
-        (f"ontology://{ontology.version}",),
+        (f"ontology://{ontology.version}", ontology.version),
     ).fetchall()
     if len(revision_rows) != 1:
         raise ValueError(
-            "domain rebuild requires exactly one fresh ontology revision"
+            "domain rebuild requires exactly one fresh version-bound "
+            "ontology revision"
         )
     source_revision_id = int(revision_rows[0][0])
     entity_uri = str(entity[0])
@@ -499,6 +501,19 @@ def materialize_domain_entity_memberships(
             FROM classes AS c
             JOIN asset_class_assignments AS a ON a.class_id=c.class_id
             WHERE a.entity_id=? AND a.assignment_kind='GENERATED_CLASS'
+              AND UPPER(a.status) IN (
+                  'SELF', 'EXTRACTED', 'IDENTIFIED',
+                  'CONFIRMED', 'VERIFIED', 'RESOLVED'
+              )
+              AND UPPER(a.confidence) IN ('HIGH', 'CONFIRMED')
+              AND a.source_revision_id IN (
+                  SELECT revision_id FROM source_revisions
+                  WHERE freshness_status='FRESH'
+              )
+              AND c.source_revision_id IN (
+                  SELECT revision_id FROM source_revisions
+                  WHERE freshness_status='FRESH'
+              )
             """,
             (entity_id,),
         )

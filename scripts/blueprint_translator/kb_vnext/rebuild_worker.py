@@ -261,6 +261,28 @@ class RebuildVerificationError(RebuildWorkerError):
     """The backend returned without producing a verified target state."""
 
 
+class _ProjectionRollbackIncomplete(RebuildWorkerError):
+    """Projection publication changed disk state but rollback was incomplete."""
+
+    def __init__(
+        self,
+        staging_dir: Path,
+        publish_error: BaseException,
+        restore_errors: Sequence[BaseException],
+    ) -> None:
+        residual = staging_dir.name
+        restore_types = ",".join(
+            type(error).__name__ for error in restore_errors
+        )
+        super().__init__(
+            "projection rollback incomplete; "
+            f"residual={residual}; "
+            f"publishError={type(publish_error).__name__}; "
+            f"restoreErrors={restore_types}"
+        )
+        self.residual = residual
+
+
 class RebuildBlockedGap(RuntimeError):
     """Tell the worker that required rebuild input is not available."""
 
@@ -3426,6 +3448,17 @@ def _fsync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _atomic_replace(source: Path, target: Path) -> None:
     if os.name != "nt":
         os.replace(source, target)
@@ -3509,6 +3542,7 @@ def _publish_projection_staging(
                 shutil.copy2(target, backup)
                 _fsync_file(backup)
                 backed_up.append(target.name)
+        _fsync_directory(backup_dir)
         for source, target in zip(sources, targets, strict=True):
             if _is_reparse_point(source):
                 raise RebuildVerificationError(
@@ -3517,17 +3551,31 @@ def _publish_projection_staging(
             _fsync_file(source)
             _atomic_replace(source, target)
             published.append(target.name)
-    except Exception:
+    except Exception as publish_error:
+        restore_errors: list[BaseException] = []
         for name in reversed(backed_up):
             backup = backup_dir / name
             if backup.is_file():
-                _atomic_replace(backup, output_dir / name)
+                try:
+                    _atomic_replace(backup, output_dir / name)
+                except Exception as restore_error:
+                    restore_errors.append(restore_error)
         for name in reversed(published):
             if name in backed_up:
                 continue
             target = output_dir / name
             if target.is_file():
-                target.unlink()
+                try:
+                    target.unlink()
+                    _fsync_directory(output_dir)
+                except Exception as restore_error:
+                    restore_errors.append(restore_error)
+        if restore_errors:
+            raise _ProjectionRollbackIncomplete(
+                staging_dir,
+                publish_error,
+                restore_errors,
+            ) from publish_error
         raise
     return _ProjectionPublication(
         staging_dir=staging_dir,
@@ -3551,16 +3599,30 @@ def _restore_projection_publication(
     if publication is None:
         return
     backup_dir = publication.staging_dir / ".publish-backup"
+    restore_errors: list[BaseException] = []
     for name in reversed(publication.backed_up):
         backup = backup_dir / name
         if backup.is_file():
-            _atomic_replace(backup, publication.output_dir / name)
+            try:
+                _atomic_replace(backup, publication.output_dir / name)
+            except Exception as restore_error:
+                restore_errors.append(restore_error)
     for name in reversed(publication.published):
         if name in publication.backed_up:
             continue
         target = publication.output_dir / name
         if target.is_file():
-            target.unlink()
+            try:
+                target.unlink()
+                _fsync_directory(publication.output_dir)
+            except Exception as restore_error:
+                restore_errors.append(restore_error)
+    if restore_errors:
+        raise _ProjectionRollbackIncomplete(
+            publication.staging_dir,
+            RuntimeError("post-publication verification failed"),
+            restore_errors,
+        )
 
 
 def _cleanup_projection_staging(staging_dir: Path | None) -> None:
@@ -3806,11 +3868,20 @@ def _run_task(
             >= {("domain_memberships", "DELETE")}
             and not cache_tracker.operations
         )
+        explicit_projection_rebuild = (
+            task.downstream_kind == "PROJECTION"
+            and external_marked
+            and touched == {"projection_runs"}
+            and bool(core_tracker.operations)
+            and not cache_tracker.operations
+        )
         verification_basis = "TARGET_STATE_CHANGED"
         if not semantic_changed and explicit_whole_cache_invalidation:
             verification_basis = "EXPLICIT_WHOLE_CACHE_INVALIDATION"
         if not semantic_changed and explicit_domain_owner_rebuild:
             verification_basis = "VERIFIED_DOMAIN_OWNER_TARGET_STATE"
+        if explicit_projection_rebuild:
+            verification_basis = "VERIFIED_PROJECTION_REBUILD"
         verification: dict[str, object] = {
             "basis": verification_basis,
             "coreWriteChanges": core_write_changes,
@@ -3845,6 +3916,7 @@ def _run_task(
             )
             or explicit_whole_cache_invalidation
             or explicit_domain_owner_rebuild
+            or explicit_projection_rebuild
         )
         if not verified_work:
             raise RebuildVerificationError(
@@ -3915,7 +3987,16 @@ def _run_task(
         )
     except RebuildBlockedGap as gap:
         _rollback_backend_transactions(connection, cache)
-        _restore_projection_publication(publication)
+        try:
+            _restore_projection_publication(publication)
+        except _ProjectionRollbackIncomplete as rollback_error:
+            return _finish_failure(
+                connection,
+                backend,
+                task,
+                seed,
+                rollback_error,
+            )
         _cleanup_projection_staging(staging_dir)
         return _finish_gap(
             connection,
@@ -3925,16 +4006,21 @@ def _run_task(
             gap.gap_code,
             gap.detail,
         )
-    except Exception as error:
+    except Exception as caught_error:
+        failure_error = caught_error
         _rollback_backend_transactions(connection, cache)
-        _restore_projection_publication(publication)
-        _cleanup_projection_staging(staging_dir)
+        try:
+            _restore_projection_publication(publication)
+        except _ProjectionRollbackIncomplete as rollback_error:
+            failure_error = rollback_error
+        if not isinstance(failure_error, _ProjectionRollbackIncomplete):
+            _cleanup_projection_staging(staging_dir)
         return _finish_failure(
             connection,
             backend,
             task,
             seed,
-            error,
+            failure_error,
         )
 
 

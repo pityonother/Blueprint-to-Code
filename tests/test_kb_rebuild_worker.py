@@ -872,6 +872,35 @@ class CompleteProjectionBackend(RebuildBackend):
             )
 
 
+class SingleProjectionBackend(RebuildBackend):
+    def __init__(self, *, projection_dir: Path) -> None:
+        super().__init__(projection_dir=projection_dir)
+        self.calls = 0
+
+    def rebuild_projection(self, scope: RebuildScope) -> None:
+        self.calls += 1
+        projection_name = tuple(DOMAIN_PROJECTIONS)[
+            scope.task.downstream_id - 1
+        ]
+        scope.core.execute(
+            """
+            UPDATE projection_runs
+            SET projection_version='v2',
+                source_revision_set_hash='fresh-hash',
+                ontology_version='test-ontology/v1',
+                built_at='2026-07-28T01:00:00Z',
+                row_count=0,
+                validation_status='VALID'
+            WHERE projection_name=?
+            """,
+            (projection_name,),
+        )
+        _write_projection(
+            scope.projection_dir / f"{projection_name}.sqlite",
+            projection_name,
+        )
+
+
 class MetadataOnlyProjectionBackend(RebuildBackend):
     def rebuild_projection(self, scope: RebuildScope) -> None:
         projection_name = tuple(DOMAIN_PROJECTIONS)[
@@ -2244,6 +2273,189 @@ class RebuildWorkerTests(unittest.TestCase):
                 )
             )
         )
+        core.close()
+
+    def test_equal_content_projection_records_verified_execution_basis(
+        self,
+    ) -> None:
+        core = _core()
+        projection_name = tuple(DOMAIN_PROJECTIONS)[0]
+        core.execute(
+            """
+            INSERT INTO projection_runs VALUES (
+                ?, 'v2', 'fresh-hash', 'test-ontology/v1',
+                '2026-07-28T01:00:00Z', 0, 'VALID'
+            )
+            """,
+            (projection_name,),
+        )
+        core.commit()
+        _queue(core, [("PROJECTION", 1)])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "projections"
+            output_dir.mkdir()
+            published = output_dir / f"{projection_name}.sqlite"
+            _write_projection(published, projection_name)
+            sibling = output_dir / f"{tuple(DOMAIN_PROJECTIONS)[1]}.sqlite"
+            sibling.write_bytes(b"sibling-must-not-change")
+            sibling_before = sibling.read_bytes()
+
+            report = drain_rebuild_queue(
+                core,
+                SingleProjectionBackend(projection_dir=output_dir),
+                max_items=1,
+                recover_running=False,
+            )
+
+            self.assertEqual(report.succeeded, 1)
+            self.assertEqual(sibling.read_bytes(), sibling_before)
+        payload = json.loads(
+            core.execute(
+                "SELECT payload_json FROM invalidation_events"
+            ).fetchone()[0]
+        )
+        receipt = payload["_rebuildReceipts"]["PROJECTION:1"]
+        self.assertEqual(
+            receipt["verification"]["basis"],
+            "VERIFIED_PROJECTION_REBUILD",
+        )
+        self.assertEqual(
+            receipt["verification"]["rowScope"]["projectionName"],
+            projection_name,
+        )
+        core.close()
+
+    def test_projection_rollback_failure_preserves_recovery_residual(
+        self,
+    ) -> None:
+        core = _core()
+        projection_name = tuple(DOMAIN_PROJECTIONS)[0]
+        core.execute(
+            """
+            INSERT INTO projection_runs VALUES (
+                ?, 'v2', 'fresh-hash', 'test-ontology/v1',
+                '2026-07-28T01:00:00Z', 0, 'VALID'
+            )
+            """,
+            (projection_name,),
+        )
+        core.commit()
+        _queue(core, [("PROJECTION", 1)])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_dir = root / "projections"
+            output_dir.mkdir()
+            published = output_dir / f"{projection_name}.sqlite"
+            _write_projection(published, projection_name)
+            real_replace = rebuild_worker_module._atomic_replace
+            replace_calls = 0
+
+            def uncertain_replace(source: Path, target: Path) -> None:
+                nonlocal replace_calls
+                replace_calls += 1
+                if replace_calls == 1:
+                    real_replace(source, target)
+                    raise OSError("synthetic uncertain failure after replace")
+                raise OSError("synthetic backup restore failure")
+
+            with mock.patch.object(
+                rebuild_worker_module,
+                "_atomic_replace",
+                side_effect=uncertain_replace,
+            ):
+                report = drain_rebuild_queue(
+                    core,
+                    SingleProjectionBackend(projection_dir=output_dir),
+                    max_items=1,
+                    recover_running=False,
+                )
+
+            self.assertEqual(report.failed, 1)
+            self.assertIn("projection rollback incomplete", report.outcomes[0].detail)
+            residuals = [
+                path
+                for path in root.iterdir()
+                if path.name.startswith(".kb-rebuild-")
+            ]
+            self.assertEqual(len(residuals), 1)
+            self.assertTrue(
+                (
+                    residuals[0]
+                    / ".publish-backup"
+                    / f"{projection_name}.sqlite"
+                ).is_file()
+            )
+        core.close()
+
+    def test_projection_marker_recovers_crash_after_replace_before_receipt(
+        self,
+    ) -> None:
+        core = _core()
+        projection_name = tuple(DOMAIN_PROJECTIONS)[0]
+        core.execute(
+            """
+            INSERT INTO projection_runs VALUES (
+                ?, 'v2', 'fresh-hash', 'test-ontology/v1',
+                '2026-07-28T01:00:00Z', 0, 'VALID'
+            )
+            """,
+            (projection_name,),
+        )
+        core.commit()
+        _queue(core, [("PROJECTION", 1)])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "projections"
+            output_dir.mkdir()
+            _write_projection(
+                output_dir / f"{projection_name}.sqlite",
+                projection_name,
+            )
+            backend = SingleProjectionBackend(projection_dir=output_dir)
+
+            def crash_before_core_receipt_commit(
+                core_connection: sqlite3.Connection,
+                cache_connection: sqlite3.Connection | None,
+            ) -> None:
+                rebuild_worker_module._end_authorizers(
+                    core_connection,
+                    cache_connection,
+                )
+                core_connection.rollback()
+                raise SimulatedProcessCrash
+
+            with mock.patch.object(
+                rebuild_worker_module,
+                "_commit_backend_transactions",
+                side_effect=crash_before_core_receipt_commit,
+            ):
+                with self.assertRaises(SimulatedProcessCrash):
+                    drain_rebuild_queue(
+                        core,
+                        backend,
+                        max_items=1,
+                        recover_running=False,
+                    )
+
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(
+                core.execute(
+                    "SELECT status FROM invalidation_queue"
+                ).fetchone()[0],
+                "RUNNING",
+            )
+            recovered = drain_rebuild_queue(
+                core,
+                backend,
+                max_items=1,
+            )
+
+            self.assertEqual(recovered.recovered_running, 1)
+            self.assertEqual(recovered.succeeded, 1)
+            self.assertTrue(recovered.outcomes[0].cache_hit)
+            self.assertEqual(backend.calls, 1)
         core.close()
 
     def test_metadata_only_projection_cannot_pass_verification(
