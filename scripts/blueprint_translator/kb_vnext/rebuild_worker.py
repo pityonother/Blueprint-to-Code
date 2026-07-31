@@ -39,6 +39,7 @@ from .projections import (
     compute_core_projection_content_digest,
     compute_projection_artifact_content_digest,
 )
+from .roles import ROLE_CLASSIFIER_VERSION
 
 
 PENDING_REBUILD: Final = "PENDING_REBUILD"
@@ -1968,7 +1969,8 @@ def _role_scope_proof(
     connection: sqlite3.Connection,
     task: RebuildTask,
 ) -> dict[str, object]:
-    proof = _event_payload(connection, task.event_id).get("_roleScopeProof")
+    event_payload = _event_payload(connection, task.event_id)
+    proof = event_payload.get("_roleScopeProof")
     if not isinstance(proof, dict):
         raise RebuildVerificationError("role dependency proof is missing")
     expected_keys = {
@@ -1988,11 +1990,11 @@ def _role_scope_proof(
     proof_uri = proof.get("proof")
     body = dict(proof)
     body.pop("proof", None)
-    queued_role_ids = [
-        row[0]
+    queued_role_rows = [
+        (int(row[0]), str(row[1]))
         for row in connection.execute(
             """
-            SELECT downstream_id
+            SELECT downstream_id, dependency_reason
             FROM invalidation_queue
             WHERE event_id=? AND downstream_kind='ROLE_ENTITY'
             ORDER BY downstream_id
@@ -2000,6 +2002,7 @@ def _role_scope_proof(
             (task.event_id,),
         )
     ]
+    queued_role_ids = [row[0] for row in queued_role_rows]
     def valid_ids(value: object) -> bool:
         return (
             isinstance(value, list)
@@ -2011,8 +2014,7 @@ def _role_scope_proof(
         set(proof) != expected_keys
         or proof.get("schema")
         != "ark-kb-additive-role-dependency-scope/v1"
-        or not isinstance(proof.get("classifierVersion"), str)
-        or not proof.get("classifierVersion")
+        or proof.get("classifierVersion") != ROLE_CLASSIFIER_VERSION
         or type(source_revision_id) is not int
         or source_revision_id < 1
         or not valid_ids(changed)
@@ -2025,9 +2027,30 @@ def _role_scope_proof(
         or proof_uri != "role-scope://" + _digest(body)
     ):
         raise RebuildVerificationError("role dependency proof is invalid")
+    durable_trigger_ids = event_payload.get("_upstreamRevisionIds")
+    event_row = connection.execute(
+        """
+        SELECT event_kind, upstream_revision_id
+        FROM invalidation_events WHERE event_id=?
+        """,
+        (task.event_id,),
+    ).fetchone()
+    if (
+        event_row is None
+        or str(event_row[0]).upper() != "ASSET"
+        or not valid_ids(durable_trigger_ids)
+        or durable_trigger_ids != trigger_ids
+        or (
+            event_row[1] is not None
+            and durable_trigger_ids != [int(event_row[1])]
+        )
+    ):
+        raise RebuildVerificationError(
+            "role dependency proof trigger revision scope is invalid"
+        )
     revision = connection.execute(
         """
-        SELECT source_kind, freshness_status
+        SELECT source_kind, source_uri, producer_version, freshness_status
         FROM source_revisions WHERE revision_id=?
         """,
         (source_revision_id,),
@@ -2035,10 +2058,51 @@ def _role_scope_proof(
     if (
         revision is None
         or str(revision[0]).lower() != "role_classifier"
-        or str(revision[1]).upper() != "FRESH"
+        or str(revision[1]) != f"classifier://{ROLE_CLASSIFIER_VERSION}"
+        or str(revision[2]) != ROLE_CLASSIFIER_VERSION
+        or str(revision[3]).upper() != "FRESH"
     ):
         raise RebuildVerificationError(
             "role dependency proof source revision is not fresh"
+        )
+    trigger_placeholders = ",".join("?" for _ in trigger_ids)
+    trigger_rows = list(
+        connection.execute(
+            f"""
+            SELECT revision_id, freshness_status
+            FROM source_revisions
+            WHERE revision_id IN ({trigger_placeholders})
+            ORDER BY revision_id
+            """,
+            tuple(trigger_ids),
+        )
+    )
+    if [int(row[0]) for row in trigger_rows] != trigger_ids or any(
+        str(row[1]).upper() != "FRESH" for row in trigger_rows
+    ):
+        raise RebuildVerificationError(
+            "role dependency proof trigger revision is not fresh"
+        )
+    dependency_rows = {
+        (int(row[0]), int(row[1]), str(row[2]))
+        for row in connection.execute(
+            f"""
+            SELECT upstream_revision_id, downstream_id, dependency_reason
+            FROM invalidation_dependencies
+            WHERE upstream_revision_id IN ({trigger_placeholders})
+              AND downstream_kind='ROLE_ENTITY'
+            """,
+            tuple(trigger_ids),
+        )
+    }
+    expected_dependency_rows = {
+        (trigger_id, entity_id, reason)
+        for trigger_id in trigger_ids
+        for entity_id, reason in queued_role_rows
+    }
+    if dependency_rows != expected_dependency_rows:
+        raise RebuildVerificationError(
+            "role dependency proof dependency rows are invalid"
         )
     return proof
 

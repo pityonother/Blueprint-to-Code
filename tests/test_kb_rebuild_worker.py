@@ -33,6 +33,9 @@ from blueprint_translator.kb_vnext.rebuild_worker import (  # noqa: E402
     drain_rebuild_queue,
     requeue_rebuild_tasks,
 )
+from blueprint_translator.kb_vnext.roles import (  # noqa: E402
+    ROLE_CLASSIFIER_VERSION,
+)
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CACHE_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
@@ -100,6 +103,94 @@ def _queue(
         ],
     )
     connection.commit()
+
+
+def _queue_role_scope_proof(
+    connection: sqlite3.Connection,
+    *,
+    classifier_version: str = ROLE_CLASSIFIER_VERSION,
+    trigger_revision_ids: tuple[int, ...] = (3,),
+    role_entity_ids: tuple[int, ...] = (1,),
+    durable_revision_ids: tuple[int, ...] = (3,),
+) -> rebuild_worker_module.RebuildTask:
+    connection.executemany(
+        """
+        INSERT INTO source_revisions VALUES (
+            ?, ?, ?, ?, ?, 'v1', '2026-07-31T00:00:00Z', 'FRESH'
+        )
+        """,
+        [
+            (
+                2,
+                "role_classifier",
+                f"classifier://{ROLE_CLASSIFIER_VERSION}",
+                "role-classifier-sha",
+                ROLE_CLASSIFIER_VERSION,
+            ),
+            (
+                3,
+                "blueprint_evidence",
+                "bp://source/3",
+                "blueprint-sha-3",
+                "fixture/v1",
+            ),
+            (
+                4,
+                "blueprint_evidence",
+                "bp://source/4",
+                "blueprint-sha-4",
+                "fixture/v1",
+            ),
+        ],
+    )
+    proof: dict[str, object] = {
+        "schema": "ark-kb-additive-role-dependency-scope/v1",
+        "classifierVersion": classifier_version,
+        "sourceRevisionId": 2,
+        "triggerSourceRevisionIds": list(trigger_revision_ids),
+        "changedEntityIds": [1],
+        "roleEntityIds": list(role_entity_ids),
+        "transitions": [],
+    }
+    proof["proof"] = "role-scope://" + rebuild_worker_module._digest(proof)
+    payload = {
+        "ROLE_ENTITY": list(role_entity_ids),
+        "_upstreamRevisionIds": list(durable_revision_ids),
+        "_roleScopeProof": proof,
+    }
+    connection.execute(
+        """
+        INSERT INTO invalidation_events VALUES (
+            'event-role-proof', 'ASSET', NULL, ?,
+            '2026-07-31T00:00:01Z', 'APPLIED'
+        )
+        """,
+        (json.dumps(payload, separators=(",", ":")),),
+    )
+    connection.executemany(
+        """
+        INSERT INTO invalidation_queue VALUES (
+            'event-role-proof', 'ROLE_ENTITY', ?,
+            'ADDITIVE_ROLE_INPUT', 'PENDING_REBUILD'
+        )
+        """,
+        [(entity_id,) for entity_id in role_entity_ids],
+    )
+    connection.executemany(
+        """
+        INSERT INTO invalidation_dependencies VALUES (
+            ?, 'ROLE_ENTITY', 1, 'ADDITIVE_ROLE_INPUT'
+        )
+        """,
+        [(revision_id,) for revision_id in durable_revision_ids],
+    )
+    connection.commit()
+    return rebuild_worker_module.RebuildTask(
+        event_id="event-role-proof",
+        downstream_kind="ROLE_ENTITY",
+        downstream_id=1,
+        dependency_reason="ADDITIVE_ROLE_INPUT",
+    )
 
 
 def _seed_role(
@@ -896,6 +987,134 @@ class SimulatedProcessCrash(BaseException):
 
 
 class RebuildWorkerTests(unittest.TestCase):
+    def test_role_proof_rejects_rehashed_classifier_version_tamper(
+        self,
+    ) -> None:
+        core = _core()
+        task = _queue_role_scope_proof(
+            core,
+            classifier_version="attacker-role/v999",
+        )
+
+        with self.assertRaisesRegex(
+            rebuild_worker_module.RebuildVerificationError,
+            "role dependency proof is invalid",
+        ):
+            rebuild_worker_module._role_scope_proof(core, task)
+        core.close()
+
+    def test_role_proof_rejects_rehashed_trigger_revision_replacement(
+        self,
+    ) -> None:
+        core = _core()
+        task = _queue_role_scope_proof(
+            core,
+            trigger_revision_ids=(4,),
+        )
+
+        with self.assertRaisesRegex(
+            rebuild_worker_module.RebuildVerificationError,
+            "trigger revision scope is invalid",
+        ):
+            rebuild_worker_module._role_scope_proof(core, task)
+        core.close()
+
+    def test_role_proof_rejects_stale_trigger_revision(self) -> None:
+        core = _core()
+        task = _queue_role_scope_proof(core)
+        core.execute(
+            "UPDATE source_revisions SET freshness_status='STALE' "
+            "WHERE revision_id=3"
+        )
+        core.commit()
+
+        with self.assertRaisesRegex(
+            rebuild_worker_module.RebuildVerificationError,
+            "trigger revision is not fresh",
+        ):
+            rebuild_worker_module._role_scope_proof(core, task)
+        core.close()
+
+    def test_role_proof_and_queue_tamper_cannot_bypass_dependencies(
+        self,
+    ) -> None:
+        core = _core()
+        core.execute(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (
+                2, '/Game/Test/Other.Other', 'BLUEPRINT_ASSET',
+                'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+        task = _queue_role_scope_proof(
+            core,
+            role_entity_ids=(1, 2),
+        )
+
+        with self.assertRaisesRegex(
+            rebuild_worker_module.RebuildVerificationError,
+            "dependency rows are invalid",
+        ):
+            rebuild_worker_module._role_scope_proof(core, task)
+        core.close()
+
+    def test_role_task_claim_order_follows_fact_and_effective_inputs(
+        self,
+    ) -> None:
+        core = _core()
+        _queue(
+            core,
+            [
+                ("ROLE_ENTITY", 1),
+                ("EFFECTIVE_ENTITY", 1),
+                ("FACT", 1),
+            ],
+        )
+
+        first = rebuild_worker_module._claim_next_task(core, set())
+        second = rebuild_worker_module._claim_next_task(core, set())
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.downstream_kind, "FACT")
+        self.assertEqual(second.downstream_kind, "EFFECTIVE_ENTITY")
+        core.close()
+
+    def test_recovered_role_task_revalidates_proof_before_target_state(
+        self,
+    ) -> None:
+        core = _core()
+        _seed_role(core, status="CONFIRMED")
+        _queue_role_scope_proof(core)
+        core.execute(
+            "UPDATE source_revisions SET freshness_status='STALE' "
+            "WHERE revision_id=3"
+        )
+        core.execute(
+            "UPDATE invalidation_queue SET status='RUNNING'"
+        )
+        core.execute(
+            "UPDATE invalidation_events SET status='RUNNING'"
+        )
+        core.commit()
+
+        report = drain_rebuild_queue(
+            core,
+            NoopRoleBackend(),
+            max_items=1,
+        )
+
+        self.assertEqual(report.recovered_running, 1)
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(
+            core.execute("SELECT status FROM knowledge_roles").fetchone()[0],
+            "CONFIRMED",
+        )
+        core.close()
+
     def test_every_supported_kind_has_exact_row_scope_policy(
         self,
     ) -> None:
