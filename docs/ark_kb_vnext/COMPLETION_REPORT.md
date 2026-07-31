@@ -176,11 +176,16 @@ role gold。
   顺序清理 `context_packs`、`answer_plans`、
   `materialized_neighborhoods` 与 `query_snapshots`，保留严格的 whole-cache
   equal-digest receipt、external marker 和崩溃恢复合同；
+- selective `ROLE_ENTITY`：按 content-addressed percentile dependency proof
+  展开真实闭包，并同步重建 role、depth、metrics 与 signal metrics；
+- ontology-owned `DOMAIN_ENTITY`：只替换目标实体的 class ancestry 与 typed
+  registration membership，保留 manual/map/其他 producer；
+- 六个 exact `PROJECTION` backend：固定 ID/name 反向校验、同卷 staging、
+  artifact/Core 内容核验、external marker 与单文件原子替换；
 - gate/worker 失败时禁止 publication。
 
 尚未交付为生产可用：
 
-- `ROLE_ENTITY`、`DOMAIN_ENTITY` 与 `PROJECTION` rebuild backend；
 - production narrow-gate 执行与签名 artifact authorization；
 - 绑定 source manifest 的生产 atomic incremental publisher。
 
@@ -199,17 +204,26 @@ published=false
 e4Scenario2Complete=false
 ```
 
-4 个成功任务为 `FACT × 2`、`EFFECTIVE_ENTITY × 1` 和
-`QUERY_SNAPSHOT × 1`；8 个阻断任务为 `ROLE_ENTITY × 1`、
+当时 4 个成功任务为 `FACT × 2`、`EFFECTIVE_ENTITY × 1` 和
+`QUERY_SNAPSHOT × 1`；当时 8 个阻断任务为 `ROLE_ENTITY × 1`、
 `DOMAIN_ENTITY × 1` 和 `PROJECTION × 6`。v3 receipt 的独立 raw SHA-256 为
 `6c56aa85ff43349ac20b64fae93058e51ad645d27660099c87758ca62c5e94b3`。
-`REBUILD_QUEUE_NOT_DRAINED` 因此仍然正确阻断 narrow gates 和 publisher。
+这是历史运行证据，不用于冒充本轮能力或 live replay。
 
-current Snapshot 仍包含 234 个 Blueprint Evidence；live captures 为 235，
-Scarecrow 是唯一未发布新增。只读 Source Diff 是
-`BLUEPRINT_EVIDENCE added=1, changed=0, deleted=0`，同步仅有
-`captures aggregate changed=1`，没有 semantic producer、Discovery、
-Ontology、Gold、Native 或其他 semantic input drift。
+本轮 production-shaped 场景已得到精确 12-task drain：
+
+```text
+SUCCEEDED=12
+BLOCKED_GAP=0
+FAILED=0
+remaining_pending=0
+remaining_running=0
+worker.drained=true
+```
+
+它仅证明 backend/worker 合同。live Source Diff 已变为 14 个新增和 9 个变更，
+命中 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，所以没有执行真实 incremental
+worker、narrow gates、publisher 或 E4 attestation。
 
 ## Storage
 
@@ -285,9 +299,8 @@ git diff --check
    未达门槛；expected-gap match 已达到 `95.74%`；
 5. 单实体性能已通过：密封 P95 `3.786ms`，三次独立完整复测为
    `4.857 / 4.104 / 4.935ms`；
-6. Scarecrow 真实回放已接通 FACT、EFFECTIVE_ENTITY 和 QUERY_SNAPSHOT，
-   但 `ROLE_ENTITY`、`DOMAIN_ENTITY`、六个 `PROJECTION`、narrow gates 与
-   publisher 仍 fail closed；
+6. Additive rebuild backend 已在 production-shaped 12-task 场景闭合；live
+   输入不是选择性单新增，且 narrow gates 与 publisher 尚未在本工作包接通；
 7. 没有 3 个连续合格 sealed builds、真实 shadow diff disposition、
    rollback/concurrent-reader 记录和 12 个生产增量场景 attestation。
 

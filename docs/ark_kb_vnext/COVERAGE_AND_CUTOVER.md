@@ -177,7 +177,7 @@ whole-tree staging、单资产 quarantine、live rescan、v3 base-bound receipt
 诊断不会越界或误绑旧 base，但所有 authority flag 仍为 false，不能替代签名
 production authorization、narrow gates 或 publisher。
 
-真实 Scarecrow prepublication 回放得到：
+历史 Scarecrow prepublication 回放得到：
 
 ```text
 SUCCEEDED=4
@@ -189,21 +189,21 @@ published=false
 e4Scenario2Complete=false
 ```
 
-成功任务是 `FACT × 2`、`EFFECTIVE_ENTITY × 1` 和
-`QUERY_SNAPSHOT × 1`；剩余任务仅为 `ROLE_ENTITY × 1`、
+当时成功任务是 `FACT × 2`、`EFFECTIVE_ENTITY × 1` 和
+`QUERY_SNAPSHOT × 1`；当时缺少 `ROLE_ENTITY × 1`、
 `DOMAIN_ENTITY × 1`、`PROJECTION × 6`。v3 receipt 的独立 raw SHA-256 为
 `6c56aa85ff43349ac20b64fae93058e51ad645d27660099c87758ca62c5e94b3`。
-因此 `REBUILD_QUEUE_NOT_DRAINED` 仍然阻止 narrow gates 和 publisher。
+该历史 receipt 不代表当前 backend 能力。
 
-current Snapshot 仍有 234 个 Blueprint Evidence；live captures 为 235，
-Scarecrow 是唯一未发布新增。只读 Source Diff 精确为 Scarecrow
-`BLUEPRINT_EVIDENCE added=1, changed=0, deleted=0`，同步仅有
-`captures aggregate changed=1`；没有 semantic producer、Discovery、
-Ontology、Gold、Native 或其他 semantic input drift。没有增量 Snapshot，
-current pointer 未改变。
+本工作包已实现 selective Role、ontology-owned Domain 与六个 exact single-file
+Projection backend。production-shaped 12-task 场景得到
+`SUCCEEDED=12 / BLOCKED_GAP=0 / FAILED=0`，且 pending/running 均为 0。
+这是 fixture/test 证据，不是 E4 真实运行事实。
 
-因此“单资产增量摄取到原子发布”和计划要求的 12 个生产场景仍未闭合；
-不能把 4 个成功的 prepublication tasks 描述成完整增量发布。
+2026-07-31 live 只读复核得到 14 个新增和 9 个变更，并包含非选择性 semantic
+输入变化；capability check 以 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`
+在 staging 前阻断。没有增量 Snapshot，current pointer 未改变，Snapshot 数量
+仍为 3。不能把 production-shaped 12/12 描述成真实发布或 E4 完成。
 
 ## 切换规则
 

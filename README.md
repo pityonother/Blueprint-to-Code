@@ -25,7 +25,7 @@ C++。伪代码、Ghidra 伪 C 和静态排行都只是有明确来源与失效�
 | Query mode | `shadow` |
 | 默认查询来源 | `legacy` |
 | Blueprint-native links | 713 candidates / 1 confirmed |
-| Blueprint Evidence | Snapshot `234`；live Scarecrow 是唯一未发布新增 |
+| Blueprint Evidence | Snapshot `234`；live 输入已不是单一新增 |
 | Burn-in | `MISSING / BURN_IN_ATTESTATION_MISSING` |
 | Cutover | `false` |
 
@@ -34,12 +34,12 @@ registration、role Gold 与连续 burn-in 证据不足时，系统会继续 fai
 完整身份、统计和限制见
 [ARK KB vNext 当前状态](docs/ark_kb_vnext/CURRENT_STATUS.md)。
 
-PR #27（merge commit `86c7715dab7dc15635c0cb18789f36d5cd8f3f69`）
-已把生产 `QUERY_SNAPSHOT` backend 合入 `main`。真实 Scarecrow
-prepublication 回放得到 `SUCCEEDED=4 / BLOCKED_GAP=8 / FAILED=0`，v3
-receipt 为 `baseBindingVerified=true`；剩余 Backend 是 Role、Domain 和
-Projection。此次回放保持 `published=false`，没有创建增量 Snapshot，也没有
-修改 current pointer。
+Additive Rebuild Backend 工作包已补齐 selective Role、Domain、六个单投影与
+Query rebuild；隔离的 production-shaped 输入得到
+`SUCCEEDED=12 / BLOCKED_GAP=0 / FAILED=0`。这只是测试证据：2026-07-31
+只读 live rescan 实测为 14 个新增和 9 个变更，命中
+`NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，因此没有把该结果冒充真实回放，
+也没有创建 Snapshot 或修改 current pointer。
 
 ## 5 分钟快速开始
 
