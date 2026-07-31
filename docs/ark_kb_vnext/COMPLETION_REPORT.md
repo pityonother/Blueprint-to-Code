@@ -182,12 +182,21 @@ role gold。
   registration membership，保留 manual/map/其他 producer；
 - 六个 exact `PROJECTION` backend：固定 ID/name 反向校验、同卷 staging、
   artifact/Core 内容核验、external marker 与单文件原子替换；
+- 固定 11 项 production narrow-gate runner：从最终 staged candidate 计算
+  observation，绑定 v3 delta、完整 worker receipts、projection digests、cache
+  marker、candidate lineage 与未变化 base；
+- incremental candidate reseal：为 10 个数据库/投影、runtime health、质量报告、
+  manifest 与 previous Snapshot 生成并复核一个新的 immutable build identity；
+- atomic shadow publisher：reserved staging、同卷 rename、exact pointer CAS、
+  CAS 前 live Source Manifest 复核、切换后独立回读与 content-addressed local-write
+  receipt；
 - gate/worker 失败时禁止 publication。
 
-尚未交付为生产可用：
+仍未交付为 cutover/生产授权：
 
-- production narrow-gate 执行与签名 artifact authorization；
-- 绑定 source manifest 的生产 atomic incremental publisher。
+- 独立真实签名的 artifact/production authorization；
+- live 合格单新增输入上的 shadow publication 与对应 E4 运行证据；
+- 75/75 Gold、三轮 burn-in、rollback/concurrent-reader 实际演练与 cutover。
 
 PR #27 已以 merge commit
 `86c7715dab7dc15635c0cb18789f36d5cd8f3f69` 合入 `main`。真实 Scarecrow
@@ -224,6 +233,10 @@ worker.drained=true
 它仅证明 backend/worker 合同。live Source Diff 已变为 14 个新增和 9 个变更，
 命中 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，所以没有执行真实 incremental
 worker、narrow gates、publisher 或 E4 attestation。
+
+隔离 Work Package B fixture 另行证明固定 11/11 narrow-gate report 和真实临时
+目录 rename/CAS/独立 verification 路径。它不改变上述 live 结论；本机 current
+仍未发生 pointer swap，Snapshot 数仍为 3。
 
 ## Storage
 
@@ -300,7 +313,7 @@ git diff --check
 5. 单实体性能已通过：密封 P95 `3.786ms`，三次独立完整复测为
    `4.857 / 4.104 / 4.935ms`；
 6. Additive rebuild backend 已在 production-shaped 12-task 场景闭合；live
-   输入不是选择性单新增，且 narrow gates 与 publisher 尚未在本工作包接通；
+   输入不是选择性单新增；narrow gates 与 publisher 已实现但未在 live 运行；
 7. 没有 3 个连续合格 sealed builds、真实 shadow diff disposition、
    rollback/concurrent-reader 记录和 12 个生产增量场景 attestation。
 
