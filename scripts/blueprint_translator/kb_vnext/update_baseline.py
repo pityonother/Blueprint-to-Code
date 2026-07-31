@@ -1798,6 +1798,45 @@ def build_base_bound_add_only_delta_receipt(
     try:
         base.execute("PRAGMA query_only=ON")
         staged.execute("PRAGMA foreign_keys=ON")
+        role_proof = invalidation_plan.role_scope_proof
+        derived_source_revision_ids = (
+            (int(role_proof["sourceRevisionId"]),)
+            if isinstance(role_proof, Mapping)
+            and type(role_proof.get("sourceRevisionId")) is int
+            and invalidation_plan.downstream.get("ROLE_ENTITY")
+            else ()
+        )
+        if derived_source_revision_ids:
+            classifier_version = str(
+                role_proof.get("classifierVersion") or ""
+            )
+            derived_rows = list(
+                staged.execute(
+                    """
+                    SELECT revision_id, source_kind, source_uri,
+                           producer_version, schema_version,
+                           freshness_status
+                    FROM source_revisions
+                    WHERE revision_id=?
+                    """,
+                    derived_source_revision_ids,
+                )
+            )
+            if (
+                len(derived_rows) != 1
+                or derived_rows[0][0] != derived_source_revision_ids[0]
+                or derived_rows[0][1] != "role_classifier"
+                or derived_rows[0][2]
+                != f"classifier://{classifier_version}"
+                or derived_rows[0][3] != classifier_version
+                or not str(derived_rows[0][4] or "")
+                or derived_rows[0][5] != "FRESH"
+            ):
+                raise _gap(
+                    "DELTA_DERIVED_SOURCE_SCOPE_INVALID",
+                    "derived Role classifier revision does not match "
+                    "the verified invalidation proof",
+                )
         delta = build_add_only_blueprint_delta(
             base,
             staged,
@@ -1807,6 +1846,7 @@ def build_base_bound_add_only_delta_receipt(
             artifact_bindings=_artifact_binding_payload(frozen_input),
             trust_context=TEST_ONLY,
             durable_derived_state=True,
+            derived_source_revision_ids=derived_source_revision_ids,
         )
         legacy = build_add_only_delta_receipt(
             delta,

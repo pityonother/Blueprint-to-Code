@@ -1,7 +1,8 @@
 # Additive Incremental Publication v1
 
-Status: Work Package A implemented; Work Package B is intentionally not claimed by
-this revision.
+Status: Work Packages A and B are implemented as engineering capability. The live
+candidate is still blocked before staging, so no live incremental publication or
+E4 completion is claimed.
 
 ## Decision
 
@@ -75,16 +76,90 @@ The production-shaped acceptance fixture drains the original 12-task shape with
 12 succeeded tasks, no gaps or failures, no pending/running tasks, and
 `worker.drained=true`. It does not publish and is not E4 production evidence.
 
-The 2026-07-31 read-only live audit found 14 added and 9 changed sources, including
+The 2026-07-31 read-only live audit found 14 added and 10 changed sources, including
 non-selective semantic inputs. The production capability check therefore returned
 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED` before staging. No live Snapshot,
 pointer swap, narrow-gate result, Gold, authorization, burn-in, or cutover claim was
 created.
 
-## Work Package B boundary
+## Production narrow gates
 
-Candidate reseal, the fixed production narrow-gate report, immutable Snapshot
-promotion, pointer CAS, and independent publication verification belong to Work
-Package B. Until those contracts are implemented and their real prerequisites are
-available, the required state remains `mode=shadow`,
-`defaultQuerySource=legacy`, and `cutoverEligible=false`.
+The default updater now computes the repository's fixed 11-check contract from the
+final staged candidate. It does not accept caller-controlled pass flags. The runner
+independently reopens the v3 delta receipt, requires the worker queue to be fully
+drained, binds the canonical worker receipt set, checks changed revision freshness,
+active stale state, foreign keys, effective dependencies, typed registrations, all
+six Core/artifact projection digests, affected search identity, the four empty
+canonical cache tables, all 10 sealed SQLite artifacts, and the exact unchanged
+base pointer/manifest.
+
+The canonical report is stored at
+`reports/incremental_narrow_gates.json`. Its SHA-256 and proof are sealed into the
+candidate manifest together with the base identity, candidate Source Manifest
+fingerprint, and v3 delta receipt SHA-256. The report remains an
+`ENGINEERING_DIAGNOSTIC`; `productionAuthority`, `cutoverEligible`, and every E4 or
+cutover implication remain false. Any failed observation prevents the publisher
+from being called.
+
+## Candidate reseal
+
+After the worker drains and before the final v3 delta receipt is constructed, the
+complete candidate receives a new immutable build identity. The existing snapshot
+contract keeps `source.sha256` as the exact hash of the 10 semantic inputs; the full
+candidate Source Manifest fingerprint is additionally bound in `incrementalUpdate`
+and `incrementalPublication`. These two identities are deliberately not conflated.
+
+Catalog, Core, Search, cache, six projections, `projection_runs`, runtime health,
+database metrics, and the manifest are rebound to the new build. Catalog and Search
+non-metadata truth digests must remain unchanged. WAL is checkpointed, journal mode
+is sealed, sidecars are rejected, and the existing full quality suite is evaluated
+and sealed twice using the same immutable-candidate procedure as a full build. A
+non-75/75 result is preserved honestly and the candidate remains `shadow/legacy`.
+
+## Atomic shadow publication
+
+The publisher accepts only
+`.incremental-staging/<32-lowercase-hex>/snapshot`, rejects symlink/reparse or
+cross-volume targets and existing immutable destinations, and reuses the reviewed
+full-snapshot same-volume directory rename plus raw-pointer CAS. The CAS is bound to
+the expected base build ID, raw pointer SHA-256, and current manifest SHA-256. A
+fresh live Source Manifest validation runs at the final pre-CAS boundary.
+
+After the pointer attempt, the publisher independently resolves
+`current.json -> manifest -> databases`, verifies the candidate Source Manifest,
+previous Snapshot, quality binding, narrow-gate artifact, runtime health, and
+`shadow/legacy` policy, then returns a content-addressed
+`UNSIGNED_LOCAL_WRITE_FACT` receipt. A failure with the old pointer independently
+observed is `NOT_REPLACED`; an unreadable or non-verifiable post-attempt state is
+`UNCERTAIN`. The code never reports an automatic rollback.
+
+`current.json` remaining on the old build does **not** imply that no new
+immutable directory was created. The same-volume rename intentionally precedes
+the pointer CAS. If the final callback or CAS fails after that rename, the
+`NOT_REPLACED` result includes a relative `publicationResidualIdentifier`, a
+deterministic relative file inventory, and the policy
+`PRESERVE_FOR_MANUAL_RECONCILIATION`. The orphan is never auto-deleted; an
+operator must reconcile it against the observed pointer before any retry or
+cleanup.
+
+The root-level `manifests/*.sql` files are non-authoritative compatibility
+copies. Snapshot readers bind only through `current.json` and the immutable
+snapshot manifest. Compatibility copies are written only after a successful
+pointer CAS and identical existing bytes are left untouched, so a pre-CAS
+failure cannot mutate them.
+
+The successful fixture covers the actual rename/CAS/independent verification path,
+including the final source-revalidation callback. Shared immutable-snapshot tests
+continue to cover Windows old connections and concurrent readers. These tests do
+not constitute a live E4 scenario.
+
+## Live boundary after Work Package B
+
+The 2026-07-31 live diff remains 14 additions and 10 changes with non-selective
+semantic input drift. The updater therefore still stops at
+`NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED` before staging. The current build,
+pointer, manifest, three immutable Snapshots, and disk contents are unchanged. No
+narrow-gate report, publication receipt, Gold, reviewer/operator signature,
+authorization, burn-in, rollback drill, or E4 attestation was fabricated. The
+required state remains `mode=shadow`, `defaultQuerySource=legacy`, and
+`cutoverEligible=false`.

@@ -21,6 +21,9 @@ match it.
 - Selective production `ROLE_ENTITY` and ontology-owned `DOMAIN_ENTITY`
   materializers, plus an exact one-file-at-a-time backend for all six domain
   projections.
+- A computed fixed-11 production narrow-gate runner, full candidate reseal, and
+  content-addressed atomic shadow publication receipt with independent
+  post-switch verification.
 
 ### Changed
 
@@ -29,6 +32,9 @@ match it.
   base binding.
 - Incremental update planning now binds the scan, writer lock, delta receipt,
   base snapshot, and publication decision to one verified scope.
+- Incremental candidates now receive a new immutable build identity, sealed
+  quality report, exact previous-Snapshot lineage, and a final live-source
+  recheck immediately before current-pointer CAS.
 - Whole-cache equal-digest receipts are now accepted only under the strict
   `QUERY_SNAPSHOT` contract; the real Scarecrow replay produced a base-bound v3
   inspection with `baseBindingVerified=true`.
@@ -48,6 +54,8 @@ match it.
 - Domain rebuilds preserve manual and other producer rows; projection publish
   rejects reparse/cross-volume paths and atomically replaces only its queued
   artifact.
+- Incremental publication failures now preserve the distinction between a
+  verified `NOT_REPLACED` pointer and an `UNCERTAIN` post-attempt state.
 - Documentation no longer presents the 2026-07-27 `58/75` snapshot or a
   machine-specific Capture count as current.
 
@@ -57,7 +65,7 @@ match it.
   immutable snapshots, Registry generations, Git LFS objects, worktrees, and
   legacy Capture artifacts.
 - Recorded a production-shaped 12/12 backend result separately from the live
-  input audit. The live candidate is non-selective (14 additions and 9
+  input audit. The live candidate is non-selective (14 additions and 10
   changes), so no incremental publication occurred.
 
 ## [0.2.0] - 2026-07-27

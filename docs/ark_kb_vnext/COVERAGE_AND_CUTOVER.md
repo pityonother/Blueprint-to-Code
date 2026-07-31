@@ -200,7 +200,13 @@ Projection backend。production-shaped 12-task 场景得到
 `SUCCEEDED=12 / BLOCKED_GAP=0 / FAILED=0`，且 pending/running 均为 0。
 这是 fixture/test 证据，不是 E4 真实运行事实。
 
-2026-07-31 live 只读复核得到 14 个新增和 9 个变更，并包含非选择性 semantic
+后续 Work Package B 已把固定 11-check production runner 接到最终 candidate，
+并实现完整 reseal、质量报告密封、同卷 immutable rename、exact pointer CAS、
+切换前 live Source Manifest 复核与切换后独立回读。隔离 fixture 的 11/11 报告和
+临时 Snapshot pointer swap 只证明工程合同；报告与 publication receipt 均明确
+`productionAuthority=false`，不能升级为真实 E4、burn-in 或 cutover 证据。
+
+2026-07-31 live 只读复核得到 14 个新增和 10 个变更，并包含非选择性 semantic
 输入变化；capability check 以 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`
 在 staging 前阻断。没有增量 Snapshot，current pointer 未改变，Snapshot 数量
 仍为 3。不能把 production-shaped 12/12 描述成真实发布或 E4 完成。
@@ -233,9 +239,9 @@ attestation，才允许生成：
 4. query protocol compliance `98.46%` 和 wrong-answer rate `2.31%`
    未达到 fail-closed 门槛；expected-gap match 已通过 `95.74%`。
 
-Role/Domain/Projection backend、narrow gates 和 publisher 仍是工程能力
-边界，但当前 sealed 质量报告中的 native、projection、storage、performance、
-expected-gap 和 stale-leak 门已经通过。密封 benchmark P95 为 `3.786ms`；
+Role/Domain/Projection backend、narrow gates 和 shadow publisher 已有工程实现，
+但当前 live 输入未满足选择性发布前提。当前 sealed 质量报告中的 native、
+projection、storage、performance、expected-gap 和 stale-leak 门已经通过。密封 benchmark P95 为 `3.786ms`；
 三次独立完整复测 P95 为 `4.857 / 4.104 / 4.935ms`，均低于固定
 `<250ms` 门槛。
 

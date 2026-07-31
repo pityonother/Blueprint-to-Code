@@ -1066,11 +1066,15 @@ def _verify_row_delta(
     staged: sqlite3.Connection,
     source_ids: Sequence[int],
     fact_ids: Sequence[int],
+    *,
+    derived_source_revision_ids: Sequence[int] = (),
 ) -> None:
     source_set = set(source_ids)
+    derived_source_set = set(derived_source_revision_ids)
+    allowed_source_set = source_set | derived_source_set
     fact_set = set(fact_ids)
     for table, allowed in (
-        ("source_revisions", source_set),
+        ("source_revisions", allowed_source_set),
         ("facts", fact_set),
     ):
         old, new = set(_rows(base, table)), set(_rows(staged, table))
@@ -1080,7 +1084,7 @@ def _verify_row_delta(
             or any(
                 not row or not _is_integer(row[0]) for row in added_rows
             )
-            or {row[0] for row in added_rows} - allowed
+            or {row[0] for row in added_rows} != allowed
         ):
             raise _gap(
                 "ADDITIVE_ASSET_MUTATION_NOT_ALLOWED",
@@ -1118,11 +1122,19 @@ def build_add_only_blueprint_delta(
     artifact_bindings: Iterable[Mapping[str, object]],
     trust_context: str = PRODUCTION,
     durable_derived_state: bool = False,
+    derived_source_revision_ids: Iterable[int] = (),
 ) -> AddOnlyBlueprintDelta:
     """Verify a staged add-only ingest without applying or publishing it."""
 
     if type(durable_derived_state) is not bool:
         raise TypeError("durable_derived_state must be a boolean")
+    derived_ids = tuple(derived_source_revision_ids)
+    if (
+        any(not _is_integer(value) or value < 1 for value in derived_ids)
+        or derived_ids != tuple(sorted(set(derived_ids)))
+        or (derived_ids and not durable_derived_state)
+    ):
+        raise TypeError("derived source revision IDs are invalid")
     context = _context(trust_context)
     if context != TEST_ONLY:
         raise _gap(
@@ -1158,7 +1170,13 @@ def build_add_only_blueprint_delta(
                 ingest_result,
                 source_ids,
             )
-            _verify_row_delta(base, staged, source_ids, fact_ids)
+            _verify_row_delta(
+                base,
+                staged,
+                source_ids,
+                fact_ids,
+                derived_source_revision_ids=derived_ids,
+            )
             final_before = logical_database_state(base)
             final_after = logical_database_state(staged)
             if (
@@ -1242,16 +1260,28 @@ def _validate_additive_plan_scope(
         )
     exact_scopes = {
         "FACT": tuple(sorted(fact_ids)),
-        "ROLE_ENTITY": tuple(sorted(entity_ids)),
         "DOMAIN_ENTITY": tuple(sorted(entity_ids)),
         "PROJECTION": tuple(range(1, len(DOMAIN_PROJECTIONS) + 1)),
         "QUERY_SNAPSHOT": tuple(sorted(source_revision_ids)),
     }
+    role_scope = tuple(sorted(plan.downstream.get("ROLE_ENTITY", ())))
+    role_proof = plan.role_scope_proof
+    role_scope_valid = (
+        isinstance(role_proof, Mapping)
+        and role_proof.get("roleEntityIds") == list(role_scope)
+        and set(entity_ids).issubset(role_scope)
+        if role_proof
+        else role_scope == tuple(sorted(entity_ids))
+    )
     if any(
         tuple(sorted(plan.downstream.get(kind, ()))) != expected
         for kind, expected in exact_scopes.items()
-    ) or not set(entity_ids).issubset(
-        plan.downstream.get("EFFECTIVE_ENTITY", ())
+    ) or (
+        not set(entity_ids).issubset(
+            plan.downstream.get("EFFECTIVE_ENTITY", ())
+        )
+        or not isinstance(role_proof, Mapping)
+        or not role_scope_valid
     ):
         raise _gap(
             "DELTA_INVALIDATION_PLAN_MISMATCH",
@@ -1266,6 +1296,8 @@ def _validate_backend_row_scope(
     kind: str,
     target_id: int,
     event_id: str,
+    strict_derived_scope: bool,
+    role_scope_proof: Mapping[str, object],
 ) -> None:
     if not isinstance(value, Mapping):
         raise _gap(
@@ -1287,13 +1319,67 @@ def _validate_backend_row_scope(
             == sorted(EXPECTED_REBUILD_WRITE_TABLES[kind])
         )
     elif kind == "PROJECTION":
+        if strict_derived_scope:
+            valid = (
+                set(value)
+                == {"mode", "eventId", "targetId", "projectionName"}
+                and mode == "EXACT_PROJECTION"
+                and value.get("eventId") == event_id
+                and target_matches
+                and 1 <= target_id <= len(DOMAIN_PROJECTIONS)
+                and value.get("projectionName")
+                == tuple(DOMAIN_PROJECTIONS)[target_id - 1]
+            )
+        else:
+            valid = (
+                set(value)
+                == {"mode", "eventId", "targetId", "projectionNames"}
+                and mode == "EXPLICIT_PROJECTION_BATCH"
+                and value.get("eventId") == event_id
+                and target_matches
+                and value.get("projectionNames") == list(DOMAIN_PROJECTIONS)
+            )
+    elif kind == "ROLE_ENTITY" and strict_derived_scope:
+        trigger_ids = value.get("triggerSourceRevisionIds")
+        changed_ids = value.get("changedEntityIds")
+        role_ids = value.get("roleEntityIds")
         valid = (
             set(value)
-            == {"mode", "eventId", "targetId", "projectionNames"}
-            and mode == "EXPLICIT_PROJECTION_BATCH"
-            and value.get("eventId") == event_id
+            == {
+                "mode",
+                "targetId",
+                "sourceRevisionId",
+                "triggerSourceRevisionIds",
+                "changedEntityIds",
+                "roleEntityIds",
+                "dependencyProof",
+            }
+            and mode == "PROVEN_PERCENTILE_CLOSURE"
             and target_matches
-            and value.get("projectionNames") == list(DOMAIN_PROJECTIONS)
+            and _is_integer(value.get("sourceRevisionId"))
+            and value.get("sourceRevisionId") > 0
+            and value.get("sourceRevisionId")
+            == role_scope_proof.get("sourceRevisionId")
+            and trigger_ids
+            == role_scope_proof.get("triggerSourceRevisionIds")
+            and changed_ids == role_scope_proof.get("changedEntityIds")
+            and role_ids == role_scope_proof.get("roleEntityIds")
+            and value.get("dependencyProof")
+            == role_scope_proof.get("proof")
+            and all(
+                isinstance(items, list)
+                and bool(items)
+                and all(_is_integer(item) and item > 0 for item in items)
+                and items == sorted(set(items))
+                for items in (trigger_ids, changed_ids, role_ids)
+            )
+            and target_id in role_ids
+            and set(changed_ids).issubset(role_ids)
+            and re.fullmatch(
+                r"role-scope://[0-9a-f]{64}",
+                str(value.get("dependencyProof") or ""),
+            )
+            is not None
         )
     elif kind == "CLASS_CLOSURE":
         class_ids = value.get("classIds")
@@ -1354,6 +1440,8 @@ def _terminal_receipt(
     expected_id: int,
     expected_reason: str,
     expected_event_id: str | None,
+    strict_derived_scope: bool,
+    role_scope_proof: Mapping[str, object],
 ) -> tuple[dict[str, object], str]:
     if not isinstance(raw, Mapping) or set(raw) != _BACKEND_RECEIPT_FIELDS:
         raise _gap(
@@ -1448,6 +1536,8 @@ def _terminal_receipt(
             kind=kind,
             target_id=expected_id,
             event_id=event_id,
+            strict_derived_scope=strict_derived_scope,
+            role_scope_proof=role_scope_proof,
         )
         target_state_changed = (
             complete is True
@@ -1490,13 +1580,48 @@ def _terminal_receipt(
             and operations_valid
             and operation_tables == touched_tables
         )
+        verified_domain_owner_target_state = (
+            kind == "DOMAIN_ENTITY"
+            and complete is True
+            and before == after
+            and recovered is False
+            and cache_hit is False
+            and normalized.get("gapCode") == ""
+            and normalized.get("detail") == ""
+            and not projection_batch
+            and verification.get("basis")
+            == "VERIFIED_DOMAIN_OWNER_TARGET_STATE"
+            and touched == ["domain_memberships"]
+            and operations_valid
+            and operation_tables == {"domain_memberships"}
+            and "domain_memberships:DELETE" in operations
+        )
+        verified_projection_rebuild = (
+            kind == "PROJECTION"
+            and complete is True
+            and recovered is False
+            and cache_hit is False
+            and normalized.get("gapCode") == ""
+            and normalized.get("detail") == ""
+                and not projection_batch
+            and verification.get("basis")
+            == "VERIFIED_PROJECTION_REBUILD"
+            and touched == ["projection_runs"]
+            and operations_valid
+            and operation_tables == {"projection_runs"}
+        )
         if not (
-            target_state_changed or explicit_whole_cache_invalidation
+            target_state_changed
+            or explicit_whole_cache_invalidation
+            or verified_domain_owner_target_state
+            or verified_projection_rebuild
         ):
-            raise _gap(
-                "BACKEND_TERMINAL_OUTCOME_UNPROVEN",
-                "backend receipt does not prove durable target work",
-            )
+                raise _gap(
+                    "BACKEND_TERMINAL_OUTCOME_UNPROVEN",
+                    "backend receipt does not prove durable target work for "
+                    f"{kind}:{expected_id} with basis "
+                    f"{verification.get('basis')!r}",
+                )
         return normalized, ""
     if status == BLOCKED_GAP:
         gap_code = _text(
@@ -1658,6 +1783,11 @@ def _durable_terminal_receipts(
         and tuple(payload[kind]) == tuple(values)
         for kind, values in plan.downstream.items()
     )
+    role_payload_matches = (
+        payload.get("_roleScopeProof") == dict(plan.role_scope_proof)
+        if plan.role_scope_proof
+        else "_roleScopeProof" not in payload
+    )
     if (
         len(queue_by_task) != len(queue_rows)
         or set(queue_by_task) != set(tasks)
@@ -1670,6 +1800,7 @@ def _durable_terminal_receipts(
             for key, reason in tasks.items()
         )
         or not payload_plan_matches
+        or not role_payload_matches
         or any(
             not str(key).startswith("_") and key not in plan.downstream
             for key in payload
@@ -1787,6 +1918,8 @@ def _bind_terminal_receipts(
             expected_id=target,
             expected_reason=reason,
             expected_event_id=event_id,
+            strict_derived_scope=bool(plan.role_scope_proof),
+            role_scope_proof=plan.role_scope_proof,
         )
         event_id = event_id or str(receipt["eventId"])
         normalized.append(receipt)
@@ -1883,6 +2016,8 @@ def _build_add_only_delta_receipt_in_snapshot(
             entity_ids=delta.entity_ids,
             source_revision_ids=delta.source_revision_ids,
             actual_write_tables=delta.changed_tables,
+            role_entity_ids=plan.downstream.get("ROLE_ENTITY", ()),
+            role_scope_proof=plan.role_scope_proof or None,
         )
     except InvalidationBlockedGap as error:
         raise _gap(
@@ -1934,6 +2069,11 @@ def _build_add_only_delta_receipt_in_snapshot(
                 for kind, values in sorted(plan.downstream.items())
             },
             "reasons": dict(sorted(plan.reasons.items())),
+            **(
+                {"roleScopeProof": _json(plan.role_scope_proof)}
+                if plan.role_scope_proof
+                else {}
+            ),
         },
         "backendEvent": backend_event,
         "backendTerminalReceipts": list(terminal_receipts),
@@ -2071,15 +2211,20 @@ def _validate_receipt_artifacts(
 
 
 def _receipt_plan(value: object) -> InvalidationPlan:
-    if not isinstance(value, Mapping) or set(value) != {
-        "eventKind",
-        "downstream",
-        "reasons",
+    base_fields = {"eventKind", "downstream", "reasons"}
+    if not isinstance(value, Mapping) or frozenset(value) not in {
+        frozenset(base_fields),
+        frozenset({*base_fields, "roleScopeProof"}),
     }:
         raise _gap("DELTA_RECEIPT_INVALID", "receipt plan is invalid")
     downstream = value.get("downstream")
     reasons = value.get("reasons")
-    if not isinstance(downstream, Mapping) or not isinstance(reasons, Mapping):
+    role_proof = value.get("roleScopeProof", {})
+    if (
+        not isinstance(downstream, Mapping)
+        or not isinstance(reasons, Mapping)
+        or not isinstance(role_proof, Mapping)
+    ):
         raise _gap("DELTA_RECEIPT_INVALID", "receipt plan is invalid")
     normalized: dict[str, tuple[int, ...]] = {}
     for raw_kind, raw_values in downstream.items():
@@ -2093,11 +2238,34 @@ def _receipt_plan(value: object) -> InvalidationPlan:
         for key, child in reasons.items()
     ):
         raise _gap("DELTA_RECEIPT_INVALID", "receipt reasons are invalid")
+    expected_role_fields = {
+        "schema",
+        "classifierVersion",
+        "sourceRevisionId",
+        "triggerSourceRevisionIds",
+        "changedEntityIds",
+        "roleEntityIds",
+        "transitions",
+        "proof",
+    }
+    role_body = dict(role_proof)
+    role_proof_value = role_body.pop("proof", None)
+    if role_proof and (
+        set(role_proof) != expected_role_fields
+        or role_proof.get("schema")
+        != "ark-kb-additive-role-dependency-scope/v1"
+        or role_proof_value != "role-scope://" + _digest(role_body)
+    ):
+        raise _gap(
+            "DELTA_RECEIPT_INVALID",
+            "receipt Role dependency proof is invalid",
+        )
     return InvalidationPlan(
         event_kind=str(value.get("eventKind") or ""),
         upstream_revision_id=None,
         downstream=normalized,
         reasons=dict(reasons),
+        role_scope_proof=dict(role_proof),
     )
 
 

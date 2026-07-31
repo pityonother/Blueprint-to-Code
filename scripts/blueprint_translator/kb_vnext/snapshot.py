@@ -11,7 +11,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
@@ -2454,6 +2454,8 @@ def _promote_snapshot(
     manifest: dict[str, object],
     expected_current_pointer: CurrentPointerBaseline,
     expected_current_manifest_sha256: str | None = None,
+    operation: str = "FULL_SNAPSHOT_PROMOTION",
+    before_pointer_cas: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     if not isinstance(
         expected_current_pointer,
@@ -2483,18 +2485,12 @@ def _promote_snapshot(
     # the only reader-visible mutation: replacing the small current pointer.
     os.replace(staging, destination)
 
-    manifests = output_dir / "manifests"
-    _write_text(
-        manifests / "catalog_schema.sql",
-        FULL_CATALOG_SCHEMA_SQL,
-    )
-    _write_text(manifests / "core_schema.sql", FULL_CORE_SCHEMA_SQL)
-    _write_text(manifests / "search_schema.sql", SEARCH_SCHEMA_SQL)
-    _write_text(manifests / "cache_schema.sql", CACHE_SCHEMA_SQL)
     target_manifest_sha256 = hashlib.sha256(
         (destination / "manifest.json").read_bytes()
     ).hexdigest()
-    return _write_current_pointer(
+    if before_pointer_cas is not None:
+        before_pointer_cas()
+    pointer_receipt = _write_current_pointer(
         output_dir,
         build_id,
         expected=expected_current_pointer,
@@ -2502,8 +2498,26 @@ def _promote_snapshot(
             expected_current_manifest_sha256
         ),
         expected_target_manifest_sha256=target_manifest_sha256,
-        operation="FULL_SNAPSHOT_PROMOTION",
+        operation=operation,
     )
+    # These root-level SQL files are compatibility copies only.  They are not
+    # reader authority and must never change before the current-pointer CAS.
+    manifests = output_dir / "manifests"
+    for name, contents in (
+        ("catalog_schema.sql", FULL_CATALOG_SCHEMA_SQL),
+        ("core_schema.sql", FULL_CORE_SCHEMA_SQL),
+        ("search_schema.sql", SEARCH_SCHEMA_SQL),
+        ("cache_schema.sql", CACHE_SCHEMA_SQL),
+    ):
+        path = manifests / name
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and path.read_text(encoding="utf-8") == contents
+        ):
+            continue
+        _write_text(path, contents)
+    return pointer_receipt
 
 
 def _validate_rollback_adjacency(

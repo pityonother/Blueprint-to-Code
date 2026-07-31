@@ -37,9 +37,14 @@ registration、role Gold 与连续 burn-in 证据不足时，系统会继续 fai
 Additive Rebuild Backend 工作包已补齐 selective Role、Domain、六个单投影与
 Query rebuild；隔离的 production-shaped 输入得到
 `SUCCEEDED=12 / BLOCKED_GAP=0 / FAILED=0`。这只是测试证据：2026-07-31
-只读 live rescan 实测为 14 个新增和 9 个变更，命中
+只读 live rescan 实测为 14 个新增和 10 个变更，命中
 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，因此没有把该结果冒充真实回放，
 也没有创建 Snapshot 或修改 current pointer。
+
+固定 11 项 production narrow gates、完整 candidate reseal、原子 shadow
+publisher 与独立 publication verification 也已接通默认增量路径，并由隔离
+fixture 验证真实目录 rename/CAS。它们不授予 production authority：live 输入仍在
+staging 前阻断，当前仍是 `shadow / legacy / cutoverEligible=false`，没有完成 E4。
 
 ## 5 分钟快速开始
 

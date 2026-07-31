@@ -117,10 +117,18 @@ worker.drained=true
 
 这不是 live E4 证据。writer lock 下的实际只读复核得到 base Source Manifest
 fingerprint `fbb474d8ca1073dee5305cbe0247fdbec7fa4cbea97e882cb2cabc438b8750ca`；
-candidate fingerprint 与它不同，Source Diff 为 14 个新增和 9 个变更，
+candidate fingerprint 为
+`7f0f79cfe270dbb7ed21a146f5854b3da6aa80c1051df2bf2e1324c1d064a327`，
+与 base 不同；Source Diff 为 14 个新增和 10 个变更，
 包括多个 Blueprint Evidence 与 semantic/native/legacy 输入变化。生产 capability
 check 因此返回 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，没有进入 quarantine、
 ingest、worker、narrow gates 或 publisher。
+
+默认路径的工程实现已经不再停留在 unavailable hook：最终 worker 输出会先重封为
+新 immutable candidate，再构造并复核 v3 delta receipt，计算固定 11 项 narrow
+gates，把 canonical report 密封进 manifest，最后才允许同卷 rename 与 exact
+pointer CAS。隔离 fixture 已通过 11/11 Gate 和真实临时目录 CAS/独立回读；这些是
+测试事实，不是上述 live 输入的执行结果，也不产生 production authority。
 
 本轮仍明确保持：
 
