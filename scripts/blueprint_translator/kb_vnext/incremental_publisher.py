@@ -9,14 +9,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import re
-from collections.abc import Mapping
+import sqlite3
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
+from .incremental_delta import logical_database_state
+from .narrow_gates import (
+    UpdateBaseline as NarrowGateUpdateBaseline,
+    parse_and_validate_narrow_gate_diagnostic_report_bytes,
+)
+from .pointer_cas import (
+    CurrentPointerBaseline,
+    read_current_pointer_baseline,
+)
 from .projections import (
     DOMAIN_PROJECTIONS,
     PROJECTION_SCHEMA_VERSION,
@@ -45,21 +53,12 @@ from .snapshot import (
     semantic_inputs_sha256,
     snapshot_build_id,
 )
-from .pointer_cas import (
-    CurrentPointerBaseline,
-    read_current_pointer_baseline,
-)
-from .narrow_gates import (
-    UpdateBaseline as NarrowGateUpdateBaseline,
-    parse_and_validate_narrow_gate_diagnostic_report_bytes,
-)
 from .source_manifest import (
     SNAPSHOT_SEMANTIC_INPUT_KEYS,
     SourceManifest,
     source_manifest_binding,
     source_manifest_from_binding,
 )
-from .incremental_delta import logical_database_state
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +128,8 @@ def _validate_incremental_binding(
         "defaultQuerySource",
     }
     report_sha256 = str(binding.get("narrowGateReportSha256") or "")
-    report_path = snapshot_dir / "reports" / "incremental_narrow_gates.json"
+    reports = snapshot_dir / "reports"
+    report_path = reports / "incremental_narrow_gates.json"
     if (
         set(binding) != expected_fields
         or binding.get("schema")
@@ -148,6 +148,7 @@ def _validate_incremental_binding(
         or binding.get("mode") != "shadow"
         or binding.get("defaultQuerySource") != "legacy"
         or not isinstance(previous, Mapping)
+        or set(previous) != {"buildId", "manifestSha256"}
         or previous.get("buildId") != expected_update_baseline.base_build_id
         or previous.get("manifestSha256")
         != expected_update_baseline.base_manifest_sha256
@@ -156,6 +157,8 @@ def _validate_incremental_binding(
         or cutover.get("defaultQuerySource") != "legacy"
         or not isinstance(quality, Mapping)
         or quality.get("cutoverEligible") is not False
+        or reports.is_symlink()
+        or not reports.is_dir()
         or report_path.is_symlink()
         or not report_path.is_file()
     ):
@@ -488,8 +491,18 @@ def candidate_semantic_inputs(
     return dict(sorted(values.items()))
 
 
-def _truth_digest(path: Path) -> str:
-    with closing(sqlite3.connect(path)) as connection:
+def database_truth_digest(path: Path) -> str:
+    """Hash logical non-metadata truth without opening a writable database."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"database truth source is missing or unsafe: {path.name}")
+    with closing(
+        sqlite3.connect(
+            f"file:{path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        )
+    ) as connection:
+        connection.execute("PRAGMA query_only=ON")
         state = logical_database_state(connection)
     payload = {
         "schemaSha256": state.schema_sha256,
@@ -599,7 +612,7 @@ def reseal_incremental_snapshot_candidate(
         raise ValueError("base snapshot identity is incomplete")
 
     before_identity_truth = {
-        name: _truth_digest(staging / name)
+        name: database_truth_digest(staging / name)
         for name in ("catalog.sqlite", "search.sqlite")
     }
     main_metadata = {
@@ -658,7 +671,7 @@ def reseal_incremental_snapshot_candidate(
     )
     _finalize_staged_database_journals(staging)
     after_identity_truth = {
-        name: _truth_digest(staging / name)
+        name: database_truth_digest(staging / name)
         for name in ("catalog.sqlite", "search.sqlite")
     }
     if before_identity_truth != after_identity_truth:
@@ -752,6 +765,7 @@ __all__ = [
     "IncrementalPublicationUncertain",
     "ResealedIncrementalCandidate",
     "candidate_semantic_inputs",
+    "database_truth_digest",
     "reseal_incremental_snapshot_candidate",
     "seal_incremental_narrow_gate_report",
     "publish_incremental_shadow_snapshot",

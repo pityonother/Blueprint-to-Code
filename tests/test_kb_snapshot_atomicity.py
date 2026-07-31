@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ from blueprint_translator.kb_vnext.quality_contract import (  # noqa: E402
 from blueprint_translator.kb_vnext.incremental_publisher import (  # noqa: E402
     IncrementalPublicationNotReplaced,
     IncrementalPublicationUncertain,
+    database_truth_digest,
     publish_incremental_shadow_snapshot,
     reseal_incremental_snapshot_candidate,
     seal_incremental_narrow_gate_report,
@@ -46,6 +48,7 @@ from blueprint_translator.kb_vnext.narrow_gates import (  # noqa: E402
     build_narrow_gate_diagnostic_report,
 )
 from blueprint_translator.kb_vnext.narrow_gate_runner import (  # noqa: E402
+    ProductionNarrowGateError,
     ProductionNarrowGateInputs,
     run_production_narrow_gates,
 )
@@ -552,6 +555,17 @@ def _attach_query_diagnostics(
 
 
 class ImmutableSnapshotPublicationTests(unittest.TestCase):
+    def test_database_truth_digest_never_creates_a_missing_database(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "missing.sqlite"
+
+            with self.assertRaisesRegex(ValueError, "missing or unsafe"):
+                database_truth_digest(missing)
+
+            self.assertFalse(missing.exists())
+
     def test_incremental_publisher_distinguishes_pre_and_post_switch_failure(
         self,
     ) -> None:
@@ -762,25 +776,38 @@ class ImmutableSnapshotPublicationTests(unittest.TestCase):
                     "validate_update_baseline_identity"
                 ),
             ):
-                result = run_production_narrow_gates(
-                    ProductionNarrowGateInputs(
-                        baseline=fake_baseline,
-                        staged_snapshot=SimpleNamespace(
-                            snapshot_dir=staging,
-                            temporary_root=temporary_root,
-                        ),
-                        frozen_input=object(),
-                        candidate_source_manifest=(
-                            candidate_source_manifest
-                        ),
-                        candidate_manifest=manifest,
-                        delta_receipt_bytes=b"fixture",
-                        delta_receipt_sha256="5" * 64,
-                        worker_report=worker,
-                        changed_source_revision_ids=(1,),
-                        affected_entity_ids=(1,),
-                    )
+                inputs = ProductionNarrowGateInputs(
+                    baseline=fake_baseline,
+                    staged_snapshot=SimpleNamespace(
+                        snapshot_dir=staging,
+                        temporary_root=temporary_root,
+                    ),
+                    frozen_input=object(),
+                    candidate_source_manifest=(
+                        candidate_source_manifest
+                    ),
+                    candidate_manifest=manifest,
+                    delta_receipt_bytes=b"fixture",
+                    delta_receipt_sha256="5" * 64,
+                    worker_report=worker,
+                    changed_source_revision_ids=(1,),
+                    affected_entity_ids=(1,),
                 )
+                result = run_production_narrow_gates(inputs)
+                with self.assertRaisesRegex(
+                    ProductionNarrowGateError,
+                    "attempted must be a nonnegative integer",
+                ):
+                    run_production_narrow_gates(
+                        replace(
+                            inputs,
+                            worker_report={
+                                **worker,
+                                "attempted": True,
+                                "succeeded": True,
+                            },
+                        )
+                    )
 
             self.assertEqual(len(result.observations), 11)
             self.assertEqual(

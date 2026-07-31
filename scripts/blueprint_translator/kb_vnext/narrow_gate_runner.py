@@ -37,7 +37,7 @@ from .update_baseline import (
     validate_final_source_manifest,
     validate_update_baseline_identity,
 )
-from .incremental_publisher import _truth_digest
+from .incremental_publisher import database_truth_digest
 
 
 class ProductionNarrowGateError(ValueError):
@@ -124,6 +124,20 @@ def _integer_tuple(value: Sequence[int], *, label: str) -> tuple[int, ...]:
     ):
         raise ValueError(f"{label} must be canonical positive integers")
     return normalized
+
+
+def _worker_counter(
+    worker: Mapping[str, object],
+    snake_name: str,
+    camel_name: str,
+) -> int:
+    value = worker.get(snake_name, worker.get(camel_name))
+    if type(value) is not int or value < 0:
+        raise _fail(
+            NARROW_GATE_CHECK_IDS[0],
+            f"worker {snake_name} must be a nonnegative integer",
+        )
+    return value
 
 
 def _read_only(path: Path) -> sqlite3.Connection:
@@ -279,7 +293,9 @@ def _search_evidence(
     core: sqlite3.Connection,
     entity_ids: tuple[int, ...],
 ) -> dict[str, object]:
-    if _truth_digest(base_search_path) != _truth_digest(staged_search_path):
+    if database_truth_digest(base_search_path) != database_truth_digest(
+        staged_search_path
+    ):
         raise _fail(NARROW_GATE_CHECK_IDS[7], "search truth changed out of scope")
     search = _read_only(staged_search_path)
     try:
@@ -342,7 +358,7 @@ def _search_evidence(
         "entitySearchSha256": hashlib.sha256(
             canonical_json_bytes(observations)
         ).hexdigest(),
-        "baseTruthSha256": _truth_digest(base_search_path),
+        "baseTruthSha256": database_truth_digest(base_search_path),
     }
 
 
@@ -441,18 +457,35 @@ def run_production_narrow_gates(
     ).payload()
     worker = _worker_payload(inputs.worker_report)
     outcomes = worker.get("outcomes")
+    attempted = _worker_counter(worker, "attempted", "attempted")
+    succeeded = _worker_counter(worker, "succeeded", "succeeded")
+    failed = _worker_counter(worker, "failed", "failed")
+    blocked_gap = _worker_counter(worker, "blocked_gap", "blockedGap")
+    remaining_pending = _worker_counter(
+        worker,
+        "remaining_pending",
+        "remainingPending",
+    )
+    remaining_running = _worker_counter(
+        worker,
+        "remaining_running",
+        "remainingRunning",
+    )
+    blocked_gap_count = inspection.get("blockedGapCount")
     if (
         inspection.get("status") != "FOUNDATION_VERIFIED"
         or inspection.get("baseBindingVerified") is not True
-        or inspection.get("blockedGapCount") != 0
-        or worker.get("attempted") != worker.get("succeeded")
-        or worker.get("failed") != 0
-        or worker.get("blocked_gap", worker.get("blockedGap")) != 0
-        or worker.get("remaining_pending", worker.get("remainingPending")) != 0
-        or worker.get("remaining_running", worker.get("remainingRunning")) != 0
+        or type(blocked_gap_count) is not int
+        or blocked_gap_count != 0
+        or attempted < 1
+        or attempted != succeeded
+        or failed != 0
+        or blocked_gap != 0
+        or remaining_pending != 0
+        or remaining_running != 0
         or worker.get("drained") is not True
         or not isinstance(outcomes, (list, tuple))
-        or len(outcomes) != worker.get("succeeded")
+        or len(outcomes) != succeeded
         or any(
             not isinstance(outcome, Mapping)
             or outcome.get("status") != "SUCCEEDED"
@@ -470,13 +503,13 @@ def run_production_narrow_gates(
             {
                 "sourceDiffSha256": baseline.source_diff_sha256,
                 "deltaReceiptSha256": inputs.delta_receipt_sha256,
-                "attempted": worker.get("attempted"),
-                "succeeded": worker.get("succeeded"),
+                "attempted": attempted,
+                "succeeded": succeeded,
                 "workerReceiptSetSha256": hashlib.sha256(
                     canonical_json_bytes(worker)
                 ).hexdigest(),
             },
-            observation_count=int(worker["succeeded"]),
+            observation_count=succeeded,
         )
     ]
 
