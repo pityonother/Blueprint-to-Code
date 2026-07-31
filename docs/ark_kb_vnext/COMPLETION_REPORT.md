@@ -284,7 +284,7 @@ schema 和绑定验证。密封 `runtimeHealth` 与 Core metadata 一致，
 - 文档 build/source identity 与当前已发布 manifest 一致性。
 
 本轮 Work Package B 实际运行完整 Python suite：
-`1646 passed / 6 skipped / 672 subtests passed`；另有 2 条既存 `utcnow()`
+`1647 passed / 6 skipped / 672 subtests passed`；另有 2 条既存 `utcnow()`
 弃用警告。定向 Ruff、前端三组合同、`npm ci`、production build、claims 两种
 模式及 release/version/docs consistency 均通过；全仓 Ruff 仍是基线已有的 58
 项未清理告警，本次改动文件没有新增告警。没有运行 full KB build，也没有把
