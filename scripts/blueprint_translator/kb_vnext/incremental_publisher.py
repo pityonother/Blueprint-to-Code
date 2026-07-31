@@ -74,19 +74,67 @@ class IncrementalPublicationError(RuntimeError):
 
     status: str
 
-    def __init__(self, status: str, detail: str) -> None:
+    def __init__(
+        self,
+        status: str,
+        detail: str,
+        *,
+        residual_identifier: str = "",
+        orphan_inventory: tuple[str, ...] = (),
+        orphan_policy: str = "",
+    ) -> None:
         self.status = status
+        self.residual_identifier = residual_identifier
+        self.orphan_inventory = orphan_inventory
+        self.orphan_policy = orphan_policy
         super().__init__(detail)
 
 
 class IncrementalPublicationNotReplaced(IncrementalPublicationError):
-    def __init__(self, detail: str) -> None:
-        super().__init__("NOT_REPLACED", detail)
+    def __init__(
+        self,
+        detail: str,
+        *,
+        residual_identifier: str = "",
+        orphan_inventory: tuple[str, ...] = (),
+        orphan_policy: str = "",
+    ) -> None:
+        super().__init__(
+            "NOT_REPLACED",
+            detail,
+            residual_identifier=residual_identifier,
+            orphan_inventory=orphan_inventory,
+            orphan_policy=orphan_policy,
+        )
 
 
 class IncrementalPublicationUncertain(IncrementalPublicationError):
     def __init__(self, detail: str) -> None:
         super().__init__("UNCERTAIN", detail)
+
+
+_ORPHAN_POLICY = "PRESERVE_FOR_MANUAL_RECONCILIATION"
+
+
+def _immutable_candidate_residual(
+    *,
+    output_dir: Path,
+    build_id: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Return a bounded relative inventory without deleting an orphan."""
+
+    destination = output_dir / "snapshots" / build_id
+    if destination.is_symlink() or not destination.is_dir():
+        return "", ()
+    identifier = f"snapshots/{build_id}"
+    inventory = tuple(
+        sorted(
+            path.relative_to(output_dir).as_posix()
+            for path in destination.rglob("*")
+            if path.is_file() or path.is_symlink()
+        )
+    )
+    return identifier, inventory
 
 
 def _publication_proof(body: Mapping[str, object]) -> str:
@@ -175,7 +223,8 @@ def _validate_incremental_binding(
         raise ValueError("incremental narrow-gate proof binding is invalid")
     bound_source = source_manifest_from_binding(manifest.get("incrementalUpdate"))
     if (
-        bound_source != expected_candidate_source_manifest
+        bound_source.payload()
+        != expected_candidate_source_manifest.payload()
         or bound_source.fingerprint
         != expected_update_baseline.candidate_source_manifest_fingerprint
     ):
@@ -325,9 +374,20 @@ def publish_incremental_shadow_snapshot(
             raise IncrementalPublicationUncertain(
                 "current pointer could not be read after publisher failure"
             ) from read_error
-        if observed == expected_current_pointer:
+        residual_identifier, orphan_inventory = (
+            _immutable_candidate_residual(
+                output_dir=output_dir,
+                build_id=build_id,
+            )
+        )
+        if observed == expected_current_pointer or observed.build_id != build_id:
             raise IncrementalPublicationNotReplaced(
-                "publisher failed before replacing current"
+                "publisher failed before replacing current",
+                residual_identifier=residual_identifier,
+                orphan_inventory=orphan_inventory,
+                orphan_policy=(
+                    _ORPHAN_POLICY if residual_identifier else ""
+                ),
             ) from exc
         if (
             observed.build_id == build_id

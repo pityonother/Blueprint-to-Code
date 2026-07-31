@@ -342,6 +342,7 @@ IngestChanges = Callable[
     [UpdateWorkspace, SourceDiff, UpdatePaths],
     Mapping[str, object],
 ]
+BlueprintSourceProvider = Callable[..., BlueprintIngestResult]
 DrainWorker = Callable[[UpdateWorkspace, int], object]
 NarrowGates = Callable[[UpdateWorkspace], GateResult]
 AtomicPublisher = Callable[
@@ -367,6 +368,9 @@ class UpdateHooks:
     publish_atomic: AtomicPublisher
     verify_publication: PublicationVerifier
     require_locked_update_baseline: bool = False
+    blueprint_source_provider: BlueprintSourceProvider = (
+        materialize_blueprint_defaults
+    )
 
 
 def scan_source_manifest(paths: UpdatePaths) -> SourceManifest:
@@ -1062,6 +1066,8 @@ def ingest_additive_blueprint_changes(
     workspace: UpdateWorkspace,
     diff: SourceDiff,
     paths: UpdatePaths,
+    *,
+    source_provider: BlueprintSourceProvider | None = None,
 ) -> Mapping[str, object]:
     """Validate selected Evidence Stores, then create the real ASSET event."""
 
@@ -1115,7 +1121,12 @@ def ingest_additive_blueprint_changes(
     core = sqlite3.connect(workspace.core_path)
     core.execute("PRAGMA foreign_keys=ON")
     try:
-        result = materialize_blueprint_defaults(
+        provider = (
+            source_provider
+            if source_provider is not None
+            else materialize_blueprint_defaults
+        )
+        result = provider(
             discovery,
             core,
             capture_root=frozen.ingest_root,
@@ -1655,7 +1666,7 @@ def run_production_narrow_gate_checks(
     except ProductionNarrowGateError as exc:
         raise UpdateBlocked(
             "PRODUCTION_NARROW_GATE_FAILED",
-            f"{exc.gate_id} failed its computed observation.",
+            f"The production narrow gate failed: {exc.gate_id}.",
             full_rebuild_required=True,
         ) from exc
     except (OSError, sqlite3.DatabaseError, TypeError, ValueError) as exc:
@@ -1696,9 +1707,14 @@ def prepare_production_incremental_candidate(
             full_rebuild_required=True,
         )
     try:
+        base_manifest = json.loads(
+            baseline.current_snapshot.manifest_bytes.decode("utf-8")
+        )
+        if not isinstance(base_manifest, dict):
+            raise ValueError("base snapshot manifest is not an object")
         resealed = reseal_incremental_snapshot_candidate(
             staging=workspace.snapshot_dir,
-            base_manifest=baseline.current_snapshot.manifest,
+            base_manifest=base_manifest,
             base_manifest_sha256=baseline.base_manifest_sha256,
             candidate_source_manifest=baseline.candidate_source_manifest,
             project_root=PROJECT_ROOT,
@@ -1843,6 +1859,7 @@ def default_hooks() -> UpdateHooks:
         publish_atomic=publish_production_incremental_shadow,
         verify_publication=verify_current_publication,
         require_locked_update_baseline=True,
+        blueprint_source_provider=materialize_blueprint_defaults,
     )
 
 
@@ -2850,7 +2867,17 @@ def run_incremental_update(
                 base["selectiveInvalidationPlan"] = _safe_plan_summary(
                     plans
                 )
-                ingest = hooks.ingest_changes(workspace, diff, paths)
+                ingest = (
+                    hooks.ingest_changes(
+                        workspace,
+                        diff,
+                        paths,
+                        source_provider=hooks.blueprint_source_provider,
+                    )
+                    if hooks.ingest_changes
+                    is ingest_additive_blueprint_changes
+                    else hooks.ingest_changes(workspace, diff, paths)
+                )
                 base["ingest"] = _safe_ingest_summary(ingest)
                 worker = _worker_payload(
                     hooks.drain_worker(workspace, max_rebuild_items)
@@ -2985,8 +3012,8 @@ def run_incremental_update(
                         current,
                         diff,
                     )
-                except IncrementalPublicationNotReplaced:
-                    return {
+                except IncrementalPublicationNotReplaced as exc:
+                    result = {
                         **base,
                         "status": "not_replaced",
                         "cacheHit": False,
@@ -2998,6 +3025,19 @@ def run_incremental_update(
                         ),
                         "fullRebuildRequired": True,
                     }
+                    if exc.residual_identifier:
+                        result.update(
+                            {
+                                "publicationResidualIdentifier": (
+                                    exc.residual_identifier
+                                ),
+                                "orphanInventory": list(
+                                    exc.orphan_inventory
+                                ),
+                                "orphanPolicy": exc.orphan_policy,
+                            }
+                        )
+                    return result
                 except IncrementalPublicationUncertain:
                     return _uncertain_after_switch_result(
                         base=base,

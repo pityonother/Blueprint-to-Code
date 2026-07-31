@@ -2485,20 +2485,12 @@ def _promote_snapshot(
     # the only reader-visible mutation: replacing the small current pointer.
     os.replace(staging, destination)
 
-    manifests = output_dir / "manifests"
-    _write_text(
-        manifests / "catalog_schema.sql",
-        FULL_CATALOG_SCHEMA_SQL,
-    )
-    _write_text(manifests / "core_schema.sql", FULL_CORE_SCHEMA_SQL)
-    _write_text(manifests / "search_schema.sql", SEARCH_SCHEMA_SQL)
-    _write_text(manifests / "cache_schema.sql", CACHE_SCHEMA_SQL)
     target_manifest_sha256 = hashlib.sha256(
         (destination / "manifest.json").read_bytes()
     ).hexdigest()
     if before_pointer_cas is not None:
         before_pointer_cas()
-    return _write_current_pointer(
+    pointer_receipt = _write_current_pointer(
         output_dir,
         build_id,
         expected=expected_current_pointer,
@@ -2508,6 +2500,24 @@ def _promote_snapshot(
         expected_target_manifest_sha256=target_manifest_sha256,
         operation=operation,
     )
+    # These root-level SQL files are compatibility copies only.  They are not
+    # reader authority and must never change before the current-pointer CAS.
+    manifests = output_dir / "manifests"
+    for name, contents in (
+        ("catalog_schema.sql", FULL_CATALOG_SCHEMA_SQL),
+        ("core_schema.sql", FULL_CORE_SCHEMA_SQL),
+        ("search_schema.sql", SEARCH_SCHEMA_SQL),
+        ("cache_schema.sql", CACHE_SCHEMA_SQL),
+    ):
+        path = manifests / name
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and path.read_text(encoding="utf-8") == contents
+        ):
+            continue
+        _write_text(path, contents)
+    return pointer_receipt
 
 
 def _validate_rollback_adjacency(

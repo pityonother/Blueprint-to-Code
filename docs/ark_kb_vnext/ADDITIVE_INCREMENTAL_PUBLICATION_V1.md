@@ -133,6 +133,21 @@ previous Snapshot, quality binding, narrow-gate artifact, runtime health, and
 observed is `NOT_REPLACED`; an unreadable or non-verifiable post-attempt state is
 `UNCERTAIN`. The code never reports an automatic rollback.
 
+`current.json` remaining on the old build does **not** imply that no new
+immutable directory was created. The same-volume rename intentionally precedes
+the pointer CAS. If the final callback or CAS fails after that rename, the
+`NOT_REPLACED` result includes a relative `publicationResidualIdentifier`, a
+deterministic relative file inventory, and the policy
+`PRESERVE_FOR_MANUAL_RECONCILIATION`. The orphan is never auto-deleted; an
+operator must reconcile it against the observed pointer before any retry or
+cleanup.
+
+The root-level `manifests/*.sql` files are non-authoritative compatibility
+copies. Snapshot readers bind only through `current.json` and the immutable
+snapshot manifest. Compatibility copies are written only after a successful
+pointer CAS and identical existing bytes are left untouched, so a pre-CAS
+failure cannot mutate them.
+
 The successful fixture covers the actual rename/CAS/independent verification path,
 including the final source-revalidation callback. Shared immutable-snapshot tests
 continue to cover Windows old connections and concurrent readers. These tests do

@@ -2351,6 +2351,49 @@ def test_incremental_publisher_outcome_state_is_not_collapsed(
     assert result["gapCodes"] == [gap_code]
 
 
+def test_not_replaced_result_exposes_bounded_orphan_reconciliation(
+    tmp_path: Path,
+) -> None:
+    previous = _manifest(_revision("old"))
+    current = _manifest(_revision("new"))
+    phases: list[str] = []
+    hooks = _success_hooks(tmp_path, previous, current, phases)
+    error = update.IncrementalPublicationNotReplaced(
+        "fixture pre-switch orphan",
+        residual_identifier=(
+            "snapshots/20260728T020304-0123456789ab"
+        ),
+        orphan_inventory=(
+            "snapshots/20260728T020304-0123456789ab/core.sqlite",
+            "snapshots/20260728T020304-0123456789ab/manifest.json",
+        ),
+        orphan_policy="PRESERVE_FOR_MANUAL_RECONCILIATION",
+    )
+
+    guarded = update.UpdateHooks(
+        load_previous_manifest=hooks.load_previous_manifest,
+        scan_manifest=hooks.scan_manifest,
+        check_capability=hooks.check_capability,
+        stage_snapshot=hooks.stage_snapshot,
+        plan_changes=hooks.plan_changes,
+        ingest_changes=hooks.ingest_changes,
+        drain_worker=hooks.drain_worker,
+        run_narrow_gates=hooks.run_narrow_gates,
+        publish_atomic=lambda *args, **kwargs: (_ for _ in ()).throw(error),
+        verify_publication=hooks.verify_publication,
+    )
+
+    result = update.run_incremental_update(_paths(tmp_path), hooks=guarded)
+
+    assert result["status"] == "not_replaced"
+    assert result["published"] is False
+    assert result["publicationResidualIdentifier"] == (
+        "snapshots/20260728T020304-0123456789ab"
+    )
+    assert result["orphanInventory"] == list(error.orphan_inventory)
+    assert result["orphanPolicy"] == error.orphan_policy
+
+
 def test_default_hooks_use_production_gates_and_shadow_publisher() -> None:
     hooks = update.default_hooks()
 
@@ -2358,6 +2401,7 @@ def test_default_hooks_use_production_gates_and_shadow_publisher() -> None:
     assert hooks.publish_atomic is update.publish_production_incremental_shadow
     assert hooks.verify_publication is update.verify_current_publication
     assert hooks.require_locked_update_baseline is True
+    assert hooks.blueprint_source_provider is update.materialize_blueprint_defaults
 
 
 def test_unknown_ingest_receipt_schema_cannot_self_attest(

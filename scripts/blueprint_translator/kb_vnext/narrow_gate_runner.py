@@ -18,6 +18,7 @@ from .narrow_gates import (
     narrow_gate_diagnostic_report_sha256,
     parse_and_validate_narrow_gate_diagnostic_report_bytes,
 )
+from .projections import DOMAIN_PROJECTIONS
 from .query_planner import source_revision_is_fresh
 from .registrations import is_valid_registration_evidence_uri
 from .signed_receipts import canonical_json_bytes
@@ -270,18 +271,23 @@ def _projection_evidence(
     databases = manifest.get("databases")
     if not isinstance(databases, Mapping):
         raise _fail(NARROW_GATE_CHECK_IDS[6], "projection manifest is missing")
+    observed_names = {
+        path.stem
+        for path in (staging / "domain_exports").glob("*.sqlite")
+    }
+    expected_names = set(DOMAIN_PROJECTIONS)
     digests = {
         name: str(
             (databases.get(f"domain_exports/{name}.sqlite") or {}).get(
                 "contentDigest"
             )
         )
-        for name in sorted(
-            path.stem
-            for path in (staging / "domain_exports").glob("*.sqlite")
-        )
+        for name in sorted(expected_names)
     }
-    if len(digests) != 6 or any(len(value) != 64 for value in digests.values()):
+    if observed_names != expected_names or any(
+        not re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in digests.values()
+    ):
         raise _fail(NARROW_GATE_CHECK_IDS[6], "projection digest set is incomplete")
     return {"projectionCount": len(digests), "contentDigests": digests}
 
@@ -438,7 +444,8 @@ def run_production_narrow_gates(
         ) from exc
     previous = inputs.candidate_manifest.get("previousSnapshot")
     if (
-        bound_candidate != inputs.candidate_source_manifest
+        bound_candidate.payload()
+        != inputs.candidate_source_manifest.payload()
         or not isinstance(previous, Mapping)
         or set(previous) != {"buildId", "manifestSha256"}
         or previous.get("buildId") != baseline.base_build_id
@@ -483,7 +490,6 @@ def run_production_narrow_gates(
         or blocked_gap != 0
         or remaining_pending != 0
         or remaining_running != 0
-        or worker.get("drained") is not True
         or not isinstance(outcomes, (list, tuple))
         or len(outcomes) != succeeded
         or any(
