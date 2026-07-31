@@ -450,6 +450,7 @@ class KnowledgeRoleTests(unittest.TestCase):
             target,
             changed_entity_ids=(2,),
             source_revision_id=1,
+            trigger_source_revision_ids=(1,),
         )
 
         result = materialize_discovery_role_entities(

@@ -877,6 +877,11 @@ def test_ingest_reads_frozen_quarantine_not_live_capture(
     )
     monkeypatch.setattr(
         update,
+        "materialize_incremental_role_classifier_revision",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        update,
         "materialize_additive_asset_dependency_scope",
         lambda *args, **kwargs: SimpleNamespace(downstream=(1,)),
     )

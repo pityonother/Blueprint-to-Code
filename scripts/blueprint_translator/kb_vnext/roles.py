@@ -26,6 +26,7 @@ from .registrations import (
     registration_edge_type,
     registration_provenance_is_confirmed,
 )
+from .schema_capabilities import CORE_SCHEMA_VERSION
 
 
 ROLE_CLASSIFIER_VERSION = "ark-kb-roles/v2"
@@ -2219,6 +2220,7 @@ def compute_additive_role_dependency_scope(
     *,
     changed_entity_ids: Sequence[int],
     source_revision_id: int,
+    trigger_source_revision_ids: Sequence[int],
 ) -> tuple[tuple[int, ...], dict[str, object]]:
     """Prove the exact percentile closure for an additive fact change.
 
@@ -2228,12 +2230,16 @@ def compute_additive_role_dependency_scope(
     """
 
     changed = tuple(sorted(set(changed_entity_ids)))
+    triggers = tuple(sorted(set(trigger_source_revision_ids)))
     if (
         not changed
         or tuple(changed_entity_ids) != changed
         or any(type(value) is not int or value < 1 for value in changed)
         or type(source_revision_id) is not int
         or source_revision_id < 1
+        or not triggers
+        or tuple(trigger_source_revision_ids) != triggers
+        or any(type(value) is not int or value < 1 for value in triggers)
     ):
         raise ValueError("additive role dependency inputs are not canonical")
     revision = target.execute(
@@ -2380,6 +2386,7 @@ def compute_additive_role_dependency_scope(
         "schema": "ark-kb-additive-role-dependency-scope/v1",
         "classifierVersion": ROLE_CLASSIFIER_VERSION,
         "sourceRevisionId": source_revision_id,
+        "triggerSourceRevisionIds": list(triggers),
         "changedEntityIds": list(changed),
         "roleEntityIds": list(closure),
         "transitions": transitions,
@@ -2388,3 +2395,85 @@ def compute_additive_role_dependency_scope(
         _json(proof_body).encode("utf-8")
     ).hexdigest()
     return closure, proof_body
+
+
+def materialize_incremental_role_classifier_revision(
+    target: sqlite3.Connection,
+    *,
+    generated_at: str,
+) -> int:
+    """Create the role-classifier revision for candidate Core inputs."""
+
+    discovery_rows = target.execute(
+        """
+        SELECT DISTINCT source_fingerprint
+        FROM source_revisions
+        WHERE source_kind='discovery' AND freshness_status='FRESH'
+        ORDER BY source_fingerprint
+        """
+    ).fetchall()
+    if len(discovery_rows) != 1 or not str(discovery_rows[0][0]):
+        raise ValueError("candidate Role rebuild needs one fresh Discovery")
+    payload = {
+        "discoveryFingerprint": str(discovery_rows[0][0]),
+        "classifierVersion": ROLE_CLASSIFIER_VERSION,
+        "sourceRevisions": [
+            tuple(str(value or "") for value in row)
+            for row in target.execute(
+                """
+                SELECT
+                    source_kind, source_uri, source_fingerprint,
+                    producer_version, schema_version, freshness_status
+                FROM source_revisions
+                WHERE source_kind<>'role_classifier'
+                ORDER BY
+                    source_kind, source_uri, source_fingerprint,
+                    producer_version, schema_version, freshness_status
+                """
+            )
+        ],
+        "benchmarkQueries": [
+            tuple(str(value or "") for value in row)
+            for row in target.execute(
+                """
+                SELECT query_id, primary_domain, query_json
+                FROM benchmark_queries
+                ORDER BY query_id
+                """
+            )
+        ],
+    }
+    fingerprint = hashlib.sha256(
+        _json(payload).encode("utf-8")
+    ).hexdigest()
+    target.execute(
+        """
+        INSERT OR IGNORE INTO source_revisions(
+            source_kind, source_uri, source_fingerprint,
+            producer_version, schema_version, generated_at,
+            freshness_status
+        ) VALUES ('role_classifier', ?, ?, ?, ?, ?, 'FRESH')
+        """,
+        (
+            f"classifier://{ROLE_CLASSIFIER_VERSION}",
+            fingerprint,
+            ROLE_CLASSIFIER_VERSION,
+            CORE_SCHEMA_VERSION,
+            generated_at,
+        ),
+    )
+    rows = target.execute(
+        """
+        SELECT revision_id
+        FROM source_revisions
+        WHERE source_kind='role_classifier'
+          AND source_uri=?
+          AND source_fingerprint=?
+          AND freshness_status='FRESH'
+        ORDER BY revision_id
+        """,
+        (f"classifier://{ROLE_CLASSIFIER_VERSION}", fingerprint),
+    ).fetchall()
+    if len(rows) != 1:
+        raise ValueError("candidate Role classifier revision is ambiguous")
+    return int(rows[0][0])

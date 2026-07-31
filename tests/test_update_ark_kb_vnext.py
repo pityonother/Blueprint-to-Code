@@ -1227,6 +1227,7 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
                 "schema": "ark-kb-additive-role-dependency-scope/v1",
                 "classifierVersion": "fixture-role/v1",
                 "sourceRevisionId": 2,
+                "triggerSourceRevisionIds": [2],
                 "changedEntityIds": [1],
                 "roleEntityIds": [1],
                 "transitions": [],
@@ -1501,11 +1502,18 @@ def test_production_shaped_additive_backends_drain_exact_12_of_12(
             core,
             source_revision_id=1,
         )
+        role_revision_id = (
+            update.materialize_incremental_role_classifier_revision(
+                core,
+                generated_at="2026-07-31T00:00:00+00:00",
+            )
+        )
         role_ids, role_proof = update.compute_additive_role_dependency_scope(
             discovery,
             core,
             changed_entity_ids=(1,),
-            source_revision_id=2,
+            source_revision_id=role_revision_id,
+            trigger_source_revision_ids=(2,),
         )
         assert role_ids == (1,)
         plan = update.InvalidationPlan(
@@ -1556,6 +1564,19 @@ def test_production_shaped_additive_backends_drain_exact_12_of_12(
         *("PROJECTION" for _ in range(6)),
         "QUERY_SNAPSHOT",
     ]
+    core = sqlite3.connect(workspace.core_path)
+    try:
+        assert core.execute(
+            """
+            SELECT DISTINCT revision.source_kind
+            FROM knowledge_roles AS role
+            JOIN source_revisions AS revision
+              ON revision.revision_id=role.source_revision_id
+            WHERE role.entity_id=1
+            """
+        ).fetchall() == [("role_classifier",)]
+    finally:
+        core.close()
 
 
 def test_default_unchanged_manifest_is_cache_hit_without_write(

@@ -1975,6 +1975,7 @@ def _role_scope_proof(
         "schema",
         "classifierVersion",
         "sourceRevisionId",
+        "triggerSourceRevisionIds",
         "changedEntityIds",
         "roleEntityIds",
         "transitions",
@@ -1982,6 +1983,7 @@ def _role_scope_proof(
     }
     changed = proof.get("changedEntityIds")
     role_ids = proof.get("roleEntityIds")
+    trigger_ids = proof.get("triggerSourceRevisionIds")
     source_revision_id = proof.get("sourceRevisionId")
     proof_uri = proof.get("proof")
     body = dict(proof)
@@ -2015,6 +2017,7 @@ def _role_scope_proof(
         or source_revision_id < 1
         or not valid_ids(changed)
         or not valid_ids(role_ids)
+        or not valid_ids(trigger_ids)
         or not set(changed).issubset(role_ids)
         or role_ids != queued_role_ids
         or task.downstream_id not in role_ids
@@ -2023,10 +2026,17 @@ def _role_scope_proof(
     ):
         raise RebuildVerificationError("role dependency proof is invalid")
     revision = connection.execute(
-        "SELECT freshness_status FROM source_revisions WHERE revision_id=?",
+        """
+        SELECT source_kind, freshness_status
+        FROM source_revisions WHERE revision_id=?
+        """,
         (source_revision_id,),
     ).fetchone()
-    if revision is None or str(revision[0]).upper() != "FRESH":
+    if (
+        revision is None
+        or str(revision[0]).lower() != "role_classifier"
+        or str(revision[1]).upper() != "FRESH"
+    ):
         raise RebuildVerificationError(
             "role dependency proof source revision is not fresh"
         )
@@ -2743,6 +2753,7 @@ def _row_scope_receipt(
             "mode": "PROVEN_PERCENTILE_CLOSURE",
             "targetId": task.downstream_id,
             "sourceRevisionId": proof["sourceRevisionId"],
+            "triggerSourceRevisionIds": proof["triggerSourceRevisionIds"],
             "changedEntityIds": proof["changedEntityIds"],
             "roleEntityIds": proof["roleEntityIds"],
             "dependencyProof": proof["proof"],

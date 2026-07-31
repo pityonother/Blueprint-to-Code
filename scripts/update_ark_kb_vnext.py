@@ -78,6 +78,7 @@ from blueprint_translator.kb_vnext.projections import (  # noqa: E402
 from blueprint_translator.kb_vnext.roles import (  # noqa: E402
     compute_additive_role_dependency_scope,
     materialize_discovery_role_entities,
+    materialize_incremental_role_classifier_revision,
 )
 from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     SNAPSHOT_SEMANTIC_INPUT_KEYS as SNAPSHOT_SEMANTIC_INPUT_KEYS,
@@ -1105,12 +1106,20 @@ def ingest_additive_blueprint_changes(
                 "The v1 role dependency proof requires one source revision.",
                 full_rebuild_required=True,
             )
+        role_revision_id = materialize_incremental_role_classifier_revision(
+            core,
+            generated_at=(
+                workspace.candidate_generated_at
+                or datetime.now(UTC).isoformat(timespec="seconds")
+            ),
+        )
         role_entity_ids, role_scope_proof = (
             compute_additive_role_dependency_scope(
                 discovery,
                 core,
                 changed_entity_ids=delta.entity_ids,
-                source_revision_id=delta.source_revision_ids[0],
+                source_revision_id=role_revision_id,
+                trigger_source_revision_ids=delta.source_revision_ids,
             )
         )
         plan = materialize_additive_asset_dependency_scope(

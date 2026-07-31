@@ -1375,7 +1375,7 @@ def plan_additive_asset_invalidation(
         or role_proof.get("changedEntityIds") != sorted(entities)
         or role_proof.get("roleEntityIds") != sorted(role_entities)
         or type(role_proof.get("sourceRevisionId")) is not int
-        or role_proof.get("sourceRevisionId") not in revisions
+        or role_proof.get("triggerSourceRevisionIds") != sorted(revisions)
         or not str(role_proof.get("proof") or "").startswith("role-scope://")
     ):
         raise InvalidationBlockedGap(
