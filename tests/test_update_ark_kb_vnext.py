@@ -1516,6 +1516,13 @@ def test_production_shaped_additive_backends_drain_exact_12_of_12(
             trigger_source_revision_ids=(2,),
         )
         assert role_ids == (1,)
+        core.execute(
+            """
+            INSERT INTO invalidation_dependencies VALUES (
+                2, 'ROLE_ENTITY', 1, 'ADDITIVE_ROLE_INPUT'
+            )
+            """
+        )
         plan = update.InvalidationPlan(
             event_kind="ASSET",
             upstream_revision_id=None,

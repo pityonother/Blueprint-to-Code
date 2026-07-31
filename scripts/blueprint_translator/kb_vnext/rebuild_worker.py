@@ -39,6 +39,7 @@ from .projections import (
     compute_core_projection_content_digest,
     compute_projection_artifact_content_digest,
 )
+from .roles import ROLE_CLASSIFIER_VERSION
 
 
 PENDING_REBUILD: Final = "PENDING_REBUILD"
@@ -258,6 +259,28 @@ class RebuildWorkerError(RuntimeError):
 
 class RebuildVerificationError(RebuildWorkerError):
     """The backend returned without producing a verified target state."""
+
+
+class _ProjectionRollbackIncomplete(RebuildWorkerError):
+    """Projection publication changed disk state but rollback was incomplete."""
+
+    def __init__(
+        self,
+        staging_dir: Path,
+        publish_error: BaseException,
+        restore_errors: Sequence[BaseException],
+    ) -> None:
+        residual = staging_dir.name
+        restore_types = ",".join(
+            type(error).__name__ for error in restore_errors
+        )
+        super().__init__(
+            "projection rollback incomplete; "
+            f"residual={residual}; "
+            f"publishError={type(publish_error).__name__}; "
+            f"restoreErrors={restore_types}"
+        )
+        self.residual = residual
 
 
 class RebuildBlockedGap(RuntimeError):
@@ -1968,7 +1991,8 @@ def _role_scope_proof(
     connection: sqlite3.Connection,
     task: RebuildTask,
 ) -> dict[str, object]:
-    proof = _event_payload(connection, task.event_id).get("_roleScopeProof")
+    event_payload = _event_payload(connection, task.event_id)
+    proof = event_payload.get("_roleScopeProof")
     if not isinstance(proof, dict):
         raise RebuildVerificationError("role dependency proof is missing")
     expected_keys = {
@@ -1988,11 +2012,11 @@ def _role_scope_proof(
     proof_uri = proof.get("proof")
     body = dict(proof)
     body.pop("proof", None)
-    queued_role_ids = [
-        row[0]
+    queued_role_rows = [
+        (int(row[0]), str(row[1]))
         for row in connection.execute(
             """
-            SELECT downstream_id
+            SELECT downstream_id, dependency_reason
             FROM invalidation_queue
             WHERE event_id=? AND downstream_kind='ROLE_ENTITY'
             ORDER BY downstream_id
@@ -2000,6 +2024,7 @@ def _role_scope_proof(
             (task.event_id,),
         )
     ]
+    queued_role_ids = [row[0] for row in queued_role_rows]
     def valid_ids(value: object) -> bool:
         return (
             isinstance(value, list)
@@ -2011,8 +2036,7 @@ def _role_scope_proof(
         set(proof) != expected_keys
         or proof.get("schema")
         != "ark-kb-additive-role-dependency-scope/v1"
-        or not isinstance(proof.get("classifierVersion"), str)
-        or not proof.get("classifierVersion")
+        or proof.get("classifierVersion") != ROLE_CLASSIFIER_VERSION
         or type(source_revision_id) is not int
         or source_revision_id < 1
         or not valid_ids(changed)
@@ -2025,9 +2049,30 @@ def _role_scope_proof(
         or proof_uri != "role-scope://" + _digest(body)
     ):
         raise RebuildVerificationError("role dependency proof is invalid")
+    durable_trigger_ids = event_payload.get("_upstreamRevisionIds")
+    event_row = connection.execute(
+        """
+        SELECT event_kind, upstream_revision_id
+        FROM invalidation_events WHERE event_id=?
+        """,
+        (task.event_id,),
+    ).fetchone()
+    if (
+        event_row is None
+        or str(event_row[0]).upper() != "ASSET"
+        or not valid_ids(durable_trigger_ids)
+        or durable_trigger_ids != trigger_ids
+        or (
+            event_row[1] is not None
+            and durable_trigger_ids != [int(event_row[1])]
+        )
+    ):
+        raise RebuildVerificationError(
+            "role dependency proof trigger revision scope is invalid"
+        )
     revision = connection.execute(
         """
-        SELECT source_kind, freshness_status
+        SELECT source_kind, source_uri, producer_version, freshness_status
         FROM source_revisions WHERE revision_id=?
         """,
         (source_revision_id,),
@@ -2035,10 +2080,51 @@ def _role_scope_proof(
     if (
         revision is None
         or str(revision[0]).lower() != "role_classifier"
-        or str(revision[1]).upper() != "FRESH"
+        or str(revision[1]) != f"classifier://{ROLE_CLASSIFIER_VERSION}"
+        or str(revision[2]) != ROLE_CLASSIFIER_VERSION
+        or str(revision[3]).upper() != "FRESH"
     ):
         raise RebuildVerificationError(
             "role dependency proof source revision is not fresh"
+        )
+    trigger_placeholders = ",".join("?" for _ in trigger_ids)
+    trigger_rows = list(
+        connection.execute(
+            f"""
+            SELECT revision_id, freshness_status
+            FROM source_revisions
+            WHERE revision_id IN ({trigger_placeholders})
+            ORDER BY revision_id
+            """,
+            tuple(trigger_ids),
+        )
+    )
+    if [int(row[0]) for row in trigger_rows] != trigger_ids or any(
+        str(row[1]).upper() != "FRESH" for row in trigger_rows
+    ):
+        raise RebuildVerificationError(
+            "role dependency proof trigger revision is not fresh"
+        )
+    dependency_rows = {
+        (int(row[0]), int(row[1]), str(row[2]))
+        for row in connection.execute(
+            f"""
+            SELECT upstream_revision_id, downstream_id, dependency_reason
+            FROM invalidation_dependencies
+            WHERE upstream_revision_id IN ({trigger_placeholders})
+              AND downstream_kind='ROLE_ENTITY'
+            """,
+            tuple(trigger_ids),
+        )
+    }
+    expected_dependency_rows = {
+        (trigger_id, entity_id, reason)
+        for trigger_id in trigger_ids
+        for entity_id, reason in queued_role_rows
+    }
+    if dependency_rows != expected_dependency_rows:
+        raise RebuildVerificationError(
+            "role dependency proof dependency rows are invalid"
         )
     return proof
 
@@ -3362,6 +3448,17 @@ def _fsync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _atomic_replace(source: Path, target: Path) -> None:
     if os.name != "nt":
         os.replace(source, target)
@@ -3445,6 +3542,7 @@ def _publish_projection_staging(
                 shutil.copy2(target, backup)
                 _fsync_file(backup)
                 backed_up.append(target.name)
+        _fsync_directory(backup_dir)
         for source, target in zip(sources, targets, strict=True):
             if _is_reparse_point(source):
                 raise RebuildVerificationError(
@@ -3453,17 +3551,31 @@ def _publish_projection_staging(
             _fsync_file(source)
             _atomic_replace(source, target)
             published.append(target.name)
-    except Exception:
+    except Exception as publish_error:
+        restore_errors: list[BaseException] = []
         for name in reversed(backed_up):
             backup = backup_dir / name
             if backup.is_file():
-                _atomic_replace(backup, output_dir / name)
+                try:
+                    _atomic_replace(backup, output_dir / name)
+                except Exception as restore_error:
+                    restore_errors.append(restore_error)
         for name in reversed(published):
             if name in backed_up:
                 continue
             target = output_dir / name
             if target.is_file():
-                target.unlink()
+                try:
+                    target.unlink()
+                    _fsync_directory(output_dir)
+                except Exception as restore_error:
+                    restore_errors.append(restore_error)
+        if restore_errors:
+            raise _ProjectionRollbackIncomplete(
+                staging_dir,
+                publish_error,
+                restore_errors,
+            ) from publish_error
         raise
     return _ProjectionPublication(
         staging_dir=staging_dir,
@@ -3487,16 +3599,30 @@ def _restore_projection_publication(
     if publication is None:
         return
     backup_dir = publication.staging_dir / ".publish-backup"
+    restore_errors: list[BaseException] = []
     for name in reversed(publication.backed_up):
         backup = backup_dir / name
         if backup.is_file():
-            _atomic_replace(backup, publication.output_dir / name)
+            try:
+                _atomic_replace(backup, publication.output_dir / name)
+            except Exception as restore_error:
+                restore_errors.append(restore_error)
     for name in reversed(publication.published):
         if name in publication.backed_up:
             continue
         target = publication.output_dir / name
         if target.is_file():
-            target.unlink()
+            try:
+                target.unlink()
+                _fsync_directory(publication.output_dir)
+            except Exception as restore_error:
+                restore_errors.append(restore_error)
+    if restore_errors:
+        raise _ProjectionRollbackIncomplete(
+            publication.staging_dir,
+            RuntimeError("post-publication verification failed"),
+            restore_errors,
+        )
 
 
 def _cleanup_projection_staging(staging_dir: Path | None) -> None:
@@ -3742,11 +3868,20 @@ def _run_task(
             >= {("domain_memberships", "DELETE")}
             and not cache_tracker.operations
         )
+        explicit_projection_rebuild = (
+            task.downstream_kind == "PROJECTION"
+            and external_marked
+            and touched == {"projection_runs"}
+            and bool(core_tracker.operations)
+            and not cache_tracker.operations
+        )
         verification_basis = "TARGET_STATE_CHANGED"
         if not semantic_changed and explicit_whole_cache_invalidation:
             verification_basis = "EXPLICIT_WHOLE_CACHE_INVALIDATION"
         if not semantic_changed and explicit_domain_owner_rebuild:
             verification_basis = "VERIFIED_DOMAIN_OWNER_TARGET_STATE"
+        if explicit_projection_rebuild:
+            verification_basis = "VERIFIED_PROJECTION_REBUILD"
         verification: dict[str, object] = {
             "basis": verification_basis,
             "coreWriteChanges": core_write_changes,
@@ -3781,6 +3916,7 @@ def _run_task(
             )
             or explicit_whole_cache_invalidation
             or explicit_domain_owner_rebuild
+            or explicit_projection_rebuild
         )
         if not verified_work:
             raise RebuildVerificationError(
@@ -3851,7 +3987,16 @@ def _run_task(
         )
     except RebuildBlockedGap as gap:
         _rollback_backend_transactions(connection, cache)
-        _restore_projection_publication(publication)
+        try:
+            _restore_projection_publication(publication)
+        except _ProjectionRollbackIncomplete as rollback_error:
+            return _finish_failure(
+                connection,
+                backend,
+                task,
+                seed,
+                rollback_error,
+            )
         _cleanup_projection_staging(staging_dir)
         return _finish_gap(
             connection,
@@ -3861,16 +4006,21 @@ def _run_task(
             gap.gap_code,
             gap.detail,
         )
-    except Exception as error:
+    except Exception as caught_error:
+        failure_error = caught_error
         _rollback_backend_transactions(connection, cache)
-        _restore_projection_publication(publication)
-        _cleanup_projection_staging(staging_dir)
+        try:
+            _restore_projection_publication(publication)
+        except _ProjectionRollbackIncomplete as rollback_error:
+            failure_error = rollback_error
+        if not isinstance(failure_error, _ProjectionRollbackIncomplete):
+            _cleanup_projection_staging(staging_dir)
         return _finish_failure(
             connection,
             backend,
             task,
             seed,
-            error,
+            failure_error,
         )
 
 

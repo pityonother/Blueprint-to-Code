@@ -1657,6 +1657,9 @@ def apply_invalidation_plan(
         }
     if plan.role_scope_proof:
         event_payload["_roleScopeProof"] = dict(plan.role_scope_proof)
+        event_payload["_upstreamRevisionIds"] = list(
+            plan.role_scope_proof.get("triggerSourceRevisionIds", ())
+        )
     connection.execute(
         """
         INSERT INTO invalidation_events(
