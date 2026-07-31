@@ -135,6 +135,16 @@ def _seed_role(
         """,
         (entity_id,),
     )
+    connection.execute(
+        """
+        INSERT INTO role_signal_metrics VALUES (
+            ?, 'UNCLASSIFIED', NULL, 'NOT_MEASURED',
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            '{}', 'test-role/v1', 1
+        )
+        """,
+        (entity_id,),
+    )
     connection.commit()
 
 
@@ -446,21 +456,23 @@ class IntegrationBackend(CoreMaterializerRebuildBackend):
 
     def rebuild_projection(self, scope: RebuildScope) -> None:
         self.projection_calls += 1
-        for projection_name in DOMAIN_PROJECTIONS:
-            scope.core.execute(
-                """
-                UPDATE projection_runs
-                SET source_revision_set_hash='fresh-hash',
-                    built_at='2026-07-28T01:00:00Z',
-                    validation_status='VALID'
-                WHERE projection_name=?
-                """,
-                (projection_name,),
-            )
-            _write_projection(
-                scope.projection_dir / f"{projection_name}.sqlite",
-                projection_name,
-            )
+        projection_name = tuple(DOMAIN_PROJECTIONS)[
+            scope.task.downstream_id - 1
+        ]
+        scope.core.execute(
+            """
+            UPDATE projection_runs
+            SET source_revision_set_hash='fresh-hash',
+                built_at='2026-07-28T01:00:00Z',
+                validation_status='VALID'
+            WHERE projection_name=?
+            """,
+            (projection_name,),
+        )
+        _write_projection(
+            scope.projection_dir / f"{projection_name}.sqlite",
+            projection_name,
+        )
 
     def rebuild_query_snapshot(self, scope: RebuildScope) -> None:
         assert scope.cache is not None
@@ -905,7 +917,7 @@ class RebuildWorkerTests(unittest.TestCase):
                         "EXPLICIT_WHOLE_CACHE_BATCH",
                     )
 
-    def test_real_schema_backend_rebuilds_all_kinds_and_projections_once(
+    def test_real_schema_backend_rebuilds_each_projection_exactly_once(
         self,
     ) -> None:
         core = _core()
@@ -949,7 +961,7 @@ class RebuildWorkerTests(unittest.TestCase):
         self.assertEqual(report.succeeded, len(queue_rows))
         self.assertEqual(report.failed, 0)
         self.assertEqual(report.blocked_gap, 0)
-        self.assertEqual(backend.projection_calls, 1)
+        self.assertEqual(backend.projection_calls, len(DOMAIN_PROJECTIONS))
         self.assertTrue(
             all(
                 status == "SUCCEEDED"
@@ -1020,7 +1032,7 @@ class RebuildWorkerTests(unittest.TestCase):
             recover_running=False,
         )
         self.assertEqual(repeat.attempted, 0)
-        self.assertEqual(backend.projection_calls, 1)
+        self.assertEqual(backend.projection_calls, len(DOMAIN_PROJECTIONS))
         core.close()
         cache.close()
 
