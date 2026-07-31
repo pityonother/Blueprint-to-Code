@@ -65,7 +65,7 @@ match it.
   immutable snapshots, Registry generations, Git LFS objects, worktrees, and
   legacy Capture artifacts.
 - Recorded a production-shaped 12/12 backend result separately from the live
-  input audit. The live candidate is non-selective (14 additions and 9
+  input audit. The live candidate is non-selective (14 additions and 10
   changes), so no incremental publication occurred.
 
 ## [0.2.0] - 2026-07-27

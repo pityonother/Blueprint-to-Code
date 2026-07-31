@@ -37,7 +37,7 @@ registration、role Gold 与连续 burn-in 证据不足时，系统会继续 fai
 Additive Rebuild Backend 工作包已补齐 selective Role、Domain、六个单投影与
 Query rebuild；隔离的 production-shaped 输入得到
 `SUCCEEDED=12 / BLOCKED_GAP=0 / FAILED=0`。这只是测试证据：2026-07-31
-只读 live rescan 实测为 14 个新增和 9 个变更，命中
+只读 live rescan 实测为 14 个新增和 10 个变更，命中
 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，因此没有把该结果冒充真实回放，
 也没有创建 Snapshot 或修改 current pointer。
 

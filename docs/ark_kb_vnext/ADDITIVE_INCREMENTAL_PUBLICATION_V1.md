@@ -76,7 +76,7 @@ The production-shaped acceptance fixture drains the original 12-task shape with
 12 succeeded tasks, no gaps or failures, no pending/running tasks, and
 `worker.drained=true`. It does not publish and is not E4 production evidence.
 
-The 2026-07-31 read-only live audit found 14 added and 9 changed sources, including
+The 2026-07-31 read-only live audit found 14 added and 10 changed sources, including
 non-selective semantic inputs. The production capability check therefore returned
 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED` before staging. No live Snapshot,
 pointer swap, narrow-gate result, Gold, authorization, burn-in, or cutover claim was
@@ -140,7 +140,7 @@ not constitute a live E4 scenario.
 
 ## Live boundary after Work Package B
 
-The 2026-07-31 live diff remains 14 additions and 9 changes with non-selective
+The 2026-07-31 live diff remains 14 additions and 10 changes with non-selective
 semantic input drift. The updater therefore still stops at
 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED` before staging. The current build,
 pointer, manifest, three immutable Snapshots, and disk contents are unchanged. No

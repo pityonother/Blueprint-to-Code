@@ -206,7 +206,7 @@ Projection backend。production-shaped 12-task 场景得到
 临时 Snapshot pointer swap 只证明工程合同；报告与 publication receipt 均明确
 `productionAuthority=false`，不能升级为真实 E4、burn-in 或 cutover 证据。
 
-2026-07-31 live 只读复核得到 14 个新增和 9 个变更，并包含非选择性 semantic
+2026-07-31 live 只读复核得到 14 个新增和 10 个变更，并包含非选择性 semantic
 输入变化；capability check 以 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`
 在 staging 前阻断。没有增量 Snapshot，current pointer 未改变，Snapshot 数量
 仍为 3。不能把 production-shaped 12/12 描述成真实发布或 E4 完成。

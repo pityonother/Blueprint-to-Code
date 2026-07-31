@@ -117,7 +117,9 @@ worker.drained=true
 
 这不是 live E4 证据。writer lock 下的实际只读复核得到 base Source Manifest
 fingerprint `fbb474d8ca1073dee5305cbe0247fdbec7fa4cbea97e882cb2cabc438b8750ca`；
-candidate fingerprint 与它不同，Source Diff 为 14 个新增和 9 个变更，
+candidate fingerprint 为
+`7f0f79cfe270dbb7ed21a146f5854b3da6aa80c1051df2bf2e1324c1d064a327`，
+与 base 不同；Source Diff 为 14 个新增和 10 个变更，
 包括多个 Blueprint Evidence 与 semantic/native/legacy 输入变化。生产 capability
 check 因此返回 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，没有进入 quarantine、
 ingest、worker、narrow gates 或 publisher。

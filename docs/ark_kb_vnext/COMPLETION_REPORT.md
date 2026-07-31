@@ -230,7 +230,7 @@ remaining_running=0
 worker.drained=true
 ```
 
-它仅证明 backend/worker 合同。live Source Diff 已变为 14 个新增和 9 个变更，
+它仅证明 backend/worker 合同。live Source Diff 已变为 14 个新增和 10 个变更，
 命中 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，所以没有执行真实 incremental
 worker、narrow gates、publisher 或 E4 attestation。
 
@@ -283,9 +283,13 @@ schema 和绑定验证。密封 `runtimeHealth` 与 Core metadata 一致，
   receipt 的 fail-closed 路径；
 - 文档 build/source identity 与当前已发布 manifest 一致性。
 
-本次文档基线对齐只运行文档身份测试、Markdown 链接检查、diff/秘密/路径
-检查和 GitHub CI；没有把旧的全量测试数字冒充为本次验证，也没有运行 full
-build 或再次回放 Scarecrow。运行时 health 和 Source Diff 均以只读方式复核。
+本轮 Work Package B 实际运行完整 Python suite：
+`1646 passed / 6 skipped / 672 subtests passed`；另有 2 条既存 `utcnow()`
+弃用警告。定向 Ruff、前端三组合同、`npm ci`、production build、claims 两种
+模式及 release/version/docs consistency 均通过；全仓 Ruff 仍是基线已有的 58
+项未清理告警，本次改动文件没有新增告警。没有运行 full KB build，也没有把
+不合格 live 输入改造成 Scarecrow 回放。live updater 重新扫描后以 14 个新增、
+10 个变更和 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED` 在 staging 前阻断。
 
 复现命令：
 

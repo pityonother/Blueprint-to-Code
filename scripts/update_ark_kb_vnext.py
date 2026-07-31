@@ -3047,8 +3047,8 @@ def run_incremental_update(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the bounded additive Blueprint rebuild diagnostic and fail "
-            "closed without publication when any backend or gate is missing."
+            "Run the bounded additive Blueprint rebuild and publish only a "
+            "fully verified local shadow snapshot; otherwise fail closed."
         )
     )
     parser.add_argument("--discovery-database", type=Path, required=True)
