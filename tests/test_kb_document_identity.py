@@ -183,13 +183,16 @@ class KnowledgeDocumentIdentityTests(unittest.TestCase):
         self.assertIn("`legacy`", readme)
         self.assertIn("| Cutover | `false` |", readme)
         self.assertIn("Snapshot `234`", readme)
-        self.assertIn("唯一未发布新增", readme)
+        self.assertIn("14 个新增和 9 个变更", readme)
+        self.assertIn("NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED", readme)
 
-    def test_current_status_preserves_unpublished_scarecrow_boundary(self):
+    def test_current_status_preserves_unpublished_live_diff_boundary(self):
         text = REPORT_PATHS[0].read_text(encoding="utf-8")
         normalized = re.sub(r"\s+", "", text)
         self.assertIn("BlueprintEvidenceinSnapshot", normalized)
-        self.assertIn("livecaptures共有`235`个", normalized)
+        self.assertIn("14个新增和9个变更", normalized)
+        self.assertIn("NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED", normalized)
+        self.assertIn("Snapshot仍为3个", normalized)
         self.assertIn("published=false", normalized)
         self.assertIn("productionAuthority=false", normalized)
         self.assertIn("e4Scenario2Complete=false", normalized)
