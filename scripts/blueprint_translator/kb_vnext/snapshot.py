@@ -11,7 +11,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
@@ -2454,6 +2454,8 @@ def _promote_snapshot(
     manifest: dict[str, object],
     expected_current_pointer: CurrentPointerBaseline,
     expected_current_manifest_sha256: str | None = None,
+    operation: str = "FULL_SNAPSHOT_PROMOTION",
+    before_pointer_cas: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     if not isinstance(
         expected_current_pointer,
@@ -2494,6 +2496,8 @@ def _promote_snapshot(
     target_manifest_sha256 = hashlib.sha256(
         (destination / "manifest.json").read_bytes()
     ).hexdigest()
+    if before_pointer_cas is not None:
+        before_pointer_cas()
     return _write_current_pointer(
         output_dir,
         build_id,
@@ -2502,7 +2506,7 @@ def _promote_snapshot(
             expected_current_manifest_sha256
         ),
         expected_target_manifest_sha256=target_manifest_sha256,
-        operation="FULL_SNAPSHOT_PROMOTION",
+        operation=operation,
     )
 
 

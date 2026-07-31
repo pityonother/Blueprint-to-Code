@@ -2298,6 +2298,68 @@ def test_self_attested_receipt_without_independent_binding_is_rejected(
     assert result["published"] is None
 
 
+@pytest.mark.parametrize(
+    ("error", "status", "published", "gap_code"),
+    [
+        (
+            update.IncrementalPublicationNotReplaced("fixture pre-switch"),
+            "not_replaced",
+            False,
+            "ATOMIC_PUBLICATION_NOT_REPLACED",
+        ),
+        (
+            update.IncrementalPublicationUncertain("fixture post-switch"),
+            "uncertain_after_switch",
+            None,
+            "PUBLISHER_OUTCOME_UNCERTAIN",
+        ),
+    ],
+)
+def test_incremental_publisher_outcome_state_is_not_collapsed(
+    tmp_path: Path,
+    error: Exception,
+    status: str,
+    published: bool | None,
+    gap_code: str,
+) -> None:
+    previous = _manifest(_revision("old"))
+    current = _manifest(_revision("new"))
+    phases: list[str] = []
+    hooks = _success_hooks(tmp_path, previous, current, phases)
+
+    def publish(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        raise error
+
+    guarded = update.UpdateHooks(
+        load_previous_manifest=hooks.load_previous_manifest,
+        scan_manifest=hooks.scan_manifest,
+        check_capability=hooks.check_capability,
+        stage_snapshot=hooks.stage_snapshot,
+        plan_changes=hooks.plan_changes,
+        ingest_changes=hooks.ingest_changes,
+        drain_worker=hooks.drain_worker,
+        run_narrow_gates=hooks.run_narrow_gates,
+        publish_atomic=publish,
+        verify_publication=hooks.verify_publication,
+    )
+
+    result = update.run_incremental_update(_paths(tmp_path), hooks=guarded)
+
+    assert result["status"] == status
+    assert result["published"] is published
+    assert result["gapCodes"] == [gap_code]
+
+
+def test_default_hooks_use_production_gates_and_shadow_publisher() -> None:
+    hooks = update.default_hooks()
+
+    assert hooks.run_narrow_gates is update.run_production_narrow_gate_checks
+    assert hooks.publish_atomic is update.publish_production_incremental_shadow
+    assert hooks.verify_publication is update.verify_current_publication
+    assert hooks.require_locked_update_baseline is True
+
+
 def test_unknown_ingest_receipt_schema_cannot_self_attest(
     tmp_path: Path,
 ) -> None:
@@ -2505,6 +2567,70 @@ def test_zero_worker_report_cannot_self_attest_queue_drain(
     assert result["gapCodes"] == ["REBUILD_QUEUE_NOT_DRAINED"]
     assert result["published"] is False
     assert phases == ["stage", "plan", "ingest"]
+
+
+def test_shadow_publication_receipt_rejects_rehashed_pointer_mismatch() -> None:
+    manifest = _manifest(
+        *(
+            _semantic(key, f"fixture-{key}")
+            for key in sorted(update.SNAPSHOT_SEMANTIC_INPUT_KEYS)
+        )
+    )
+    source_sha256 = update.semantic_inputs_sha256(
+        update.candidate_semantic_inputs(manifest)
+    )
+    build_id = update.snapshot_build_id(
+        manifest.generated_at,
+        source_sha256,
+    )
+    body: dict[str, object] = {
+        "schema": "ark-kb-incremental-shadow-publication-receipt/v1",
+        "evidenceClass": "UNSIGNED_LOCAL_WRITE_FACT",
+        "status": "REPLACED",
+        "buildId": build_id,
+        "sourceSha256": source_sha256,
+        "sourceManifestFingerprint": manifest.fingerprint,
+        "previousBuildId": "20260727T000000-aaaaaaaaaaaa",
+        "previousManifestSha256": "1" * 64,
+        "narrowGateReportSha256": "2" * 64,
+        "pointerCAS": {
+            "operation": "INCREMENTAL_SHADOW_PUBLICATION",
+            "beforeBuildId": "20260727T000000-aaaaaaaaaaaa",
+            "afterBuildId": build_id,
+            "beforePointerSha256": "3" * 64,
+            "afterPointerSha256": "4" * 64,
+            "pointerUpdated": True,
+            "independentlyVerified": True,
+            "recoveredAfterFailure": False,
+        },
+        "atomicSourceManifestBound": True,
+        "published": True,
+        "productionAuthority": False,
+        "cutoverEligible": False,
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
+    }
+
+    def seal(value: dict[str, object]) -> dict[str, object]:
+        proof = hashlib.sha256(
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return {**value, "proof": f"publication-proof://{proof}"}
+
+    assert update._safe_publication(seal(body), manifest)["buildId"] == build_id
+    tampered = json.loads(json.dumps(body))
+    tampered["pointerCAS"]["afterBuildId"] = "attacker-build"
+    with pytest.raises(
+        update.UpdateBlocked,
+        match="invalid local shadow receipt",
+    ):
+        update._safe_publication(seal(tampered), manifest)
 
 
 def test_source_diff_and_plan_output_cannot_leak_injected_host_paths(
