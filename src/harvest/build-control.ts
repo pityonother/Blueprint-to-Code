@@ -1,15 +1,6 @@
 import { HarvestApiError, requestHarvestJson } from './api';
+import { escapeHtml } from '../shared/html';
 import type { HarvestBuildJob, HarvestBuildResponse } from './types';
-
-
-function escapeHtml(value: unknown): string {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
 
 
 function isActive(job: HarvestBuildJob | null): boolean {
