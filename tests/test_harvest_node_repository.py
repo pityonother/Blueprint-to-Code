@@ -539,7 +539,7 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
             )
 
             with patch(
-                "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+                "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
                 wraps=evaluate_attack_resource,
             ) as evaluator:
                 first = repository.rankings("node-a", "resource-a", limit=10)
@@ -605,7 +605,7 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
             )
 
             with patch(
-                "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+                "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
                 wraps=evaluate_attack_resource,
             ) as evaluator:
                 first = repository.rankings("node-a", "resource-a", limit=10)
@@ -647,7 +647,7 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
             )
 
             with patch(
-                "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+                "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
                 wraps=evaluate_attack_resource,
             ) as evaluator:
                 for index in range(component_count):
@@ -791,7 +791,7 @@ class HarvestNodeRepositoryTests(unittest.TestCase):
             )
 
             with patch(
-                "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+                "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
                 wraps=evaluate_attack_resource,
             ) as evaluator:
                 first_page = repository.creature_specialties(

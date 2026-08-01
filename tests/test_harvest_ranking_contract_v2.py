@@ -169,7 +169,7 @@ def _fake_evaluate_attack_resource(**kwargs: object) -> dict[str, object]:
 class HarvestRankingContractV2Tests(unittest.TestCase):
     def _rank(self, **kwargs: object) -> dict[str, object]:
         with patch(
-            "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+            "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
             side_effect=_fake_evaluate_attack_resource,
         ):
             return HarvestEvaluationEngine(_evaluation_catalog()).rank_node_resource(
@@ -231,7 +231,7 @@ class HarvestRankingContractV2Tests(unittest.TestCase):
         canonical["attacks"].append(conditional_attack)
 
         with patch(
-            "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+            "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
             side_effect=_fake_evaluate_attack_resource,
         ):
             result = HarvestEvaluationEngine(catalog).rank_node_resource(
@@ -301,7 +301,7 @@ class HarvestRankingContractV2Tests(unittest.TestCase):
             )
         )
         with patch(
-            "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+            "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
             side_effect=_fake_evaluate_attack_resource,
         ):
             result = HarvestEvaluationEngine(catalog).rank_node_resource(
@@ -360,7 +360,7 @@ class HarvestRankingContractV2Tests(unittest.TestCase):
             )
         ]
         with patch(
-            "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+            "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
             side_effect=_fake_evaluate_attack_resource,
         ):
             result = HarvestEvaluationEngine(catalog).rank_node_resource(

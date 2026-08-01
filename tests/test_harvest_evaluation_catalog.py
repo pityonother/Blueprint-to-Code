@@ -599,7 +599,7 @@ class HarvestEvaluationCatalogTests(unittest.TestCase):
             }
 
         with patch(
-            "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+            "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
             side_effect=fake_evaluate_attack_resource,
         ):
             result = HarvestEvaluationEngine(evaluation_catalog).rank_node_resource(
