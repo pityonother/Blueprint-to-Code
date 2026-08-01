@@ -17,6 +17,9 @@ from blueprint_translator.harvest_ranking_verifier import (  # noqa: E402
     independently_rank_target,
     verify_catalogs,
 )
+from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
+    HarvestEvaluationEngine,
+)
 from verify_ark_harvest_rankings import main  # noqa: E402
 
 
@@ -223,6 +226,48 @@ class HarvestRankingVerifierTests(unittest.TestCase):
         )
         self.assertNotIn("evaluate_attack_resource", called_names)
         self.assertNotIn("HarvestEvaluationEngine", called_names)
+
+    def test_v2_verifier_checks_confirmed_canonical_contract_without_runtime_gold(self):
+        nodes, evaluation = _catalogs()
+        evaluation["methodology"]["contractVersion"] = "harvest-ranking-contract/v2"
+        for entry in evaluation["components"][0]["resourceEntries"]:
+            entry["effectivenessQuantityMultiplier"] = 1.0
+        evaluation["creatures"][0]["attacks"][0][
+            "useBlueprintCanRiderAttack"
+        ] = False
+        evaluation["creatures"][1]["tameability"] = {
+            "status": "ALLOWED",
+            "reasonCodes": [],
+        }
+        engine = HarvestEvaluationEngine(evaluation)
+
+        summary = verify_catalogs(
+            nodes,
+            evaluation,
+            reference_query=lambda node_id, resource_id, limit: engine.rank_node_resource(
+                nodes,
+                node_id=node_id,
+                node_resource_id=resource_id,
+                limit=limit,
+                evidence_policy="includeConditional",
+            ),
+            sample_size=2,
+            seed="v2-contract",
+        )
+
+        self.assertEqual(summary["status"], "PASS")
+        self.assertEqual(
+            summary["verificationBoundary"]["rankingContractVersion"],
+            "harvest-ranking-contract/v2",
+        )
+        self.assertFalse(
+            summary["verificationBoundary"]["runtimeGoldCreatedByVerifier"]
+        )
+        self.assertEqual(
+            summary["methodology"]["metric"],
+            "staticCompleteNodeTargetYield",
+        )
+        self.assertGreater(summary["comparison"]["expectedTopRows"], 0)
 
     def test_independent_formula_recomputes_complete_node_yield_and_top_order(self):
         nodes, evaluation = _catalogs()

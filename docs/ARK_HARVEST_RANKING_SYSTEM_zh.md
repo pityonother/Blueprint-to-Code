@@ -1,5 +1,20 @@
 # ARK 资源采集排行系统：证据、口径与使用方法
 
+> 当前公开查询合同为 `harvest-ranking-contract/v2`。旧文中出现的 `estimatedYieldPerNode` 与 best-discovered variant 是迁移背景；v2 的权威字段、分榜与默认策略以本节为准。
+
+## Ranking Contract v2
+
+- 权威静态总量字段：`staticCompleteNodeTargetYield`（静态单节点目标资源总产量）。`estimatedYieldPerNode` 只保留为同值兼容别名，不能成为第二套排序公式。
+- 静态周期速度：`staticYieldPerAttackCycleSecond`。耗时定义为 `estimatedHitsToDepleteNode × effectiveAttackInterval`，第一击发生在首个攻击周期末；该值不是移动、耐力、负重、节点密度和服务器 hook 下的真实每秒产量。
+- 合法 `synthetic=false` observation 才能填入 `observedYieldPerNode`、`observedYieldPerSecond` 和 `runtimeStatus`；没有精确 observation 时显示“未实测”并返回 `null`。
+- 默认 HTTP `policy=confirmed`；UI 为了同时展示两个证据层，会显式请求 `policy=includeConditional`。`confirmedItems` 与 `conditionalItems` 分别编号，条件性结果永远不占已确认名次或基线；已确认为空时返回 `UNAVAILABLE`，不提升条件性结果。
+- 默认 `variantPolicy=CANONICAL_VARIANT`，从稳定 base package/最短对象路径中选择，不读取分数。`ALL_VARIANTS` 与 `BEST_DISCOVERED_VARIANT_EXPLORATORY` 必须显式请求。
+- 默认地图策略是 `GLOBAL_TRANSFER_ALLOWED`。当前证据不足以实现 `NATIVE_MAP_EVIDENCE_ONLY`，因此服务端不会接受它。
+- 反向专长排序固定为：`relativeToNodeTopPercent DESC`、所选绝对指标 DESC、资源显示名、节点名、节点 ID。前端按服务端顺序渲染，不重新排序。
+- 每个结果绑定 extractor、model、policy、result schema、node/evaluation/component revision；缓存键包含这些身份、精确 resource `entryIndex`、查询策略与 runtime observation revision。身份不一致时 repository fail closed 并要求重建。
+
+Effectiveness 的当前证据结论和实验门槛见 [HARVEST_EFFECTIVENESS_QUANTITY_GAP_zh.md](HARVEST_EFFECTIVENESS_QUANTITY_GAP_zh.md)。受控 observation 见 [HARVEST_RUNTIME_TEST_PROTOCOL_zh.md](HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)。
+
 ## 1. 这套系统解决什么问题
 
 这套系统不再让 AI 每次读取一份巨大的蓝图转储后自行猜测，而是把本地 ARK DevKit 资产预处理成四层兼容结果：

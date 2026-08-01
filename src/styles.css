@@ -1643,6 +1643,60 @@ code {
   margin-top: 12px;
 }
 
+.harvest-ranking-policy-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+  margin: 1rem 0;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+}
+
+.harvest-ranking-policy-controls label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: min(100%, 14rem);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.harvest-ranking-policy-controls select {
+  min-width: 0;
+  width: 100%;
+}
+
+.harvest-ranking-tier {
+  margin-top: 1rem;
+}
+
+.harvest-ranking-tier > h3,
+.harvest-ranking-tier > h4 {
+  margin: 0 0 0.65rem;
+}
+
+.harvest-ranking-tier.conditional {
+  border-top: 1px dashed var(--line);
+  padding-top: 1rem;
+}
+
+.harvest-policy-warning {
+  color: var(--warning);
+}
+
+.harvest-rebuild-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin: 0.85rem 0;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--danger);
+  border-radius: 0.75rem;
+  color: var(--danger);
+}
+
 .harvest-ranking-details details {
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 7px;

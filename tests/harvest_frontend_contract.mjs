@@ -572,6 +572,134 @@ try {
   assert.match(legacySpecialtyHtml, /节点旧版榜首指数 43.7/);
   assert.doesNotMatch(legacySpecialtyHtml, /本龙预计产量/);
 
+  const rankingContractV2 = {
+    ok: true,
+    schema: 'blueprint-to-code.harvest-ranking-result/v4',
+    contractVersion: 'harvest-ranking-contract/v2',
+    identity: {
+      extractorVersion: 'extractor/v3',
+      modelVersion: 'model/v2',
+      policyVersion: 'policy/v2',
+      resultSchemaVersion: 'blueprint-to-code.harvest-ranking-result/v4',
+      nodeCatalogRevision: '1'.repeat(64),
+      evaluationCatalogRevision: '2'.repeat(64),
+      componentCatalogRevision: '3'.repeat(64),
+    },
+    dataset: {},
+    node: { id: 'node', name: 'Node', objectPath: '/Game/Node' },
+    resource: {
+      entryIndex: 0,
+      resource: 'PrimalItemResource_Metal_C',
+      displayName: 'Metal',
+      nodeResourceId: 'resource',
+    },
+    queryPolicy: {
+      evidence: 'includeConditional',
+      variant: 'CANONICAL_VARIANT',
+      metric: 'staticCompleteNodeTargetYield',
+      availability: 'GLOBAL_TRANSFER_ALLOWED',
+    },
+    methodology: {
+      metric: 'staticCompleteNodeTargetYield',
+      scoreBasis: 'STATIC_COMPLETE_NODE_TARGET_RESOURCE_UNITS',
+      warning: '静态指标不是实测。',
+      firstHitTiming: 'FIRST_HIT_AT_END_OF_FIRST_ATTACK_CYCLE',
+    },
+    confirmedStatus: 'AVAILABLE',
+    conditionalStatus: 'AVAILABLE',
+    scopeStatus: 'PARTIAL',
+    claimsGlobalTop: false,
+    coverage: {},
+    runtimeCoverage: { publishableExactRows: 0 },
+    confirmedItems: [{
+      rank: 1,
+      creature: 'Confirmed creature',
+      creatureObjectPath: '/Game/Dinos/Confirmed',
+      speciesKey: 'confirmed',
+      attackName: 'Hit',
+      attackInterval: 1,
+      attackIntervalSource: 'GENERAL_ATTACK_INTERVAL',
+      rankingStatus: 'RANKED',
+      rankingTier: 'CONFIRMED',
+      staticCompleteNodeTargetYield: 20,
+      estimatedYieldPerNode: 20,
+      relativeToNodeTopPercent: 100,
+      runtimeStatus: 'NOT_MEASURED',
+      evidence: { status: 'CONFIRMED', gaps: [] },
+      variantSelection: {
+        policy: 'CANONICAL_VARIANT',
+        selectedObjectPath: '/Game/Dinos/Confirmed',
+        higherExploratoryVariantExists: true,
+      },
+      scoreBreakdown: {
+        omittedFactors: ['MAP_AVAILABILITY', 'EFFECTIVENESS_QUANTITY_MULTIPLIER_NOT_MODELED'],
+      },
+    }],
+    conditionalItems: [{
+      rank: 1,
+      creature: '<script>Conditional high</script>',
+      creatureObjectPath: '/Game/Dinos/Conditional',
+      speciesKey: 'conditional',
+      attackName: 'Conditional hit',
+      attackInterval: 0.5,
+      rankingStatus: 'RANKED',
+      rankingTier: 'CONDITIONAL',
+      staticCompleteNodeTargetYield: 2000,
+      estimatedYieldPerNode: 2000,
+      relativeToNodeTopPercent: 100,
+      evidence: { status: 'PARTIAL', gaps: ['BLUEPRINT_RIDER_ELIGIBILITY_NOT_RECOVERED'] },
+      variantSelection: {
+        policy: 'CANONICAL_VARIANT',
+        selectedObjectPath: '/Game/Dinos/Conditional',
+      },
+    }],
+    items: [],
+  };
+  rankingContractV2.items = [
+    ...rankingContractV2.confirmedItems,
+    ...rankingContractV2.conditionalItems,
+  ];
+  const rankingV2Html = renderHarvestRankingResult(rankingContractV2);
+  assert.match(rankingV2Html, /已确认榜（独立编号）/);
+  assert.match(rankingV2Html, /条件性估算（不占已确认名次）/);
+  assert.match(rankingV2Html, /静态单节点目标资源总产量/);
+  assert.match(rankingV2Html, /规范榜未自动取最大/);
+  assert.match(rankingV2Html, /未实测/);
+  assert.match(rankingV2Html, /GLOBAL_TRANSFER_ALLOWED/);
+  assert.match(rankingV2Html, /EFFECTIVENESS_QUANTITY_MULTIPLIER_NOT_MODELED/);
+  assert.doesNotMatch(rankingV2Html, /<script>Conditional high<\/script>/);
+
+  const specialtyContractV2 = {
+    ...specialtyV2,
+    schema: 'blueprint-to-code.harvest-creature-specialties/v3',
+    contractVersion: 'harvest-ranking-contract/v2',
+    identity: rankingContractV2.identity,
+    queryPolicy: rankingContractV2.queryPolicy,
+    confirmedStatus: 'AVAILABLE',
+    conditionalStatus: 'UNAVAILABLE',
+    methodology: {
+      ...specialtyV2.methodology,
+      metric: 'staticCompleteNodeTargetYield',
+      sortMetric: 'relativeToNodeTopPercent DESC, selectedMetricValue DESC, resourceDisplayName, nodeName, nodeId',
+    },
+    confirmedItems: [{
+      ...specialtyV2.items[0],
+      selectedMetricValue: 10,
+      nodeTopSelectedMetricValue: 10,
+      relativeToNodeTopPercent: 100,
+      staticCompleteNodeTargetYield: 10,
+      variantSelection: { selectedObjectPath: '/Game/Dinos/Anky' },
+    }],
+    conditionalItems: [],
+  };
+  specialtyContractV2.items = specialtyContractV2.confirmedItems;
+  const specialtyContractHtml = renderHarvestCreatureSpecialties(specialtyContractV2);
+  assert.match(specialtyContractHtml, /RELATIVE-FIRST/);
+  assert.match(specialtyContractHtml, /相对同层节点榜首 100%/);
+  assert.match(specialtyContractHtml, /界面不重新排序/);
+  assert.match(specialtyContractHtml, /已确认专长（独立编号）/);
+  assert.match(specialtyContractHtml, /条件性专长（不占已确认名次）/);
+
   const buildHtml = renderHarvestBuildPanel({
     id: 'job-1',
     status: 'RUNNING',

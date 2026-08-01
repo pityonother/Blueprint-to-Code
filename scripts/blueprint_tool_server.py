@@ -46,6 +46,18 @@ from blueprint_translator.harvest_node_repository import (
     HarvestDatasetNotBuilt,
     HarvestNodeRepository,
 )
+from blueprint_translator.harvest_evaluation_catalog import (
+    AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
+    METRIC_OBSERVED_PER_NODE,
+    METRIC_OBSERVED_PER_SECOND,
+    METRIC_STATIC_CYCLE_SPEED,
+    METRIC_STATIC_TOTAL,
+    POLICY_CONFIRMED,
+    POLICY_INCLUDE_CONDITIONAL,
+    VARIANT_ALL,
+    VARIANT_BEST_DISCOVERED_EXPLORATORY,
+    VARIANT_CANONICAL,
+)
 from blueprint_translator.harvest_build_jobs import (
     HarvestBuildAlreadyRunning,
     HarvestBuildArgumentError,
@@ -132,6 +144,9 @@ HARVEST_EVALUATION_CATALOG_PATH = (
 HARVEST_SQLITE_CATALOG_PATH = (
     PROJECT_ROOT / "analysis" / "harvest_nodes" / "harvest_catalog.sqlite"
 )
+HARVEST_RUNTIME_OBSERVATION_ROOT = (
+    PROJECT_ROOT / "analysis" / "harvest_rankings" / "runtime_observations"
+)
 HARVEST_REPOSITORY = HarvestNodeRepository(
     HARVEST_CATALOG_PATH,
     HARVEST_RANKING_PATH,
@@ -141,6 +156,7 @@ HARVEST_REPOSITORY = HarvestNodeRepository(
         if HARVEST_SQLITE_CATALOG_PATH.is_file()
         else None
     ),
+    runtime_observation_root=HARVEST_RUNTIME_OBSERVATION_ROOT,
 )
 HARVEST_BUILD_MANAGER = HarvestBuildJobManager(project_root=PROJECT_ROOT)
 
@@ -1408,11 +1424,54 @@ def query_harvest_ranking_for_request(query: str) -> dict[str, object]:
             parse_report_query_int(values.get("limit", [""])[0], "limit", 10),
         ),
     )
+    evidence_policy = values.get("policy", [POLICY_CONFIRMED])[0].strip()
+    variant_policy = values.get("variantPolicy", [VARIANT_CANONICAL])[0].strip()
+    metric = values.get("metric", [METRIC_STATIC_TOTAL])[0].strip()
+    availability_policy = values.get(
+        "availabilityPolicy", [AVAILABILITY_GLOBAL_TRANSFER_ALLOWED]
+    )[0].strip()
+    allowed_values = {
+        "policy": {POLICY_CONFIRMED, POLICY_INCLUDE_CONDITIONAL},
+        "variantPolicy": {
+            VARIANT_CANONICAL,
+            VARIANT_ALL,
+            VARIANT_BEST_DISCOVERED_EXPLORATORY,
+        },
+        "metric": {
+            METRIC_STATIC_TOTAL,
+            METRIC_STATIC_CYCLE_SPEED,
+            METRIC_OBSERVED_PER_NODE,
+            METRIC_OBSERVED_PER_SECOND,
+        },
+        "availabilityPolicy": {AVAILABILITY_GLOBAL_TRANSFER_ALLOWED},
+    }
+    requested_values = {
+        "policy": evidence_policy,
+        "variantPolicy": variant_policy,
+        "metric": metric,
+        "availabilityPolicy": availability_policy,
+    }
+    if any(
+        requested_values[name] not in allowed
+        for name, allowed in allowed_values.items()
+    ):
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_RANKING_POLICY",
+                "error": "Invalid harvest ranking policy.",
+            },
+        )
     try:
         return HARVEST_REPOSITORY.rankings(
             node_id,
             node_resource_id,
             limit=limit,
+            evidence_policy=evidence_policy,
+            variant_policy=variant_policy,
+            metric=metric,
+            availability_policy=availability_policy,
         )
     except KeyError as exc:
         code = str(exc).strip("'")
@@ -1422,6 +1481,15 @@ def query_harvest_ranking_for_request(query: str) -> dict[str, object]:
         ) from exc
     except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
         raise _harvest_dataset_problem(exc) from exc
+    except ValueError as exc:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_RANKING_POLICY",
+                "error": "Invalid harvest ranking policy.",
+            },
+        ) from exc
 
 
 def query_harvest_creatures_for_request(query: str) -> dict[str, object]:
@@ -1472,11 +1540,21 @@ def query_harvest_creature_specialties_for_request(
             parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
         ),
     )
+    evidence_policy = values.get("policy", [POLICY_CONFIRMED])[0].strip()
+    variant_policy = values.get("variantPolicy", [VARIANT_CANONICAL])[0].strip()
+    metric = values.get("metric", [METRIC_STATIC_TOTAL])[0].strip()
+    availability_policy = values.get(
+        "availabilityPolicy", [AVAILABILITY_GLOBAL_TRANSFER_ALLOWED]
+    )[0].strip()
     try:
         return HARVEST_REPOSITORY.creature_specialties(
             species_key,
             offset=offset,
             limit=limit,
+            evidence_policy=evidence_policy,
+            variant_policy=variant_policy,
+            metric=metric,
+            availability_policy=availability_policy,
         )
     except KeyError as exc:
         raise ApiProblem(
@@ -1489,6 +1567,15 @@ def query_harvest_creature_specialties_for_request(
         ) from exc
     except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
         raise _harvest_dataset_problem(exc) from exc
+    except ValueError as exc:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_RANKING_POLICY",
+                "error": "Invalid harvest ranking policy.",
+            },
+        ) from exc
 
 
 def _harvest_build_problem(exc: Exception) -> ApiProblem:

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/harvest_runtime_observation_v2.schema.json",
+  "title": "Blueprint to Code Harvest runtime ranking observation v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "observationSetId",
+    "synthetic",
+    "environment",
+    "subject",
+    "staticModel",
+    "trials"
+  ],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.harvest-runtime-observation/v2"},
+    "observationSetId": {"type": "string", "pattern": "^runtime://"},
+    "synthetic": {"type": "boolean"},
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gameBuild", "serverSettings", "mods", "map", "notes"],
+      "properties": {
+        "gameBuild": {"type": "string", "minLength": 1},
+        "serverSettings": {"type": "object"},
+        "mods": {"type": "array", "items": {"type": "string"}},
+        "map": {"type": "string", "minLength": 1},
+        "notes": {"type": "string", "minLength": 1}
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeId",
+        "nodeResourceId",
+        "speciesKey",
+        "creatureObjectPath",
+        "attackIndex"
+      ],
+      "properties": {
+        "nodeId": {"type": "string", "minLength": 1},
+        "nodeResourceId": {"type": "string", "minLength": 1},
+        "speciesKey": {"type": "string", "minLength": 1},
+        "creatureObjectPath": {"type": "string", "pattern": "^/Game/"},
+        "attackIndex": {"type": "integer", "minimum": 0}
+      }
+    },
+    "staticModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelVersion",
+        "extractorVersion",
+        "policyVersion",
+        "nodeCatalogRevision",
+        "evaluationCatalogRevision",
+        "componentCatalogRevision"
+      ],
+      "properties": {
+        "modelVersion": {"type": "string", "minLength": 1},
+        "extractorVersion": {"type": "string", "minLength": 1},
+        "policyVersion": {"type": "string", "minLength": 1},
+        "nodeCatalogRevision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evaluationCatalogRevision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "componentCatalogRevision": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "trials": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["trialId", "durationSeconds", "hits", "finalResourceUnits"],
+        "properties": {
+          "trialId": {"type": "string", "minLength": 1},
+          "durationSeconds": {"type": "number", "exclusiveMinimum": 0},
+          "hits": {"type": "array", "items": {"type": "object"}},
+          "finalResourceUnits": {"type": "number", "minimum": 0}
+        }
+      }
+    }
+  }
+}

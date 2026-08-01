@@ -532,6 +532,9 @@ def _independent_evaluate(
         damageMultiplier=float(damage_multiplier),
         harvestQuantityMultiplier=float(quantity_multiplier),
         damageHarvestAdditionalEffectiveness=float(additional_effectiveness),
+        effectivenessQuantityMultiplier=target_entry.get(
+            "effectivenessQuantityMultiplier"
+        ),
         resourceWeight=resource_weight,
         totalPositiveResourceWeight=total_positive_weight,
         resourceWeightShare=weight_share,
@@ -571,7 +574,7 @@ def _find_target(
     raise KeyError("RESOURCE_NODE_NOT_FOUND")
 
 
-def independently_rank_target(
+def _independently_rank_target_v1(
     node_catalog: dict[str, Any],
     evaluation_catalog: dict[str, Any],
     *,
@@ -835,6 +838,352 @@ def independently_rank_target(
     }
 
 
+def _canonical_variant_key(creature: dict[str, Any]) -> tuple[int, int, str]:
+    object_path = str(creature.get("objectPath") or "")
+    normalized = object_path.casefold()
+    priority = (
+        0
+        if normalized.startswith("/game/primalearth/dinos/")
+        else 1
+        if normalized.startswith("/game/earth/dinos/")
+        else 2
+    )
+    return priority, len(object_path), normalized
+
+
+def _independently_rank_target_v2(
+    node_catalog: dict[str, Any],
+    evaluation_catalog: dict[str, Any],
+    *,
+    node_id: str,
+    node_resource_id: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Independently verify the default confirmed/canonical/static-total contract."""
+
+    node, resource = _find_target(node_catalog, node_id, node_resource_id)
+    component_package = _package_path(
+        node.get("harvestComponent", {}).get("packagePath")
+        if isinstance(node.get("harvestComponent"), dict)
+        else ""
+    )
+    component = next(
+        (
+            row
+            for row in evaluation_catalog.get("components", [])
+            if isinstance(row, dict)
+            and _package_path(row.get("objectPath")).casefold()
+            == component_package.casefold()
+        ),
+        None,
+    )
+    if not isinstance(component, dict):
+        raise KeyError("HARVEST_COMPONENT_NOT_FOUND")
+    creatures = [
+        row for row in evaluation_catalog.get("creatures", []) if isinstance(row, dict)
+    ]
+    parents = evaluation_catalog.get("damageTypeParents")
+    damage_gaps = evaluation_catalog.get("damageTypeGaps")
+    overrides = _resource_override_map(
+        evaluation_catalog.get("resourceDamageOverrides")
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    excluded_attacks = Counter()
+    excluded_creatures = Counter()
+    attacks_excluded_by_creature_scope = 0
+    dispositions = Counter()
+    conditional_evaluations = Counter()
+    attacks_conditionally_evaluated = 0
+    conditionally_ranked_attacks = 0
+    for creature in creatures:
+        attacks = [row for row in creature.get("attacks", []) if isinstance(row, dict)]
+        tameability = creature.get("tameability")
+        rideability = creature.get("rideability")
+        tameability_status = str(
+            tameability.get("status") if isinstance(tameability, dict) else "UNKNOWN"
+        ) or "UNKNOWN"
+        rideability_status = str(
+            rideability.get("status") if isinstance(rideability, dict) else "UNKNOWN"
+        ) or "UNKNOWN"
+        if tameability_status == "PREVENTED":
+            excluded_creatures["CREATURE_NOT_TAMEABLE"] += 1
+            attacks_excluded_by_creature_scope += len(attacks)
+            continue
+        if rideability_status == "PREVENTED":
+            excluded_creatures["RIDING_NOT_ALLOWED"] += 1
+            attacks_excluded_by_creature_scope += len(attacks)
+            continue
+        species_key = str(
+            creature.get("speciesKey")
+            or creature.get("objectPath")
+            or creature.get("name")
+            or ""
+        ).casefold()
+        if species_key:
+            grouped.setdefault(species_key, []).append(creature)
+
+    selected_species_rows: list[dict[str, Any]] = []
+    for species_key, variants in grouped.items():
+        canonical_creature = min(variants, key=_canonical_variant_key)
+        canonical_path = str(canonical_creature.get("objectPath") or "")
+        best_by_variant_and_tier: dict[str, list[dict[str, Any]]] = {
+            "CONFIRMED": [],
+            "CONDITIONAL": [],
+        }
+        for creature in variants:
+            tameability = creature.get("tameability")
+            rideability = creature.get("rideability")
+            tameability_status = str(
+                tameability.get("status")
+                if isinstance(tameability, dict)
+                else "UNKNOWN"
+            ) or "UNKNOWN"
+            rideability_status = str(
+                rideability.get("status")
+                if isinstance(rideability, dict)
+                else "UNKNOWN"
+            ) or "UNKNOWN"
+            tameability_reasons = (
+                [str(value) for value in tameability.get("reasonCodes", []) if value]
+                if isinstance(tameability, dict)
+                else ["TAMEABILITY_NOT_RECOVERED"]
+            )
+            rideability_reasons = (
+                [str(value) for value in rideability.get("reasonCodes", []) if value]
+                if isinstance(rideability, dict)
+                else ["RIDEABILITY_NOT_RECOVERED"]
+            )
+            attack_rows: list[dict[str, Any]] = []
+            for attack in creature.get("attacks", []):
+                if not isinstance(attack, dict):
+                    continue
+                prepared, exclusion_reason = _scope_attack(attack)
+                if prepared is None:
+                    excluded_attacks[
+                        str(exclusion_reason or "ATTACK_SCOPE_UNKNOWN")
+                    ] += 1
+                    continue
+                condition_reasons = [
+                    str(value)
+                    for value in prepared.get("usageConditionReasonCodes", [])
+                    if value
+                ]
+                disposition = _independent_evaluate(
+                    prepared,
+                    component,
+                    resource=str(resource.get("resource") or ""),
+                    resource_entry_index=(
+                        int(resource["entryIndex"])
+                        if isinstance(resource.get("entryIndex"), int)
+                        and not isinstance(resource.get("entryIndex"), bool)
+                        else None
+                    ),
+                    damage_type_parents=(
+                        dict(parents) if isinstance(parents, dict) else {}
+                    ),
+                    damage_type_gaps=(
+                        dict(damage_gaps) if isinstance(damage_gaps, dict) else {}
+                    ),
+                    resource_overrides=overrides,
+                )
+                status = str(disposition.get("rankingStatus") or "UNRANKED")
+                dispositions[status] += 1
+                score = disposition.get("estimatedYieldPerNode")
+                if status != "RANKED" or not isinstance(score, (int, float)):
+                    continue
+                if condition_reasons:
+                    attacks_conditionally_evaluated += 1
+                    conditionally_ranked_attacks += 1
+                    for reason in condition_reasons:
+                        conditional_evaluations[reason] += 1
+                evidence_gaps = list(condition_reasons)
+                if tameability_status != "ALLOWED":
+                    evidence_gaps.extend(
+                        tameability_reasons or ["TAMEABILITY_NOT_RECOVERED"]
+                    )
+                if rideability_status != "ALLOWED":
+                    evidence_gaps.extend(
+                        rideability_reasons or ["RIDEABILITY_NOT_RECOVERED"]
+                    )
+                effectiveness = disposition.get("effectivenessQuantityMultiplier")
+                if (
+                    isinstance(effectiveness, (int, float))
+                    and not isinstance(effectiveness, bool)
+                    and not math.isclose(
+                        float(effectiveness), 1.0, rel_tol=0.0, abs_tol=1e-9
+                    )
+                ):
+                    evidence_gaps.append(
+                        "EFFECTIVENESS_QUANTITY_MULTIPLIER_NOT_MODELED"
+                    )
+                evidence_gaps = sorted(set(evidence_gaps))
+                confirmed = not evidence_gaps
+                attack_rows.append(
+                    {
+                        **disposition,
+                        "staticCompleteNodeTargetYield": float(score),
+                        "creature": str(creature.get("name") or "Unknown creature"),
+                        "creatureObjectPath": str(creature.get("objectPath") or ""),
+                        "speciesKey": species_key,
+                        "attackIndex": prepared.get("attackIndex"),
+                        "attackName": prepared.get("attackName"),
+                        "variantCount": len(variants),
+                        "usageEligibilityStatus": prepared.get(
+                            "usageEligibilityStatus"
+                        ),
+                        "usageConditionReasonCodes": condition_reasons,
+                        "usageEstimateBasis": prepared.get("usageEstimateBasis"),
+                        "tameabilityStatus": tameability_status,
+                        "tameabilityReasonCodes": tameability_reasons,
+                        "rideabilityStatus": rideability_status,
+                        "rideabilityReasonCodes": rideability_reasons,
+                        "evidence": {
+                            "status": "CONFIRMED" if confirmed else "PARTIAL",
+                            "gaps": evidence_gaps,
+                        },
+                        "rankingTier": (
+                            "CONFIRMED" if confirmed else "CONDITIONAL"
+                        ),
+                    }
+                )
+            attack_rows.sort(
+                key=lambda row: (
+                    -float(row.get("estimatedYieldPerNode") or 0.0),
+                    *_stable_row_identity(row),
+                )
+            )
+            for tier in ("CONFIRMED", "CONDITIONAL"):
+                best_for_tier = next(
+                    (row for row in attack_rows if row.get("rankingTier") == tier),
+                    None,
+                )
+                if best_for_tier is not None:
+                    best_by_variant_and_tier[tier].append(best_for_tier)
+        variant_paths = [str(creature.get("objectPath") or "") for creature in variants]
+        for tier, best_by_variant in best_by_variant_and_tier.items():
+            canonical_row = next(
+                (
+                    row
+                    for row in best_by_variant
+                    if str(row.get("creatureObjectPath") or "") == canonical_path
+                ),
+                None,
+            )
+            if canonical_row is None:
+                continue
+            exploratory_row = min(
+                best_by_variant,
+                key=lambda row: (
+                    -float(row.get("estimatedYieldPerNode") or 0.0),
+                    *_stable_row_identity(row),
+                ),
+            )
+            canonical_row["variantSelection"] = {
+                "policy": "CANONICAL_VARIANT",
+                "selectedObjectPath": canonical_path,
+                "canonicalObjectPath": canonical_path,
+                "excludedObjectPaths": [
+                    path for path in variant_paths if path != canonical_path
+                ],
+                "higherExploratoryVariantExists": float(
+                    exploratory_row.get("estimatedYieldPerNode") or 0.0
+                )
+                > float(canonical_row.get("estimatedYieldPerNode") or 0.0),
+            }
+            selected_species_rows.append(canonical_row)
+
+    bounded_limit = max(1, min(int(limit), 10))
+
+    def ranked_tier(tier: str) -> list[dict[str, Any]]:
+        ordered = sorted(
+            [row for row in selected_species_rows if row.get("rankingTier") == tier],
+            key=lambda row: (
+                -float(row.get("estimatedYieldPerNode") or 0.0),
+                *_stable_row_identity(row),
+            ),
+        )
+        selected = [dict(row) for row in ordered[:bounded_limit]]
+        top_score = (
+            float(ordered[0].get("estimatedYieldPerNode") or 0.0)
+            if ordered
+            else 0.0
+        )
+        previous_score: float | None = None
+        competition_rank = 0
+        for ordinal, row in enumerate(selected, start=1):
+            score = float(row.get("estimatedYieldPerNode") or 0.0)
+            if previous_score is None or score != previous_score:
+                competition_rank = ordinal
+                previous_score = score
+            row["rank"] = competition_rank
+            row["relativeToNodeTopPercent"] = (
+                round(min(100.0, max(0.0, score / top_score * 100.0)), 6)
+                if top_score > 0
+                else 0.0
+            )
+            row["relativeBasisTier"] = tier
+        return selected
+
+    confirmed_items = ranked_tier("CONFIRMED")
+    conditional_items = ranked_tier("CONDITIONAL")
+    selected = [*confirmed_items, *conditional_items]
+    return {
+        "node": {"id": node_id},
+        "resource": {"nodeResourceId": node_resource_id},
+        "coverage": {
+            "attacksEvaluated": sum(dispositions.values()),
+            "attacksRanked": dispositions["RANKED"],
+            "attacksUnranked": dispositions["UNRANKED"],
+            "attacksIncompatible": dispositions["INCOMPATIBLE"],
+            "attacksExcludedByScope": sum(excluded_attacks.values()),
+            "excludedByReason": dict(sorted(excluded_attacks.items())),
+            "attacksConditionallyEvaluated": attacks_conditionally_evaluated,
+            "conditionallyRankedAttacks": conditionally_ranked_attacks,
+            "conditionalEvaluationByReason": dict(
+                sorted(conditional_evaluations.items())
+            ),
+            "creatureAssetsExcludedFromScope": sum(excluded_creatures.values()),
+            "attacksExcludedByCreatureScope": attacks_excluded_by_creature_scope,
+            "excludedCreatureByReason": dict(sorted(excluded_creatures.items())),
+            "rankedForNodeResource": len(selected_species_rows),
+            "returned": len(selected),
+            "omitted": max(0, len(selected_species_rows) - len(selected)),
+        },
+        "confirmedItems": confirmed_items,
+        "conditionalItems": conditional_items,
+        "items": selected,
+    }
+
+
+def independently_rank_target(
+    node_catalog: dict[str, Any],
+    evaluation_catalog: dict[str, Any],
+    *,
+    node_id: str,
+    node_resource_id: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    methodology = evaluation_catalog.get("methodology")
+    if (
+        isinstance(methodology, dict)
+        and methodology.get("contractVersion") == "harvest-ranking-contract/v2"
+    ):
+        return _independently_rank_target_v2(
+            node_catalog,
+            evaluation_catalog,
+            node_id=node_id,
+            node_resource_id=node_resource_id,
+            limit=limit,
+        )
+    return _independently_rank_target_v1(
+        node_catalog,
+        evaluation_catalog,
+        node_id=node_id,
+        node_resource_id=node_resource_id,
+        limit=limit,
+    )
+
+
 def _all_targets(
     node_catalog: dict[str, Any], evaluation_catalog: dict[str, Any]
 ) -> list[dict[str, str]]:
@@ -939,6 +1288,10 @@ def verify_catalogs(
     actual_rows = 0
     comparisons = 0
     recomputed = Counter()
+    contract_v2 = (
+        evaluation_catalog.get("methodology", {}).get("contractVersion")
+        == "harvest-ranking-contract/v2"
+    )
     if not targets:
         _append_mismatch(
             mismatches,
@@ -1028,6 +1381,48 @@ def verify_catalogs(
                     expected=expected_score,
                     actual=actual_score,
                 )
+            if contract_v2:
+                expected_static = expected_row.get(
+                    "staticCompleteNodeTargetYield"
+                )
+                actual_static = actual_row.get("staticCompleteNodeTargetYield")
+                if not (
+                    isinstance(expected_static, (int, float))
+                    and isinstance(actual_static, (int, float))
+                    and math.isclose(
+                        float(expected_static),
+                        float(actual_static),
+                        rel_tol=float_tolerance,
+                        abs_tol=float_tolerance,
+                    )
+                ):
+                    _append_mismatch(
+                        mismatches,
+                        target=key,
+                        field=f"items[{index}].staticCompleteNodeTargetYield",
+                        expected=expected_static,
+                        actual=actual_static,
+                    )
+                for selection_field in (
+                    "policy",
+                    "selectedObjectPath",
+                    "canonicalObjectPath",
+                    "higherExploratoryVariantExists",
+                ):
+                    expected_selection = expected_row.get("variantSelection") or {}
+                    actual_selection = actual_row.get("variantSelection") or {}
+                    if expected_selection.get(selection_field) != actual_selection.get(
+                        selection_field
+                    ):
+                        _append_mismatch(
+                            mismatches,
+                            target=key,
+                            field=(
+                                f"items[{index}].variantSelection.{selection_field}"
+                            ),
+                            expected=expected_selection.get(selection_field),
+                            actual=actual_selection.get(selection_field),
+                        )
             expected_relative = expected_row.get("relativeToNodeTopPercent")
             actual_relative = actual_row.get("relativeToNodeTopPercent")
             relative_matches = (
@@ -1108,6 +1503,14 @@ def verify_catalogs(
         "verificationBoundary": {
             "proves": "production implementation == independent implementation",
             "doesNotProve": "static model == real game",
+            **(
+                {
+                    "rankingContractVersion": "harvest-ranking-contract/v2",
+                    "runtimeGoldCreatedByVerifier": False,
+                }
+                if contract_v2
+                else {}
+            ),
         },
         "methodology": {
             "formulaVersion": FORMULA_VERSION,
@@ -1116,8 +1519,16 @@ def verify_catalogs(
                 "EVALUATE_ATTACK_RESOURCE"
             ),
             "referenceMode": "BLACK_BOX_QUERY_CALLBACK",
-            "metric": "estimatedYieldPerNode",
-            "scoreBasis": SCORE_BASIS,
+            "metric": (
+                "staticCompleteNodeTargetYield"
+                if contract_v2
+                else "estimatedYieldPerNode"
+            ),
+            "scoreBasis": (
+                "STATIC_COMPLETE_NODE_TARGET_RESOURCE_UNITS"
+                if contract_v2
+                else SCORE_BASIS
+            ),
             "score": (
                 "finite native-style per-hit node simulation; grantCalls * "
                 "normalizedResourceWeight * (quantityMin + quantityMax) / 2"

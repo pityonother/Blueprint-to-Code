@@ -1,5 +1,29 @@
 # ARK Harvest Runtime 实测协议
 
+Ranking Contract v2 用于公开实测字段的 schema 是：
+
+```text
+schemas/harvest_runtime_observation_v2.schema.json
+```
+
+字段模板是 `examples/harvest_runtime_observation_v2.example.json`。模板故意标记为 `synthetic=true`，不是 gold，也不能进入公开排行。真实 observation 保存在被 `.gitignore` 覆盖的 `analysis/harvest_rankings/runtime_observations/`。
+
+先验证单个文件：
+
+```powershell
+.\runtime\python\python.exe scripts\validate_harvest_runtime_observation.py `
+  analysis\harvest_rankings\runtime_observations\<observation>.json
+```
+
+再验证整个公开 overlay：
+
+```powershell
+.\runtime\python\python.exe scripts\validate_harvest_runtime_ranking.py `
+  analysis\harvest_rankings\runtime_observations
+```
+
+公开 overlay 使用 `nodeId + nodeResourceId + speciesKey + creatureObjectPath + attackIndex` 精确匹配，并要求 model/extractor/policy/node/evaluation/component 身份。重复键、旧模型或无效文件会 fail closed；synthetic 文件只计入 `syntheticExcluded`。
+
 本协议用于采集真实 observation。仓库当前只提交 synthetic fixtures；没有完成下面的固定条件和记录步骤时，不得把观察值写成 `RUNTIME_CONFIRMED`。
 
 ## 1. 固定环境
@@ -57,7 +81,7 @@
 
 ## 5. 导入
 
-复制一个 synthetic fixture 作为字段模板，但必须：
+复制 v2 `.example.json` 作为字段模板，但必须：
 
 1. 把 `synthetic` 改为 `false`；
 2. 使用新的 `runtime://` ID；

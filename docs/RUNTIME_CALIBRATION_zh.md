@@ -1,5 +1,7 @@
 # Runtime Calibration v1
 
+> 本文的 observation-set v1 继续用于静态模型校准比较。Harvest Ranking Contract v2 的公开排行 overlay 使用更强的精确身份 schema `schemas/harvest_runtime_observation_v2.schema.json`；两者不会互相冒充。参见 [HARVEST_RUNTIME_TEST_PROTOCOL_zh.md](HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)。
+
 Runtime calibration 是静态证据之上的独立观察层。它不会改写 Blueprint Evidence Store、Native Evidence Store 或静态 Harvest 模型；它只回答“在一组明确记录的环境与 trials 中，观察结果是否支持当前静态预测”。
 
 ## 状态

@@ -126,15 +126,27 @@ def main(argv: list[str] | None = None) -> int:
                 args.ranking_catalog.resolve(),
                 evaluation_catalog_path=args.evaluation_catalog.resolve(),
             )
+            contract_v2 = (
+                evaluation_catalog.get("methodology", {}).get("contractVersion")
+                == "harvest-ranking-contract/v2"
+            )
 
             def reference_query(node_id: str, node_resource_id: str, limit: int):
                 return repository.rankings(
-                    node_id, node_resource_id, limit=limit
+                    node_id,
+                    node_resource_id,
+                    limit=limit,
+                    evidence_policy=(
+                        "includeConditional" if contract_v2 else "confirmed"
+                    ),
                 )
 
             reference_source = {
                 "mode": "LIVE_HARVEST_NODE_REPOSITORY",
                 "rankingCatalogPath": str(args.ranking_catalog.resolve()),
+                "evidencePolicy": (
+                    "includeConditional" if contract_v2 else "legacy"
+                ),
             }
         summary = verify_catalogs(
             node_catalog,

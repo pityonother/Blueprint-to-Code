@@ -39,22 +39,24 @@ class _FakeRepository:
     def get_node(self, node_id):
         return {"id": node_id}
 
-    def rankings(self, node_id, node_resource_id, *, limit):
+    def rankings(self, node_id, node_resource_id, *, limit, **policies):
         return {
             "node": {"id": node_id},
             "resource": {"nodeResourceId": node_resource_id},
             "limit": limit,
+            "policies": policies,
         }
 
     def list_creatures(self, **kwargs):
         return {"schema": "creature-page", "arguments": kwargs, "items": []}
 
-    def creature_specialties(self, species_key, *, offset, limit):
+    def creature_specialties(self, species_key, *, offset, limit, **policies):
         return {
             "schema": "specialties",
             "species": {"speciesKey": species_key},
             "offset": offset,
             "limit": limit,
+            "policies": policies,
             "items": [],
         }
 
@@ -206,6 +208,42 @@ class HarvestHttpContractTests(unittest.TestCase):
         self.assertEqual(node["id"], "node-metal")
         self.assertEqual(ranking["resource"]["nodeResourceId"], "node-resource-metal")
         self.assertEqual(ranking["limit"], 10)
+        self.assertEqual(
+            ranking["policies"],
+            {
+                "evidence_policy": "confirmed",
+                "variant_policy": "CANONICAL_VARIANT",
+                "metric": "staticCompleteNodeTargetYield",
+                "availability_policy": "GLOBAL_TRANSFER_ALLOWED",
+            },
+        )
+
+    def test_ranking_query_accepts_only_explicit_v2_policy_values(self):
+        with patch.object(tool_server, "HARVEST_REPOSITORY", _FakeRepository()):
+            result = query_harvest_ranking_for_request(
+                "nodeId=node&nodeResourceId=resource&policy=includeConditional&"
+                "variantPolicy=BEST_DISCOVERED_VARIANT_EXPLORATORY&"
+                "metric=staticYieldPerAttackCycleSecond&"
+                "availabilityPolicy=GLOBAL_TRANSFER_ALLOWED"
+            )
+
+        self.assertEqual(result["policies"]["evidence_policy"], "includeConditional")
+        self.assertEqual(
+            result["policies"]["variant_policy"],
+            "BEST_DISCOVERED_VARIANT_EXPLORATORY",
+        )
+        self.assertEqual(
+            result["policies"]["metric"], "staticYieldPerAttackCycleSecond"
+        )
+        with patch.object(tool_server, "HARVEST_REPOSITORY", _FakeRepository()):
+            with self.assertRaises(tool_server.ApiProblem) as raised:
+                query_harvest_ranking_for_request(
+                    "nodeId=node&nodeResourceId=resource&metric=weightedComposite"
+                )
+        self.assertEqual(raised.exception.status, 400)
+        self.assertEqual(
+            raised.exception.payload["code"], "INVALID_HARVEST_RANKING_POLICY"
+        )
 
     def test_invalid_node_filter_is_returned_as_bounded_client_error(self):
         class _RejectingRepository(_FakeRepository):
@@ -255,6 +293,7 @@ class HarvestHttpContractTests(unittest.TestCase):
         self.assertEqual(specialties["species"]["speciesKey"], "AnKy")
         self.assertEqual(specialties["offset"], 2)
         self.assertEqual(specialties["limit"], 100)
+        self.assertEqual(specialties["policies"]["evidence_policy"], "confirmed")
 
     def test_build_query_start_and_cancel_delegate_only_typed_options(self):
         manager = _FakeBuildManager()

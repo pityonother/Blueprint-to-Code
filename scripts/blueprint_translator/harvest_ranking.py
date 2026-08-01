@@ -17,6 +17,7 @@ NOT_RECOVERED = "NOT_RECOVERED"
 
 YIELD_MODEL_VERSION = "harvest-estimated-yield-per-node/v1-native-static-profile"
 YIELD_SCORE_BASIS = "ESTIMATED_RESOURCE_UNITS_PER_COMPLETE_NODE"
+STATIC_COMPLETE_NODE_SCORE_BASIS = "STATIC_COMPLETE_NODE_TARGET_RESOURCE_UNITS"
 NORMALIZED_HARVEST_AMOUNT_SCALE = 2.0
 UNCLAMPED_FINAL_HIT_HEALTH_MULTIPLIER = 3.5
 
@@ -1119,6 +1120,17 @@ def evaluate_attack_resource(
     )
     legacy_index = pressure * weight_share if pressure is not None else None
     estimated_yield = float(yield_estimate["estimatedYieldPerNode"])
+    estimated_hits = int(yield_estimate["estimatedHitsToDepleteNode"])
+    static_cycle_seconds = (
+        float(estimated_hits) * attack_interval
+        if isinstance(attack_interval, float) and attack_interval > 0
+        else None
+    )
+    static_cycle_speed = (
+        estimated_yield / static_cycle_seconds
+        if isinstance(static_cycle_seconds, float) and static_cycle_seconds > 0
+        else None
+    )
     effectiveness_quantity_multiplier = target_entry.get(
         "effectivenessQuantityMultiplier"
     )
@@ -1172,6 +1184,10 @@ def evaluate_attack_resource(
         "harvestHealthGiveResourceInterval": float(give_resource_interval),
         "harvestPressurePerSecond": pressure,
         "estimatedYieldPerNode": estimated_yield,
+        "staticCompleteNodeTargetYield": estimated_yield,
+        "staticAttackCycleSecondsToDepleteNode": static_cycle_seconds,
+        "staticYieldPerAttackCycleSecond": static_cycle_speed,
+        "staticFirstHitTiming": "FIRST_HIT_AT_END_OF_FIRST_ATTACK_CYCLE",
         # One-release compatibility alias.  It intentionally equals the new
         # yield metric so an old renderer cannot show a score that contradicts
         # the order returned by the API.
@@ -1181,7 +1197,9 @@ def evaluate_attack_resource(
             "engineComparisonIndex": legacy_index,
             "scoreBasis": "DEPRECATED_ATTACK_CADENCE_COEFFICIENT",
         },
+        "observedYieldPerNode": None,
         "observedYieldPerSecond": None,
+        "runtimeStatus": "NOT_MEASURED",
         "scoreBasis": YIELD_SCORE_BASIS,
         "scoreBreakdown": score_breakdown,
         "yieldModelStatus": "STATIC_NORMALIZED_PROFILE",

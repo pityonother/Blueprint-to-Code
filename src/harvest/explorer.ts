@@ -1,4 +1,4 @@
-import { fetchHarvestJson } from './api';
+import { fetchHarvestJson, HarvestApiError } from './api';
 import { HarvestBuildControl } from './build-control';
 import { HarvestCreatureExplorer } from './creatures';
 import type {
@@ -7,6 +7,7 @@ import type {
   HarvestNodeDetail,
   HarvestNodePage,
   HarvestRankingResult,
+  HarvestRankingMetric,
   HarvestResourceEntry,
   HarvestResourceTypeFacet,
 } from './types';
@@ -274,7 +275,147 @@ function rowEvidence(row: HarvestRankingResult['items'][number]): string {
 }
 
 
+function rankingMetricValue(
+  row: HarvestRankingResult['items'][number],
+  metric: string,
+): number | null {
+  const value = row[metric as keyof typeof row];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+
+function rankingMetricLabel(metric: string): string {
+  const labels: Record<string, string> = {
+    staticCompleteNodeTargetYield: '静态单节点目标资源总产量',
+    staticYieldPerAttackCycleSecond: '静态攻击周期折算产量',
+    observedYieldPerNode: '受控实测单节点产量',
+    observedYieldPerSecond: '受控实测每秒产量',
+  };
+  return labels[metric] || metric;
+}
+
+
+function renderRankingV2Tier(
+  heading: string,
+  rows: HarvestRankingResult['items'],
+  metric: string,
+  emptyText: string,
+  conditional: boolean,
+): string {
+  if (!rows.length) {
+    return `
+      <section class="harvest-ranking-tier ${conditional ? 'conditional' : 'confirmed'}">
+        <h4>${escapeHtml(heading)}</h4>
+        <div class="empty-state compact">${escapeHtml(emptyText)}</div>
+      </section>
+    `;
+  }
+  return `
+    <section class="harvest-ranking-tier ${conditional ? 'conditional' : 'confirmed'}">
+      <h4>${escapeHtml(heading)}</h4>
+      <div class="harvest-table-wrap">
+        <table class="harvest-ranking-table">
+          <caption>${escapeHtml(heading)}；顺序由服务端 Ranking Contract v2 决定</caption>
+          <thead><tr><th scope="col">本榜名次</th><th scope="col">生物与变体</th><th scope="col">攻击周期</th><th scope="col">${escapeHtml(rankingMetricLabel(metric))}</th><th scope="col">证据</th></tr></thead>
+          <tbody>${rows.map((row) => {
+            const selection = row.variantSelection;
+            const omitted = row.scoreBreakdown?.omittedFactors || [];
+            const metricValue = rankingMetricValue(row, metric);
+            return `<tr>
+              <td><span class="rank-number">${escapeHtml(row.rank)}</span></td>
+              <td>
+                <strong>${escapeHtml(row.creature)}</strong>
+                <small>已选变体：<code>${escapeHtml(selection?.selectedObjectPath || row.creatureObjectPath || '未标记')}</code></small>
+                ${selection?.higherExploratoryVariantExists ? '<small class="harvest-policy-warning">存在更高的探索性变体；规范榜未自动取最大</small>' : ''}
+                <small>变体策略：${escapeHtml(selection?.policy || '未标记')}</small>
+              </td>
+              <td class="harvest-attack-cell">${intervalCell(row)}<small>首击：首个攻击周期末</small></td>
+              <td class="score-cell">${formatScore(metricValue ?? undefined)}<small>同证据层相对值 ${formatScore(row.relativeToNodeTopPercent)}%</small>${row.runtimeStatus ? `<small>实测：${escapeHtml(row.runtimeStatus === 'NOT_MEASURED' ? '未实测' : row.runtimeStatus)}</small>` : ''}</td>
+              <td>${rowEvidence(row)}${omitted.length ? `<small title="${escapeHtml(omitted.join('；'))}">省略因素 ${escapeHtml(omitted.length)} 项</small>` : ''}</td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+
+function renderHarvestRankingResultV2(ranking: HarvestRankingResult): string {
+  const confirmed = ranking.confirmedItems || [];
+  const conditional = ranking.conditionalItems || [];
+  const metric = ranking.queryPolicy?.metric || ranking.methodology.metric;
+  const variantPolicy = ranking.queryPolicy?.variant || 'CANONICAL_VARIANT';
+  const runtimeAvailable = (ranking.runtimeCoverage?.publishableExactRows || 0) > 0;
+  const identity = ranking.identity || {};
+  const identityValues = [
+    identity.extractorVersion,
+    identity.modelVersion,
+    identity.policyVersion,
+    identity.resultSchemaVersion,
+    identity.nodeCatalogRevision,
+    identity.evaluationCatalogRevision,
+    identity.componentCatalogRevision,
+  ];
+  const staleIdentity = identityValues.some((value) => !value);
+  const omitted = Array.from(new Set(
+    [...confirmed, ...conditional].flatMap((row) => row.scoreBreakdown?.omittedFactors || []),
+  ));
+  return `
+    <div class="harvest-detail-section harvest-ranking" data-ranking-contract="v2">
+      <div class="harvest-ranking-heading">
+        <div>
+          <p class="eyebrow">RANKING CONTRACT V2</p>
+          <h3>${escapeHtml(resourceName(ranking.resource))}：分证据层排行</h3>
+        </div>
+        <span class="status-pill ${ranking.confirmedStatus === 'AVAILABLE' ? 'good' : 'warn'}">已确认榜 ${ranking.confirmedStatus === 'AVAILABLE' ? '可用' : '不可用'}</span>
+      </div>
+      ${staleIdentity ? '<div class="harvest-rebuild-banner" role="alert"><strong>数据身份不完整或已过期</strong><span>请在“数据构建”中重建；界面不会用旧结果继续排名。</span></div>' : ''}
+      <p class="harvest-warning">${escapeHtml(ranking.methodology.warning || '')}</p>
+      <div class="harvest-ranking-policy-controls" aria-label="排行口径">
+        <label>指标
+          <select id="harvest-ranking-metric" data-harvest-ranking-policy="metric">
+            <option value="staticCompleteNodeTargetYield" ${metric === 'staticCompleteNodeTargetYield' ? 'selected' : ''}>静态单节点总产量</option>
+            <option value="staticYieldPerAttackCycleSecond" ${metric === 'staticYieldPerAttackCycleSecond' ? 'selected' : ''}>静态攻击周期速度</option>
+            <option value="observedYieldPerNode" ${metric === 'observedYieldPerNode' ? 'selected' : ''} ${runtimeAvailable ? '' : 'disabled'}>受控实测单节点${runtimeAvailable ? '' : '（未实测）'}</option>
+            <option value="observedYieldPerSecond" ${metric === 'observedYieldPerSecond' ? 'selected' : ''} ${runtimeAvailable ? '' : 'disabled'}>受控实测每秒${runtimeAvailable ? '' : '（未实测）'}</option>
+          </select>
+        </label>
+        <label>变体
+          <select id="harvest-ranking-variant" data-harvest-ranking-policy="variant">
+            <option value="CANONICAL_VARIANT" ${variantPolicy === 'CANONICAL_VARIANT' ? 'selected' : ''}>规范变体（默认）</option>
+            <option value="ALL_VARIANTS" ${variantPolicy === 'ALL_VARIANTS' ? 'selected' : ''}>全部变体</option>
+            <option value="BEST_DISCOVERED_VARIANT_EXPLORATORY" ${variantPolicy === 'BEST_DISCOVERED_VARIANT_EXPLORATORY' ? 'selected' : ''}>探索性最高变体</option>
+          </select>
+        </label>
+        <span>地图可用性：<code>${escapeHtml(ranking.queryPolicy?.availability || 'GLOBAL_TRANSFER_ALLOWED')}</code></span>
+      </div>
+      ${renderRankingV2Tier('已确认榜（独立编号）', confirmed, metric, '已确认榜不可用；条件性结果不会被提升为已确认第一名。', false)}
+      ${renderRankingV2Tier('条件性估算（不占已确认名次）', conditional, metric, '当前请求没有可显示的条件性估算。', true)}
+      <details class="harvest-scope-details">
+        <summary>口径、版本与省略因素</summary>
+        <dl class="harvest-evidence-list">
+          <div><dt>Extractor</dt><dd><code>${escapeHtml(identity.extractorVersion || '缺失')}</code></dd></div>
+          <div><dt>Model</dt><dd><code>${escapeHtml(identity.modelVersion || '缺失')}</code></dd></div>
+          <div><dt>Policy</dt><dd><code>${escapeHtml(identity.policyVersion || '缺失')}</code></dd></div>
+          <div><dt>Result schema</dt><dd><code>${escapeHtml(identity.resultSchemaVersion || ranking.schema)}</code></dd></div>
+          <div><dt>Node revision</dt><dd><code>${escapeHtml(identity.nodeCatalogRevision || '缺失')}</code></dd></div>
+          <div><dt>Evaluation revision</dt><dd><code>${escapeHtml(identity.evaluationCatalogRevision || '缺失')}</code></dd></div>
+          <div><dt>Component revision</dt><dd><code>${escapeHtml(identity.componentCatalogRevision || '缺失')}</code></dd></div>
+          <div><dt>首击计时</dt><dd><code>${escapeHtml(ranking.methodology.firstHitTiming || '未标记')}</code></dd></div>
+        </dl>
+        <p class="hint">静态周期速度只是固定攻击间隔的折算值，不是移动、耐力、负重、节点密度和服务器 hook 下的真实每秒产量。</p>
+        ${omitted.length ? `<ul class="harvest-blocker-list">${omitted.map((value) => `<li><code>${escapeHtml(value)}</code></li>`).join('')}</ul>` : '<p class="hint">响应未列出省略因素。</p>'}
+      </details>
+    </div>
+  `;
+}
+
+
 export function renderHarvestRankingResult(ranking: HarvestRankingResult): string {
+  if (ranking.contractVersion === 'harvest-ranking-contract/v2') {
+    return renderHarvestRankingResultV2(ranking);
+  }
   const rows = ranking.items || [];
   const coverage = ranking.coverage || {};
   const isEstimatedYield = hasEstimatedYieldMetric(ranking);
@@ -651,6 +792,8 @@ export class HarvestExplorer {
   private page: HarvestNodePage | null = null;
   private selectedNode: HarvestNode | null = null;
   private ranking: HarvestRankingResult | null = null;
+  private rankingMetric: HarvestRankingMetric = 'staticCompleteNodeTargetYield';
+  private rankingVariantPolicy = 'CANONICAL_VARIANT';
   private query = '';
   private mapFilter = '';
   private mapMode: HarvestMapFilterMode = 'contains';
@@ -660,6 +803,7 @@ export class HarvestExplorer {
   private loadingNode = false;
   private loadingRanking = false;
   private error = '';
+  private errorCode = '';
   private initialized = false;
   private requestSequence = 0;
   private nodeRequestSequence = 0;
@@ -680,6 +824,21 @@ export class HarvestExplorer {
     this.mapFilter = onlyMapFamily || params.get('mapFilter') || '';
     this.mapMode = onlyMapFamily ? 'evidenceExclusive' : 'contains';
     this.resourceFilter = params.get('resourceFilter') || '';
+    const requestedMetric = params.get('rankingMetric');
+    if (
+      requestedMetric === 'staticYieldPerAttackCycleSecond'
+      || requestedMetric === 'observedYieldPerNode'
+      || requestedMetric === 'observedYieldPerSecond'
+    ) {
+      this.rankingMetric = requestedMetric;
+    }
+    const requestedVariant = params.get('rankingVariant');
+    if (
+      requestedVariant === 'ALL_VARIANTS'
+      || requestedVariant === 'BEST_DISCOVERED_VARIANT_EXPLORATORY'
+    ) {
+      this.rankingVariantPolicy = requestedVariant;
+    }
     this.creatureExplorer = new HarvestCreatureExplorer(requestRender);
     this.buildControl = new HarvestBuildControl(requestRender);
   }
@@ -868,6 +1027,37 @@ export class HarvestExplorer {
     document.querySelectorAll<HTMLButtonElement>('[data-harvest-resource]').forEach((button) => {
       button.addEventListener('click', () => void this.selectResource(button.dataset.harvestResource || ''));
     });
+    document.querySelector<HTMLSelectElement>('#harvest-ranking-metric')?.addEventListener('change', (event) => {
+      const requested = (event.currentTarget as HTMLSelectElement).value;
+      if (
+        requested === 'staticCompleteNodeTargetYield'
+        || requested === 'staticYieldPerAttackCycleSecond'
+        || requested === 'observedYieldPerNode'
+        || requested === 'observedYieldPerSecond'
+      ) {
+        this.rankingMetric = requested;
+        const resourceId = this.ranking?.resource.nodeResourceId || '';
+        this.updateUrl({ rankingMetric: requested });
+        if (resourceId) {
+          void this.selectResource(resourceId);
+        }
+      }
+    });
+    document.querySelector<HTMLSelectElement>('#harvest-ranking-variant')?.addEventListener('change', (event) => {
+      const requested = (event.currentTarget as HTMLSelectElement).value;
+      if (
+        requested === 'CANONICAL_VARIANT'
+        || requested === 'ALL_VARIANTS'
+        || requested === 'BEST_DISCOVERED_VARIANT_EXPLORATORY'
+      ) {
+        this.rankingVariantPolicy = requested;
+        const resourceId = this.ranking?.resource.nodeResourceId || '';
+        this.updateUrl({ rankingVariant: requested });
+        if (resourceId) {
+          void this.selectResource(resourceId);
+        }
+      }
+    });
     document.querySelectorAll<HTMLButtonElement>('[data-harvest-page]').forEach((button) => {
       button.addEventListener('click', () => {
         this.offset = Math.max(0, Number(button.dataset.harvestPage || 0));
@@ -910,10 +1100,13 @@ export class HarvestExplorer {
   }
 
   private renderError(): string {
+    const rebuildRequired = this.errorCode === 'HARVEST_DATASET_INVALID'
+      || this.errorCode === 'HARVEST_DATASET_NOT_BUILT';
     return `
       <section class="empty-state harvest-error">
-        <strong>资源节点数据暂时不可用</strong>
+        <strong>${rebuildRequired ? '排行数据身份过期，需要重建' : '资源节点数据暂时不可用'}</strong>
         <p>${escapeHtml(this.error)}</p>
+        ${rebuildRequired ? '<p>系统已停止使用旧 revision；请切换到“数据构建”完成重建。</p>' : ''}
         <button class="button secondary" type="button" data-harvest-action="retry">重试</button>
       </section>
     `;
@@ -1094,6 +1287,7 @@ export class HarvestExplorer {
         return;
       }
       this.error = error instanceof Error ? error.message : String(error);
+      this.errorCode = error instanceof HarvestApiError ? error.code || '' : '';
     } finally {
       if (sequence === this.requestSequence) {
         this.loadingPage = false;
@@ -1140,6 +1334,7 @@ export class HarvestExplorer {
         return;
       }
       this.error = error instanceof Error ? error.message : String(error);
+      this.errorCode = error instanceof HarvestApiError ? error.code || '' : '';
     } finally {
       if (sequence === this.nodeRequestSequence) {
         this.loadingNode = false;
@@ -1164,6 +1359,10 @@ export class HarvestExplorer {
         nodeId,
         nodeResourceId,
         limit: '10',
+        policy: 'includeConditional',
+        metric: this.rankingMetric,
+        variantPolicy: this.rankingVariantPolicy,
+        availabilityPolicy: 'GLOBAL_TRANSFER_ALLOWED',
       });
       const ranking = await fetchHarvestJson<HarvestRankingResult>(
         `/api/harvest/rankings?${params.toString()}`,
@@ -1176,7 +1375,12 @@ export class HarvestExplorer {
         return;
       }
       this.ranking = ranking;
-      this.updateUrl({ node: nodeId, resource: nodeResourceId });
+      this.updateUrl({
+        node: nodeId,
+        resource: nodeResourceId,
+        rankingMetric: this.rankingMetric,
+        rankingVariant: this.rankingVariantPolicy,
+      });
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         return;
@@ -1185,6 +1389,7 @@ export class HarvestExplorer {
         return;
       }
       this.error = error instanceof Error ? error.message : String(error);
+      this.errorCode = error instanceof HarvestApiError ? error.code || '' : '';
     } finally {
       if (sequence === this.rankingRequestSequence) {
         this.loadingRanking = false;
@@ -1200,6 +1405,8 @@ export class HarvestExplorer {
     resourceFilter?: string;
     node?: string;
     resource?: string;
+    rankingMetric?: string;
+    rankingVariant?: string;
   }): void {
     const url = new URL(window.location.href);
     url.searchParams.set('view', 'harvest');
