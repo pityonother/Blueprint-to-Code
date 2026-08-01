@@ -493,6 +493,13 @@ class HarvestRankingVerifierTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["status"], "FAIL")
+        self.assertEqual(
+            summary["verificationBoundary"],
+            {
+                "proves": "production implementation == independent implementation",
+                "doesNotProve": "static model == real game",
+            },
+        )
         self.assertGreaterEqual(summary["comparison"]["mismatchCount"], 2)
         fields = {row["field"] for row in summary["mismatches"]}
         self.assertIn("items[0].estimatedYieldPerNode", fields)
