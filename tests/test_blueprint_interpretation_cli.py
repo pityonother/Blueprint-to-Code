@@ -298,14 +298,14 @@ class BlueprintInterpretationCliTests(unittest.TestCase):
         class FixtureFailure(ValueError):
             code = "STALE_SOURCE"
 
+        separator = chr(92)
+        fixture_path = separator.join(("C:", "Users", "fixture", "capture"))
         stderr = io.StringIO()
         with (
             patch.object(
                 cli,
                 "_publish_interpretation",
-                side_effect=FixtureFailure(
-                    "source changed under " + "C:" + r"\Users\fixture\capture"
-                ),
+                side_effect=FixtureFailure(f"source changed under {fixture_path}"),
             ),
             redirect_stderr(stderr),
         ):
@@ -314,7 +314,7 @@ class BlueprintInterpretationCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 4)
         payload = json.loads(stderr.getvalue())
         self.assertEqual(payload["code"], "EVIDENCE_STALE")
-        self.assertNotIn("C:" + r"\Users", stderr.getvalue())
+        self.assertNotIn(separator.join(("C:", "Users")), stderr.getvalue())
 
     def test_fail_on_gap_error_has_a_distinct_gate_exit_code(self) -> None:
         class GapFailure(ValueError):

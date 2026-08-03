@@ -306,15 +306,14 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
         class StaleInterpretation(ValueError):
             code = "INTERPRETATION_STALE_EVIDENCE"
 
+        fixture_path = chr(92).join(("C:", "Users", "fixture", "capture"))
         with self.assertRaises(ApiProblem) as raised:
             blueprint_get_payload(
                 "/api/blueprint/assets/Fixture/interpretation",
                 "",
                 capture_root=self.capture_root,
                 load_current=lambda _asset_dir: (_ for _ in ()).throw(
-                    StaleInterpretation(
-                        "changed under " + "C:" + r"\Users\fixture\capture"
-                    )
+                    StaleInterpretation(f"changed under {fixture_path}")
                 ),
                 inspect_health=lambda _asset_dir: {},
             )
@@ -566,7 +565,9 @@ class BlueprintInterpretationServerIntegrationTests(unittest.TestCase):
         dispatch.assert_not_called()
 
     def test_handler_maps_unknown_blueprint_failure_to_path_free_schema_error(self) -> None:
-        private_path = "C:" + r"\Users\fixture\private\evidence.sqlite"
+        private_path = chr(92).join(
+            ("C:", "Users", "fixture", "private", "evidence.sqlite")
+        )
         with patch.object(
             tool_server,
             "blueprint_get_payload",
