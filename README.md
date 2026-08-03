@@ -8,8 +8,9 @@ Blueprint to Code 是面向 ARK DevKit / Unreal Blueprint 的本地、证据优�
 证据，并可选连接与 DLL/PDB hash 绑定的 Native Evidence。项目版本以根目录
 [`VERSION`](VERSION) 为唯一来源。
 
-当前软件版本为 `0.3.0`；发布范围、分发边界与已知限制见
-[v0.3.0 Release notes](docs/releases/v0.3.0.md)。
+当前软件版本为 `0.3.1`；Windows 便携版下载方式、分发边界与已知限制见
+[v0.3.1 Release notes](docs/releases/v0.3.1.md)。历史上的
+[v0.3.0 Release notes](docs/releases/v0.3.0.md) 仍保留其 source-only 合同。
 
 它不是完整 Blueprint decompiler，不会恢复开发者的原始 C++，也不保证生成可编译
 C++。伪代码、Ghidra 伪 C 和静态排行都只是有明确来源与失效边界的分析产物。
@@ -46,8 +47,13 @@ Projection。此次回放保持 `published=false`，没有创建增量 Snapshot�
 
 ## 5 分钟快速开始
 
-源码开发需要 Node.js `^20.19.0` 或 `>=22.12.0`。读取真实资产还需要在本机合法
-安装 ARK DevKit；只运行 committed fixtures 不需要 ARK 文件。
+普通 Windows x64 用户请在 GitHub Release 下载
+`BlueprintToCode-v0.3.1-windows-x64-portable.zip`，完整解压后双击
+`START_HERE.bat`。便携包已包含网页和 Python，不需要安装 Python 或 Node.js；
+分析自己的真实 ARK 资产时，仍需在本机合法安装 ARK DevKit。不要把 GitHub 自动
+生成的 `Source code (zip)` 当成便携包。
+
+源码开发需要 Node.js `^20.19.0` 或 `>=22.12.0`：
 
 ```powershell
 npm ci
@@ -63,7 +69,8 @@ npm run build
    estimated tokens 的 `agent_index.md`；
 4. 再用有预算的 query/context 命令取得当前问题所需证据。
 
-完整环境包用户可直接运行 `START_HERE.bat`；诊断入口是 `DIAGNOSE.bat`。
+便携包用户可直接运行 `START_HERE.bat`；诊断入口是 `DIAGNOSE.bat`。包内还包含
+`QUICK_START_zh.txt` 与逐文件 `SHA256SUMS.txt`。
 
 ## 主要入口
 

@@ -1,12 +1,13 @@
 {
   "name": "blueprint-tool-control-center",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "control": "npm run build && python scripts/blueprint_tool_server.py --open",
+    "package:windows": "runtime\\python\\python.exe scripts\\package_windows_portable.py",
     "preview": "vite preview"
   },
   "devDependencies": {

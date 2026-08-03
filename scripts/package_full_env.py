@@ -19,6 +19,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 ARCHIVE_ROOT = "BlueprintToCode"
 SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _BLOCKED_PREFIXES = (

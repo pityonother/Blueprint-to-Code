@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,36 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "bundled Windows Python executable")
+    def test_packager_bootstraps_scripts_directory_for_embedded_python(self):
+        python = ROOT / "runtime" / "python" / "python.exe"
+        script = ROOT / "scripts" / "package_full_env.py"
+        probe = """
+import importlib.util
+import sys
+from pathlib import Path
+
+script = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("package_full_env_probe", script)
+if spec is None or spec.loader is None:
+    raise RuntimeError("unable to load packager")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+import blueprint_translator.evidence_repository
+"""
+
+        process = subprocess.run(
+            [str(python), "-I", "-c", probe, str(script)],
+            cwd=tempfile.gettempdir(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+        self.assertEqual(process.returncode, 0, process.stderr or process.stdout)
+
     def test_archive_paths_reject_escape_absolute_and_drive_paths(self):
         from package_full_env import is_safe_archive_path
 
