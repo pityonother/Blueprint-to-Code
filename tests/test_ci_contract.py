@@ -57,6 +57,31 @@ class CiContractTests(unittest.TestCase):
             re.compile(r"(?i)(token|password|secret)\s*:\s*['\"][^$]"),
         )
 
+    def test_ci_runs_harvest_closeout_and_changed_content_gates(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        required_fragments = (
+            "ruff==0.15.20",
+            "python -m ruff check --",
+            "python -m pytest -q tests/test_*harvest*.py",
+            "node tests/knowledge_frontend_contract.mjs",
+            "npm audit --audit-level=high",
+            "git diff --name-only --diff-filter=ACMR -z",
+            "Changed-file safety scan passed",
+            "local_path_patterns",
+            "known_secret_patterns",
+            "generated_prefixes",
+            '".sqlite"',
+            '".uasset"',
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, workflow)
+        self.assertRegex(
+            workflow,
+            r"pull_request:\s*\n\s+branches:\s*\n\s+- main",
+        )
+
     def test_linux_wasm_peer_is_explicit_in_the_lock_contract(self):
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         lock = json.loads(
