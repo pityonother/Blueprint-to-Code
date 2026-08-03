@@ -168,11 +168,14 @@ def _directory_identity(path: Path, *, label: str) -> tuple[int, ...]:
     _require_plain_path_chain(path, label=label)
     _require_plain_directory(path, label=label)
     metadata = path.lstat()
+    # On POSIX, a directory's link count changes when this publisher creates or
+    # removes child directories.  It is therefore mutable contents metadata,
+    # not stable identity.  Device/inode plus the plain-directory checks retain
+    # replacement, symlink, junction, and reparse-point protection.
     return (
         int(metadata.st_dev),
         int(metadata.st_ino),
         int(metadata.st_mode),
-        int(getattr(metadata, "st_nlink", 1)),
         int(getattr(metadata, "st_file_attributes", 0)),
     )
 

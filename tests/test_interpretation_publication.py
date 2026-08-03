@@ -323,6 +323,41 @@ class InterpretationPublicationTests(unittest.TestCase):
         with self.assertRaises((OSError, ValueError)):
             load_current_interpretation(self.asset_dir)
 
+    def test_directory_identity_survives_legitimate_child_directory_changes(
+        self,
+    ) -> None:
+        parent = Path(self._temporary.name) / "identity-parent"
+        parent.mkdir()
+        before = publication_module._directory_identity(parent, label="fixture")
+
+        child = parent / "child"
+        child.mkdir()
+        after_create = publication_module._directory_identity(parent, label="fixture")
+        child.rmdir()
+        after_remove = publication_module._directory_identity(parent, label="fixture")
+
+        self.assertEqual(after_create, before)
+        self.assertEqual(after_remove, before)
+
+    def test_directory_binding_rejects_plain_directory_replacement(self) -> None:
+        bound = Path(self._temporary.name) / "bound-directory"
+        replacement = Path(self._temporary.name) / "replacement-directory"
+        parked = Path(self._temporary.name) / "parked-directory"
+        bound.mkdir()
+        replacement.mkdir()
+        expected = publication_module._directory_identity(bound, label="fixture")
+
+        os.replace(bound, parked)
+        os.replace(replacement, bound)
+
+        with self.assertRaises(InterpretationPublicationError) as caught:
+            publication_module._require_directory_binding(
+                bound,
+                expected,
+                label="fixture",
+            )
+        self.assertEqual(caught.exception.code, "INTERPRETATION_DIRECTORY_CHANGED")
+
     def test_interpretation_directory_swap_cannot_write_outside_asset(self) -> None:
         external = Path(self._temporary.name) / "external"
         (external / "revisions").mkdir(parents=True)
