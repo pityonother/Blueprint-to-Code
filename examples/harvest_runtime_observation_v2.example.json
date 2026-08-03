@@ -1,14 +1,36 @@
 {
   "schema": "blueprint-to-code.harvest-runtime-observation/v2",
   "observationSetId": "runtime://example/replace-before-use",
+  "runtimeProfileId": "profile://example/replace-before-use",
+  "environmentFingerprint": "503e928981aed8e7f550d592f7e1219727ca8e530f8a3be32da0d93726138875",
   "synthetic": true,
   "environment": {
     "gameBuild": "REPLACE_WITH_RECORDED_BUILD",
-    "serverSettings": {
-      "HarvestAmountMultiplier": 1.0
+    "map": "REPLACE_WITH_RECORDED_MAP",
+    "sessionType": "REPLACE_WITH_SINGLE_PLAYER_OR_SERVER_TYPE",
+    "HarvestAmountMultiplier": 1.0,
+    "otherHarvestMultipliers": {
+      "DinoHarvestingDamageMultiplier": 1.0,
+      "PlayerHarvestingDamageMultiplier": 1.0
     },
     "mods": [],
-    "map": "REPLACE_WITH_RECORDED_MAP",
+    "creature": {
+      "level": 1,
+      "meleePercent": 100.0,
+      "relevantStats": {}
+    },
+    "buffs": [],
+    "genes": [],
+    "worldState": {
+      "mission": "NONE",
+      "weather": "REPLACE_WITH_RECORDED_WEATHER"
+    },
+    "nodeFreshnessContract": "FRESH_COMPLETE_NODE",
+    "measurementMethod": {
+      "kind": "INVENTORY_DELTA",
+      "randomQuantity": true,
+      "recommendedSampleCount": 20
+    },
     "notes": "Synthetic field template only. This is not a real measurement."
   },
   "subject": {

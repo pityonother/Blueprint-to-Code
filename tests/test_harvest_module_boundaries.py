@@ -119,6 +119,93 @@ def test_formula_and_compatibility_ownership_is_explicit() -> None:
         ), f"Compatibility module owns behavior: {compatibility_module}"
 
 
+def test_repository_facade_only_composes_focused_services() -> None:
+    repository_root = HARVEST_ROOT / "repository"
+    expected_owners = {
+        "dataset_loader.py": {"_load_catalog", "_load_sqlite_catalog", "list_nodes"},
+        "revision_binding.py": {"_load_evaluation", "_evaluation_revisions"},
+        "runtime_overlay.py": {"_load_runtime_observations"},
+        "forward_service.py": {"_lazy_rankings", "rankings"},
+        "specialty_service.py": {"_v2_tier_baselines", "creature_specialties"},
+        "creature_service.py": {"list_creatures"},
+    }
+    for filename, required_methods in expected_owners.items():
+        tree = ast.parse(
+            (repository_root / filename).read_text(encoding="utf-8"),
+            filename=filename,
+        )
+        owned_methods = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert required_methods <= owned_methods
+
+    facade_path = repository_root / "service.py"
+    facade_tree = ast.parse(
+        facade_path.read_text(encoding="utf-8"), filename=str(facade_path)
+    )
+    facade = next(
+        node
+        for node in facade_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "HarvestNodeRepository"
+    )
+    assert {
+        node.name
+        for node in facade.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    } == {"__init__"}
+
+
+def test_evaluation_engine_only_orchestrates_focused_services() -> None:
+    evaluation_root = HARVEST_ROOT / "evaluation"
+    expected_owners = {
+        "runtime.py": {
+            "_runtime_profile_context",
+            "_eligible_runtime_observation",
+        },
+        "variant_selection.py": {
+            "_canonical_variant_audit",
+            "project_species_variants",
+        },
+        "species_evaluation.py": {"evaluate_species_catalog"},
+        "tier_projection.py": {"project_tiers"},
+        "result_projection.py": {"rank_node_resource_v2"},
+        "legacy.py": {"rank_node_resource_v1"},
+    }
+    for filename, required_functions in expected_owners.items():
+        tree = ast.parse(
+            (evaluation_root / filename).read_text(encoding="utf-8"),
+            filename=filename,
+        )
+        owned_functions = {
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert required_functions <= owned_functions
+
+    engine_path = evaluation_root / "engine.py"
+    engine_tree = ast.parse(
+        engine_path.read_text(encoding="utf-8"), filename=str(engine_path)
+    )
+    engine = next(
+        node
+        for node in engine_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "HarvestEvaluationEngine"
+    )
+    assert {
+        node.name
+        for node in engine.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    } == {
+        "__init__",
+        "canonical_variant_audits",
+        "_rank_node_resource_v1",
+        "rank_node_resource",
+    }
+
+
 def test_builder_and_frontend_facades_remain_thin() -> None:
     builder = (ROOT / "scripts" / "build_ark_harvest_evaluation_catalog.py").read_text(
         encoding="utf-8"

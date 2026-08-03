@@ -5,10 +5,8 @@ from __future__ import annotations
 import math
 from typing import Any, Iterable
 
-from .contracts import (
-    METRIC_STATIC_TOTAL,
-    TAMED_RIDDEN,
-)
+from .contracts import METRIC_CONTRACTS, TAMED_RIDDEN
+
 
 def _estimated_yield(row: dict[str, Any]) -> float | None:
     """Return the only numeric value allowed to influence ranking order."""
@@ -36,21 +34,6 @@ def _stable_row_identity(row: dict[str, Any]) -> tuple[str, str, int, str]:
         str(row.get("attackName") or "").casefold(),
     )
 
-
-def _canonical_variant_key(creature: dict[str, Any]) -> tuple[int, int, str]:
-    """Select a stable base identity without reading any ranking score."""
-
-    object_path = str(creature.get("objectPath") or "")
-    normalized = object_path.casefold()
-    if normalized.startswith("/game/primalearth/dinos/"):
-        package_priority = 0
-    elif normalized.startswith("/game/earth/dinos/"):
-        package_priority = 1
-    else:
-        package_priority = 2
-    return package_priority, len(object_path), normalized
-
-
 def _metric_value(row: dict[str, Any], metric: str) -> float | None:
     value = row.get(metric)
     if (
@@ -62,7 +45,7 @@ def _metric_value(row: dict[str, Any], metric: str) -> float | None:
     return float(value)
 
 
-def _enrich_v2_metrics(row: dict[str, Any]) -> None:
+def _enrich_v2_metrics(row: dict[str, Any], *, metric: str) -> None:
     static_total = _estimated_yield(row)
     row["staticCompleteNodeTargetYield"] = static_total
     # Compatibility is intentionally a value alias, never a second formula.
@@ -89,11 +72,10 @@ def _enrich_v2_metrics(row: dict[str, Any]) -> None:
     row.setdefault("observedYieldPerNode", None)
     row.setdefault("observedYieldPerSecond", None)
     row.setdefault("runtimeStatus", "NOT_MEASURED")
+    row["scoreBasis"] = METRIC_CONTRACTS[metric]["scoreBasis"]
     breakdown = dict(row.get("scoreBreakdown") or {})
-    if breakdown:
-        breakdown["metric"] = METRIC_STATIC_TOTAL
-        row["scoreBreakdown"] = breakdown
-
+    breakdown["metric"] = metric
+    row["scoreBreakdown"] = breakdown
 
 def _semantic_property_value(prop: dict[str, Any]) -> Any:
     type_name = str(prop.get("type") or prop.get("type_name") or "")

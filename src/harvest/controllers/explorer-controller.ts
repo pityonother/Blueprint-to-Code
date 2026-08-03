@@ -29,6 +29,8 @@ export class HarvestExplorer {
   private ranking: HarvestRankingResult | null = null;
   private rankingMetric: HarvestRankingMetric = 'staticCompleteNodeTargetYield';
   private rankingVariantPolicy = 'CANONICAL_VARIANT';
+  private rankingRuntimeProfileId = '';
+  private rankingIncludePreliminary = false;
   private query = '';
   private mapFilter = '';
   private mapMode: HarvestMapFilterMode = 'contains';
@@ -74,6 +76,8 @@ export class HarvestExplorer {
     ) {
       this.rankingVariantPolicy = requestedVariant;
     }
+    this.rankingRuntimeProfileId = params.get('rankingRuntimeProfile') || '';
+    this.rankingIncludePreliminary = params.get('rankingIncludePreliminary') === 'true';
     this.creatureExplorer = new HarvestCreatureExplorer(requestRender);
     this.buildControl = new HarvestBuildControl(requestRender);
   }
@@ -293,6 +297,24 @@ export class HarvestExplorer {
         }
       }
     });
+    document.querySelector<HTMLSelectElement>('#harvest-ranking-runtime-profile')?.addEventListener('change', (event) => {
+      this.rankingRuntimeProfileId = (event.currentTarget as HTMLSelectElement).value.trim();
+      const resourceId = this.ranking?.resource.nodeResourceId || '';
+      this.updateUrl({ rankingRuntimeProfile: this.rankingRuntimeProfileId });
+      if (resourceId) {
+        void this.selectResource(resourceId);
+      }
+    });
+    document.querySelector<HTMLInputElement>('#harvest-ranking-include-preliminary')?.addEventListener('change', (event) => {
+      this.rankingIncludePreliminary = (event.currentTarget as HTMLInputElement).checked;
+      const resourceId = this.ranking?.resource.nodeResourceId || '';
+      this.updateUrl({
+        rankingIncludePreliminary: this.rankingIncludePreliminary ? 'true' : '',
+      });
+      if (resourceId) {
+        void this.selectResource(resourceId);
+      }
+    });
     document.querySelectorAll<HTMLButtonElement>('[data-harvest-page]').forEach((button) => {
       button.addEventListener('click', () => {
         this.offset = Math.max(0, Number(button.dataset.harvestPage || 0));
@@ -491,6 +513,12 @@ export class HarvestExplorer {
         variantPolicy: this.rankingVariantPolicy,
         availabilityPolicy: 'GLOBAL_TRANSFER_ALLOWED',
       });
+      if (this.rankingRuntimeProfileId) {
+        params.set('runtimeProfileId', this.rankingRuntimeProfileId);
+      }
+      if (this.rankingIncludePreliminary) {
+        params.set('includePreliminary', 'true');
+      }
       const ranking = await fetchHarvestJson<HarvestRankingResult>(
         `/api/harvest/rankings?${params.toString()}`,
         this.rankingController.signal,
@@ -507,6 +535,8 @@ export class HarvestExplorer {
         resource: nodeResourceId,
         rankingMetric: this.rankingMetric,
         rankingVariant: this.rankingVariantPolicy,
+        rankingRuntimeProfile: this.rankingRuntimeProfileId,
+        rankingIncludePreliminary: this.rankingIncludePreliminary ? 'true' : '',
       });
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
@@ -534,6 +564,8 @@ export class HarvestExplorer {
     resource?: string;
     rankingMetric?: string;
     rankingVariant?: string;
+    rankingRuntimeProfile?: string;
+    rankingIncludePreliminary?: string;
   }): void {
     const url = new URL(window.location.href);
     url.searchParams.set('view', 'harvest');

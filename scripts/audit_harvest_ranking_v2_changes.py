@@ -19,8 +19,10 @@ if str(SCRIPT_DIR) not in sys.path:
 from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
     AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
     HARVEST_RANKING_CONTRACT_VERSION,
+    METRIC_CONTRACTS,
     METRIC_STATIC_TOTAL,
     POLICY_INCLUDE_CONDITIONAL,
+    TAMED_RIDDEN,
     VARIANT_CANONICAL,
     HarvestEvaluationEngine,
 )
@@ -42,6 +44,13 @@ DEFAULT_OUTPUT = (
     / "harvest_rankings"
     / "audits"
     / "ranking-contract-v2-changed-cases.json"
+)
+
+_VARIANT_AUDIT_EXAMPLE_LIMIT = 10
+_EFFECTIVENESS_COVERAGE_FIELDS = (
+    "rowsWithEffectivenessField",
+    "rowsWithNonNeutralEffectiveness",
+    "rowsConditionalBecauseEffectiveness",
 )
 
 
@@ -101,6 +110,17 @@ def _profile_rows(counter: Counter[tuple[str, int | None, str, str]]) -> list[di
     ]
 
 
+def _coverage_count(coverage: dict[str, Any], field: str) -> int:
+    value = coverage.get(field, 0)
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+    ):
+        raise ValueError(f"coverage.{field} must be a non-negative integer")
+    return value
+
+
 def audit_changes(
     node_catalog: dict[str, Any],
     evaluation_catalog: dict[str, Any],
@@ -112,6 +132,26 @@ def audit_changes(
     ) != HARVEST_RANKING_CONTRACT_VERSION:
         raise ValueError("Evaluation catalog is not Ranking Contract v2.")
     engine = HarvestEvaluationEngine(evaluation_catalog)
+    complete_variant_audits = engine.canonical_variant_audits()
+    canonical_audits: dict[str, dict[str, Any]] = {}
+    for raw_audit in complete_variant_audits:
+        if not isinstance(raw_audit, dict):
+            raise ValueError("Complete canonical variant audit entries must be objects.")
+        species_key = str(raw_audit.get("speciesKey") or "")
+        if not species_key:
+            raise ValueError(
+                "Complete canonical variant audit speciesKey must be non-empty."
+            )
+        if species_key in canonical_audits:
+            raise ValueError(
+                f"Duplicate complete canonical variant audit: {species_key}"
+            )
+        canonical_audits[species_key] = dict(raw_audit)
+    canonical_ambiguity_examples = {
+        species_key: audit
+        for species_key, audit in canonical_audits.items()
+        if audit.get("ambiguous") is True
+    }
     representatives: OrderedDict[
         tuple[str, str, int | None], tuple[str, str]
     ] = OrderedDict()
@@ -160,6 +200,9 @@ def audit_changes(
     dread_legacy_top_profiles: Counter[tuple[str, int | None, str, str]] = Counter()
     dread_confirmed_top_profiles: Counter[tuple[str, int | None, str, str]] = Counter()
     dread_conditional_top_profiles: Counter[tuple[str, int | None, str, str]] = Counter()
+    effectiveness_coverage: Counter[str] = Counter()
+    canonical_species_audited: int | None = len(canonical_audits)
+    canonical_ambiguous_species: int | None = len(canonical_ambiguity_examples)
     samples: list[dict[str, Any]] = []
     dread_key = "dreadnoughtus"
     for key, (node_id, node_resource_id) in representatives.items():
@@ -183,6 +226,86 @@ def audit_changes(
         legacy_items = legacy.get("items") or []
         confirmed_items = current.get("confirmedItems") or []
         conditional_items = current.get("conditionalItems") or []
+        compatibility_items = current.get("items") or []
+        if compatibility_items != confirmed_items:
+            raise ValueError(
+                "items must remain a confirmedItems-only compatibility alias"
+            )
+        coverage = current.get("coverage")
+        if not isinstance(coverage, dict):
+            raise ValueError("Ranking result coverage must be an object.")
+        for field in _EFFECTIVENESS_COVERAGE_FIELDS:
+            effectiveness_coverage[field] += _coverage_count(coverage, field)
+        for field in (
+            "canonicalVariantsAudited",
+            "canonicalVariantAmbiguousSpecies",
+        ):
+            if field not in coverage:
+                raise ValueError(f"coverage.{field} is required")
+        reported_species_audited = _coverage_count(
+            coverage, "canonicalVariantsAudited"
+        )
+        reported_ambiguous_species = _coverage_count(
+            coverage, "canonicalVariantAmbiguousSpecies"
+        )
+        if canonical_species_audited is None:
+            canonical_species_audited = reported_species_audited
+            canonical_ambiguous_species = reported_ambiguous_species
+        elif (
+            canonical_species_audited != reported_species_audited
+            or canonical_ambiguous_species != reported_ambiguous_species
+        ):
+            raise ValueError(
+                "Canonical variant coverage changed across node/resource queries"
+            )
+        raw_variant_audits = current.get("variantSelectionAudits") or []
+        if not isinstance(raw_variant_audits, list):
+            raise ValueError("variantSelectionAudits must be an array.")
+        for raw_audit in raw_variant_audits:
+            if not isinstance(raw_audit, dict):
+                raise ValueError("variantSelectionAudits entries must be objects.")
+            species_key = str(raw_audit.get("speciesKey") or "")
+            if not species_key:
+                raise ValueError("variantSelectionAudits speciesKey must be non-empty.")
+            audit = dict(raw_audit)
+            previous = canonical_audits.setdefault(species_key, audit)
+            if previous != audit:
+                raise ValueError(
+                    "Canonical variant audit changed across node/resource queries: "
+                    f"{species_key}"
+                )
+        raw_ambiguity_examples = coverage.get(
+            "canonicalVariantAmbiguityExamples"
+        ) or []
+        if not isinstance(raw_ambiguity_examples, list):
+            raise ValueError(
+                "coverage.canonicalVariantAmbiguityExamples must be an array"
+            )
+        for raw_audit in raw_ambiguity_examples:
+            if not isinstance(raw_audit, dict):
+                raise ValueError(
+                    "coverage.canonicalVariantAmbiguityExamples entries must be objects"
+                )
+            species_key = str(raw_audit.get("speciesKey") or "")
+            if not species_key or raw_audit.get("ambiguous") is not True:
+                raise ValueError(
+                    "Canonical ambiguity examples must identify an ambiguous species"
+                )
+            audit = dict(raw_audit)
+            previous = canonical_ambiguity_examples.setdefault(species_key, audit)
+            if previous != audit:
+                raise ValueError(
+                    "Canonical ambiguity example changed across queries: "
+                    f"{species_key}"
+                )
+        if reported_species_audited < len(raw_variant_audits):
+            raise ValueError(
+                "coverage.canonicalVariantsAudited is smaller than returned audits"
+            )
+        if reported_ambiguous_species < len(raw_ambiguity_examples):
+            raise ValueError(
+                "coverage.canonicalVariantAmbiguousSpecies is smaller than examples"
+            )
         legacy_top = _species(legacy_items[0] if legacy_items else None)
         confirmed_top = _species(confirmed_items[0] if confirmed_items else None)
         conditional_top = _species(
@@ -254,8 +377,15 @@ def audit_changes(
                         ),
                     }
                 )
+    ordered_variant_audits = [
+        canonical_audits[species_key] for species_key in sorted(canonical_audits)
+    ]
+    ordered_ambiguity_examples = [
+        canonical_ambiguity_examples[species_key]
+        for species_key in sorted(canonical_ambiguity_examples)
+    ]
     return {
-        "schema": "blueprint-to-code.harvest-ranking-v2-changed-cases/v1",
+        "schema": "blueprint-to-code.harvest-ranking-v2-changed-cases/v2",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "comparison": {
             "before": "legacy combined evidence + best discovered variant",
@@ -263,11 +393,54 @@ def audit_changes(
             "metric": METRIC_STATIC_TOTAL,
             "availabilityPolicy": AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
         },
+        "metricContracts": {
+            metric: dict(contract) for metric, contract in METRIC_CONTRACTS.items()
+        },
+        "cycleTimingContract": {
+            "firstHitTiming": "FIRST_HIT_AT_END_OF_FIRST_ATTACK_CYCLE",
+            "elapsedSeconds": (
+                "estimatedHitsToDepleteNode * effectiveAttackInterval"
+            ),
+        },
+        "resultTierSemantics": {
+            "confirmedItems": "PRIMARY_CONFIRMED_RANKING",
+            "conditionalItems": "SEPARATE_CONDITIONAL_RANKING_NOT_PROMOTED",
+            "items": "CONFIRMED_ITEMS_COMPATIBILITY_ALIAS_ONLY",
+            "relativeBaselines": "INDEPENDENT_WITHIN_EACH_EVIDENCE_TIER",
+        },
         "dataset": {
             "node": dict(node_catalog.get("dataset") or {}),
             "evaluation": dict(evaluation_catalog.get("dataset") or {}),
         },
         "counts": dict(sorted(counts.items())),
+        "effectivenessCoverage": {
+            field: effectiveness_coverage[field]
+            for field in _EFFECTIVENESS_COVERAGE_FIELDS
+        },
+        "canonicalVariantAudit": {
+            "scope": "ALL_DISCOVERED_CREATURE_ASSETS",
+            "rankingUsageScope": str(
+                evaluation_catalog.get("methodology", {}).get("usageScope")
+                or TAMED_RIDDEN
+            ),
+            "creatureAssetsAudited": len(
+                [
+                    row
+                    for row in evaluation_catalog.get("creatures", [])
+                    if isinstance(row, dict)
+                ]
+            ),
+            "speciesAudited": canonical_species_audited or 0,
+            "ambiguousSpecies": canonical_ambiguous_species or 0,
+            "auditExampleLimit": _VARIANT_AUDIT_EXAMPLE_LIMIT,
+            "audits": ordered_variant_audits,
+            "auditExamples": ordered_variant_audits[
+                :_VARIANT_AUDIT_EXAMPLE_LIMIT
+            ],
+            "ambiguityExamples": ordered_ambiguity_examples[
+                :_VARIANT_AUDIT_EXAMPLE_LIMIT
+            ],
+        },
         "dreadTopProfiles": {
             "legacy": _profile_rows(dread_legacy_top_profiles),
             "v2Confirmed": _profile_rows(dread_confirmed_top_profiles),
@@ -285,9 +458,27 @@ def audit_changes(
 
 def render_markdown(result: dict[str, Any]) -> str:
     counts = result.get("counts") or {}
+    effectiveness = result.get("effectivenessCoverage") or {}
+    variant_audit = result.get("canonicalVariantAudit") or {}
+    metric_contracts = result.get("metricContracts") or {}
+    metric_lines = [
+        (
+            f"- `{metric}`: `{contract.get('scoreBasis')}`, "
+            f"`{contract.get('unit')}`, "
+            f"runtime=`{str(contract.get('runtime')).lower()}`"
+        )
+        for metric, contract in metric_contracts.items()
+        if isinstance(contract, dict)
+    ]
     return "\n".join(
         [
             "# Harvest Ranking Contract v2 changed cases",
+            "",
+            "## Metric contracts",
+            "",
+            *metric_lines,
+            "",
+            "## Audit counts",
             "",
             f"- Unique pairs: `{counts.get('uniquePairs', 0)}`",
             f"- Node/resource occurrences: `{counts.get('occurrences', 0)}`",
@@ -295,8 +486,30 @@ def render_markdown(result: dict[str, Any]) -> str:
             f"- Dreadnoughtus legacy top occurrences: `{counts.get('dreadLegacyTopOccurrences', 0)}`",
             f"- Dreadnoughtus v2 confirmed top occurrences: `{counts.get('dreadV2ConfirmedTopOccurrences', 0)}`",
             f"- Dreadnoughtus v2 conditional top occurrences: `{counts.get('dreadV2ConditionalTopOccurrences', 0)}`",
+            (
+                "- Canonical creature assets audited before ranking scope: "
+                f"`{variant_audit.get('creatureAssetsAudited', 0)}`"
+            ),
+            (
+                "- Canonical species audited in "
+                f"`{variant_audit.get('scope', 'ALL_DISCOVERED_CREATURE_ASSETS')}`: "
+                f"`{variant_audit.get('speciesAudited', 0)}`"
+            ),
+            (
+                "- Ranking usage scope applied after canonical audit: "
+                f"`{variant_audit.get('rankingUsageScope', TAMED_RIDDEN)}`"
+            ),
+            f"- Canonical ambiguous species: `{variant_audit.get('ambiguousSpecies', 0)}`",
+            f"- Effectiveness rows with field: `{effectiveness.get('rowsWithEffectivenessField', 0)}`",
+            f"- Effectiveness non-neutral rows: `{effectiveness.get('rowsWithNonNeutralEffectiveness', 0)}`",
+            f"- Rows conditional because Effectiveness is not modeled: `{effectiveness.get('rowsConditionalBecauseEffectiveness', 0)}`",
             "",
-            "> v2 splits evidence tiers and selects a canonical variant. It does not change the static complete-node formula or create runtime gold.",
+            "> `items` is a compatibility alias of `confirmedItems` only. "
+            "`conditionalItems` has an independent rank and relative baseline.",
+            "",
+            "> v2 splits evidence tiers and requires either one BASE candidate or "
+            "one unambiguous ancestry-root BASE candidate. "
+            "It does not change the static complete-node formula or create runtime gold.",
             "",
         ]
     )

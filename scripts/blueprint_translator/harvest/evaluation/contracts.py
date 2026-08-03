@@ -19,16 +19,34 @@ METRIC_OBSERVED_PER_NODE = "observedYieldPerNode"
 METRIC_OBSERVED_PER_SECOND = "observedYieldPerSecond"
 AVAILABILITY_GLOBAL_TRANSFER_ALLOWED = "GLOBAL_TRANSFER_ALLOWED"
 
+METRIC_CONTRACTS: dict[str, dict[str, object]] = {
+    METRIC_STATIC_TOTAL: {
+        "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+        "unit": "target_resource_units/node",
+        "runtime": False,
+    },
+    METRIC_STATIC_CYCLE_SPEED: {
+        "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_ATTACK_CYCLE_SECOND",
+        "unit": "target_resource_units/attack_cycle_second",
+        "runtime": False,
+    },
+    METRIC_OBSERVED_PER_NODE: {
+        "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+        "unit": "target_resource_units/node",
+        "runtime": True,
+    },
+    METRIC_OBSERVED_PER_SECOND: {
+        "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_SECOND",
+        "unit": "target_resource_units/second",
+        "runtime": True,
+    },
+}
+
 EVIDENCE_POLICIES = {POLICY_CONFIRMED, POLICY_INCLUDE_CONDITIONAL}
 VARIANT_POLICIES = {
     VARIANT_CANONICAL,
     VARIANT_ALL,
     VARIANT_BEST_DISCOVERED_EXPLORATORY,
 }
-RANKING_METRICS = {
-    METRIC_STATIC_TOTAL,
-    METRIC_STATIC_CYCLE_SPEED,
-    METRIC_OBSERVED_PER_NODE,
-    METRIC_OBSERVED_PER_SECOND,
-}
+RANKING_METRICS = set(METRIC_CONTRACTS)
 AVAILABILITY_POLICIES = {AVAILABILITY_GLOBAL_TRANSFER_ALLOWED}

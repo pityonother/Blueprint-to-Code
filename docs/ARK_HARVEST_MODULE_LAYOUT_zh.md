@@ -20,6 +20,28 @@ contracts / identity
 - `blueprint_translator.harvest.repository`：数据集校验、缓存和查询服务；不实现 Harvest 公式。
 - `blueprint_translator.harvest.build`：creature discovery、ancestry、asset projection 与 catalog assembly。
 
+Evaluation 内部继续按职责拆分：
+
+- `evaluation/contracts.py`：四个 metric 的 score basis、单位、static/runtime 边界与公开 policy 常量。
+- `evaluation/runtime.py`：runtime profile 选择、preliminary opt-in 与 observation eligibility。
+- `evaluation/variant_selection.py`：全目录 canonical variant 分类、歧义审计与同物种 variant 投影。
+- `evaluation/species_evaluation.py`：单物种攻击事实计算；公式实现仍只来自 `harvest/model/`。
+- `evaluation/tier_projection.py`：confirmed/conditional 独立 competition rank 与 bounded Top-N。
+- `evaluation/result_projection.py`：Ranking Contract v2 coverage、identity、methodology 与 JSON 响应组装。
+- `evaluation/legacy.py`：隔离一个兼容窗口内的 v1 响应。
+- `evaluation/engine.py`：预索引 catalog 并编排上述服务，不复制公式或投影规则。
+
+Repository 内部继续按职责拆分：
+
+- `repository/dataset_loader.py`：JSON/SQLite 数据集加载、源绑定校验和节点查询。
+- `repository/revision_binding.py`：evaluation/component revision 与模型身份绑定。
+- `repository/runtime_overlay.py`：runtime profile 选择、过滤和 observation 缓存隔离。
+- `repository/caches.py`：所有 LRU 容量和 repository 可变缓存状态。
+- `repository/forward_service.py`：正向排行、同 tier baseline 与 legacy ranking fallback。
+- `repository/specialty_service.py`：反向 specialties、稳定分页排序和 legacy specialty fallback。
+- `repository/creature_service.py`：物种折叠与 creature list 投影。
+- `repository/service.py`：只组合上述服务并初始化路径/缓存，不拥有查询或排行规则。
+
 以下旧入口保留一个兼容窗口，只转发到新模块：
 
 - `blueprint_translator.harvest_ranking`
@@ -43,7 +65,7 @@ contracts / identity
 ```powershell
 python -m pytest tests/test_harvest_module_boundaries.py tests/test_harvest_refactor_characterization.py -q
 python -m pytest -q
-python -m ruff check scripts tests
+python -m ruff check <本次变更的 Python 文件>
 npm run build
 node tests/harvest_frontend_contract.mjs
 ```
