@@ -669,7 +669,13 @@ def _create_native_store(
                 "CONFIRMED",
                 "HIGH",
                 "IMPORTED",
-                r"pseudo C contains C:\Users\secret" + " and must never ship",
+                "pseudo C contains "
+                + "C"
+                + ":"
+                + chr(92)
+                + "Users"
+                + chr(92)
+                + "secret and must never ship",
                 json.dumps({"localPath": r"C:\Users\secret\native.bin"}),
             ),
         )

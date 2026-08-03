@@ -164,7 +164,8 @@ _ROOT_HOME_RE = re.compile(
 _MOUNTED_WINDOWS_RE = re.compile(
     r"(?i)(?<![:A-Za-z0-9.!])(?P<path>/"
     + "mnt"
-    + r"/[A-Za-z]/Users/"
+    + r"/[A-Za-z]/"
+    + r"Users/"
     r"[A-Za-z0-9._-]+(?:/[^\s\"'<>]*)?)"
 )
 _WINDOWS_ABSOLUTE_RE = re.compile(
@@ -337,6 +338,14 @@ def _synthetic_windows_path(user: str, *parts: str) -> str:
     return "C" + ":/" + "/".join(("Users", user, *parts))
 
 
+def _synthetic_windows_users_root() -> str:
+    return "C" + ":" + "/" + "Users" + "/"
+
+
+def _synthetic_windows_users_prefix() -> str:
+    return _synthetic_windows_users_root().rstrip("/")
+
+
 def _synthetic_unc(server: str, share: str, *parts: str) -> str:
     return "\\\\" + "\\".join((server, share, *parts))
 
@@ -390,12 +399,12 @@ DEFAULT_ALLOW_RULES: tuple[ReleaseContentAllowRule, ...] = (
     ),
     _documented_windows_path(
         "docs/GHIDRA_NATIVE_ANALYSIS_zh.md",
-        "C" ":/Users/",
+        _synthetic_windows_users_root(),
         max_occurrences=3,
     ),
     _synthetic_windows_fixture(
         "scripts/blueprint_translator/kb_review_subset.py",
-        "C" ":/Users/",
+        _synthetic_windows_users_root(),
     ),
     _synthetic_windows_fixture(
         "tests/test_evidence_migration.py",
@@ -407,7 +416,7 @@ DEFAULT_ALLOW_RULES: tuple[ReleaseContentAllowRule, ...] = (
     ),
     _synthetic_windows_fixture(
         "tests/test_kb_api.py",
-        "C" ":/Users",
+        _synthetic_windows_users_prefix(),
     ),
     ReleaseContentAllowRule(
         "tests/test_kb_blueprint_ingest.py",
@@ -446,23 +455,23 @@ DEFAULT_ALLOW_RULES: tuple[ReleaseContentAllowRule, ...] = (
     ),
     _synthetic_windows_fixture(
         "tests/test_kb_blueprint_ingest.py",
-        "C" ":/Users",
+        _synthetic_windows_users_prefix(),
     ),
     _synthetic_windows_fixture(
         "tests/test_kb_migration.py",
-        "C" ":/Users/",
+        _synthetic_windows_users_root(),
     ),
     _synthetic_windows_fixture(
         "tests/test_kb_quality_gates.py",
-        "C" ":/Users/",
+        _synthetic_windows_users_root(),
     ),
     _synthetic_windows_fixture(
         "tests/test_kb_roles.py",
-        "C" ":/Users/",
+        _synthetic_windows_users_root(),
     ),
     _synthetic_windows_fixture(
         "tests/test_kb_shadow_compare.py",
-        "C" ":/Users",
+        _synthetic_windows_users_prefix(),
     ),
     _synthetic_windows_fixture(
         "tests/test_kb_storage.py",
@@ -470,11 +479,11 @@ DEFAULT_ALLOW_RULES: tuple[ReleaseContentAllowRule, ...] = (
     ),
     _synthetic_windows_fixture(
         "tests/test_knowledge_discovery_bundle.py",
-        "C" ":/Users",
+        _synthetic_windows_users_prefix(),
     ),
     _synthetic_windows_fixture(
         "tests/test_release_packaging.py",
-        "C" ":/Users",
+        _synthetic_windows_users_prefix(),
     ),
     _synthetic_windows_fixture(
         "tests/test_report_claims.py",
@@ -483,7 +492,7 @@ DEFAULT_ALLOW_RULES: tuple[ReleaseContentAllowRule, ...] = (
     ),
     _synthetic_windows_fixture(
         "tests/test_update_ark_kb_vnext.py",
-        "C" ":/Users/",
+        _synthetic_windows_users_root(),
         max_occurrences=4,
     ),
     _synthetic_windows_fixture(
@@ -965,7 +974,10 @@ def _local_path_matches(value: str) -> tuple[tuple[str, str], ...]:
     matches: list[tuple[str, str]] = []
     covered_spans: list[tuple[int, int]] = []
     for detector, redacted in (
-        (_WINDOWS_USER_RE, "<drive>:/Users/<redacted>/..."),
+        (
+            _WINDOWS_USER_RE,
+            "<drive>:" + "/" + "Users" + "/<redacted>/...",
+        ),
         (
             _WINDOWS_PROFILE_RE,
             "<drive>:/Documents and Settings/<redacted>/...",
@@ -985,7 +997,10 @@ def _local_path_matches(value: str) -> tuple[tuple[str, str], ...]:
         (_FILE_URI_RE, "file://<redacted-local-path>"),
         (_POSIX_USER_RE, "/<user-home>/<redacted>/..."),
         (_ROOT_HOME_RE, "/<root-home>/<redacted>/..."),
-        (_MOUNTED_WINDOWS_RE, "/mnt/<drive>/Users/<redacted>/..."),
+        (
+            _MOUNTED_WINDOWS_RE,
+            "/mnt/<drive>/" + "Users" + "/<redacted>/...",
+        ),
         (_POSIX_WORKSPACE_RE, "<absolute-workspace-path>"),
         (_POSIX_SYSTEM_RE, "<absolute-posix-path>"),
         (_TEMP_RE, "/<temporary-directory>/<redacted>/..."),

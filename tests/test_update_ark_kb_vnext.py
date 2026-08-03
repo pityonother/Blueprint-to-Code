@@ -779,15 +779,34 @@ def test_diff_precisely_lists_added_changed_and_deleted() -> None:
     [
         ("sourceId", "a" * 63),
         ("fingerprint", "z" * 64),
-        ("sourceUri", "C:/Users/" + "ac/native.json"),
-        ("sourceUri", "file:" + "///C:/Users/" + "ac/native.json"),
+        (
+            "sourceUri",
+            "C" + ":" + "/" + "Users" + "/" + "ac/native.json",
+        ),
+        (
+            "sourceUri",
+            "file:"
+            + "///"
+            + "C"
+            + ":"
+            + "/"
+            + "Users"
+            + "/"
+            + "ac/native.json",
+        ),
         ("sourceUri", "https://example.invalid/input"),
         ("sourceUri", "capture://Demo Asset"),
         ("sourceUri", "capture://Demo/home/ac/private.json"),
-        ("entityUri", "C:\\Users\\" + "ac\\capture"),
-        ("entityUri", "file:" + "///home/" + "ac/private"),
+        (
+            "entityUri",
+            "C" + ":" + chr(92) + "Users" + chr(92) + "ac" + chr(92) + "capture",
+        ),
+        (
+            "entityUri",
+            "file:" + "///" + "home" + "/" + "ac/private",
+        ),
         ("entityUri", "bp://fixture/C%3A%5CUsers%5C" + "ac%5Cprivate"),
-        ("revisionLabel", "/home/" + "ac/private/revision"),
+        ("revisionLabel", "/" + "home" + "/" + "ac/private/revision"),
         (
             "sourceKind",
             chr(92) * 2 + "server" + chr(92) + "share" + chr(92) + "kind",

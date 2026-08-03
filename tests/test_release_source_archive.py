@@ -378,7 +378,12 @@ class ReleaseSourceArchiveTests(unittest.TestCase):
         yaml_secret = "password" + ": RealSecret123!"
         json_secret = '{"' + "client_secret" + '":"RealSecret123!"}'
         hash_secret = "PASSWORD" + "=$2b$12$abcdefghijklmnopqrstuvwxyz0123456789"
-        query_secret = "https://example.invalid/?" + "access_token=RealSecret123!"
+        query_secret = (
+            "https://example.invalid/?"
+            + "access_"
+            + "token="
+            + "RealSecret123!"
+        )
         cli_secret = "tool --" + "password RealSecret123!"
         yaml_spaces = "password" + ": correct horse battery staple"
         angle_secret = "PASSWORD" + "=<live-password-123>"

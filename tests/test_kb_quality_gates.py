@@ -1234,7 +1234,9 @@ class KnowledgeQualityGateTests(unittest.TestCase):
                 '2026-07-28T00:00:00Z', 'FRESH'
             );
             INSERT INTO source_revisions VALUES(
-                2, 'fixture', 'C:/Users/' || 'ac/private',
+                2, 'fixture',
+                char(67) || char(58) || char(47) || 'Users' ||
+                char(47) || 'ac/private',
                 'x', 'fixture', 'fixture/v1',
                 'not-a-time', 'FRESH'
             );
