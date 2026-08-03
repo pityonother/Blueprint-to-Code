@@ -99,6 +99,54 @@ class ReleaseReadinessTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(process.stdout.strip(), str(special_root.resolve()))
 
+    def test_start_here_matches_bracketed_project_root_as_a_literal_path(self):
+        launcher = (ROOT / "START_HERE.bat").read_text(encoding="utf-8")
+
+        self.assertNotIn("-like ('*' + $root + '*')", launcher)
+        self.assertIn(
+            "$_.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0",
+            launcher,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            special_root = Path(temp_dir) / "Blueprint[1]"
+            sibling_root = Path(temp_dir) / "Blueprint1"
+            special_root.mkdir()
+            sibling_root.mkdir()
+            environment = dict(os.environ)
+            environment["BLUEPRINT_TO_CODE_LAUNCH_ROOT"] = str(special_root)
+            environment["BLUEPRINT_TO_CODE_OWN_COMMAND"] = str(
+                special_root / "scripts" / "blueprint_tool_server.py"
+            )
+            environment["BLUEPRINT_TO_CODE_SIBLING_COMMAND"] = str(
+                sibling_root / "scripts" / "blueprint_tool_server.py"
+            )
+            process = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "$root=(Resolve-Path -LiteralPath "
+                        "$env:BLUEPRINT_TO_CODE_LAUNCH_ROOT).Path; "
+                        "$comparison=[StringComparison]::OrdinalIgnoreCase; "
+                        "$own=$env:BLUEPRINT_TO_CODE_OWN_COMMAND; "
+                        "$sibling=$env:BLUEPRINT_TO_CODE_SIBLING_COMMAND; "
+                        "Write-Output ($own.IndexOf($root, $comparison) -ge 0); "
+                        "Write-Output ($sibling.IndexOf($root, $comparison) -ge 0)"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stdout.splitlines(), ["True", "False"])
+
 
 if __name__ == "__main__":
     unittest.main()
