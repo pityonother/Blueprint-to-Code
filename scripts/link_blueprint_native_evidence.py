@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,12 @@ from blueprint_translator.native_evidence_repository import (  # noqa: E402
 
 
 CALLS_SCHEMA = "blueprint-to-code-blueprint-native-calls/v1"
+
+
+def _lexical_absolute(path: str | os.PathLike[str]) -> Path:
+    """Return an absolute path without following links or reparse points."""
+
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
 
 
 def _read_calls(path: Path) -> tuple[list[dict[str, object]], dict[str, str]]:
@@ -78,7 +85,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.calls_json is not None:
             calls, identity = _read_calls(args.calls_json.resolve())
         else:
-            calls, identity = extract_blueprint_calls(args.asset_dir.resolve())
+            calls, identity = extract_blueprint_calls(
+                _lexical_absolute(args.asset_dir)
+            )
         with open_native_evidence_repository(
             args.native_evidence_dir.resolve()
         ) as native:

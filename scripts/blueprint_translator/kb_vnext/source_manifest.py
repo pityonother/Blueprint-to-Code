@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import sqlite3
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -13,6 +12,16 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import quote, unquote, urlsplit
 
+from ..evidence_publication import (
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_path_chain,
+)
+from ..evidence_repository import (
+    ResolvedEvidenceState,
+    open_bound_evidence_database,
+    resolve_asset_evidence_state,
+)
 from .native_ingest import NativeEvidenceSet, load_native_evidence_corpus
 
 
@@ -505,58 +514,115 @@ def runtime_observations_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _capture_identity(database: Path) -> tuple[str, str]:
-    try:
-        connection = sqlite3.connect(
-            f"file:{database.resolve().as_posix()}?mode=ro",
-            uri=True,
-        )
-        try:
-            rows = list(
-                connection.execute(
-                    """
-                    SELECT DISTINCT object_path, revision_id
-                    FROM asset_revisions
-                    ORDER BY revision_id DESC
-                    LIMIT 2
-                    """
-                )
+def resolve_live_capture_evidence_states(
+    capture_root: Path,
+) -> tuple[ResolvedEvidenceState, ...]:
+    """Resolve each declared live capture through the v3-aware trust boundary.
+
+    A capture is declared when it has either a v3 current pointer or the v2
+    compatibility database.  Once declared, every resolver error is allowed to
+    propagate: a damaged current pointer must never fall back to v2 bytes.
+    Directories without either declaration remain outside the Evidence set.
+    """
+
+    root = _lexical_absolute(capture_root)
+    _require_plain_path_chain(root, label="capture root")
+    if not root.is_dir():
+        return ()
+    _require_plain_directory(root, label="capture root")
+    states: list[ResolvedEvidenceState] = []
+    for asset_dir in sorted(root.iterdir(), key=lambda path: path.name):
+        if not asset_dir.is_dir():
+            continue
+        evidence_root = asset_dir / "evidence"
+        declared = False
+        for declaration in (
+            evidence_root / "current.json",
+            evidence_root / "evidence.sqlite",
+        ):
+            try:
+                declaration.lstat()
+            except FileNotFoundError:
+                continue
+            declared = True
+            break
+        if not declared:
+            continue
+        states.append(resolve_asset_evidence_state(asset_dir))
+    return tuple(states)
+
+
+def _capture_identity(state: ResolvedEvidenceState) -> tuple[str, str]:
+    with open_bound_evidence_database(state) as connection:
+        rows = list(
+            connection.execute(
+                """
+                SELECT DISTINCT object_path, revision_id
+                FROM asset_revisions
+                ORDER BY revision_id DESC
+                LIMIT 2
+                """
             )
-            if len(rows) != 1:
-                return "", ""
-            return str(rows[0][0] or ""), str(rows[0][1] or "")
-        finally:
-            connection.close()
-    except sqlite3.DatabaseError:
-        return "", ""
+        )
+    if len(rows) != 1:
+        raise ValueError("resolved Blueprint evidence must contain one identity")
+    return str(rows[0][0] or ""), str(rows[0][1] or "")
+
+
+def live_capture_evidence_fingerprint(
+    state: ResolvedEvidenceState,
+) -> str:
+    """Bind a resolved live state without exposing its host paths."""
+
+    payload = {
+        "schema": "blueprint-to-code.live-evidence-fingerprint/v2",
+        "sourceKind": state.source_kind,
+        "freshnessStatus": state.freshness_status,
+        "releaseAuthority": state.release_authority,
+        "migrationRequired": state.migration_required,
+        "manifestSha256": state.manifest_sha256,
+        "pointerSha256": state.pointer_sha256,
+        "database": {
+            "bytes": state.database_bytes,
+            "sha256": state.database_sha256,
+        },
+        "manifest": {
+            "bytes": state.manifest_bytes,
+            "sha256": state.manifest_content_sha256,
+        },
+        "agentIndex": {
+            "bytes": state.agent_index_bytes,
+            "sha256": state.agent_index_sha256,
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _blueprint_revision(
-    database: Path,
+    state: ResolvedEvidenceState,
     capture_root: Path,
 ) -> SourceRevision:
-    entity_uri, revision_label = _capture_identity(database)
-    asset_root = database.parent.parent
+    entity_uri, revision_label = _capture_identity(state)
+    asset_root = state.asset_dir
     asset_name = quote(
         asset_root.relative_to(capture_root).as_posix(),
         safe="._-",
     )
     source_kind = "BLUEPRINT_EVIDENCE"
     source_uri = f"capture://{asset_name}"
-    digest = hashlib.sha256()
-    for path in (database, database.parent / "manifest.json"):
-        if not path.is_file():
-            continue
-        digest.update(path.name.encode("utf-8"))
-        digest.update(b"\0")
-        _hash_file(path, digest)
-        digest.update(b"\n")
     return SourceRevision(
         source_id=source_id(source_kind, source_uri),
         source_kind=source_kind,
         source_uri=source_uri,
-        fingerprint=digest.hexdigest(),
-        size_bytes=database.stat().st_size,
+        fingerprint=live_capture_evidence_fingerprint(state),
+        size_bytes=state.database_bytes,
         entity_uri=entity_uri,
         revision_label=revision_label,
     )
@@ -625,14 +691,13 @@ def scan_source_manifest(
             fingerprint=runtime_observations_sha256(runtime_root),
         )
     )
-    capture_root = capture_root.resolve()
+    capture_root = _lexical_absolute(capture_root)
+    _require_plain_path_chain(capture_root, label="capture root")
     if capture_root.is_dir():
+        _require_plain_directory(capture_root, label="capture root")
         entries.extend(
-            _blueprint_revision(database, capture_root)
-            for database in sorted(
-                capture_root.glob("*/evidence/evidence.sqlite"),
-                key=lambda path: path.relative_to(capture_root).as_posix(),
-            )
+            _blueprint_revision(state, capture_root)
+            for state in resolve_live_capture_evidence_states(capture_root)
         )
     corpus = load_native_evidence_corpus(native_root)
     entries.extend(
@@ -658,7 +723,9 @@ __all__ = [
     "SourceRevision",
     "canonical_source_diff_bytes",
     "compare_source_manifests",
+    "live_capture_evidence_fingerprint",
     "runtime_observations_sha256",
+    "resolve_live_capture_evidence_states",
     "scan_source_manifest",
     "source_id",
     "source_diff_sha256",

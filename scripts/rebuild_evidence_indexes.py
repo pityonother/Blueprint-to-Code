@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.evidence_writer import refresh_agent_index
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    resolve_asset_evidence_state,
+)
+from blueprint_translator.evidence_writer import refresh_agent_index  # noqa: E402
+
+
+def _lexical_absolute(path: str | os.PathLike[str]) -> Path:
+    """Return an absolute path without following links or reparse points."""
+
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -39,11 +49,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def discover_asset_dirs(capture_root: Path) -> list[Path]:
-    root = capture_root.expanduser().resolve()
+    root = _lexical_absolute(capture_root)
     if not root.is_dir():
         raise FileNotFoundError(root)
+    evidence_markers = [
+        *root.rglob("evidence/current.json"),
+        *root.rglob("evidence/evidence.sqlite"),
+    ]
     return sorted(
-        {database.parent.parent.resolve() for database in root.rglob("evidence/evidence.sqlite")},
+        {_lexical_absolute(marker.parent.parent) for marker in evidence_markers},
         key=lambda path: str(path).casefold(),
     )
 
@@ -55,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             discover_asset_dirs(args.capture_root)
             if args.all
             else sorted(
-                {path.expanduser().resolve() for path in args.asset_dir},
+                {_lexical_absolute(path) for path in args.asset_dir},
                 key=lambda path: str(path).casefold(),
             )
         )
@@ -67,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[dict[str, str]] = []
     for asset_dir in asset_dirs:
         try:
+            state = resolve_asset_evidence_state(asset_dir)
             refreshed = refresh_agent_index(asset_dir)
             results.append(
                 {
@@ -75,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
                     "revisionId": str(refreshed.get("revision_id") or ""),
                     "gapCount": int(refreshed.get("gap_count") or 0),
                     "estimatedTokens": int(refreshed.get("estimated_tokens") or 0),
+                    "sourceKind": state.source_kind,
+                    "releaseAuthority": state.release_authority,
                 }
             )
         except Exception as exc:

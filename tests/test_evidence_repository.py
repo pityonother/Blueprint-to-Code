@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from blueprint_translator.evidence_repository import open_asset_repository  # noqa: E402
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    open_asset_repository,
+    open_bound_evidence_database,
+    resolve_asset_evidence_state,
+)
+from blueprint_translator.evidence_query import EvidenceQueryService  # noqa: E402
 from blueprint_translator.evidence_writer import (  # noqa: E402
-    write_evidence_store_from_capture,
+    migrate_asset_capture,
 )
 
 
@@ -279,13 +286,195 @@ def _replace_with_lionfish_scale_gaps(database_path: Path) -> None:
 
 
 class EvidenceRepositoryContractTests(unittest.TestCase):
+    def test_repository_open_rejects_sidecars_created_after_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for suffix in ("-wal", "-shm", "-journal"):
+                with self.subTest(sidecar=suffix):
+                    asset_dir = _write_legacy_capture(
+                        root / suffix.removeprefix("-"),
+                        revision_marker=f"sidecar-race-{suffix}",
+                    )
+                    migrate_asset_capture(asset_dir)
+
+                    from blueprint_translator import evidence_repository as repository_module
+
+                    real_resolve = repository_module.resolve_asset_evidence_state
+
+                    def resolve_then_add_sidecar(*args: object, **kwargs: object):
+                        state = real_resolve(*args, **kwargs)
+                        state.database_path.with_name(
+                            state.database_path.name + suffix
+                        ).write_bytes(b"injected-sidecar")
+                        return state
+
+                    with (
+                        patch.object(
+                            repository_module,
+                            "resolve_asset_evidence_state",
+                            side_effect=resolve_then_add_sidecar,
+                        ),
+                        self.assertRaisesRegex(ValueError, "sidecar is forbidden"),
+                    ):
+                        open_asset_repository(asset_dir)
+
+    def test_stable_binding_rejects_a_hardlink_created_while_hashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.bin"
+            linked = root / "linked.bin"
+            source.write_bytes(b"immutable-evidence")
+
+            from blueprint_translator import evidence_repository as repository_module
+
+            real_read = repository_module.os.read
+            linked_once = False
+
+            def read_then_link(descriptor: int, size: int) -> bytes:
+                nonlocal linked_once
+                chunk = real_read(descriptor, size)
+                if chunk and not linked_once:
+                    try:
+                        linked.hardlink_to(source)
+                    except OSError as error:
+                        self.skipTest(f"hardlink creation is unavailable: {error}")
+                    linked_once = True
+                return chunk
+
+            with (
+                patch.object(
+                    repository_module.os,
+                    "read",
+                    side_effect=read_then_link,
+                ),
+                self.assertRaisesRegex(ValueError, "plain regular file"),
+            ):
+                repository_module._stable_file_binding(source, label="test artifact")
+
+    def test_v2_resolver_rejects_database_swap_during_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asset_dir = _write_legacy_capture(
+                root / "generation-a",
+                revision_marker="resolver-race-a",
+            )
+            replacement_dir = _write_legacy_capture(
+                root / "generation-b",
+                revision_marker="resolver-race-b",
+            )
+            migrate_asset_capture(asset_dir, publish_v3=False)
+            migrate_asset_capture(replacement_dir, publish_v3=False)
+            database_path = asset_dir / "evidence" / "evidence.sqlite"
+            replacement_database = replacement_dir / "evidence" / "evidence.sqlite"
+
+            from blueprint_translator import evidence_repository as repository_module
+
+            real_projection = repository_module._database_projection
+
+            def project_then_swap(
+                path: Path,
+                **kwargs: object,
+            ) -> dict[str, object]:
+                projection = real_projection(path, **kwargs)
+                shutil.copyfile(replacement_database, database_path)
+                return projection
+
+            with (
+                patch.object(
+                    repository_module,
+                    "_database_projection",
+                    side_effect=project_then_swap,
+                ),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "DATABASE_HASH_MISMATCH|changed while they were validated",
+                ),
+            ):
+                resolve_asset_evidence_state(asset_dir)
+
+    def test_bound_database_helper_is_query_only_and_rechecks_after_use(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset_dir = _write_legacy_capture(
+                Path(tmp),
+                revision_marker="bound-read",
+            )
+            migrate_asset_capture(asset_dir)
+            state = resolve_asset_evidence_state(asset_dir)
+
+            with (
+                patch(
+                    "blueprint_translator.evidence_repository._read_bound_file_bytes",
+                    return_value=b"drift",
+                ),
+                self.assertRaisesRegex(ValueError, "size drifted"),
+                open_bound_evidence_database(state) as connection,
+            ):
+                self.assertEqual(
+                    connection.execute("PRAGMA query_only").fetchone()[0],
+                    1,
+                )
+
+    def test_query_connection_deserializes_bound_bytes_despite_path_aba(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_asset = _write_legacy_capture(
+                root / "generation-a",
+                revision_marker="aba-a",
+                target_function="BoundFunctionA",
+            )
+            second_asset = _write_legacy_capture(
+                root / "generation-b",
+                revision_marker="aba-b",
+                target_function="ReplacementFunctionB",
+            )
+            migrate_asset_capture(first_asset)
+            migrate_asset_capture(second_asset)
+            first_state = resolve_asset_evidence_state(first_asset)
+            replacement = resolve_asset_evidence_state(second_asset).database_path.read_bytes()
+            original = first_state.database_path.read_bytes()
+            real_connect = sqlite3.connect
+            connect_targets: list[str] = []
+
+            def swap_path_while_connecting(*args: object, **kwargs: object):
+                connect_targets.append(str(args[0]))
+                first_state.database_path.write_bytes(replacement)
+                try:
+                    return real_connect(*args, **kwargs)
+                finally:
+                    first_state.database_path.write_bytes(original)
+
+            with patch(
+                "blueprint_translator.bound_database.sqlite3.connect",
+                side_effect=swap_path_while_connecting,
+            ):
+                with EvidenceQueryService.open(
+                    first_state.database_path,
+                    expected_sha256=first_state.database_sha256,
+                    expected_size=first_state.database_bytes,
+                ) as service:
+                    functions = {
+                        str(row[0])
+                        for row in service._connection.execute(  # noqa: SLF001
+                            "SELECT function_name FROM nodes WHERE function_name <> ''"
+                        )
+                    }
+
+            self.assertEqual(connect_targets, [":memory:"])
+            self.assertIn("BoundFunctionA", functions)
+            self.assertNotIn("ReplacementFunctionB", functions)
+
     def test_gap_summary_reports_lionfish_scale_omissions_and_every_reason_group(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             asset_dir = _write_legacy_capture(root, revision_marker="lionfish-scale")
             database_path = asset_dir / "evidence" / "evidence.sqlite"
-            write_evidence_store_from_capture(asset_dir, database_path)
+            migrate_asset_capture(asset_dir, publish_v3=False)
             _replace_with_lionfish_scale_gaps(database_path)
+            manifest_path = asset_dir / "evidence" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["counts"]["edge_observations"] = 0
+            manifest["counts"]["diagnostics"] = 26_461
+            _write_json(manifest_path, manifest)
 
             with open_asset_repository(asset_dir) as repository:
                 summary = repository.gap_summary(limit=200, example_limit=2)
@@ -324,8 +513,7 @@ class EvidenceRepositoryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             asset_dir = _write_legacy_capture(root, revision_marker="revision-a")
-            database_path = asset_dir / "evidence" / "evidence.sqlite"
-            write_evidence_store_from_capture(asset_dir, database_path)
+            migrate_asset_capture(asset_dir, publish_v3=False)
 
             # The indexed revision says ApplyEffect. The legacy capture is now
             # deliberately newer and says LegacyOnlyNewName. A repository that
@@ -369,7 +557,10 @@ class EvidenceRepositoryContractTests(unittest.TestCase):
             )
             before = _asset_snapshot(asset_dir)
 
-            repository = open_asset_repository(asset_dir)
+            repository = open_asset_repository(
+                asset_dir,
+                allow_legacy_fallback=True,
+            )
             try:
                 overview = repository.query(
                     {"operation": "overview", "budgetTokens": 800}
@@ -449,8 +640,7 @@ class EvidenceRepositoryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             asset_dir = _write_legacy_capture(root, revision_marker="revision-a")
-            database_path = asset_dir / "evidence" / "evidence.sqlite"
-            write_evidence_store_from_capture(asset_dir, database_path)
+            migrate_asset_capture(asset_dir, publish_v3=False)
 
             with open_asset_repository(asset_dir) as old_repository:
                 old_ref = _find_node_ref(
@@ -460,7 +650,7 @@ class EvidenceRepositoryContractTests(unittest.TestCase):
                 )
 
             _write_legacy_capture(root, revision_marker="revision-b")
-            write_evidence_store_from_capture(asset_dir, database_path)
+            migrate_asset_capture(asset_dir, publish_v3=False)
 
             with open_asset_repository(asset_dir) as new_repository:
                 with self.assertRaisesRegex(ValueError, "STALE_REVISION"):

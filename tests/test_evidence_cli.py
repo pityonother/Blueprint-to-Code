@@ -196,9 +196,9 @@ class EvidenceCliTests(unittest.TestCase):
                 self.assertEqual(result["artifact_mode"], expected_mode)
                 self.assertFalse(result["legacy_artifacts_deleted"])
                 expected_paths = {
-                    "database_path": asset_dir / "evidence" / "evidence.sqlite",
-                    "manifest_path": asset_dir / "evidence" / "manifest.json",
-                    "agent_index_path": asset_dir / "output" / "agent_index.md",
+                    "compatibility_database_path": asset_dir / "evidence" / "evidence.sqlite",
+                    "compatibility_manifest_path": asset_dir / "evidence" / "manifest.json",
+                    "compatibility_agent_index_path": asset_dir / "output" / "agent_index.md",
                 }
                 for key, expected_path in expected_paths.items():
                     self.assertTrue(expected_path.is_file(), expected_path)
@@ -214,7 +214,9 @@ class EvidenceCliTests(unittest.TestCase):
             first_result = migrate_asset_capture(first)
             second_result = migrate_asset_capture(second)
             for result in (first_result, second_result):
-                Path(str(result["agent_index_path"])).write_text("# stale index\n", encoding="utf-8")
+                Path(str(result["compatibility_agent_index_path"])).write_text(
+                    "# stale index\n", encoding="utf-8"
+                )
 
             process = _run(
                 REBUILD_INDEXES_SCRIPT,
@@ -233,6 +235,39 @@ class EvidenceCliTests(unittest.TestCase):
                 index_text = Path(str(result["agent_index_path"])).read_text(encoding="utf-8")
                 self.assertIn(str(result["revision_id"]), index_text)
                 self.assertIn("Evidence gaps:", index_text)
+
+    def test_rebuild_indexes_discovers_pruned_v3_and_never_mutates_revision_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture_root = Path(temp_dir) / "captures"
+            asset_dir, _legacy = _make_legacy_capture(capture_root)
+            result = migrate_asset_capture(asset_dir)
+            revision_dir = Path(str(result["revision_dir"]))
+            revision_index = revision_dir / "agent_index.md"
+            original_revision_index = revision_index.read_bytes()
+            for path in (
+                asset_dir / "evidence" / "evidence.sqlite",
+                asset_dir / "evidence" / "manifest.json",
+                asset_dir / "output" / "agent_index.md",
+            ):
+                path.unlink(missing_ok=True)
+
+            process = _run(
+                REBUILD_INDEXES_SCRIPT,
+                "--capture-root",
+                capture_root,
+                "--all",
+                "--expected-asset-count",
+                1,
+            )
+            payload = self._successful_json(process)
+
+            self.assertEqual(payload["selected"], 1)
+            self.assertEqual(payload["passed"], 1)
+            self.assertEqual(revision_index.read_bytes(), original_revision_index)
+            self.assertEqual(
+                (asset_dir / "output" / "agent_index.md").read_bytes(),
+                original_revision_index,
+            )
 
     def test_overview_and_search_json_match_the_shared_service_and_obey_budget(self):
         with tempfile.TemporaryDirectory() as temp_dir:

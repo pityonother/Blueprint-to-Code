@@ -139,10 +139,10 @@ def _make_capture(root: Path, name: str = "ValidationFixture") -> Path:
     return asset_dir
 
 
-def _migrate(asset_dir: Path) -> None:
+def _migrate(asset_dir: Path, *, publish_v3: bool = True) -> None:
     from blueprint_translator.evidence_writer import migrate_asset_capture
 
-    migrate_asset_capture(asset_dir)
+    migrate_asset_capture(asset_dir, publish_v3=publish_v3)
 
 
 def _make_direct_capture(root: Path, name: str = "DirectValidationFixture") -> tuple[Path, Path]:
@@ -379,7 +379,7 @@ class EvidenceValidationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             asset_dir = _make_link_disambiguation_capture(Path(temp_dir))
-            _migrate(asset_dir)
+            _migrate(asset_dir, publish_v3=False)
             report = validate_asset(asset_dir)
 
         self.assertTrue(report["ok"], report)
@@ -393,7 +393,7 @@ class EvidenceValidationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             asset_dir = _make_capture(Path(temp_dir))
-            _migrate(asset_dir)
+            _migrate(asset_dir, publish_v3=False)
 
             report = validate_asset(
                 asset_dir,
@@ -448,7 +448,7 @@ class EvidenceValidationTests(unittest.TestCase):
                 }
             )
             _write_json(defaults_path, defaults)
-            _migrate(asset_dir)
+            _migrate(asset_dir, publish_v3=False)
 
             valid = validate_asset(asset_dir)
             self.assertTrue(valid["ok"], valid)
@@ -555,7 +555,7 @@ class EvidenceValidationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             asset_dir = _make_capture(Path(temp_dir))
-            _migrate(asset_dir)
+            _migrate(asset_dir, publish_v3=False)
             database_path = asset_dir / "evidence" / "evidence.sqlite"
             with closing(sqlite3.connect(database_path)) as connection:
                 connection.execute(
@@ -566,8 +566,20 @@ class EvidenceValidationTests(unittest.TestCase):
             report = validate_asset(asset_dir)
 
         self.assertFalse(report["ok"])
-        self.assertFalse(report["checks"]["versions"]["ok"])
-        self.assertTrue(any("parser_version" in item for item in report["checks"]["versions"]["errors"]))
+        if "versions" in report["checks"]:
+            self.assertFalse(report["checks"]["versions"]["ok"])
+            self.assertTrue(
+                any(
+                    "parser_version" in item
+                    for item in report["checks"]["versions"]["errors"]
+                )
+            )
+        else:
+            self.assertFalse(report["checks"]["artifacts"]["ok"])
+            self.assertIn(
+                "parser",
+                " ".join(report["checks"]["artifacts"]["errors"]).casefold(),
+            )
 
     def test_benchmark_uses_a_real_two_hop_traversal_request(self):
         import validate_evidence_store as validator
@@ -611,7 +623,7 @@ class EvidenceValidationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             asset_dir = _make_capture(Path(temp_dir))
-            _migrate(asset_dir)
+            _migrate(asset_dir, publish_v3=False)
             database_path = asset_dir / "evidence" / "evidence.sqlite"
             with closing(sqlite3.connect(database_path)) as connection:
                 connection.execute("DELETE FROM properties")

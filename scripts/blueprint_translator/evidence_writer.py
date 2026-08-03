@@ -22,6 +22,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .context_pack import estimate_tokens
+from .evidence_publication import (
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_file,
+    _require_plain_path_chain,
+    evidence_publication_lock,
+)
 from .evidence_query import EvidenceQueryService
 from .evidence_schema import (
     EVIDENCE_SCHEMA_VERSION,
@@ -1066,18 +1073,19 @@ def _database_counts(connection: sqlite3.Connection) -> dict[str, int]:
     }
 
 
-def _query_gap_projection(database_path: Path) -> tuple[int, list[dict[str, str]]]:
+def _query_gap_projection(
+    service: EvidenceQueryService,
+) -> tuple[int, list[dict[str, str]]]:
     """Use the public query contract as the single inventory of evidence gaps."""
 
-    with EvidenceQueryService.open(database_path) as service:
-        overview = service.query({"operation": "overview", "budgetTokens": 8000})
-        gaps = service.query(
-            {
-                "operation": "gaps",
-                "pageSize": 8,
-                "budgetTokens": 8000,
-            }
-        )
+    overview = service.query({"operation": "overview", "budgetTokens": 8000})
+    gaps = service.query(
+        {
+            "operation": "gaps",
+            "pageSize": 8,
+            "budgetTokens": 8000,
+        }
+    )
     summary = overview.get("summary")
     coverage = gaps.get("coverage")
     if not isinstance(summary, dict) or not isinstance(coverage, dict):
@@ -1321,7 +1329,11 @@ def _write_database_components(
                 raise ValueError(f"evidence database integrity check failed: {integrity}")
         finally:
             connection.close()
-        gap_count, gap_summaries = _query_gap_projection(temp_path)
+        query_service = EvidenceQueryService.open(temp_path)
+        try:
+            gap_count, gap_summaries = _query_gap_projection(query_service)
+        finally:
+            query_service.close()
         os.replace(temp_path, database_path)
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -1833,12 +1845,21 @@ def _agent_index(result: dict[str, Any]) -> str:
     return content
 
 
-def _index_result_from_database(database_path: Path) -> dict[str, Any]:
+def _index_result_from_database(
+    database_path: Path,
+    *,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
+) -> dict[str, Any]:
     """Rebuild every agent-index field from one immutable evidence database."""
 
-    path = Path(database_path).expanduser().resolve()
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
+    path = _lexical_absolute(database_path)
+    service = EvidenceQueryService.open(
+        path,
+        expected_sha256=expected_sha256,
+        expected_size=expected_size,
+    )
+    connection = service._connection  # noqa: SLF001 - helper owns service lifetime
     try:
         identity = connection.execute(
             "SELECT asset_id, asset_name, object_path, revision_id, source_fingerprint, "
@@ -1908,10 +1929,10 @@ def _index_result_from_database(database_path: Path) -> dict[str, Any]:
         candidate_count = int(connection.execute("SELECT COUNT(*) FROM edge_candidates").fetchone()[0])
         default_count = int(connection.execute("SELECT COUNT(*) FROM class_defaults").fetchone()[0])
         source_paths = [str(row[0]) for row in connection.execute("SELECT path FROM source_manifest ORDER BY path")]
+        gap_count, gap_summaries = _query_gap_projection(service)
     finally:
-        connection.close()
+        service.close()
 
-    gap_count, gap_summaries = _query_gap_projection(path)
     return {
         "database_path": str(path),
         "asset_id": str(identity["asset_id"]),
@@ -1977,21 +1998,96 @@ def _unlink_with_retry(path: Path) -> None:
             time.sleep(0.05 * (2**attempt))
 
 
-def _publish_staged(staged: list[tuple[Path, Path]]) -> None:
+def _validated_publication_destination(
+    destination_root: Path,
+    destination: Path,
+    *,
+    create_parent: bool,
+) -> Path:
+    root = _lexical_absolute(destination_root)
+    target = _lexical_absolute(destination)
+    _require_plain_path_chain(root, label="asset directory")
+    _require_plain_directory(root, label="asset directory")
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("evidence publication destination escapes the asset directory") from exc
+    if not relative.parts:
+        raise ValueError("evidence publication destination cannot be the asset directory")
+
+    # Validate before and after parent creation so an existing child junction,
+    # symlink, or reparse point can never be hidden by mkdir/replace.
+    _require_plain_path_chain(target, label="evidence publication destination")
+    if create_parent:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    _require_plain_path_chain(target, label="evidence publication destination")
+    _require_plain_directory(target.parent, label="evidence publication parent")
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
+        return target
+    _require_plain_file(target, label="evidence publication destination")
+    if int(getattr(metadata, "st_nlink", 1)) != 1:
+        raise ValueError("evidence publication destination must not be hard-linked")
+    return target
+
+
+def _publish_staged(
+    staged: list[tuple[Path, Path]],
+    *,
+    destination_root: Path,
+) -> None:
+    root = _lexical_absolute(destination_root)
+    normalized: list[tuple[Path, Path]] = []
+    for source, destination in staged:
+        source_path = _lexical_absolute(source)
+        _require_plain_path_chain(source_path, label="staged evidence artifact")
+        _require_plain_file(source_path, label="staged evidence artifact")
+        normalized.append(
+            (
+                source_path,
+                _validated_publication_destination(
+                    root,
+                    destination,
+                    create_parent=True,
+                ),
+            )
+        )
+
     backups: dict[Path, Path] = {}
     published: list[Path] = []
     safe_to_remove: set[Path] = set()
     publication_succeeded = False
     try:
-        for _source, destination in staged:
+        for _source, destination in normalized:
+            destination = _validated_publication_destination(
+                root,
+                destination,
+                create_parent=False,
+            )
             if destination.exists():
-                backup = destination.with_name(f".{destination.name}.{_short_hash(os.getpid(), destination)}.bak")
-                shutil.copy2(destination, backup)
+                descriptor, raw_backup = tempfile.mkstemp(
+                    prefix=f".{destination.name}.",
+                    suffix=".bak",
+                    dir=destination.parent,
+                )
+                os.close(descriptor)
+                backup = Path(raw_backup)
                 backups[destination] = backup
-        for source, destination in staged:
-            destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(destination, backup)
+        for source, destination in normalized:
+            destination = _validated_publication_destination(
+                root,
+                destination,
+                create_parent=False,
+            )
             _replace_with_retry(source, destination)
             published.append(destination)
+            _validated_publication_destination(
+                root,
+                destination,
+                create_parent=False,
+            )
         publication_succeeded = True
     except Exception as publication_error:
         # Destinations not recorded in ``published`` were never changed.  Their
@@ -2004,11 +2100,16 @@ def _publish_staged(staged: list[tuple[Path, Path]]) -> None:
         for destination in reversed(published):
             backup = backups.get(destination)
             try:
+                destination = _validated_publication_destination(
+                    root,
+                    destination,
+                    create_parent=False,
+                )
                 if backup is not None and backup.exists():
                     _replace_with_retry(backup, destination)
                 else:
                     _unlink_with_retry(destination)
-            except OSError as rollback_error:
+            except (OSError, ValueError) as rollback_error:
                 # Keep a surviving backup for manual recovery.  Never delete
                 # the last valid artifact merely to make cleanup look tidy.
                 rollback_errors.append(f"{destination}: {rollback_error}")
@@ -2027,43 +2128,103 @@ def _publish_staged(staged: list[tuple[Path, Path]]) -> None:
         if publication_succeeded:
             safe_to_remove.update(backups.values())
         for backup in safe_to_remove:
+            try:
+                _validated_publication_destination(
+                    root,
+                    backup,
+                    create_parent=False,
+                )
+            except (OSError, ValueError):
+                continue
             _unlink_with_retry(backup)
-        for source, _destination in staged:
+        for source, _destination in normalized:
             _unlink_with_retry(source)
 
 
 def refresh_agent_index(asset_dir: str | Path) -> dict[str, Any]:
-    """Atomically rebuild ``agent_index.md`` from the published SQLite revision."""
+    """Refresh only the compatibility index; never mutate a v3 revision."""
 
-    root = Path(asset_dir).expanduser().resolve()
-    database_path = root / "evidence" / "evidence.sqlite"
-    manifest_path = root / "evidence" / "manifest.json"
-    final_index = root / "output" / "agent_index.md"
-    if not database_path.is_file():
-        raise FileNotFoundError(database_path)
-    if not manifest_path.is_file():
-        raise FileNotFoundError(manifest_path)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-    if not isinstance(manifest, dict):
-        raise ValueError("evidence manifest must be a JSON object")
-    result = _index_result_from_database(database_path)
-    if str(manifest.get("revision_id") or "") != str(result["revision_id"]):
-        raise ValueError("evidence manifest revision differs from SQLite")
-    rendered = _agent_index(result)
-    staging_root = Path(tempfile.mkdtemp(prefix=".agent-index-refresh-", dir=root))
-    try:
-        staged_index = _atomic_write_bytes(
-            staging_root / "agent_index.md",
-            rendered.encode("utf-8"),
+    root = _lexical_absolute(asset_dir)
+    _require_plain_path_chain(root, label="asset directory")
+    _require_plain_directory(root, label="asset directory")
+    with evidence_publication_lock(root):
+        current_pointer = root / "evidence" / "current.json"
+        try:
+            current_pointer.lstat()
+        except FileNotFoundError:
+            has_v3_current = False
+        else:
+            has_v3_current = True
+        if has_v3_current:
+            from .evidence_revision import load_current_evidence_revision
+
+            validated = load_current_evidence_revision(root, allow_stale=True)
+            database_artifact = validated.manifest["artifacts"]["database"]
+            result = _index_result_from_database(
+                validated.database_path,
+                expected_sha256=str(database_artifact["sha256"]),
+                expected_size=int(database_artifact["bytes"]),
+            )
+            final_index = root / "output" / "agent_index.md"
+            staging_root = Path(
+                tempfile.mkdtemp(prefix=".agent-index-refresh-", dir=root)
+            )
+            try:
+                staged_index = _atomic_write_bytes(
+                    staging_root / "agent_index.md",
+                    validated.agent_index_raw,
+                )
+                _publish_staged(
+                    [(staged_index, final_index)],
+                    destination_root=root,
+                )
+            finally:
+                shutil.rmtree(staging_root, ignore_errors=True)
+            return {
+                **result,
+                "agent_index_path": str(final_index),
+                "authoritative_agent_index_path": str(validated.agent_index_path),
+                "revision_dir": str(validated.revision_dir),
+                "manifest_sha256": validated.manifest_sha256,
+                "pointer_sha256": validated.pointer_sha256,
+                "estimated_tokens": estimate_tokens(
+                    validated.agent_index_raw.decode("utf-8", errors="strict")
+                ),
+            }
+
+        database_path = root / "evidence" / "evidence.sqlite"
+        manifest_path = root / "evidence" / "manifest.json"
+        final_index = root / "output" / "agent_index.md"
+        if not database_path.is_file():
+            raise FileNotFoundError(database_path)
+        if not manifest_path.is_file():
+            raise FileNotFoundError(manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(manifest, dict):
+            raise ValueError("evidence manifest must be a JSON object")
+        result = _index_result_from_database(database_path)
+        if str(manifest.get("revision_id") or "") != str(result["revision_id"]):
+            raise ValueError("evidence manifest revision differs from SQLite")
+        rendered = _agent_index(result)
+        staging_root = Path(
+            tempfile.mkdtemp(prefix=".agent-index-refresh-", dir=root)
         )
-        _publish_staged([(staged_index, final_index)])
-    finally:
-        shutil.rmtree(staging_root, ignore_errors=True)
-    return {
-        **result,
-        "agent_index_path": str(final_index),
-        "estimated_tokens": estimate_tokens(rendered),
-    }
+        try:
+            staged_index = _atomic_write_bytes(
+                staging_root / "agent_index.md",
+                rendered.encode("utf-8"),
+            )
+            _publish_staged(
+                [(staged_index, final_index)],
+                destination_root=root,
+            )
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
+        return {
+            **result,
+            "agent_index_path": str(final_index),
+            "estimated_tokens": estimate_tokens(rendered),
+        }
 
 
 def _manifest_payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -2087,18 +2248,16 @@ def write_evidence_artifacts_from_payload(
     uasset_path: str | Path | None,
     payload: dict[str, Any],
     asset_dir: str | Path,
+    *,
+    publish_v3: bool = True,
 ) -> dict[str, Any]:
-    """Commit the database, manifest, and bounded agent index as one artifact set."""
+    """Publish an immutable v3 revision, then refresh v2 compatibility files."""
 
-    destination_root = Path(asset_dir).expanduser().resolve()
+    destination_root = _lexical_absolute(asset_dir)
+    _require_plain_path_chain(destination_root, label="asset directory")
     destination_root.mkdir(parents=True, exist_ok=True)
-    evidence_dir = destination_root / "evidence"
-    output_dir = destination_root / "output"
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    final_database = evidence_dir / "evidence.sqlite"
-    final_manifest = evidence_dir / "manifest.json"
-    final_index = output_dir / "agent_index.md"
+    _require_plain_path_chain(destination_root, label="asset directory")
+    _require_plain_directory(destination_root, label="asset directory")
     staging_root = Path(tempfile.mkdtemp(prefix=".evidence-direct-", dir=destination_root))
     try:
         staged_database = staging_root / "evidence.sqlite"
@@ -2108,35 +2267,73 @@ def write_evidence_artifacts_from_payload(
             (json.dumps(_manifest_payload(result), ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         )
         staged_index = _atomic_write_bytes(staging_root / "agent_index.md", _agent_index(result).encode("utf-8"))
-        _publish_staged(
-            [
-                (staged_database, final_database),
-                (staged_manifest, final_manifest),
-                (staged_index, final_index),
-            ]
-        )
+        final_database = destination_root / "evidence" / "evidence.sqlite"
+        final_manifest = destination_root / "evidence" / "manifest.json"
+        final_index = destination_root / "output" / "agent_index.md"
+        result_database = final_database
+        result_manifest = final_manifest
+        result_index = final_index
+        publication_metadata: dict[str, object] = {}
+        if publish_v3:
+            from .evidence_publication import publish_prepared_evidence_revision
+
+            published = publish_prepared_evidence_revision(
+                asset_dir=destination_root,
+                database_path=staged_database,
+                agent_index_path=staged_index,
+                compatibility_manifest_bytes=staged_manifest.read_bytes(),
+            )
+            publication_metadata = {
+                "current_pointer_path": str(destination_root / "evidence" / "current.json"),
+                "revision_dir": published.revision_dir,
+                "v3_manifest_path": str(Path(published.revision_dir) / "manifest.json"),
+                "authoritative_database_path": published.database_path,
+                "authoritative_manifest_path": str(Path(published.revision_dir) / "manifest.json"),
+                "authoritative_agent_index_path": published.agent_index_path,
+                "compatibility_database_path": str(final_database),
+                "compatibility_manifest_path": str(final_manifest),
+                "compatibility_agent_index_path": str(final_index),
+                "compatibility_copy_status": published.compatibility_copy_status,
+                "compatibility_error": published.compatibility_error,
+                "manifest_sha256": published.manifest_sha256,
+                "pointer_sha256": published.pointer_sha256,
+                "freshness_status": published.freshness_status,
+                "release_authority": published.release_authority,
+            }
+            result_database = Path(published.database_path)
+            result_manifest = Path(published.revision_dir) / "manifest.json"
+            result_index = Path(published.agent_index_path)
+        else:
+            with evidence_publication_lock(destination_root):
+                _publish_staged(
+                    [
+                        (staged_database, final_database),
+                        (staged_manifest, final_manifest),
+                        (staged_index, final_index),
+                    ],
+                    destination_root=destination_root,
+                )
         return {
             **result,
-            "database_path": str(final_database),
-            "manifest_path": str(final_manifest),
-            "agent_index_path": str(final_index),
+            "database_path": str(result_database),
+            "manifest_path": str(result_manifest),
+            "agent_index_path": str(result_index),
+            **publication_metadata,
         }
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
-def migrate_asset_capture(asset_dir: str | Path) -> dict[str, Any]:
-    """Migrate one legacy asset capture without risking its last valid v2 artifacts."""
+def migrate_asset_capture(
+    asset_dir: str | Path,
+    *,
+    publish_v3: bool = True,
+) -> dict[str, Any]:
+    """Publish one legacy capture as v3 while retaining v2 compatibility."""
 
-    source = Path(asset_dir).resolve()
-    evidence_dir = source / "evidence"
-    output_dir = source / "output"
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    final_database = evidence_dir / "evidence.sqlite"
-    final_manifest = evidence_dir / "manifest.json"
-    final_index = output_dir / "agent_index.md"
-
+    source = _lexical_absolute(asset_dir)
+    _require_plain_path_chain(source, label="asset directory")
+    _require_plain_directory(source, label="asset directory")
     staging_root = Path(tempfile.mkdtemp(prefix=".evidence-migration-", dir=source))
     try:
         staged_database = staging_root / "evidence.sqlite"
@@ -2149,18 +2346,58 @@ def migrate_asset_capture(asset_dir: str | Path) -> dict[str, Any]:
             staging_root / "agent_index.md",
             _agent_index(result).encode("utf-8"),
         )
-        _publish_staged(
-            [
-                (staged_database, final_database),
-                (staged_manifest, final_manifest),
-                (staged_index, final_index),
-            ]
-        )
+        final_database = source / "evidence" / "evidence.sqlite"
+        final_manifest = source / "evidence" / "manifest.json"
+        final_index = source / "output" / "agent_index.md"
+        result_database = final_database
+        result_manifest = final_manifest
+        result_index = final_index
+        publication_metadata: dict[str, object] = {}
+        if publish_v3:
+            from .evidence_publication import publish_prepared_evidence_revision
+
+            published = publish_prepared_evidence_revision(
+                asset_dir=source,
+                database_path=staged_database,
+                agent_index_path=staged_index,
+                compatibility_manifest_bytes=staged_manifest.read_bytes(),
+            )
+            publication_metadata = {
+                "current_pointer_path": str(source / "evidence" / "current.json"),
+                "revision_dir": published.revision_dir,
+                "v3_manifest_path": str(Path(published.revision_dir) / "manifest.json"),
+                "authoritative_database_path": published.database_path,
+                "authoritative_manifest_path": str(Path(published.revision_dir) / "manifest.json"),
+                "authoritative_agent_index_path": published.agent_index_path,
+                "compatibility_database_path": str(final_database),
+                "compatibility_manifest_path": str(final_manifest),
+                "compatibility_agent_index_path": str(final_index),
+                "compatibility_copy_status": published.compatibility_copy_status,
+                "compatibility_error": published.compatibility_error,
+                "manifest_sha256": published.manifest_sha256,
+                "pointer_sha256": published.pointer_sha256,
+                "freshness_status": published.freshness_status,
+                "release_authority": published.release_authority,
+            }
+            result_database = Path(published.database_path)
+            result_manifest = Path(published.revision_dir) / "manifest.json"
+            result_index = Path(published.agent_index_path)
+        else:
+            with evidence_publication_lock(source):
+                _publish_staged(
+                    [
+                        (staged_database, final_database),
+                        (staged_manifest, final_manifest),
+                        (staged_index, final_index),
+                    ],
+                    destination_root=source,
+                )
         return {
             **result,
-            "database_path": str(final_database),
-            "manifest_path": str(final_manifest),
-            "agent_index_path": str(final_index),
+            "database_path": str(result_database),
+            "manifest_path": str(result_manifest),
+            "agent_index_path": str(result_index),
+            **publication_metadata,
         }
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)

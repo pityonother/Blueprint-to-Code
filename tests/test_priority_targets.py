@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import sys
@@ -13,7 +14,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import build_ark_knowledge_base as kb  # noqa: E402
 import read_priority_assets  # noqa: E402
 import review_processed_asset_quality  # noqa: E402
-from blueprint_translator.evidence_schema import ensure_evidence_schema  # noqa: E402
+from blueprint_translator.evidence_publication import (  # noqa: E402
+    migrate_v2_evidence_to_v3,
+)
+from blueprint_translator.evidence_schema import (  # noqa: E402
+    EVIDENCE_SCHEMA_VERSION,
+    ensure_evidence_schema,
+    make_asset_id,
+    make_revision_id,
+)
 
 
 def asset(name: str, asset_type: str, **extra):
@@ -32,11 +41,28 @@ def asset(name: str, asset_type: str, **extra):
 def write_indexed_asset(asset_dir: Path, statuses: list[str], *, link_observation_count: int = 0) -> None:
     database_path = asset_dir / "evidence" / "evidence.sqlite"
     database_path.parent.mkdir(parents=True, exist_ok=True)
+    object_path = f"/Game/Test/{asset_dir.name}.{asset_dir.name}"
+    asset_id = make_asset_id(object_path)
+    parser_version = "fixture-parser"
+    source_path = f"binary/{asset_dir.name}.uasset"
+    source_sha256 = "a" * 64
+    source_hashes = {source_path: source_sha256}
+    revision_id = make_revision_id(
+        source_hashes,
+        parser_version=parser_version,
+        schema_version=EVIDENCE_SCHEMA_VERSION,
+    )
+    source_fingerprint = hashlib.sha256(
+        json.dumps(
+            sorted(source_hashes.items()),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     connection = sqlite3.connect(database_path)
     try:
         ensure_evidence_schema(connection)
-        asset_id = "asset-priority-v2"
-        revision_id = "revision-priority-v2"
         connection.execute(
             "INSERT INTO asset_revisions("
             "revision_id, asset_id, asset_name, object_path, source_fingerprint, "
@@ -46,10 +72,10 @@ def write_indexed_asset(asset_dir: Path, statuses: list[str], *, link_observatio
                 revision_id,
                 asset_id,
                 asset_dir.name,
-                f"/Game/Test/{asset_dir.name}.{asset_dir.name}",
-                "fixture-fingerprint",
-                "fixture-parser",
-                "ark.blueprint.evidence.v2",
+                object_path,
+                source_fingerprint,
+                parser_version,
+                EVIDENCE_SCHEMA_VERSION,
                 "2026-07-19T00:00:00+00:00",
                 "",
             ),
@@ -69,15 +95,60 @@ def write_indexed_asset(asset_dir: Path, statuses: list[str], *, link_observatio
                 "INSERT INTO edge_observations(observation_ref, graph_ref) VALUES (?, ?)",
                 (f"{graph_refs[0]}/observation/{ordinal}", graph_refs[0]),
             )
+        connection.execute(
+            "INSERT INTO source_manifest("
+            "revision_id, path, sha256, size_bytes, source_kind"
+            ") VALUES (?, ?, ?, ?, ?)",
+            (revision_id, source_path, source_sha256, 5, "package_binary"),
+        )
         connection.commit()
     finally:
         connection.close()
+    manifest = {
+        "schema": EVIDENCE_SCHEMA_VERSION,
+        "asset_id": asset_id,
+        "asset_name": asset_dir.name,
+        "object_path": object_path,
+        "revision_id": revision_id,
+        "source_fingerprint": source_fingerprint,
+        "parser_version": parser_version,
+        "counts": {
+            "graphs": len(statuses),
+            "nodes": 0,
+            "pins": 0,
+            "edges": 0,
+        },
+        "database": "evidence.sqlite",
+        "agent_index": "../output/agent_index.md",
+    }
+    (asset_dir / "evidence" / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     output_dir = asset_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "agent_index.md").write_text("# Indexed evidence\n", encoding="utf-8")
+    (output_dir / "agent_index.md").write_text(
+        f"# Indexed evidence\n\n- Revision: `{revision_id}`\n",
+        encoding="utf-8",
+    )
 
 
 class PriorityTargetTests(unittest.TestCase):
+    def test_special_v2_declaration_never_falls_back_to_legacy_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset_dir = Path(tmp) / "SpecialV2"
+            evidence_dir = asset_dir / "evidence"
+            (evidence_dir / "evidence.sqlite").mkdir(parents=True)
+            (evidence_dir / "manifest.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                (ValueError, FileNotFoundError),
+                r"(?i)(plain regular file|NO_EVIDENCE)",
+            ):
+                read_priority_assets.resolve_indexed_evidence(asset_dir)
+
     def test_existing_v2_asset_uses_real_link_count_and_does_not_require_legacy_reports(self):
         object_path = "/Game/Test/IndexedOnly.IndexedOnly"
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,9 +180,12 @@ class PriorityTargetTests(unittest.TestCase):
         self.assertTrue(quality["report_files"]["agent_index"])
         self.assertNotIn("read_failed", quality["quality_flags"])
         self.assertNotIn("reports_missing", quality["quality_flags"])
-        self.assertEqual(quality["verdict"], "good")
+        self.assertEqual(quality["verdict"], "usable_with_notes")
+        self.assertFalse(result["releaseAuthority"])
+        self.assertTrue(result["migrationRequired"])
+        self.assertIn("evidence_not_release_authority", quality["quality_flags"])
 
-    def test_complete_legacy_reports_remain_valid_when_index_publication_is_missing(self):
+    def test_declared_v2_missing_index_fails_closed_even_with_legacy_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
             asset_dir = Path(tmp) / "DualFallback"
             write_indexed_asset(asset_dir, ["complete"])
@@ -122,10 +196,32 @@ class PriorityTargetTests(unittest.TestCase):
             (output_dir / "capture_quality_report.md").write_text("# Capture quality\n", encoding="utf-8")
             (output_dir / "asset_report.md").write_text("# Asset\n", encoding="utf-8")
 
+            with self.assertRaises(FileNotFoundError):
+                read_priority_assets.evaluate_asset_quality(
+                    {
+                        "asset_name": "DualFallback",
+                        "asset_path": "/Game/Test/DualFallback.DualFallback",
+                        "asset_dir": str(asset_dir),
+                        "status": "read",
+                        "graph_count": 1,
+                        "status_counts": {"complete": 1},
+                    }
+                )
+
+    def test_complete_legacy_reports_are_non_authoritative_and_require_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset_dir = Path(tmp) / "LegacyOnly"
+            output_dir = asset_dir / "output"
+            output_dir.mkdir(parents=True)
+            (output_dir / "behavior_summary.md").write_text("# Behavior\n", encoding="utf-8")
+            (output_dir / "diagnostics_report.md").write_text("# Diagnostics\n", encoding="utf-8")
+            (output_dir / "capture_quality_report.md").write_text("# Capture quality\n", encoding="utf-8")
+            (output_dir / "asset_report.md").write_text("# Asset\n", encoding="utf-8")
+
             quality = read_priority_assets.evaluate_asset_quality(
                 {
-                    "asset_name": "DualFallback",
-                    "asset_path": "/Game/Test/DualFallback.DualFallback",
+                    "asset_name": "LegacyOnly",
+                    "asset_path": "/Game/Test/LegacyOnly.LegacyOnly",
                     "asset_dir": str(asset_dir),
                     "status": "read",
                     "graph_count": 1,
@@ -133,7 +229,15 @@ class PriorityTargetTests(unittest.TestCase):
                 }
             )
 
-        self.assertNotIn("reports_missing", quality["quality_flags"])
+        self.assertNotEqual(quality["verdict"], "good")
+        self.assertEqual(quality["sourceKind"], "LEGACY_REPORTS_ONLY")
+        self.assertEqual(quality["freshnessStatus"], "SOURCE_UNAVAILABLE")
+        self.assertFalse(quality["releaseAuthority"])
+        self.assertTrue(quality["migrationRequired"])
+        self.assertIsNone(quality["manifestSha256"])
+        self.assertIsNone(quality["pointerSha256"])
+        self.assertIn("evidence_not_release_authority", quality["quality_flags"])
+        self.assertIn("evidence_migration_required", quality["quality_flags"])
 
     def test_processed_v2_review_loads_graph_statuses_and_link_observations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,6 +265,131 @@ class PriorityTargetTests(unittest.TestCase):
         self.assertEqual(result["graph_count"], 2)
         self.assertEqual(result["link_count"], 9)
         self.assertEqual(result["status_counts"], {"complete": 1, "heuristic": 1})
+
+    def test_pruned_v3_revision_drives_priority_quality_and_processed_review(self):
+        object_path = "/Game/Test/PrunedV3.PrunedV3"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture_root = root / "captures"
+            asset_dir = capture_root / "PrunedV3"
+            write_indexed_asset(
+                asset_dir,
+                ["complete", "heuristic"],
+                link_observation_count=5,
+            )
+            migrate_v2_evidence_to_v3(asset_dir, prune_v2=True)
+            uasset_path = root / "PrunedV3.uasset"
+
+            with (
+                patch.object(read_priority_assets, "CAPTURE_ROOT", capture_root),
+                patch.object(
+                    read_priority_assets,
+                    "object_path_to_uasset_path",
+                    return_value=(uasset_path, []),
+                ),
+                patch.object(
+                    read_priority_assets,
+                    "ledger_db_path",
+                    return_value=root / "ledger.sqlite",
+                ),
+                patch.object(
+                    read_priority_assets,
+                    "processed_current_for_path",
+                    return_value=False,
+                ),
+            ):
+                priority_result = read_priority_assets.read_asset(
+                    object_path,
+                    max_graphs=0,
+                    analyze=False,
+                    report_level="standard",
+                    force=False,
+                )
+            quality = read_priority_assets.evaluate_asset_quality(priority_result)
+
+            row = {
+                "object_path": object_path,
+                "asset_name": "PrunedV3",
+                "capture_dir": str(asset_dir),
+                "read_status": "read",
+            }
+            with patch.object(
+                review_processed_asset_quality,
+                "analyze_asset",
+                side_effect=AssertionError(
+                    "validated v3 evidence should satisfy analyze-missing"
+                ),
+            ):
+                reviewed = review_processed_asset_quality.row_to_result(
+                    row,
+                    analyze_missing=True,
+                    analyze_all=False,
+                    report_level="standard",
+                )
+
+        self.assertEqual(priority_result["status"], "existing_indexed")
+        self.assertEqual(priority_result["link_count"], 5)
+        self.assertTrue(quality["report_files"]["evidence_store"])
+        self.assertTrue(quality["report_files"]["agent_index"])
+        self.assertNotIn("reports_missing", quality["quality_flags"])
+        self.assertEqual(reviewed["graph_count"], 2)
+        self.assertEqual(reviewed["link_count"], 5)
+
+    def test_corrupt_pruned_v3_pointer_is_not_hidden_by_legacy_reports(self):
+        object_path = "/Game/Test/BrokenV3.BrokenV3"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture_root = root / "captures"
+            asset_dir = capture_root / "BrokenV3"
+            write_indexed_asset(asset_dir, ["complete"])
+            migrate_v2_evidence_to_v3(asset_dir, prune_v2=True)
+            (asset_dir / "evidence" / "current.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            (asset_dir / "uasset_graph_nodes.json").write_text(
+                json.dumps({"graph_count": 1, "status_counts": {"complete": 1}}),
+                encoding="utf-8",
+            )
+            output_dir = asset_dir / "output"
+            output_dir.mkdir(exist_ok=True)
+            for name in (
+                "behavior_summary.md",
+                "diagnostics_report.md",
+                "capture_quality_report.md",
+                "asset_report.md",
+            ):
+                (output_dir / name).write_text("# legacy\n", encoding="utf-8")
+
+            with (
+                patch.object(read_priority_assets, "CAPTURE_ROOT", capture_root),
+                patch.object(
+                    read_priority_assets,
+                    "object_path_to_uasset_path",
+                    return_value=(root / "BrokenV3.uasset", []),
+                ),
+                patch.object(
+                    read_priority_assets,
+                    "ledger_db_path",
+                    return_value=root / "ledger.sqlite",
+                ),
+                patch.object(
+                    read_priority_assets,
+                    "processed_current_for_path",
+                    return_value=False,
+                ),
+                self.assertRaisesRegex(ValueError, "POINTER_FIELDS_INVALID"),
+            ):
+                read_priority_assets.read_asset(
+                    object_path,
+                    max_graphs=0,
+                    analyze=False,
+                    report_level="standard",
+                    force=False,
+                )
+
+            with self.assertRaisesRegex(ValueError, "POINTER_FIELDS_INVALID"):
+                review_processed_asset_quality.report_files_exist(asset_dir)
 
     def test_primal_item_include_names_do_not_become_only_allow_list(self):
         priority = kb.build_priority_targets(

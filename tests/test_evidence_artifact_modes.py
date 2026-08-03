@@ -220,7 +220,7 @@ class DirectEvidenceArtifactWriterTests(unittest.TestCase):
         self.assertNotEqual(baseline["revision_id"], warnings_changed["revision_id"])
         self.assertNotEqual(baseline["source_fingerprint"], warnings_changed["source_fingerprint"])
 
-    def test_direct_writer_builds_v2_from_memory_without_legacy_graph_json(self):
+    def test_direct_writer_publishes_v3_and_v2_compatibility_without_legacy_graph_json(self):
         from blueprint_translator.artifact_modes import write_evidence_artifacts_from_payload
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,13 +249,40 @@ class DirectEvidenceArtifactWriterTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             agent_index = agent_index_path.read_text(encoding="utf-8")
 
-            self.assertEqual(Path(str(result["database_path"])), database_path)
-            self.assertEqual(Path(str(result["manifest_path"])), manifest_path)
-            self.assertEqual(Path(str(result["agent_index_path"])), agent_index_path)
+            revision_dir = Path(str(result["revision_dir"]))
+            self.assertEqual(
+                Path(str(result["database_path"])),
+                revision_dir / "evidence.sqlite",
+            )
+            self.assertEqual(
+                Path(str(result["manifest_path"])),
+                revision_dir / "manifest.json",
+            )
+            self.assertEqual(
+                Path(str(result["agent_index_path"])),
+                revision_dir / "agent_index.md",
+            )
+            self.assertEqual(
+                Path(str(result["compatibility_database_path"])), database_path
+            )
+            self.assertEqual(
+                Path(str(result["compatibility_manifest_path"])), manifest_path
+            )
+            self.assertEqual(
+                Path(str(result["compatibility_agent_index_path"])), agent_index_path
+            )
+            self.assertEqual(result["compatibility_copy_status"], "UPDATED")
+            self.assertIsNone(result["compatibility_error"])
             self.assertEqual(counts, {"graphs": 1, "nodes": 1, "pins": 1})
             self.assertEqual(integrity, "ok")
             self.assertEqual(manifest["revision_id"], result["revision_id"])
             self.assertIn("EventGraph", agent_index)
+            self.assertTrue((asset_dir / "evidence" / "current.json").is_file())
+            self.assertEqual(Path(str(result["revision_dir"])).name, result["revision_id"])
+            self.assertTrue(Path(str(result["v3_manifest_path"])).is_file())
+            self.assertRegex(str(result["manifest_sha256"]), r"^[0-9a-f]{64}$")
+            self.assertRegex(str(result["pointer_sha256"]), r"^[0-9a-f]{64}$")
+            self.assertTrue(result["release_authority"])
             self.assertFalse((asset_dir / "graphs_from_uasset").exists())
             self.assertFalse((asset_dir / "graphs_from_uasset_manifest.json").exists())
 
@@ -328,7 +355,7 @@ class UAssetGraphWriterModeTests(unittest.TestCase):
             legacy_graph.write_bytes(b"legacy-graph")
             unrelated.write_bytes(b"keep-unrelated")
 
-            with self.assertRaisesRegex(ValueError, "before indexed evidence exists"):
+            with self.assertRaisesRegex(ValueError, "fresh manifest-bound v3 evidence"):
                 prune_legacy_uasset_outputs(asset_dir)
 
             self.assertEqual(legacy_package.read_bytes(), b"legacy-package")
@@ -371,10 +398,10 @@ class UAssetGraphWriterModeTests(unittest.TestCase):
         from blueprint_translator.artifact_modes import write_evidence_artifacts_from_payload
 
         cases = {
-            "invalid_manifest": "valid evidence manifest",
-            "index_revision_mismatch": "different revision",
-            "foreign_key_violation": "integrity validation failed",
-            "manifest_count_mismatch": "counts do not match",
+            "invalid_manifest": "fresh manifest-bound v3 evidence",
+            "index_revision_mismatch": "fresh manifest-bound v3 evidence",
+            "foreign_key_violation": "fresh manifest-bound v3 evidence",
+            "manifest_count_mismatch": "fresh manifest-bound v3 evidence",
         }
         for case, expected_error in cases.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
@@ -386,14 +413,17 @@ class UAssetGraphWriterModeTests(unittest.TestCase):
                 legacy_graph.parent.mkdir(parents=True, exist_ok=True)
                 legacy_package.write_bytes(b"legacy-package-sentinel")
                 legacy_graph.write_bytes(b"legacy-graph-sentinel")
-                write_evidence_artifacts_from_payload(
+                published = write_evidence_artifacts_from_payload(
                     ASSET_PATH,
                     uasset_path,
                     copy.deepcopy(payload),
                     asset_dir,
                 )
 
-                database_path, manifest_path, agent_index_path = _v2_paths(asset_dir)
+                revision_dir = Path(str(published["revision_dir"]))
+                database_path = revision_dir / "evidence.sqlite"
+                manifest_path = revision_dir / "manifest.json"
+                agent_index_path = revision_dir / "agent_index.md"
                 if case == "invalid_manifest":
                     manifest_path.write_text("{", encoding="utf-8")
                 elif case == "index_revision_mismatch":

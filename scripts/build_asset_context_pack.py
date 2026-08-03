@@ -24,8 +24,17 @@ from blueprint_translator.context_pack import (  # noqa: E402
     render_context_pack,
     estimate_tokens,
 )
-from blueprint_translator.evidence_repository import open_asset_repository  # noqa: E402
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    open_asset_repository,
+    resolve_asset_evidence_state,
+)
 from blueprint_translator.formulas import build_formula_candidates, render_formula_candidates  # noqa: E402
+
+
+def _lexical_absolute(path: str | os.PathLike[str]) -> Path:
+    """Return an absolute path without following links or reparse points."""
+
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
 
 
 def write_json(path: Path, payload: object) -> None:
@@ -104,7 +113,7 @@ def graph_payload_from_capture(graph: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_asset_payload(asset_dir: Path) -> dict[str, object]:
-    asset_dir = asset_dir.expanduser().resolve()
+    asset_dir = _lexical_absolute(asset_dir)
     graph_nodes = read_required_json(asset_dir / "uasset_graph_nodes.json")
     class_defaults = read_optional_json(asset_dir / "uasset_class_defaults.json")
     graph_rows = graph_nodes.get("graphs", [])
@@ -277,7 +286,7 @@ def build_pack_from_repository(
 ) -> dict[str, object]:
     """Build a bounded, question-aware navigation pack through the Evidence Repository."""
 
-    root = Path(asset_dir).expanduser().resolve()
+    root = _lexical_absolute(asset_dir)
     if budget < MIN_CONTEXT_BUDGET:
         raise ValueError(f"Budget must be at least {MIN_CONTEXT_BUDGET} estimated tokens.")
     bounded_question = str(question or "").strip()[:500]
@@ -476,11 +485,26 @@ def build_pack_from_repository(
 
 
 def build_pack(asset_dir: Path, question: str, budget: int) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-    asset_dir = asset_dir.expanduser().resolve()
+    asset_dir = _lexical_absolute(asset_dir)
     output_dir = asset_dir / "output"
-    if output_dir.exists() and not output_dir.resolve().is_relative_to(asset_dir):
-        raise ValueError("output directory must stay inside the capture directory")
-    if (asset_dir / "evidence" / "evidence.sqlite").is_file():
+    indexed_evidence = False
+    for marker in (
+        asset_dir / "evidence" / "current.json",
+        asset_dir / "evidence" / "evidence.sqlite",
+    ):
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            continue
+        indexed_evidence = True
+        break
+    if indexed_evidence:
+        # A declared indexed generation must validate or fail closed.  Missing
+        # revision artifacts are corruption, not permission to read legacy
+        # sidecars implicitly.
+        resolve_asset_evidence_state(asset_dir)
+        if output_dir.exists() and not output_dir.resolve().is_relative_to(asset_dir):
+            raise ValueError("output directory must stay inside the capture directory")
         context_pack = build_pack_from_repository(asset_dir, question=question, budget=budget)
         source_fingerprint = str(context_pack.get("revision_id") or "indexed")
         context_json_path, context_markdown_path = _context_artifact_paths(
@@ -493,6 +517,8 @@ def build_pack(asset_dir: Path, question: str, budget: int) -> tuple[dict[str, o
         write_json(context_json_path, context_pack)
         write_text_atomic(context_markdown_path, render_context_pack(context_pack))
         return {}, {}, context_pack
+    if output_dir.exists() and not output_dir.resolve().is_relative_to(asset_dir):
+        raise ValueError("output directory must stay inside the capture directory")
     asset_payload = load_asset_payload(asset_dir)
     formula_path = output_dir / "formula_candidates.json"
     memory_path = output_dir / "asset_memory_card.json"

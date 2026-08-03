@@ -15,18 +15,28 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-from blueprint_translator.asset_ledger import (
+from blueprint_translator.asset_ledger import (  # noqa: E402
     annotate_scan_item,
     fingerprint_for_scan_item,
     read_ledger_snapshot,
     replace_deferred_assets,
     restore_ledger_snapshot,
 )
-from blueprint_translator.devkit_paths import devkit_content_roots
-from blueprint_translator.uasset_graphs import current_uasset_graph_payload_files
-from blueprint_translator.evidence_repository import open_asset_repository
-from blueprint_translator.evidence_values import downstream_default_metadata, default_value_is_usable
-from import_captures_to_knowledge_dbs import import_captures_to_business_databases
+from blueprint_translator.devkit_paths import devkit_content_roots  # noqa: E402
+from blueprint_translator.uasset_graphs import (  # noqa: E402
+    current_uasset_graph_payload_files,
+)
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    open_asset_repository,
+    resolve_asset_evidence_state,
+)
+from blueprint_translator.evidence_values import (  # noqa: E402
+    default_value_is_usable,
+    downstream_default_metadata,
+)
+from import_captures_to_knowledge_dbs import (  # noqa: E402
+    import_captures_to_business_databases,
+)
 
 
 DEFAULT_FOCUS = "gigantoraptor"
@@ -2173,6 +2183,14 @@ def summarize_asset_from_repository(asset_dir: Path, root: Path) -> dict[str, An
         node_rows = repository.node_summaries()
         default_rows = repository.default_summaries(include_values=True)
         gap_projection = repository.gap_summary()
+        database_path = repository.database_path
+        agent_index_path = repository.agent_index_path
+        agent_index = repository.agent_index_text or ""
+        source_kind = repository.source_kind
+        freshness_status = repository.freshness_status
+        release_authority = repository.release_authority
+        manifest_sha256 = repository.manifest_sha256
+        pointer_sha256 = repository.pointer_sha256
 
     gap_groups = (
         gap_projection.get("groups", [])
@@ -2277,7 +2295,6 @@ def summarize_asset_from_repository(asset_dir: Path, root: Path) -> dict[str, An
         and not is_utility_function(str(node.get("function")))
     ]
     summary = overview.get("summary", {}) if isinstance(overview.get("summary"), dict) else {}
-    agent_index = read_text(asset_dir / "output" / "agent_index.md")
     evidence = [
         {
             "source": str(row.get("ref") or ""),
@@ -2312,9 +2329,19 @@ def summarize_asset_from_repository(asset_dir: Path, root: Path) -> dict[str, An
         "capture_dir": short_path(asset_dir, root),
         "generated": now_iso(),
         "sources": {
-            "evidence_store": short_path(asset_dir / "evidence" / "evidence.sqlite", root),
-            "agent_index": short_path(asset_dir / "output" / "agent_index.md", root),
+            "evidence_store": short_path(database_path, root),
+            "agent_index": short_path(
+                agent_index_path
+                if isinstance(agent_index_path, Path)
+                else asset_dir / "output" / "agent_index.md",
+                root,
+            ),
             "revision": str(identity.get("revision_id") or ""),
+            "source_kind": source_kind,
+            "freshness_status": freshness_status,
+            "release_authority": release_authority,
+            "manifest_sha256": manifest_sha256,
+            "pointer_sha256": pointer_sha256,
         },
         "package": {
             "asset_path": str(identity.get("object_path") or ""),
@@ -2413,7 +2440,11 @@ def summarize_asset_from_repository(asset_dir: Path, root: Path) -> dict[str, An
 
 
 def summarize_asset(asset_dir: Path, root: Path) -> dict[str, Any]:
-    if (asset_dir / "evidence" / "evidence.sqlite").is_file():
+    try:
+        resolve_asset_evidence_state(asset_dir, allow_stale=False)
+    except FileNotFoundError:
+        pass
+    else:
         return summarize_asset_from_repository(asset_dir, root)
     name = asset_dir.name
     defaults = read_json(asset_dir / "uasset_class_defaults.json", {})

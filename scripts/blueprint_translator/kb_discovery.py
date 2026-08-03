@@ -21,12 +21,20 @@ import uuid
 import zipfile
 import zlib
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Iterator, Mapping, Sequence
 
 from .asset_ledger import metadata_fingerprint
+from .evidence_repository import (
+    ResolvedEvidenceState,
+    evidence_manifest_payload,
+    evidence_state_metadata,
+    open_bound_evidence_database,
+    resolve_asset_evidence_state,
+)
 from .evidence_values import project_default_value
 from .uasset_graphs import (
     parse_uasset_exports,
@@ -1325,14 +1333,17 @@ def _captured_identity(
 
 
 def _extract_blueprint_store(
-    manifest_path: Path,
-    database_path: Path,
+    evidence_state: ResolvedEvidenceState,
+    *,
+    capture_dir: Path,
 ) -> dict[str, object]:
-    manifest = _read_json(manifest_path, {})
+    manifest = evidence_manifest_payload(evidence_state)
     if not isinstance(manifest, Mapping):
         raise ValueError("BLUEPRINT_MANIFEST_INVALID")
-    connection = sqlite3.connect(_database_uri(database_path), uri=True)
-    connection.row_factory = sqlite3.Row
+    bound_database = ExitStack()
+    connection = bound_database.enter_context(
+        open_bound_evidence_database(evidence_state)
+    )
     try:
         revision = connection.execute(
             """
@@ -1347,7 +1358,6 @@ def _extract_blueprint_store(
             raise ValueError("BLUEPRINT_REVISION_MISSING")
         object_path = str(revision["object_path"])
         asset_name = str(revision["asset_name"])
-        capture_dir = manifest_path.parents[1]
         identity = _captured_identity(capture_dir, object_path, asset_name)
 
         graph_edge_counts: dict[str, int] = {}
@@ -1650,7 +1660,7 @@ def _extract_blueprint_store(
             "counts": counts,
         }
     finally:
-        connection.close()
+        bound_database.close()
 
 
 def load_blueprint_evidence(
@@ -1663,28 +1673,64 @@ def load_blueprint_evidence(
     cache_hits = 0
     rebuilt = 0
     failures = 0
+
+    def declared(path: Path) -> bool:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
     try:
-        manifests = sorted(
-            captures_root.glob("*/evidence/manifest.json"),
+        asset_dirs = sorted(
+            (
+                path
+                for path in captures_root.iterdir()
+                if path.is_dir()
+                and any(
+                    declared(marker)
+                    for marker in (
+                        path / "evidence" / "current.json",
+                        path / "evidence" / "evidence.sqlite",
+                        path / "evidence" / "manifest.json",
+                    )
+                )
+            ),
             key=lambda item: item.as_posix().casefold(),
-        )
-        for manifest_path in manifests:
-            manifest = _read_json(manifest_path, {})
+        ) if captures_root.is_dir() else []
+        for asset_dir in asset_dirs:
+            current_pointer = asset_dir / "evidence" / "current.json"
+            current_declared = declared(current_pointer)
+            try:
+                evidence_state = resolve_asset_evidence_state(asset_dir)
+            except (OSError, ValueError):
+                if current_declared:
+                    raise
+                failures += 1
+                continue
+            manifest = evidence_manifest_payload(evidence_state)
             if not isinstance(manifest, Mapping):
                 failures += 1
                 continue
-            database_name = str(manifest.get("database") or "evidence.sqlite")
-            database_path = manifest_path.parent / database_name
-            if not database_path.is_file():
-                failures += 1
-                continue
             source_key = str(
-                manifest.get("object_path") or manifest_path.parent.parent.name
+                manifest.get("objectPath")
+                or manifest.get("object_path")
+                or asset_dir.name
             )
-            stat = database_path.stat()
             fingerprint = sha256_bytes(
-                manifest_path.read_bytes()
-                + f"\0{stat.st_size}\0{stat.st_mtime_ns}".encode("ascii")
+                "\0".join(
+                    (
+                        evidence_state.source_kind,
+                        evidence_state.freshness_status,
+                        "1" if evidence_state.release_authority else "0",
+                        "1" if evidence_state.migration_required else "0",
+                        evidence_state.pointer_sha256 or "",
+                        evidence_state.manifest_sha256
+                        or evidence_state.manifest_content_sha256,
+                        evidence_state.database_sha256,
+                        str(evidence_state.database_bytes),
+                    )
+                ).encode("utf-8")
             )
             seen_keys.add(source_key)
             cached = _cache_get(
@@ -1697,11 +1743,20 @@ def load_blueprint_evidence(
                 payloads.append(dict(cached))
                 cache_hits += 1
                 continue
-            try:
-                payload = _extract_blueprint_store(manifest_path, database_path)
-            except Exception:
-                failures += 1
-                continue
+            # Every declared v3/v2 store has already passed the resolver.  A
+            # second-open failure represents drift or damage, not an optional
+            # discovery miss, and must remain fail closed.
+            payload = _extract_blueprint_store(
+                evidence_state,
+                capture_dir=asset_dir,
+            )
+            payload["publication"] = {
+                "source_kind": evidence_state.source_kind,
+                "release_authority": evidence_state.release_authority,
+                "freshness_status": evidence_state.freshness_status,
+                "migration_required": evidence_state.migration_required,
+                **evidence_state_metadata(evidence_state),
+            }
             _cache_put(
                 connection,
                 "blueprint_evidence",

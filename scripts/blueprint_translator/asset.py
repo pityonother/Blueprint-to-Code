@@ -8,7 +8,7 @@ import json
 import os
 import re
 import shutil
-import sqlite3
+import stat
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -33,6 +33,8 @@ from .diagnostics import (
 )
 from .formulas import build_formula_candidates, render_formula_candidates
 from .output import resolve_output_paths, write_glossary
+from .evidence_publication import evidence_publication_lock
+from .evidence_repository import resolve_asset_evidence_state
 from .quality import (
     behavior_area,
     build_components_suggestions,
@@ -44,7 +46,7 @@ from .quality import (
     render_capture_quality_report,
     render_next_actions,
 )
-from .renderers import format_component_refs, format_default_refs, render_report
+from .renderers import format_component_refs, format_default_refs
 from .uasset_graphs import (
     compare_uasset_with_clipboard,
     current_uasset_graph_payload_files,
@@ -1340,64 +1342,59 @@ def clean_asset_outputs(paths: dict[str, Path]) -> None:
 def prune_legacy_uasset_outputs(asset_dir: Path) -> list[str]:
     """Delete only known generated legacy artifacts after explicit opt-in."""
 
-    root = asset_dir.resolve()
-    database_path = root / "evidence" / "evidence.sqlite"
-    if not database_path.is_file():
-        raise ValueError("refusing to prune legacy artifacts before indexed evidence exists")
-    manifest_path = root / "evidence" / "manifest.json"
-    agent_index_path = root / "output" / "agent_index.md"
-    try:
-        evidence_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("refusing to prune without a valid evidence manifest") from exc
-    if not isinstance(evidence_manifest, dict) or evidence_manifest.get("database") != "evidence.sqlite":
-        raise ValueError("refusing to prune because the evidence manifest contract is invalid")
-    revision_id = str(evidence_manifest.get("revision_id") or "")
-    if not revision_id or not agent_index_path.is_file():
-        raise ValueError("refusing to prune because the indexed artifact set is incomplete")
-    connection = sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)
-    try:
-        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
-        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
-        revision_row = connection.execute(
-            "SELECT revision_id FROM asset_revisions WHERE revision_id = ?",
-            (revision_id,),
-        ).fetchone()
-        database_counts = {
-            table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("graphs", "nodes", "pins", "edges", "edge_observations")
-        }
-    finally:
-        connection.close()
-    expected_counts = evidence_manifest.get("counts")
-    if integrity != "ok" or foreign_key_errors or revision_row is None:
-        raise ValueError("refusing to prune because indexed evidence integrity validation failed")
-    if not isinstance(expected_counts, dict) or any(
-        int(expected_counts.get(table) or 0) != count
-        for table, count in database_counts.items()
-    ):
-        raise ValueError("refusing to prune because manifest and database counts do not match")
-    if revision_id not in agent_index_path.read_text(encoding="utf-8", errors="replace"):
-        raise ValueError("refusing to prune because agent_index.md has a different revision")
-    removed: list[str] = []
-    for name in UASSET_LEGACY_FILE_NAMES:
-        path = (root / name).resolve()
+    with evidence_publication_lock(asset_dir) as root:
         try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"unsafe legacy artifact path: {path}") from exc
-        if path.is_file():
+            state = resolve_asset_evidence_state(root, allow_stale=False)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ValueError(
+                "refusing to prune without fresh manifest-bound v3 evidence"
+            ) from exc
+        if (
+            state.source_kind != "INDEXED_V3_CURRENT"
+            or not state.release_authority
+            or state.freshness_status != "FRESH"
+        ):
+            raise ValueError(
+                "refusing to prune without fresh v3 release-authority evidence"
+            )
+
+        removed: list[str] = []
+        for name in UASSET_LEGACY_FILE_NAMES:
+            path = root / name
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                continue
+            reparse_flag = int(
+                getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+            )
+            if (
+                path.is_symlink()
+                or bool(int(getattr(metadata, "st_file_attributes", 0)) & reparse_flag)
+                or not stat.S_ISREG(metadata.st_mode)
+            ):
+                raise ValueError(f"unsafe legacy artifact path: {path.name}")
             path.unlink()
             removed.append(name)
-    graphs_dir = (root / "graphs_from_uasset").resolve()
-    try:
-        graphs_dir.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(f"unsafe legacy graph directory: {graphs_dir}") from exc
-    if graphs_dir.is_dir():
-        shutil.rmtree(graphs_dir)
-        removed.append("graphs_from_uasset/")
-    return removed
+
+        graphs_dir = root / "graphs_from_uasset"
+        try:
+            metadata = graphs_dir.lstat()
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None:
+            reparse_flag = int(
+                getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+            )
+            if (
+                graphs_dir.is_symlink()
+                or bool(int(getattr(metadata, "st_file_attributes", 0)) & reparse_flag)
+                or not stat.S_ISDIR(metadata.st_mode)
+            ):
+                raise ValueError("unsafe legacy graph directory")
+            shutil.rmtree(graphs_dir)
+            removed.append("graphs_from_uasset/")
+        return removed
 
 
 def run_asset_binary_translate(args: argparse.Namespace) -> int:
@@ -1492,11 +1489,21 @@ def run_asset_translate(args: argparse.Namespace) -> int:
     manifest = load_manifest(asset_dir)
     graph_records = discover_asset_graphs(asset_dir, manifest)
     if not graph_records:
-        evidence_database = asset_dir / "evidence" / "evidence.sqlite"
-        agent_index = asset_dir / "output" / "agent_index.md"
-        if evidence_database.is_file() and agent_index.is_file():
-            print(f"Indexed evidence is ready: {evidence_database}")
-            print(f"Agent index: {agent_index}")
+        indexed_declared = False
+        for marker in (
+            asset_dir / "evidence" / "current.json",
+            asset_dir / "evidence" / "evidence.sqlite",
+        ):
+            try:
+                marker.lstat()
+            except FileNotFoundError:
+                continue
+            indexed_declared = True
+            break
+        if indexed_declared:
+            state = resolve_asset_evidence_state(asset_dir)
+            print(f"Indexed evidence is ready: {state.database_path}")
+            print(f"Agent index: {state.agent_index_path}")
             print("Use scripts/query_blueprint_evidence.py for bounded analysis; no legacy reports were generated.")
             return 0
         print(f"No graph .txt files found in asset directory: {asset_dir}", file=sys.stderr)

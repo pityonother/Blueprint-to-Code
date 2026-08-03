@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -42,14 +43,26 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.context_pack import estimate_tokens
-from blueprint_translator.evidence_query import EvidenceQueryService
-from blueprint_translator.evidence_schema import (
+from blueprint_translator.context_pack import estimate_tokens  # noqa: E402
+from blueprint_translator.evidence_query import EvidenceQueryService  # noqa: E402
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    evidence_agent_index_text,
+    evidence_manifest_payload,
+    resolve_asset_evidence_state,
+)
+from blueprint_translator.evidence_publication import (  # noqa: E402
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_path_chain,
+)
+from blueprint_translator.evidence_schema import (  # noqa: E402
     EVIDENCE_SCHEMA_VERSION,
     LEGACY_CAPTURE_PARSER_VERSION,
     make_revision_id,
 )
-from blueprint_translator.evidence_writer import DIRECT_PAYLOAD_PARSER_VERSION
+from blueprint_translator.evidence_writer import (  # noqa: E402
+    DIRECT_PAYLOAD_PARSER_VERSION,
+)
 
 
 DEFAULT_MAX_SIZE_RATIO = 0.50
@@ -997,8 +1010,17 @@ def _agent_index_counts(text: str) -> dict[str, int]:
     return counts
 
 
-def _query_index_counts(database_path: Path) -> dict[str, int]:
-    with EvidenceQueryService.open(database_path) as service:
+def _query_index_counts(
+    database_path: Path,
+    *,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
+) -> dict[str, int]:
+    with EvidenceQueryService.open(
+        database_path,
+        expected_sha256=expected_sha256,
+        expected_size=expected_size,
+    ) as service:
         overview = service.query({"operation": "overview", "budgetTokens": 8000})
     summary = overview.get("summary")
     if not isinstance(summary, dict):
@@ -1009,14 +1031,33 @@ def _query_index_counts(database_path: Path) -> dict[str, int]:
     }
 
 
-def _agent_index_check(asset_dir: Path, revision_id: str, database_path: Path) -> dict[str, object]:
-    path = asset_dir / "output" / "agent_index.md"
-    if not path.is_file():
-        return {"ok": False, "estimatedTokens": 0, "limit": 1500, "errors": ["file is missing"]}
-    try:
-        text = path.read_text(encoding="utf-8")
-    except UnicodeError as exc:
-        return {"ok": False, "estimatedTokens": 0, "limit": 1500, "errors": [str(exc)]}
+def _agent_index_check(
+    asset_dir: Path,
+    revision_id: str,
+    database_path: Path,
+    *,
+    index_path: Path | None = None,
+    index_text: str | None = None,
+    index_bytes: int | None = None,
+    expected_database_sha256: str | None = None,
+    expected_database_size: int | None = None,
+) -> dict[str, object]:
+    path = index_path if index_path is not None else asset_dir / "output" / "agent_index.md"
+    if index_text is None:
+        if not path.is_file():
+            return {"ok": False, "estimatedTokens": 0, "limit": 1500, "errors": ["file is missing"]}
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeError as exc:
+            return {"ok": False, "estimatedTokens": 0, "limit": 1500, "errors": [str(exc)]}
+        observed_bytes = path.stat().st_size
+    else:
+        text = index_text
+        observed_bytes = (
+            int(index_bytes)
+            if index_bytes is not None
+            else len(text.encode("utf-8"))
+        )
     tokens = estimate_tokens(text)
     errors: list[str] = []
     if tokens > 1500:
@@ -1025,7 +1066,11 @@ def _agent_index_check(asset_dir: Path, revision_id: str, database_path: Path) -
         errors.append("SQLite revision is absent from agent_index.md")
     index_counts = _agent_index_counts(text)
     try:
-        query_counts = _query_index_counts(database_path)
+        query_counts = _query_index_counts(
+            database_path,
+            expected_sha256=expected_database_sha256,
+            expected_size=expected_database_size,
+        )
     except Exception as exc:
         query_counts = {}
         errors.append(f"could not query SQLite coverage: {type(exc).__name__}: {exc}")
@@ -1041,7 +1086,7 @@ def _agent_index_check(asset_dir: Path, revision_id: str, database_path: Path) -
         "ok": not errors,
         "estimatedTokens": tokens,
         "limit": 1500,
-        "bytes": path.stat().st_size,
+        "bytes": observed_bytes,
         "indexCounts": index_counts,
         "queryCounts": query_counts,
         "errors": errors,
@@ -1195,10 +1240,17 @@ def _recall_check(
     recall_rows: Iterable[Mapping[str, object]],
     node_refs: Mapping[tuple[int, str], str],
     default_refs: Mapping[str, str],
+    *,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
 ) -> dict[str, object]:
     rows = list(recall_rows)
     missing: list[dict[str, object]] = []
-    with EvidenceQueryService.open(database_path) as service:
+    with EvidenceQueryService.open(
+        database_path,
+        expected_sha256=expected_sha256,
+        expected_size=expected_size,
+    ) as service:
         for row in rows:
             kind = str(row["kind"])
             name = str(row["name"])
@@ -1274,12 +1326,18 @@ def _benchmark_check(
     node_ref: str,
     max_search_p95_ms: float,
     max_two_hop_p95_ms: float,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
 ) -> dict[str, object]:
     if iterations <= 0:
         raise ValueError("benchmark_iterations must be positive")
     search_samples: list[float] = []
     hop_samples: list[float] = []
-    with EvidenceQueryService.open(database_path) as service:
+    with EvidenceQueryService.open(
+        database_path,
+        expected_sha256=expected_sha256,
+        expected_size=expected_size,
+    ) as service:
         search_request = {
             "operation": "search",
             "query": search_name or "*",
@@ -1342,7 +1400,7 @@ def validate_asset(
 ) -> dict[str, object]:
     """Validate one legacy-migrated or direct-capture evidence asset."""
 
-    root = Path(asset_dir).expanduser().resolve()
+    root = _lexical_absolute(asset_dir)
     report: dict[str, object] = {
         "assetDir": str(root),
         "ok": False,
@@ -1353,6 +1411,13 @@ def validate_asset(
     }
     checks: dict[str, object] = report["checks"]  # type: ignore[assignment]
     hard_failures: list[str] = report["hardFailures"]  # type: ignore[assignment]
+    try:
+        _require_plain_path_chain(root, label="asset directory")
+        _require_plain_directory(root, label="asset directory")
+    except (OSError, ValueError) as exc:
+        checks["source"] = _failed_check(f"{type(exc).__name__}: {exc}")
+        hard_failures.append("source: asset directory path is unsafe")
+        return report
     if not root.is_dir():
         checks["source"] = _failed_check(f"asset directory does not exist: {root}")
         hard_failures.append("source: asset directory is unavailable")
@@ -1381,18 +1446,28 @@ def validate_asset(
         report["source"] = {"mode": "direct"}
         checks["source"] = {"ok": True, "mode": "direct"}
 
-    database_path = root / "evidence" / "evidence.sqlite"
-    evidence_manifest_path = root / "evidence" / "manifest.json"
     try:
-        if not database_path.is_file():
-            raise FileNotFoundError(database_path)
-        connection = sqlite3.connect(str(database_path))
-        try:
+        evidence_state = resolve_asset_evidence_state(root, allow_stale=True)
+        evidence_manifest = evidence_manifest_payload(evidence_state)
+        agent_index_text = evidence_agent_index_text(evidence_state)
+    except Exception as exc:
+        checks["artifacts"] = _failed_check(f"{type(exc).__name__}: {exc}")
+        hard_failures.append("artifacts: indexed evidence could not be validated")
+        return report
+    database_path = evidence_state.database_path
+    agent_index_path = evidence_state.agent_index_path
+    try:
+        with EvidenceQueryService.open(
+            database_path,
+            expected_sha256=evidence_state.database_sha256,
+            expected_size=evidence_state.database_bytes,
+        ) as service:
+            connection = service._connection  # noqa: SLF001 - validator owns service lifetime
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA query_only = ON")
             sqlite_result = _sqlite_check(connection)
             checks["sqlite"] = sqlite_result
             database = _database_model(connection)
-        finally:
-            connection.close()
         report["identity"] = database["identity"]
     except Exception as exc:
         checks.setdefault("sqlite", _failed_check(f"{type(exc).__name__}: {exc}"))
@@ -1449,8 +1524,34 @@ def validate_asset(
         }
 
     try:
-        evidence_manifest = _read_json_object(evidence_manifest_path)
-        artifacts = _artifact_check(root, evidence_manifest, database)
+        if evidence_state.source_kind == "INDEXED_V3_CURRENT":
+            output_dir = root / "output"
+            stale_output = sorted(
+                path.relative_to(output_dir).as_posix()
+                for path in output_dir.rglob("*")
+                if _is_temp_or_stale(path)
+            ) if output_dir.is_dir() else []
+            staging_entries = sorted(
+                path.relative_to(root).as_posix()
+                for path in (root / "evidence").glob(".evidence-v3-stage-*")
+            )
+            artifacts = {
+                "ok": not stale_output and not staging_entries,
+                "mode": "v3-current",
+                "revisionId": str(database["identity"].get("revisionId") or ""),
+                "manifestSha256": evidence_state.manifest_sha256,
+                "pointerSha256": evidence_state.pointer_sha256,
+                "freshnessStatus": evidence_state.freshness_status,
+                "releaseAuthority": evidence_state.release_authority,
+                "staleOutputFiles": stale_output,
+                "stagingEntries": staging_entries,
+                "errors": (
+                    (["stale compatibility output exists"] if stale_output else [])
+                    + (["unfinished evidence v3 staging directory exists"] if staging_entries else [])
+                ),
+            }
+        else:
+            artifacts = _artifact_check(root, evidence_manifest, database)
     except Exception as exc:
         artifacts = _failed_check(f"{type(exc).__name__}: {exc}")
     checks["artifacts"] = artifacts
@@ -1458,7 +1559,16 @@ def validate_asset(
         hard_failures.append("artifacts: expected v2 files or manifest contract failed")
 
     revision_id = str(database["identity"].get("revisionId") or "")
-    agent_index = _agent_index_check(root, revision_id, database_path)
+    agent_index = _agent_index_check(
+        root,
+        revision_id,
+        database_path,
+        index_path=agent_index_path,
+        index_text=agent_index_text,
+        index_bytes=evidence_state.agent_index_bytes,
+        expected_database_sha256=evidence_state.database_sha256,
+        expected_database_size=evidence_state.database_bytes,
+    )
     checks["agentIndex"] = agent_index
     if not agent_index["ok"]:
         hard_failures.append("agentIndex: bounded index check failed")
@@ -1474,6 +1584,8 @@ def validate_asset(
                 legacy["recall"],
                 database["node_refs"],
                 database["default_refs"],
+                expected_sha256=evidence_state.database_sha256,
+                expected_size=evidence_state.database_bytes,
             )
         except Exception as exc:
             recall = _failed_check(f"{type(exc).__name__}: {exc}")
@@ -1500,6 +1612,8 @@ def validate_asset(
                 node_ref=first_node_ref,
                 max_search_p95_ms=max_search_p95_ms,
                 max_two_hop_p95_ms=max_two_hop_p95_ms,
+                expected_sha256=evidence_state.database_sha256,
+                expected_size=evidence_state.database_bytes,
             )
         except Exception as exc:
             benchmark_result = _failed_check(f"{type(exc).__name__}: {exc}")
@@ -1523,8 +1637,21 @@ def validate_index_consistency(asset_dir: str | Path) -> dict[str, object]:
     source freshness remains the responsibility of :func:`validate_asset`.
     """
 
-    root = Path(asset_dir).expanduser().resolve()
-    database_path = root / "evidence" / "evidence.sqlite"
+    root = _lexical_absolute(asset_dir)
+    try:
+        evidence_state = resolve_asset_evidence_state(root, allow_stale=True)
+        agent_index_text = evidence_agent_index_text(evidence_state)
+    except Exception as exc:
+        return {
+            "assetDir": str(root),
+            "mode": "index-only",
+            "ok": False,
+            "identity": {},
+            "checks": {"artifacts": _failed_check(f"{type(exc).__name__}: {exc}")},
+            "hardFailures": ["artifacts: indexed evidence could not be validated"],
+        }
+    database_path = evidence_state.database_path
+    agent_index_path = evidence_state.agent_index_path
     report: dict[str, object] = {
         "assetDir": str(root),
         "mode": "index-only",
@@ -1536,14 +1663,23 @@ def validate_index_consistency(asset_dir: str | Path) -> dict[str, object]:
     checks: dict[str, object] = report["checks"]  # type: ignore[assignment]
     hard_failures: list[str] = report["hardFailures"]  # type: ignore[assignment]
     try:
-        if not database_path.is_file():
-            raise FileNotFoundError(database_path)
-        connection = sqlite3.connect(str(database_path))
-        try:
+        _require_plain_path_chain(root, label="asset directory")
+        _require_plain_directory(root, label="asset directory")
+    except (OSError, ValueError) as exc:
+        checks["source"] = _failed_check(f"{type(exc).__name__}: {exc}")
+        hard_failures.append("source: asset directory path is unsafe")
+        return report
+    try:
+        with EvidenceQueryService.open(
+            database_path,
+            expected_sha256=evidence_state.database_sha256,
+            expected_size=evidence_state.database_bytes,
+        ) as service:
+            connection = service._connection  # noqa: SLF001 - validator owns service lifetime
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA query_only = ON")
             sqlite_result = _sqlite_check(connection)
             database = _database_model(connection)
-        finally:
-            connection.close()
         checks["sqlite"] = sqlite_result
         report["identity"] = database["identity"]
     except Exception as exc:
@@ -1554,7 +1690,16 @@ def validate_index_consistency(asset_dir: str | Path) -> dict[str, object]:
     if not checks["sqlite"]["ok"]:  # type: ignore[index]
         hard_failures.append("sqlite: integrity or foreign-key check failed")
     revision_id = str(database["identity"].get("revisionId") or "")
-    agent_index = _agent_index_check(root, revision_id, database_path)
+    agent_index = _agent_index_check(
+        root,
+        revision_id,
+        database_path,
+        index_path=agent_index_path,
+        index_text=agent_index_text,
+        index_bytes=evidence_state.agent_index_bytes,
+        expected_database_sha256=evidence_state.database_sha256,
+        expected_database_size=evidence_state.database_bytes,
+    )
     checks["agentIndex"] = agent_index
     if not agent_index["ok"]:
         hard_failures.append("agentIndex: bounded index differs from SQLite query contract")
@@ -1563,17 +1708,25 @@ def validate_index_consistency(asset_dir: str | Path) -> dict[str, object]:
 
 
 def discover_asset_dirs(capture_root: str | Path) -> list[Path]:
-    """Return every asset directory containing ``evidence/evidence.sqlite``."""
+    """Return assets with a v3 current pointer or a complete v2 compatibility DB."""
 
-    root = Path(capture_root).expanduser().resolve()
+    root = _lexical_absolute(capture_root)
+    _require_plain_path_chain(root, label="capture root")
+    _require_plain_directory(root, label="capture root")
     if not root.is_dir():
         raise FileNotFoundError(root)
+    assets = {
+        Path(os.path.abspath(os.fspath(path.parent.parent)))
+        for path in root.rglob("current.json")
+        if path.parent.name.casefold() == "evidence"
+    }
+    assets.update(
+        Path(os.path.abspath(os.fspath(path.parent.parent)))
+        for path in root.rglob("evidence.sqlite")
+        if path.parent.name.casefold() == "evidence"
+    )
     return sorted(
-        {
-            path.parent.parent.resolve()
-            for path in root.rglob("evidence.sqlite")
-            if path.parent.name.casefold() == "evidence"
-        },
+        assets,
         key=lambda path: str(path).casefold(),
     )
 
@@ -1628,7 +1781,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(argv if argv is not None else sys.argv[1:]))
     try:
         asset_dirs = (
-            [path.expanduser().resolve() for path in args.asset_dir]
+            [_lexical_absolute(path) for path in args.asset_dir]
             if args.asset_dir
             else discover_asset_dirs(args.capture_root)
         )

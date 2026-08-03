@@ -8,10 +8,18 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+
+from blueprint_translator.evidence_schema import (  # noqa: E402
+    EVIDENCE_SCHEMA_VERSION,
+    ensure_evidence_schema,
+    make_asset_id,
+    make_revision_id,
+)
 
 
 REQUIRED_TABLE_COLUMNS = {
@@ -244,129 +252,53 @@ def _write_fake_asset(
 def _create_blueprint_store(captures_root: Path) -> Path:
     asset_name = "Buff_Test"
     object_path = "/Game/Test/Buff_Test.Buff_Test"
+    asset_id = make_asset_id(object_path)
+    parser_version = "fixture-parser"
+    source_path = f"binary/{asset_name}.uasset"
+    source_sha256 = "b" * 64
+    source_hashes = {source_path: source_sha256}
+    revision_id = make_revision_id(
+        source_hashes,
+        parser_version=parser_version,
+        schema_version=EVIDENCE_SCHEMA_VERSION,
+    )
+    source_fingerprint = hashlib.sha256(
+        json.dumps(
+            sorted(source_hashes.items()),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    graph_ref = f"bp://{asset_id}@{revision_id}/g/1"
+    node_ref = f"{graph_ref}/n/1"
+    first_pin_ref = f"{node_ref}/p/0"
+    second_pin_ref = f"{node_ref}/p/1"
     capture = captures_root / asset_name
     store = capture / "evidence" / "evidence.sqlite"
     store.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(store)
     try:
-        connection.executescript(
-            """
-            CREATE TABLE asset_revisions (
-                revision_id TEXT PRIMARY KEY,
-                asset_id TEXT NOT NULL,
-                asset_name TEXT NOT NULL,
-                object_path TEXT NOT NULL,
-                source_fingerprint TEXT NOT NULL,
-                parser_version TEXT NOT NULL,
-                schema_version TEXT NOT NULL,
-                generated_at TEXT NOT NULL,
-                uasset_path TEXT NOT NULL DEFAULT ''
-            );
-            CREATE TABLE graphs (
-                graph_ref TEXT PRIMARY KEY,
-                revision_id TEXT NOT NULL,
-                export_index INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                graph_type TEXT NOT NULL,
-                status TEXT NOT NULL,
-                confidence TEXT NOT NULL,
-                node_count INTEGER NOT NULL,
-                pin_count INTEGER NOT NULL,
-                link_observation_count INTEGER NOT NULL,
-                coverage_json TEXT NOT NULL,
-                warnings_json TEXT NOT NULL,
-                metadata_json TEXT NOT NULL
-            );
-            CREATE TABLE nodes (
-                node_ref TEXT PRIMARY KEY,
-                graph_ref TEXT NOT NULL,
-                function_name TEXT NOT NULL,
-                event_name TEXT NOT NULL,
-                macro_name TEXT NOT NULL,
-                confidence TEXT NOT NULL
-            );
-            CREATE TABLE pins (pin_ref TEXT PRIMARY KEY, node_ref TEXT NOT NULL);
-            CREATE TABLE edges (
-                edge_ref TEXT PRIMARY KEY,
-                graph_ref TEXT NOT NULL,
-                source_pin_ref TEXT NOT NULL,
-                target_pin_ref TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                confidence TEXT NOT NULL,
-                resolution_status TEXT NOT NULL
-            );
-            CREATE TABLE class_defaults (
-                default_ref TEXT PRIMARY KEY,
-                revision_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                type_name TEXT NOT NULL,
-                value_json TEXT NOT NULL,
-                value_codec TEXT NOT NULL,
-                confidence TEXT NOT NULL,
-                source TEXT NOT NULL,
-                extra_json TEXT NOT NULL
-            );
-            CREATE TABLE properties (property_ref TEXT PRIMARY KEY);
-            CREATE TABLE "references" (
-                reference_ref TEXT PRIMARY KEY,
-                graph_ref TEXT NOT NULL,
-                node_ref TEXT,
-                kind TEXT NOT NULL,
-                name TEXT NOT NULL,
-                target_ref TEXT NOT NULL,
-                classification TEXT NOT NULL,
-                confidence TEXT NOT NULL
-            );
-            CREATE TABLE diagnostics (
-                diagnostic_ref TEXT PRIMARY KEY,
-                revision_id TEXT NOT NULL,
-                scope_kind TEXT NOT NULL,
-                scope_ref TEXT NOT NULL,
-                status TEXT NOT NULL,
-                reason_code TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                title TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                next_probe TEXT NOT NULL,
-                evidence_json TEXT NOT NULL,
-                raw_json TEXT NOT NULL
-            );
-            CREATE TABLE coverage (
-                scope_ref TEXT PRIMARY KEY,
-                revision_id TEXT NOT NULL,
-                scope_kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                confidence TEXT NOT NULL,
-                metrics_json TEXT NOT NULL
-            );
-            CREATE TABLE source_manifest (
-                revision_id TEXT NOT NULL,
-                path TEXT NOT NULL,
-                sha256 TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                source_kind TEXT NOT NULL
-            );
-            """
-        )
+        ensure_evidence_schema(connection)
         connection.execute(
             "INSERT INTO asset_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "bp://fixture/revision/1",
-                "bp://fixture",
+                revision_id,
+                asset_id,
                 asset_name,
                 object_path,
-                "a" * 64,
-                "fixture-parser",
-                "ark.blueprint.evidence.v2",
+                source_fingerprint,
+                parser_version,
+                EVIDENCE_SCHEMA_VERSION,
                 "2026-07-27T00:00:00+00:00",
-                r"C:\Users\secret\ARKDevkit\Buff_Test.uasset",
+                "",
             ),
         )
         connection.execute(
             "INSERT INTO graphs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "bp://fixture/graph/EventGraph",
-                "bp://fixture/revision/1",
+                graph_ref,
+                revision_id,
                 1,
                 "EventGraph",
                 "EventGraph",
@@ -381,40 +313,50 @@ def _create_blueprint_store(captures_root: Path) -> Path:
             ),
         )
         connection.execute(
-            "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO nodes("
+            "node_ref, graph_ref, local_index, node_identity, name, class_name, "
+            "node_type, function_name, event_name, confidence"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "bp://fixture/node/1",
-                "bp://fixture/graph/EventGraph",
+                node_ref,
+                graph_ref,
+                1,
+                "fixture-node",
+                "K2Node_CallFunction_0",
+                "K2Node_CallFunction",
+                "K2Node_CallFunction",
                 "GenerateCrateItems",
                 "ReceiveBeginPlay",
-                "",
                 "medium",
             ),
         )
         connection.executemany(
-            "INSERT INTO pins VALUES (?, ?)",
+            "INSERT INTO pins(pin_ref, node_ref, ordinal) VALUES (?, ?, ?)",
             (
-                ("bp://fixture/pin/1", "bp://fixture/node/1"),
-                ("bp://fixture/pin/2", "bp://fixture/node/1"),
+                (first_pin_ref, node_ref, 0),
+                (second_pin_ref, node_ref, 1),
             ),
         )
         connection.execute(
             "INSERT INTO edges VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                "bp://fixture/edge/1",
-                "bp://fixture/graph/EventGraph",
-                "bp://fixture/pin/1",
-                "bp://fixture/pin/2",
+                f"{graph_ref}/e/1",
+                graph_ref,
+                first_pin_ref,
+                second_pin_ref,
                 "exec",
                 "medium",
                 "resolved_pin",
             ),
         )
         connection.execute(
-            "INSERT INTO class_defaults VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO class_defaults("
+            "default_ref, revision_id, name, type_name, value_json, value_codec, "
+            "confidence, source, extra_json"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "bp://fixture/default/Duration",
-                "bp://fixture/revision/1",
+                f"bp://{asset_id}@{revision_id}/default/Duration",
+                revision_id,
                 "Duration",
                 "FloatProperty",
                 "10.0",
@@ -425,10 +367,13 @@ def _create_blueprint_store(captures_root: Path) -> Path:
             ),
         )
         connection.execute(
-            "INSERT INTO class_defaults VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO class_defaults("
+            "default_ref, revision_id, name, type_name, value_json, value_codec, "
+            "confidence, source, extra_json"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "bp://fixture/default/UnparsedArray",
-                "bp://fixture/revision/1",
+                f"bp://{asset_id}@{revision_id}/default/UnparsedArray",
+                revision_id,
                 "UnparsedArray",
                 "ArrayProperty",
                 "[]",
@@ -442,9 +387,9 @@ def _create_blueprint_store(captures_root: Path) -> Path:
             'INSERT INTO "references" VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 (
-                    "bp://fixture/ref/game",
-                    "bp://fixture/graph/EventGraph",
-                    "bp://fixture/node/1",
+                    f"{node_ref}/reference/game",
+                    graph_ref,
+                    node_ref,
                     "object",
                     "PrimalItem_Test",
                     "/Game/Test/PrimalItem_Test.PrimalItem_Test",
@@ -452,9 +397,9 @@ def _create_blueprint_store(captures_root: Path) -> Path:
                     "medium",
                 ),
                 (
-                    "bp://fixture/ref/native",
-                    "bp://fixture/graph/EventGraph",
-                    "bp://fixture/node/1",
+                    f"{node_ref}/reference/native",
+                    graph_ref,
+                    node_ref,
                     "call",
                     "GenerateCrateItems",
                     "",
@@ -466,10 +411,10 @@ def _create_blueprint_store(captures_root: Path) -> Path:
         connection.execute(
             "INSERT INTO diagnostics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "bp://fixture/diagnostic/1",
-                "bp://fixture/revision/1",
+                f"bp://{asset_id}@{revision_id}/diagnostic/1",
+                revision_id,
                 "graph",
-                "bp://fixture/graph/EventGraph",
+                graph_ref,
                 "open",
                 "SOURCE_NOT_AVAILABLE",
                 "warning",
@@ -483,8 +428,8 @@ def _create_blueprint_store(captures_root: Path) -> Path:
         connection.execute(
             "INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?)",
             (
-                "bp://fixture/coverage/1",
-                "bp://fixture/revision/1",
+                graph_ref,
+                revision_id,
                 "graph",
                 "partial",
                 "medium",
@@ -494,9 +439,9 @@ def _create_blueprint_store(captures_root: Path) -> Path:
         connection.execute(
             "INSERT INTO source_manifest VALUES (?, ?, ?, ?, ?)",
             (
-                "bp://fixture/revision/1",
-                r"C:\Users\secret\captures\Buff_Test\uasset_package.json",
-                "b" * 64,
+                revision_id,
+                source_path,
+                source_sha256,
                 5,
                 "package_binary",
             ),
@@ -506,13 +451,13 @@ def _create_blueprint_store(captures_root: Path) -> Path:
         connection.close()
 
     manifest = {
-        "schema": "ark.blueprint.evidence.v2",
-        "asset_id": "bp://fixture",
+        "schema": EVIDENCE_SCHEMA_VERSION,
+        "asset_id": asset_id,
         "asset_name": asset_name,
         "object_path": object_path,
-        "revision_id": "bp://fixture/revision/1",
-        "source_fingerprint": "a" * 64,
-        "parser_version": "fixture-parser",
+        "revision_id": revision_id,
+        "source_fingerprint": source_fingerprint,
+        "parser_version": parser_version,
         "counts": {"graphs": 1, "nodes": 1, "pins": 2, "edges": 1},
         "database": "evidence.sqlite",
         "agent_index": "../output/agent_index.md",
@@ -557,7 +502,7 @@ def _create_blueprint_store(captures_root: Path) -> Path:
     output = capture / "output"
     output.mkdir()
     (output / "agent_index.md").write_text(
-        "# Buff Test\n\nDerived fixture index.\n",
+        f"# Buff Test\n\n- Revision: `{revision_id}`\n\nDerived fixture index.\n",
         encoding="utf-8",
     )
     return store
@@ -811,6 +756,180 @@ def _create_existing_knowledge_db(db_dir: Path) -> None:
 
 
 class KnowledgeDiscoveryBundleTests(unittest.TestCase):
+    def test_blueprint_discovery_uses_bound_manifest_after_resolver_path_replacement(self):
+        import blueprint_translator.kb_discovery as discovery
+        from blueprint_translator.evidence_publication import (
+            migrate_v2_evidence_to_v3,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            captures = root / "captures"
+            store = _create_blueprint_store(captures)
+            asset_dir = store.parents[1]
+            migrate_v2_evidence_to_v3(asset_dir, prune_v2=True)
+            state_db = root / "state.sqlite"
+            resolved_states = []
+            original_resolve = discovery.resolve_asset_evidence_state
+
+            def resolve_then_replace_manifest(*args, **kwargs):
+                state = original_resolve(*args, **kwargs)
+                resolved_states.append(state)
+                tampered_manifest = json.loads(state.manifest_raw.decode("utf-8"))
+                tampered_manifest["objectPath"] = (
+                    "/Game/Tampered/Injected.Injected"
+                )
+                state.manifest_path.write_text(
+                    json.dumps(tampered_manifest),
+                    encoding="utf-8",
+                )
+                return state
+
+            with mock.patch.object(
+                discovery,
+                "resolve_asset_evidence_state",
+                resolve_then_replace_manifest,
+            ):
+                payloads, stats = discovery.load_blueprint_evidence(
+                    state_db,
+                    captures,
+                )
+
+            state = resolved_states[0]
+            bound_manifest = json.loads(state.manifest_raw.decode("utf-8"))
+            expected_source_key = str(bound_manifest["objectPath"])
+            evidence_fingerprint = discovery.sha256_bytes(
+                "\0".join(
+                    (
+                        state.source_kind,
+                        state.freshness_status,
+                        "1" if state.release_authority else "0",
+                        "1" if state.migration_required else "0",
+                        state.pointer_sha256 or "",
+                        state.manifest_sha256 or state.manifest_content_sha256,
+                        state.database_sha256,
+                        str(state.database_bytes),
+                    )
+                ).encode("utf-8")
+            )
+            expected_fingerprint = discovery.sha256_bytes(
+                (
+                    f"{discovery.EXTRACTOR_CACHE_TOKEN}\0"
+                    f"blueprint_evidence\0{evidence_fingerprint}"
+                ).encode("utf-8")
+            )
+            connection = sqlite3.connect(state_db)
+            try:
+                cache_row = connection.execute(
+                    "SELECT source_key, source_fingerprint "
+                    "FROM source_cache WHERE source_kind='blueprint_evidence'"
+                ).fetchone()
+            finally:
+                connection.close()
+
+        self.assertEqual(stats["discovered"], 1)
+        self.assertEqual(stats["failures"], 0)
+        self.assertEqual(cache_row, (expected_source_key, expected_fingerprint))
+        self.assertEqual(payloads[0]["asset"]["object_path"], expected_source_key)
+        self.assertNotIn("Tampered", json.dumps(payloads[0], sort_keys=True))
+
+    def test_blueprint_discovery_loads_pruned_v3_revision(self):
+        from blueprint_translator.evidence_publication import (
+            migrate_v2_evidence_to_v3,
+        )
+        from blueprint_translator.kb_discovery import load_blueprint_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            captures = root / "captures"
+            store = _create_blueprint_store(captures)
+            asset_dir = store.parents[1]
+            published = migrate_v2_evidence_to_v3(asset_dir, prune_v2=True)
+
+            payloads, stats = load_blueprint_evidence(
+                root / "state.sqlite",
+                captures,
+            )
+
+        self.assertEqual(stats["discovered"], 1)
+        self.assertEqual(stats["failures"], 0)
+        self.assertEqual(
+            payloads[0]["asset"]["revision_id"],
+            published.revision_id,
+        )
+        self.assertEqual(payloads[0]["counts"]["graphs"], 1)
+        self.assertEqual(
+            payloads[0]["publication"]["source_kind"],
+            "INDEXED_V3_CURRENT",
+        )
+        self.assertFalse(payloads[0]["publication"]["migration_required"])
+        self.assertEqual(
+            set(
+                key
+                for key in payloads[0]["publication"]
+                if key
+                in {
+                    "sourceKind",
+                    "freshnessStatus",
+                    "releaseAuthority",
+                    "migrationRequired",
+                    "manifestSha256",
+                    "pointerSha256",
+                }
+            ),
+            {
+                "sourceKind",
+                "freshnessStatus",
+                "releaseAuthority",
+                "migrationRequired",
+                "manifestSha256",
+                "pointerSha256",
+            },
+        )
+
+    def test_blueprint_discovery_labels_v2_as_non_authoritative_compatibility(self):
+        from blueprint_translator.kb_discovery import load_blueprint_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            captures = root / "captures"
+            _create_blueprint_store(captures)
+
+            payloads, stats = load_blueprint_evidence(
+                root / "state.sqlite",
+                captures,
+            )
+
+        self.assertEqual(stats["discovered"], 1)
+        self.assertEqual(
+            payloads[0]["publication"]["source_kind"],
+            "INDEXED_V2_COMPATIBILITY",
+        )
+        self.assertFalse(payloads[0]["publication"]["release_authority"])
+        self.assertTrue(payloads[0]["publication"]["migration_required"])
+        self.assertFalse(payloads[0]["publication"]["releaseAuthority"])
+        self.assertTrue(payloads[0]["publication"]["migrationRequired"])
+
+    def test_blueprint_discovery_fails_closed_on_corrupt_current_pointer(self):
+        from blueprint_translator.evidence_publication import (
+            migrate_v2_evidence_to_v3,
+        )
+        from blueprint_translator.kb_discovery import load_blueprint_evidence
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            captures = root / "captures"
+            store = _create_blueprint_store(captures)
+            asset_dir = store.parents[1]
+            migrate_v2_evidence_to_v3(asset_dir)
+            (asset_dir / "evidence" / "current.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "POINTER_FIELDS_INVALID"):
+                load_blueprint_evidence(root / "state.sqlite", captures)
+
     def test_exact_owner_signature_and_exec_callsite_add_confirmed_edge(self):
         from blueprint_translator.kb_discovery import (
             _build_blueprint_native_edges,

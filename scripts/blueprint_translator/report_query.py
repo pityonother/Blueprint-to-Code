@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from .context_pack import ASCII_CHARS_PER_TOKEN, SPACE_CHARS_PER_TOKEN, estimate_tokens
+from .evidence_publication import (
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_path_chain,
+)
+from .evidence_repository import open_asset_repository
 
 
 DEFAULT_REPORT_QUERY_BUDGET = 1200
@@ -39,20 +45,149 @@ REPORT_FILES = {
 }
 
 
-def resolve_report_path(asset_dir: Path, report: str) -> Path:
-    """Resolve a known report key or safe asset-relative report path."""
-    root = Path(asset_dir).expanduser().resolve()
+def _indexed_evidence_declared(asset_dir: Path) -> bool:
+    for candidate in (
+        asset_dir / "evidence" / "current.json",
+        asset_dir / "evidence" / "evidence.sqlite",
+    ):
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        return True
+    return False
+
+
+def _repository_metadata(repository: object) -> dict[str, object]:
+    return {
+        "sourceKind": str(getattr(repository, "source_kind")),
+        "freshnessStatus": str(getattr(repository, "freshness_status")),
+        "releaseAuthority": bool(getattr(repository, "release_authority")),
+        "migrationRequired": bool(getattr(repository, "migration_required")),
+        "manifestSha256": getattr(repository, "manifest_sha256"),
+        "pointerSha256": getattr(repository, "pointer_sha256"),
+    }
+
+
+def _resolve_report_source_details(
+    asset_dir: Path,
+    report: str,
+) -> tuple[Path, dict[str, object], str | None]:
+    """Resolve a report plus manifest-bound indexed-evidence metadata.
+
+    ``agent_index`` is special: once indexed evidence is declared, the report
+    is resolved through :func:`open_asset_repository`.  A v3 current pointer
+    therefore selects the index inside the pointed immutable revision, while
+    a damaged pointer fails closed instead of falling back to the v2
+    compatibility copy in ``output/``.
+    """
+
+    root = _lexical_absolute(asset_dir)
+    _require_plain_path_chain(root, label="asset directory")
+    _require_plain_directory(root, label="asset directory")
     requested = str(report or "").strip()
-    relative = Path(*REPORT_FILES[requested]) if requested in REPORT_FILES else Path(requested)
-    target = (root / relative).resolve()
+    if requested in REPORT_FILES:
+        relative = Path(*REPORT_FILES[requested])
+    else:
+        relative = Path(requested)
+        if relative.is_absolute():
+            raise ValueError("report path must be asset-relative")
+        if any(part in {"", ".", ".."} for part in relative.parts):
+            raise ValueError("report path must not contain traversal segments")
+    compatibility_index = (root / Path(*REPORT_FILES["agent_index"])).resolve()
+    mapped_target = (root / relative).resolve()
+    try:
+        normalized_relative = mapped_target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("report path must stay inside the asset directory") from exc
+    relative_parts = tuple(part.casefold() for part in normalized_relative.parts)
+    requests_revision_index = (
+        len(relative_parts) == 4
+        and relative_parts[0] == "evidence"
+        and relative_parts[1] == "revisions"
+        and relative_parts[3] == "agent_index.md"
+    )
+    requests_agent_index = (
+        requested == "agent_index"
+        or mapped_target == compatibility_index
+        or requests_revision_index
+    )
+    metadata: dict[str, object] = {}
+    bound_text: str | None = None
+    if requests_agent_index and _indexed_evidence_declared(root):
+        with open_asset_repository(root) as repository:
+            metadata = _repository_metadata(repository)
+            bound_text = repository.agent_index_text
+            if bound_text is None:
+                raise ValueError("indexed evidence did not provide a bound agent index")
+            if repository.source_kind == "INDEXED_V3_CURRENT":
+                authoritative_index = repository.database_path.with_name(
+                    "agent_index.md"
+                ).resolve()
+                if requests_revision_index and mapped_target != authoritative_index:
+                    raise ValueError(
+                        "an explicit revision agent index is not the current evidence authority"
+                    )
+                target = authoritative_index
+            else:
+                if requests_revision_index:
+                    raise ValueError(
+                        "explicit revision agent indexes require a validated v3 current pointer"
+                    )
+                target = compatibility_index
+    else:
+        target = mapped_target
     if not target.is_relative_to(root):
         raise ValueError("report path must stay inside the asset directory")
     if target.suffix.casefold() != ".md":
         raise ValueError("only Markdown report files are supported")
-    if not target.is_file():
-        raise FileNotFoundError(f"report file does not exist: {target}")
-    if target.stat().st_size > MAX_REPORT_FILE_BYTES:
-        raise ValueError(f"Markdown report exceeds the {MAX_REPORT_FILE_BYTES}-byte safety limit")
+    if bound_text is not None:
+        if len(bound_text.encode("utf-8")) > MAX_REPORT_FILE_BYTES:
+            raise ValueError(
+                f"Markdown report exceeds the {MAX_REPORT_FILE_BYTES}-byte safety limit"
+            )
+    else:
+        if not target.is_file():
+            raise FileNotFoundError(f"report file does not exist: {target}")
+        if target.stat().st_size > MAX_REPORT_FILE_BYTES:
+            raise ValueError(
+                f"Markdown report exceeds the {MAX_REPORT_FILE_BYTES}-byte safety limit"
+            )
+    return target, metadata, bound_text
+
+
+def read_report_source(
+    asset_dir: Path,
+    report: str,
+) -> tuple[Path, str, dict[str, object]]:
+    """Resolve and read one report, preserving bound indexed-evidence bytes."""
+
+    target, metadata, bound_text = _resolve_report_source_details(asset_dir, report)
+    text = (
+        bound_text
+        if bound_text is not None
+        else target.read_text(encoding="utf-8-sig", errors="replace")
+    )
+    return target, text, metadata
+
+
+def resolve_report_source(
+    asset_dir: Path,
+    report: str,
+) -> tuple[Path, dict[str, object]]:
+    """Resolve a report path while preserving the historical two-item API."""
+
+    target, metadata, _bound_text = _resolve_report_source_details(
+        asset_dir,
+        report,
+    )
+    return target, metadata
+
+
+def resolve_report_path(asset_dir: Path, report: str) -> Path:
+    """Resolve a known report key or safe asset-relative report path."""
+
+    target, _metadata = resolve_report_source(asset_dir, report)
     return target
 
 

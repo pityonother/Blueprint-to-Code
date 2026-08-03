@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402 - local package imports follow the PROJECT_ROOT bootstrap.
+
 import argparse
 import json
 import re
@@ -18,7 +20,12 @@ from blueprint_translator.uasset_graphs import (
     write_uasset_graph_read_files,
 )
 from blueprint_translator.artifact_modes import ARTIFACT_MODES, normalize_artifact_mode
-from blueprint_translator.evidence_repository import open_asset_repository
+from blueprint_translator.evidence_repository import (
+    ResolvedEvidenceState,
+    evidence_state_metadata,
+    open_resolved_asset_repository,
+    resolve_asset_evidence_state,
+)
 from blueprint_translator.asset_ledger import (
     processed_current_for_path,
     record_asset_results,
@@ -85,6 +92,32 @@ def repository_graph_status_counts(repository: Any) -> dict[str, int]:
         status = str(graph.get("status") or "unknown").casefold()
         status_counts[status] = status_counts.get(status, 0) + 1
     return status_counts
+
+
+def resolve_indexed_evidence(
+    asset_dir: Path,
+) -> ResolvedEvidenceState | None:
+    def declared(path: Path) -> bool:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
+    evidence_dir = asset_dir / "evidence"
+    current_pointer = evidence_dir / "current.json"
+    v2_markers = (
+        evidence_dir / "evidence.sqlite",
+        evidence_dir / "manifest.json",
+    )
+    markers = (current_pointer, *v2_markers)
+    if not any(declared(marker) for marker in markers):
+        return None
+    # Once any indexed generation is declared, every missing/corrupt artifact
+    # is a fail-closed error.  Legacy reports are only considered when there is
+    # no v3/v2 declaration at all; they may not mask a damaged compatibility
+    # store or acquire a release-quality verdict.
+    return resolve_asset_evidence_state(asset_dir)
 
 
 def existing_capture_result(object_path: str, asset_name: str, asset_dir: Path, uasset_path: Path) -> dict[str, Any]:
@@ -274,9 +307,14 @@ def evaluate_asset_quality(result: dict[str, Any]) -> dict[str, Any]:
         "capture_quality_report": bool(capture_quality),
         "asset_report": (output_dir / "asset_report.md").is_file(),
     }
+    evidence_state = resolve_indexed_evidence(asset_dir)
     indexed_report_files = {
-        "evidence_store": (asset_dir / "evidence" / "evidence.sqlite").is_file(),
-        "agent_index": (output_dir / "agent_index.md").is_file(),
+        "evidence_store": bool(
+            evidence_state and evidence_state.database_path.is_file()
+        ),
+        "agent_index": bool(
+            evidence_state and evidence_state.agent_index_path.is_file()
+        ),
     }
     report_files = {**legacy_report_files, **indexed_report_files}
     incomplete_graphs = {
@@ -310,6 +348,13 @@ def evaluate_asset_quality(result: dict[str, Any]) -> dict[str, Any]:
         quality_flags.append("components_missing")
     if "UASSET021" in diagnostics:
         quality_flags.append("pin_links_heuristic")
+    if evidence_state is None:
+        quality_flags.append("evidence_not_release_authority")
+        quality_flags.append("evidence_migration_required")
+    elif not evidence_state.release_authority:
+        quality_flags.append("evidence_not_release_authority")
+    if evidence_state is not None and evidence_state.migration_required:
+        quality_flags.append("evidence_migration_required")
     confidence = summary_value(behavior, "Confidence") or summary_value(diagnostics, "Confidence")
     if confidence == "low":
         quality_flags.append("low_confidence")
@@ -350,6 +395,22 @@ def evaluate_asset_quality(result: dict[str, Any]) -> dict[str, Any]:
         "behavior_path": str(output_dir / "behavior_summary.md") if behavior else "",
         "diagnostics_path": str(output_dir / "diagnostics_report.md") if diagnostics else "",
         "capture_quality_path": str(output_dir / "capture_quality_report.md") if capture_quality else "",
+        **(
+            evidence_state_metadata(evidence_state)
+            if evidence_state is not None
+            else {
+                "sourceKind": (
+                    "LEGACY_REPORTS_ONLY"
+                    if any(legacy_report_files.values())
+                    else "NO_INDEXED_EVIDENCE"
+                ),
+                "freshnessStatus": "SOURCE_UNAVAILABLE",
+                "releaseAuthority": False,
+                "migrationRequired": True,
+                "manifestSha256": None,
+                "pointerSha256": None,
+            }
+        ),
     }
 
 
@@ -462,10 +523,10 @@ def read_asset(
             "uasset_path": str(uasset_path),
         }
 
-    indexed = asset_dir / "evidence" / "evidence.sqlite"
     existing = asset_dir / "uasset_graph_nodes.json"
-    if indexed.is_file() and not force:
-        with open_asset_repository(asset_dir) as repository:
+    evidence_state = None if force else resolve_indexed_evidence(asset_dir)
+    if evidence_state is not None:
+        with open_resolved_asset_repository(evidence_state) as repository:
             overview = repository.query({"operation": "overview", "budgetTokens": 800})
             status_counts = repository_graph_status_counts(repository)
         summary = overview.get("summary", {})
@@ -481,6 +542,7 @@ def read_asset(
             "link_count": summary.get("linkObservationCount", 0),
             "status_counts": status_counts,
             "revision_id": overview.get("asset", {}).get("revisionId", ""),
+            **evidence_state_metadata(evidence_state),
         }
     if existing.is_file() and not force:
         result = existing_capture_result(object_path, asset_name, asset_dir, uasset_path)

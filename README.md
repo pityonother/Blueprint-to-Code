@@ -56,7 +56,8 @@ npm run build
 
 1. 从 ARK DevKit 复制 `/Game/...Asset.Asset` Object Path；
 2. 粘贴后点击“从 .uasset 读取图内容”；
-3. 先阅读不超过 1,500 estimated tokens 的 `agent_index.md`；
+3. 先通过 `evidence/current.json` 读取其所指不可变 revision 内、不超过 1,500
+   estimated tokens 的 `agent_index.md`；
 4. 再用有预算的 query/context 命令取得当前问题所需证据。
 
 完整环境包用户可直接运行 `START_HERE.bat`；诊断入口是 `DIAGNOSE.bat`。
@@ -75,8 +76,9 @@ session、同源 POST、请求体上限与路径边界保护。
 ## 核心能力
 
 - 从 `.uasset` / `.uexp` 恢复 EdGraph、K2 Node、Pin、Wire、Default 与明确 gap。
-- 用 revision 固定的 `evidence.sqlite` 和稳定 `bp://` ID 提供 500–8,000
-  estimated-token 的有界查询。
+- 用 `evidence/current.json` 原子选择不可变 revision，并用该 revision 内受 manifest
+  hash 绑定的 `evidence.sqlite` 和稳定 `bp://` ID 提供 500–8,000 estimated-token
+  的有界查询。
 - 用声明式 recipe、PE/PDB 身份与动态 Ghidra project 提供可选 `native://`
   Evidence；不会把 name-only 匹配升级为 confirmed。
 - 用 Hybrid edge graph 保存 confirmed、ambiguous 与 unresolved Blueprint ↔ Native
@@ -162,10 +164,21 @@ git lfs pull --include="knowledge_base/discovery_bundle.zip"
 
 ## Token-Safe Report Reading
 
-不要把整个 `captures/<AssetName>/` 交给 AI。The validated default is `indexed`：
-一次真实资产读取只需要先交付
-`evidence/evidence.sqlite`、`evidence/manifest.json` 和
-`output/agent_index.md`。
+不要把整个 `captures/<AssetName>/` 交给 AI。The validated default is `indexed`。
+规范入口和唯一 authority 是：
+
+```text
+evidence/current.json
+  -> evidence/revisions/<revisionId>/manifest.json
+  -> evidence/revisions/<revisionId>/evidence.sqlite
+  -> evidence/revisions/<revisionId>/agent_index.md
+```
+
+本地 query/context 命令会验证 pointer、manifest、artifact hash、SQLite 身份和来源
+新鲜度后再读取。`evidence/evidence.sqlite`、`evidence/manifest.json` 与
+`output/agent_index.md` 只是一版发布周期内供旧消费者使用的 nonauthority
+compatibility copies；它们可以在消费者迁移完成后通过显式 `--prune-v2` 删除，
+不能用来判断 current revision 或掩盖损坏的 pointer。
 
 ```powershell
 runtime\python\python.exe scripts\bp_clipboard_to_prompt.py --asset-binary "/Game/Genesis2/Dinos/LionfishLion/LionfishLion_Character_BP.LionfishLion_Character_BP"
@@ -226,6 +239,7 @@ npm run build
 - [中文使用手册](docs/USER_GUIDE_zh.md)
 - [开发伙伴交接](docs/DEVELOPER_HANDOFF_zh.md)
 - [本地存储与生成物清理](docs/LOCAL_STORAGE_AND_CLEANUP_zh.md)
+- [Blueprint Evidence Publication v3](docs/BLUEPRINT_EVIDENCE_PUBLICATION_V3_zh.md)
 - [Blueprint Evidence Store v2](docs/BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
 - [Native Evidence Store v1](docs/NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md)
 - [Hybrid Evidence Linking](docs/HYBRID_EVIDENCE_LINKING_zh.md)

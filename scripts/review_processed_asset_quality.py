@@ -10,7 +10,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from blueprint_translator.asset_ledger import read_ledger_snapshot  # noqa: E402
-from blueprint_translator.evidence_repository import open_asset_repository  # noqa: E402
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    evidence_state_metadata,
+    open_resolved_asset_repository,
+)
 from read_priority_assets import (  # noqa: E402
     CATALOG_DB,
     CAPTURE_ROOT,
@@ -20,6 +23,7 @@ from read_priority_assets import (  # noqa: E402
     build_quality_payload,
     load_graph_summary,
     repository_graph_status_counts,
+    resolve_indexed_evidence,
     write_quality_report,
 )
 
@@ -33,7 +37,7 @@ def ledger_db_path() -> Path:
 
 
 def report_files_exist(asset_dir: Path) -> bool:
-    if (asset_dir / "evidence" / "evidence.sqlite").is_file() and (asset_dir / "output" / "agent_index.md").is_file():
+    if resolve_indexed_evidence(asset_dir) is not None:
         return True
     output_dir = asset_dir / "output"
     return all(
@@ -52,8 +56,9 @@ def row_to_result(row: dict[str, Any], *, analyze_missing: bool, analyze_all: bo
     asset_name = str(row.get("asset_name") or asset_name_from_object_path(object_path))
     asset_dir = Path(str(row.get("capture_dir") or "")) if row.get("capture_dir") else CAPTURE_ROOT / asset_name
     summary = load_graph_summary(asset_dir / "uasset_graph_nodes.json")
-    if (asset_dir / "evidence" / "evidence.sqlite").is_file():
-        with open_asset_repository(asset_dir) as repository:
+    evidence_state = resolve_indexed_evidence(asset_dir)
+    if evidence_state is not None:
+        with open_resolved_asset_repository(evidence_state) as repository:
             overview = repository.query({"operation": "overview", "budgetTokens": 800})
             status_counts = repository_graph_status_counts(repository)
         indexed = overview.get("summary", {})
@@ -75,6 +80,11 @@ def row_to_result(row: dict[str, Any], *, analyze_missing: bool, analyze_all: bo
         "pin_count": summary.get("pin_count", int(row.get("pin_count") or 0)),
         "link_count": summary.get("link_count", int(row.get("link_count") or 0)),
         "status_counts": summary.get("status_counts") or {},
+        **(
+            evidence_state_metadata(evidence_state)
+            if evidence_state is not None
+            else {}
+        ),
     }
     should_analyze = analyze_all or (analyze_missing and not report_files_exist(asset_dir))
     if should_analyze and asset_dir.is_dir():

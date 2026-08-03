@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,10 +22,12 @@ sys.path.insert(0, str(SCRIPTS))
 from blueprint_translator.hybrid_evidence import (  # noqa: E402
     HybridEvidenceArtifactInvalid,
     build_hybrid_evidence_payload,
+    extract_blueprint_calls,
     mark_stale_edges,
     open_hybrid_evidence_repository,
     write_hybrid_evidence_artifacts,
 )
+from blueprint_translator.evidence_schema import ensure_evidence_schema  # noqa: E402
 from blueprint_translator.native_evidence_repository import (  # noqa: E402
     open_native_evidence_repository,
 )
@@ -33,6 +39,57 @@ from build_hybrid_context_pack import (  # noqa: E402
     render_hybrid_context_pack,
 )
 from link_blueprint_native_evidence import main as link_main  # noqa: E402
+
+
+def _write_blueprint_call_database(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    try:
+        ensure_evidence_schema(connection)
+        connection.execute(
+            "INSERT INTO asset_revisions("
+            "revision_id, asset_id, asset_name, object_path, source_fingerprint, "
+            "parser_version, schema_version, generated_at, uasset_path"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "1" * 24,
+                "2" * 24,
+                "BP_CallFixture",
+                "/Game/Test/BP_CallFixture.BP_CallFixture",
+                "3" * 64,
+                "fixture-parser",
+                "ark.blueprint.evidence.v2",
+                "2026-08-03T00:00:00+00:00",
+                "",
+            ),
+        )
+        graph_ref = f"bp://{'2' * 24}@{'1' * 24}/g/1"
+        node_ref = f"{graph_ref}/n/1"
+        connection.execute(
+            "INSERT INTO graphs(graph_ref, revision_id, export_index, name) "
+            "VALUES (?, ?, ?, ?)",
+            (graph_ref, "1" * 24, 1, "EventGraph"),
+        )
+        connection.execute(
+            "INSERT INTO nodes("
+            "node_ref, graph_ref, local_index, node_identity, class_name, "
+            "node_type, function_name, confidence, semantic_json"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                node_ref,
+                graph_ref,
+                1,
+                "fixture-call",
+                "K2Node_CallFunction",
+                "K2Node_CallFunction",
+                "ComputeQuality",
+                "high",
+                json.dumps({"owner": "FixtureMath"}),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 class HybridEvidenceTests(unittest.TestCase):
@@ -89,6 +146,59 @@ class HybridEvidenceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.native.close()
         self._temporary.cleanup()
+
+    def test_blueprint_call_extraction_uses_resolved_revision_database(self):
+        asset_dir = self.root / "capture" / "BP_CallFixture"
+        revision_database = (
+            asset_dir
+            / "evidence"
+            / "revisions"
+            / ("1" * 24)
+            / "evidence.sqlite"
+        )
+        _write_blueprint_call_database(revision_database)
+        database_bytes = revision_database.read_bytes()
+
+        with patch(
+            "blueprint_translator.hybrid_evidence.resolve_asset_evidence_state",
+            return_value=SimpleNamespace(
+                database_path=revision_database,
+                database_sha256=hashlib.sha256(database_bytes).hexdigest(),
+                database_bytes=len(database_bytes),
+                source_kind="INDEXED_V3_CURRENT",
+                freshness_status="FRESH",
+                release_authority=True,
+                migration_required=False,
+                manifest_sha256="4" * 64,
+                pointer_sha256="5" * 64,
+            ),
+        ):
+            calls, identity = extract_blueprint_calls(asset_dir)
+
+        self.assertEqual(identity["revisionId"], "1" * 24)
+        self.assertEqual(identity["sourceFingerprint"], "3" * 64)
+        self.assertEqual(identity["sourceKind"], "INDEXED_V3_CURRENT")
+        self.assertTrue(identity["releaseAuthority"])
+        self.assertEqual(calls[0]["memberName"], "ComputeQuality")
+        self.assertEqual(calls[0]["owner"], "FixtureMath")
+
+    def test_blueprint_call_extraction_propagates_invalid_current_revision(self):
+        asset_dir = self.root / "capture" / "BP_BrokenCurrent"
+        compatibility_database = asset_dir / "evidence" / "evidence.sqlite"
+        _write_blueprint_call_database(compatibility_database)
+        (asset_dir / "evidence" / "current.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch(
+                "blueprint_translator.hybrid_evidence.resolve_asset_evidence_state",
+                side_effect=ValueError("MANIFEST_HASH_MISMATCH"),
+            ),
+            self.assertRaisesRegex(ValueError, "MANIFEST_HASH_MISMATCH"),
+        ):
+            extract_blueprint_calls(asset_dir)
 
     def test_owner_member_and_signature_resolution_is_fail_closed(self):
         payload = build_hybrid_evidence_payload(

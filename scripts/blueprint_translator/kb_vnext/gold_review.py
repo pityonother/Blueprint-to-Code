@@ -17,6 +17,17 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+from ..evidence_publication import (
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_path_chain,
+)
+from ..evidence_repository import (
+    evidence_state_metadata,
+    open_bound_evidence_database,
+)
+from .source_manifest import resolve_live_capture_evidence_states
+
 
 PACK_SCHEMA = "ark-kb-gold-review-pack/v1"
 REVIEW_SCHEMA = "ark-kb-gold-review/v1"
@@ -664,20 +675,22 @@ def registration_review_source_from_sqlite(
     capture_store_identities: list[dict[str, object]] = []
     if captures_root is not None:
         try:
-            resolved_captures = captures_root.resolve(strict=True)
-        except OSError as error:
+            resolved_captures = _lexical_absolute(captures_root)
+            _require_plain_path_chain(resolved_captures, label="capture root")
+            _require_plain_directory(resolved_captures, label="capture root")
+        except (OSError, ValueError) as error:
             raise GoldReviewError(
                 f"cannot read capture Evidence root: {captures_root}"
             ) from error
-        if not resolved_captures.is_dir():
-            raise GoldReviewError(
-                "capture Evidence root must be a directory"
+        try:
+            evidence_states = resolve_live_capture_evidence_states(
+                resolved_captures
             )
-        evidence_databases = sorted(
-            resolved_captures.glob("*/evidence/evidence.sqlite"),
-            key=lambda path: path.as_posix(),
-        )
-        if not evidence_databases:
+        except (OSError, ValueError) as error:
+            raise GoldReviewError(
+                "capture Evidence current revision is invalid"
+            ) from error
+        if not evidence_states:
             raise GoldReviewError(
                 "capture Evidence root has no evidence.sqlite stores"
             )
@@ -685,10 +698,12 @@ def registration_review_source_from_sqlite(
             tuple[str, str, str],
             dict[str, object],
         ] = {}
-        for evidence_database in evidence_databases:
-            evidence_connection = _sqlite_read_only(evidence_database)
+        for evidence_state in evidence_states:
+            evidence_database = evidence_state.database_path
             try:
-                try:
+                with open_bound_evidence_database(
+                    evidence_state
+                ) as evidence_connection:
                     revisions = evidence_connection.execute(
                         """
                         SELECT
@@ -722,17 +737,23 @@ def registration_review_source_from_sqlite(
                             cd.default_ref
                         """
                     ).fetchall()
-                except sqlite3.Error as error:
-                    raise GoldReviewError(
-                        "capture Evidence store schema is unavailable"
-                    ) from error
-            finally:
-                evidence_connection.close()
+            except (OSError, sqlite3.Error, ValueError) as error:
+                raise GoldReviewError(
+                    "capture Evidence store schema or byte binding is unavailable"
+                ) from error
+            try:
+                relative_store = evidence_database.relative_to(
+                    resolved_captures
+                ).as_posix()
+            except ValueError as error:
+                raise GoldReviewError(
+                    "capture Evidence store escaped the capture root"
+                ) from error
             capture_store_identities.append(
                 {
-                    "relativeStore": evidence_database.relative_to(
-                        resolved_captures
-                    ).as_posix(),
+                    "relativeStore": relative_store,
+                    "evidenceSourceKind": evidence_state.source_kind,
+                    **evidence_state_metadata(evidence_state),
                     "revisions": [
                         {
                             key: revision[key]

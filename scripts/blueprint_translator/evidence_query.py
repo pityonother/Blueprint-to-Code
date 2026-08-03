@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sqlite3
 import zlib
 from collections import deque
@@ -19,6 +20,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .context_pack import estimate_tokens
+from .bound_database import materialize_bound_database_snapshot
 from .evidence_values import default_parse_gap, project_default_value
 
 
@@ -35,6 +37,7 @@ _GAP_STATUSES = {
     "AMBIGUOUS",
     "HEURISTIC",
 }
+
 _ALL_COVERAGE_STATUSES = (
     "CONFIRMED",
     "HEURISTIC",
@@ -150,7 +153,11 @@ def _query_hash(operation: str, **parts: object) -> str:
 class EvidenceQueryService:
     """Read-only service for one immutable evidence revision."""
 
-    def __init__(self, database_path: Path, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        connection: sqlite3.Connection,
+    ) -> None:
         self.database_path = Path(database_path)
         self._connection = connection
         self._closed = False
@@ -167,15 +174,36 @@ class EvidenceQueryService:
         self.revision_id = str(row["revision_id"])
 
     @classmethod
-    def open(cls, database_path: str | Path) -> "EvidenceQueryService":
-        path = Path(database_path)
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        connection = sqlite3.connect(str(path))
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA query_only = ON")
-        return cls(path, connection)
+    def open(
+        cls,
+        database_path: str | Path,
+        *,
+        expected_sha256: str | None = None,
+        expected_size: int | None = None,
+    ) -> "EvidenceQueryService":
+        path = Path(os.path.abspath(os.path.expanduser(os.fspath(database_path))))
+        snapshot = materialize_bound_database_snapshot(
+            path,
+            expected_sha256=expected_sha256,
+            expected_size=expected_size,
+        )
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = snapshot.open_connection()
+            snapshot.close()
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA query_only = ON")
+            if int(connection.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+                raise ValueError("evidence query connection did not enable foreign keys")
+            if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                raise ValueError("evidence query connection did not become query-only")
+            return cls(path, connection)
+        except Exception:
+            if connection is not None:
+                connection.close()
+            snapshot.close()
+            raise
 
     def close(self) -> None:
         if not self._closed:

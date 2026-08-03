@@ -183,6 +183,43 @@ def _source_hash(database_path: Path, suffix: str) -> str:
 
 
 class EvidenceMigrationTests(unittest.TestCase):
+    def test_post_replace_validation_failure_restores_old_bytes_without_backup_leak(self):
+        from blueprint_translator import evidence_writer
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            staged = root / "staged.sqlite"
+            destination = root / "evidence.sqlite"
+            staged.write_bytes(b"NEW")
+            destination.write_bytes(b"OLD")
+            real_validate = evidence_writer._validated_publication_destination
+            validation_calls = 0
+
+            def fail_post_replace(*args: object, **kwargs: object) -> Path:
+                nonlocal validation_calls
+                validated = real_validate(*args, **kwargs)
+                validation_calls += 1
+                if validation_calls == 4:
+                    raise ValueError("injected post-replace validation failure")
+                return validated
+
+            with (
+                mock.patch.object(
+                    evidence_writer,
+                    "_validated_publication_destination",
+                    side_effect=fail_post_replace,
+                ),
+                self.assertRaisesRegex(ValueError, "post-replace"),
+            ):
+                evidence_writer._publish_staged(
+                    [(staged, destination)],
+                    destination_root=root,
+                )
+
+            self.assertEqual(destination.read_bytes(), b"OLD")
+            self.assertFalse(staged.exists())
+            self.assertEqual(list(root.glob(".*.bak")), [])
+
     def test_publish_retry_does_not_restore_an_unpublished_locked_destination(self):
         from blueprint_translator import evidence_writer
 
@@ -199,7 +236,10 @@ class EvidenceMigrationTests(unittest.TestCase):
                 side_effect=PermissionError(5, "destination is temporarily locked"),
             ) as replace, mock.patch.object(evidence_writer.time, "sleep"):
                 with self.assertRaises(PermissionError):
-                    evidence_writer._publish_staged([(staged, destination)])
+                    evidence_writer._publish_staged(
+                        [(staged, destination)],
+                        destination_root=root,
+                    )
 
             self.assertEqual(destination.read_bytes(), b"last-valid")
             self.assertFalse(staged.exists())
@@ -292,9 +332,31 @@ class EvidenceMigrationTests(unittest.TestCase):
             database_path = asset_dir / "evidence" / "evidence.sqlite"
             manifest_path = asset_dir / "evidence" / "manifest.json"
             agent_index_path = asset_dir / "output" / "agent_index.md"
-            self.assertEqual(Path(str(result["database_path"])).resolve(), database_path.resolve())
-            self.assertEqual(Path(str(result["manifest_path"])).resolve(), manifest_path.resolve())
-            self.assertEqual(Path(str(result["agent_index_path"])).resolve(), agent_index_path.resolve())
+            revision_dir = Path(str(result["revision_dir"]))
+            self.assertEqual(
+                Path(str(result["database_path"])).resolve(),
+                (revision_dir / "evidence.sqlite").resolve(),
+            )
+            self.assertEqual(
+                Path(str(result["manifest_path"])).resolve(),
+                (revision_dir / "manifest.json").resolve(),
+            )
+            self.assertEqual(
+                Path(str(result["agent_index_path"])).resolve(),
+                (revision_dir / "agent_index.md").resolve(),
+            )
+            self.assertEqual(
+                Path(str(result["compatibility_database_path"])).resolve(),
+                database_path.resolve(),
+            )
+            self.assertEqual(
+                Path(str(result["compatibility_manifest_path"])).resolve(),
+                manifest_path.resolve(),
+            )
+            self.assertEqual(
+                Path(str(result["compatibility_agent_index_path"])).resolve(),
+                agent_index_path.resolve(),
+            )
             self.assertTrue(database_path.is_file())
             self.assertTrue(manifest_path.is_file())
             self.assertTrue(agent_index_path.is_file())
@@ -395,7 +457,7 @@ class EvidenceMigrationTests(unittest.TestCase):
             )
             migrated = _migrate(asset_dir)
             database_path = Path(str(migrated["database_path"]))
-            index_path = Path(str(migrated["agent_index_path"]))
+            index_path = Path(str(migrated["compatibility_agent_index_path"]))
             database_before = database_path.read_bytes()
             index_path.write_text("# stale index\n", encoding="utf-8")
 

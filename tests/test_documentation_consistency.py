@@ -44,6 +44,24 @@ class DocumentationConsistencyTests(unittest.TestCase):
             re.compile(r"(?:default|默认)[^\n]{0,32}`dual`", re.IGNORECASE),
         )
 
+    def test_primary_docs_name_v3_pointer_authority_and_v2_compatibility_boundary(self):
+        documents = {
+            "README.md": self.readme,
+            "docs/DEVELOPER_HANDOFF_zh.md": (
+                ROOT / "docs" / "DEVELOPER_HANDOFF_zh.md"
+            ).read_text(encoding="utf-8"),
+            "docs/USER_GUIDE_zh.md": (
+                ROOT / "docs" / "USER_GUIDE_zh.md"
+            ).read_text(encoding="utf-8"),
+        }
+
+        for name, text in documents.items():
+            with self.subTest(document=name):
+                self.assertIn("evidence/current.json", text)
+                self.assertIn("evidence/revisions/<revisionId>/manifest.json", text)
+                self.assertRegex(text, r"nonauthority\s+compatibility")
+                self.assertIn("--prune-v2", text)
+
     def test_unified_evidence_docs_exist_and_publish_runnable_commands(self):
         required_docs = {
             "NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md": (

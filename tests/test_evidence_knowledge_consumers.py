@@ -122,6 +122,7 @@ def _make_lionfish_scale_gap_capture(root: Path) -> Path:
             "graphs": [],
         },
         asset_dir,
+        publish_v3=False,
     )
     database_path = asset_dir / "evidence" / "evidence.sqlite"
     connection = sqlite3.connect(database_path)
@@ -172,6 +173,11 @@ class EvidenceKnowledgeConsumerTests(unittest.TestCase):
         failed = capture["failed_graphs"].get("graphs", [])
         partial = capture["partial_graphs"].get("graphs", [])
         self.assertEqual(failed, [])
+        self.assertEqual(
+            capture["evidence_publication"]["sourceKind"],
+            "INDEXED_V3_CURRENT",
+        )
+        self.assertTrue(capture["evidence_publication"]["releaseAuthority"])
         graph_gaps = [row for row in partial if row.get("primary_reason") == "missing_target_pin_id"]
         self.assertEqual(len(graph_gaps), 1)
         self.assertTrue(graph_gaps[0]["evidence_ref"].startswith("bp://"))
