@@ -23,6 +23,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
     EVALUATION_CATALOG_SCHEMA,
+    HARVEST_RANKING_POLICY_VERSION,
     TAMED_RIDDEN,
     extract_creature_identity,
 )
@@ -716,6 +717,7 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
         },
         "methodology": {
             "formulaVersion": FORMULA_VERSION,
+            "policyVersion": HARVEST_RANKING_POLICY_VERSION,
             "usageScope": TAMED_RIDDEN,
             "evaluationMode": "LAZY_NODE_RESOURCE_TOP10",
             "resourceEntrySelection": "RESOURCE_CLASS_AND_ENTRY_INDEX",

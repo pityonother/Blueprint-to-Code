@@ -236,6 +236,8 @@ estimatedYieldPerNode = sum(grantCalls)
 
 所以报告中的 `observedYieldPerSecond` 按设计保持 `null`。当前字段明确叫“预计完整节点产量”，不是游戏实测；受控实测用于校准标准化 profile 和发现尚未恢复的运行时 hook。
 
+每个可排名行同时返回结构化 `scoreBreakdown`。它逐项列出 grant calls、资源权重占比、单次选择期望数量、预计命中次数和有效每击伤害；`contributions` 只包含实际进入公式的量，`omittedFactors` 则明确列出 runtime Blueprint、Buff、基因、任务、服务器/Mod hook、移动、耐力、负重、AoE/节点密度、地图可用性、自动采集、冷却/蓄力，以及尚未证明消费者语义的 `EffectivenessQuantityMultiplier`。缺失因素不会被填成 `0`。
+
 ### 5.1 Explorer 的确认层与条件静态估算
 
 Explorer 查询只针对当前选中的“节点定义 + HarvestComponent + 资源条目”复算，不把不同 Component 的预计单位数直接合并成全局倍率：

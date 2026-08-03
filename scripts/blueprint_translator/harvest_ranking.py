@@ -22,6 +22,23 @@ UNCLAMPED_FINAL_HIT_HEALTH_MULTIPLIER = 3.5
 
 _INFORMATIONAL_QUANTITY_GAPS: set[str] = set()
 
+_STATIC_MODEL_OMITTED_FACTORS = [
+    "RUNTIME_BLUEPRINT_RIDER_ELIGIBILITY",
+    "RUNTIME_OUTPUT_DAMAGE_HOOK",
+    "BUFFS",
+    "GENES",
+    "MISSIONS",
+    "SERVER_OR_MOD_HOOKS",
+    "MOVEMENT",
+    "STAMINA",
+    "WEIGHT_AND_CARRY_REDUCTION",
+    "AOE_AND_NODE_DENSITY",
+    "MAP_AVAILABILITY",
+    "AUTO_HARVEST",
+    "COOLDOWN_OR_CHARGE",
+    "EFFECTIVENESS_QUANTITY_MULTIPLIER_NOT_MODELED",
+]
+
 
 def estimate_complete_node_yield(
     *,
@@ -1102,6 +1119,37 @@ def evaluate_attack_resource(
     )
     legacy_index = pressure * weight_share if pressure is not None else None
     estimated_yield = float(yield_estimate["estimatedYieldPerNode"])
+    effectiveness_quantity_multiplier = target_entry.get(
+        "effectivenessQuantityMultiplier"
+    )
+    conditional_evidence = bool(
+        attack.get("usageConditionReasonCodes")
+        or attack.get("useBlueprintCanRiderAttack") is True
+        or attack.get("useBlueprintAdjustOutputDamage") is True
+    )
+    score_breakdown = {
+        "metric": "estimatedYieldPerNode",
+        "grantCalls": yield_estimate["estimatedGrantCallsPerNode"],
+        "resourceWeightShare": weight_share,
+        "expectedQuantityPerSelection": yield_estimate[
+            "expectedQuantityPerSelection"
+        ],
+        "estimatedHits": yield_estimate["estimatedHitsToDepleteNode"],
+        "effectiveDamagePerHit": base_damage_value * float(damage_multiplier),
+        "contributions": [
+            {
+                "factor": "grantCalls",
+                "value": yield_estimate["estimatedGrantCallsPerNode"],
+            },
+            {"factor": "resourceWeightShare", "value": weight_share},
+            {
+                "factor": "expectedQuantityPerSelection",
+                "value": yield_estimate["expectedQuantityPerSelection"],
+            },
+        ],
+        "omittedFactors": list(_STATIC_MODEL_OMITTED_FACTORS),
+        "evidenceTier": "CONDITIONAL" if conditional_evidence else "CONFIRMED",
+    }
     return {
         **base,
         **yield_estimate,
@@ -1113,6 +1161,7 @@ def evaluate_attack_resource(
         "damageMultiplier": float(damage_multiplier),
         "harvestQuantityMultiplier": float(quantity_multiplier),
         "damageHarvestAdditionalEffectiveness": float(additional_effectiveness),
+        "effectivenessQuantityMultiplier": effectiveness_quantity_multiplier,
         "resourceWeightShare": weight_share,
         "overrideQuantityMin": min_quantity,
         "overrideQuantityMax": max_quantity,
@@ -1134,6 +1183,7 @@ def evaluate_attack_resource(
         },
         "observedYieldPerSecond": None,
         "scoreBasis": YIELD_SCORE_BASIS,
+        "scoreBreakdown": score_breakdown,
         "yieldModelStatus": "STATIC_NORMALIZED_PROFILE",
         "yieldModelCaveats": [
             "RUNTIME_BLUEPRINT_BUFF_GENE_MISSION_AND_SERVER_HOOKS_NOT_APPLIED",

@@ -1105,6 +1105,10 @@ def verify_catalogs(
         "schema": VERIFICATION_SCHEMA,
         "status": "PASS" if mismatch_count == 0 else "FAIL",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "verificationBoundary": {
+            "proves": "production implementation == independent implementation",
+            "doesNotProve": "static model == real game",
+        },
         "methodology": {
             "formulaVersion": FORMULA_VERSION,
             "independenceBoundary": (

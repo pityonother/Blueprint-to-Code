@@ -65,3 +65,12 @@ python scripts\verify_ark_harvest_rankings.py --all
 黑盒对比以 `estimatedYieldPerNode` 和 Top-N 顺序为准。`engineComparisonIndex` 只是过渡兼容字段：参考结果可以不提供；如果仍提供，其数值必须与 `estimatedYieldPerNode` 完全一致，不能成为另一套冲突的排行指标。
 
 这个门禁验证的是已恢复静态证据范围内的完整节点预计产量与排序一致性。运行时 Blueprint、Buff、基因、任务和服务器倍率仍不在这个静态模型内，因此后续游戏实测用于校准模型边界，而不是把当前结果解释成资源/秒。
+
+必须把门禁边界写成下面两句，而不能把 `mismatchCount = 0` 扩大解释为游戏真实性：
+
+```text
+production implementation == independent implementation
+static model != real game proof
+```
+
+也就是说，零差异只证明生产实现与独立复算实现对同一静态合同给出了相同结果；它不证明 `static model == real game`。后者仍需要合法、`synthetic=false` 的 runtime observation。

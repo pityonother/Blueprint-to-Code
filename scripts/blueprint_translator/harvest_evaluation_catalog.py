@@ -17,6 +17,9 @@ from .resource_nodes import canonical_package_path
 EVALUATION_CATALOG_SCHEMA = "ark-harvest-evaluation-catalog/v2"
 RANKING_RESULT_SCHEMA = "blueprint-to-code.harvest-ranking-result/v3"
 TAMED_RIDDEN = "TAMED_RIDDEN"
+HARVEST_RANKING_POLICY_VERSION = (
+    "harvest-ranking-policy/v1-combined-evidence-best-discovered-variant"
+)
 
 
 def _estimated_yield(row: dict[str, Any]) -> float | None:
@@ -370,6 +373,11 @@ class HarvestEvaluationEngine:
                         )
                     )
                 )
+                score_breakdown = dict(row.get("scoreBreakdown") or {})
+                if score_breakdown:
+                    score_breakdown["evidenceTier"] = (
+                        "CONFIRMED" if evidence_confirmed else "CONDITIONAL"
+                    )
                 row.update(
                     {
                         "speciesKey": species_key,
@@ -393,6 +401,7 @@ class HarvestEvaluationEngine:
                             if evidence_confirmed
                             else evidence_gaps or ["TAMEABILITY_NOT_RECOVERED"],
                         },
+                        "scoreBreakdown": score_breakdown,
                     }
                 )
                 current = best_by_species.get(species_key)
