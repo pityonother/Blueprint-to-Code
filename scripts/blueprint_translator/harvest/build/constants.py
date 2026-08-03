@@ -2,11 +2,12 @@
 
 from pathlib import Path
 
+from ...devkit_paths import DEFAULT_CONTENT_ROOTS
 from ..contracts import YIELD_MODEL_VERSION
 
 SCRIPT_DIR = Path(__file__).resolve().parents[3]
 PROJECT_ROOT = SCRIPT_DIR.parent
-DEFAULT_DEVKIT_ROOT = Path(r"C:\Program Files\Epic Games\ARKDevkit")
+DEFAULT_DEVKIT_ROOT = DEFAULT_CONTENT_ROOTS[0].parents[2]
 DEFAULT_RANKING_REPORT = PROJECT_ROOT / "analysis" / "harvest_rankings" / "harvest_ranking_all_resources.full.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "analysis" / "harvest_rankings" / "harvest_evaluation_catalog.json"
 DEFAULT_AI_OUTPUT = DEFAULT_OUTPUT.with_name("harvest_evaluation_catalog.ai.json")

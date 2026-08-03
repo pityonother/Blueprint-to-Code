@@ -170,6 +170,8 @@ jobs:
               ".pytest_cache",
               ".ruff_cache",
               "node_modules",
+          }
+          generated_root_directories = {
               "dist",
               "build",
               "coverage",
@@ -259,8 +261,12 @@ jobs:
               lowered_parts = {part.lower() for part in normalized.parts}
               lowered_name = normalized.name.lower()
               normalized_name = normalized.as_posix().lower()
+              root_directory = (
+                  normalized.parts[0].lower() if normalized.parts else ""
+              )
               if (
                   lowered_parts & generated_directories
+                  or root_directory in generated_root_directories
                   or normalized_name.startswith(generated_prefixes)
                   or lowered_name.endswith(generated_suffixes)
                   or lowered_name in {".coverage", ".ds_store"}
@@ -271,13 +277,33 @@ jobs:
               if not path.exists() and not path.is_symlink():
                   findings.append(f"changed path missing from checkout: {name!r}")
                   continue
-              if path.is_symlink():
-                  data = os.fsencode(os.readlink(path))
-              elif path.is_file():
-                  data = path.read_bytes()
-              else:
+              if not path.is_file() and not path.is_symlink():
                   findings.append(f"changed path is not a regular file: {name!r}")
                   continue
+
+              content_diff = subprocess.run(
+                  [
+                      "git",
+                      "diff",
+                      "--no-ext-diff",
+                      "--unified=0",
+                      base,
+                      "HEAD",
+                      "--",
+                      name,
+                  ],
+                  check=True,
+                  stdout=subprocess.PIPE,
+              ).stdout
+              in_hunk = False
+              added_lines: list[bytes] = []
+              for line in content_diff.splitlines():
+                  if line.startswith(b"@@"):
+                      in_hunk = True
+                      continue
+                  if in_hunk and line.startswith(b"+"):
+                      added_lines.append(line[1:])
+              data = b"\n".join(added_lines)
 
               if any(pattern.search(data) for pattern in local_path_patterns):
                   findings.append(f"local absolute path content: {name!r}")
