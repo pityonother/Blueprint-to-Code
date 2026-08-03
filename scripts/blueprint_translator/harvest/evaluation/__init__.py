@@ -1,9 +1,6 @@
-"""Compatibility exports for modular Harvest evaluation.
+"""Harvest Ranking Contract v2 evaluation layer."""
 
-New imports should use :mod:`blueprint_translator.harvest.evaluation`.
-"""
-
-from .harvest.evaluation import (
+from .contracts import (
     AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
     EVALUATION_CATALOG_SCHEMA,
     HARVEST_RANKING_CONTRACT_VERSION,
@@ -20,18 +17,20 @@ from .harvest.evaluation import (
     VARIANT_ALL,
     VARIANT_BEST_DISCOVERED_EXPLORATORY,
     VARIANT_CANONICAL,
-    HarvestEvaluationEngine,
+)
+from .aggregation import (
     extract_creature_identity,
     find_node_and_resource,
     prepare_attack_for_usage_scope,
 )
-from .harvest.model.attack_evaluation import evaluate_attack_resource
+from .engine import HarvestEvaluationEngine
 
 __all__ = [
     "AVAILABILITY_GLOBAL_TRANSFER_ALLOWED",
     "EVALUATION_CATALOG_SCHEMA",
     "HARVEST_RANKING_CONTRACT_VERSION",
     "HARVEST_RANKING_POLICY_VERSION",
+    "HarvestEvaluationEngine",
     "METRIC_CONTRACTS",
     "METRIC_OBSERVED_PER_NODE",
     "METRIC_OBSERVED_PER_SECOND",
@@ -44,8 +43,6 @@ __all__ = [
     "VARIANT_ALL",
     "VARIANT_BEST_DISCOVERED_EXPLORATORY",
     "VARIANT_CANONICAL",
-    "HarvestEvaluationEngine",
-    "evaluate_attack_resource",
     "extract_creature_identity",
     "find_node_and_resource",
     "prepare_attack_for_usage_scope",

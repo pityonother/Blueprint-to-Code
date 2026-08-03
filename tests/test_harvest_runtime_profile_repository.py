@@ -175,7 +175,7 @@ class HarvestRuntimeProfileRepositoryTests(unittest.TestCase):
                 return _index(str(profile) if profile is not None else None)
 
             with patch(
-                "blueprint_translator.harvest_node_repository."
+                "blueprint_translator.harvest.repository.runtime_overlay."
                 "load_harvest_runtime_observations",
                 side_effect=load_index,
             ) as loader:
@@ -207,7 +207,7 @@ class HarvestRuntimeProfileRepositoryTests(unittest.TestCase):
                 return _index(str(profile) if profile is not None else None)
 
             with patch(
-                "blueprint_translator.harvest_node_repository."
+                "blueprint_translator.harvest.repository.runtime_overlay."
                 "load_harvest_runtime_observations",
                 side_effect=load_index,
             ) as loader:
@@ -252,7 +252,7 @@ class HarvestRuntimeProfileRepositoryTests(unittest.TestCase):
                 runtime_observation_root=root,
             )
             with patch(
-                "blueprint_translator.harvest_node_repository."
+                "blueprint_translator.harvest.repository.runtime_overlay."
                 "load_harvest_runtime_observations",
                 return_value=_index("profile-a"),
             ) as loader:

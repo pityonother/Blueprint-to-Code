@@ -235,6 +235,7 @@ npm run build
 - [Harvest Ranking Contract v2](docs/ARK_HARVEST_RANKING_SYSTEM_zh.md)
 - [Harvest Runtime v2 实测协议](docs/HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)
 - [EffectivenessQuantityMultiplier 证据缺口](docs/HARVEST_EFFECTIVENESS_QUANTITY_GAP_zh.md)
+- [Harvest 模块边界](docs/ARK_HARVEST_MODULE_LAYOUT_zh.md)
 - [ARK 资源点 Explorer](docs/ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md)
 - [ARK Knowledge Discovery：GPT Pro 视察说明](docs/GPT_PRO_PROGRESS_REVIEW_2026-07-27_zh.md)
 - [授权与分发策略](docs/LICENSE_POLICY.md)

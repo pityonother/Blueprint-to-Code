@@ -59,13 +59,16 @@ Effectiveness 的当前证据结论和实验门槛见 [HARVEST_EFFECTIVENESS_QUA
 
 | 文件 | 职责 |
 | --- | --- |
-| `scripts/blueprint_translator/harvest_ranking.py` | 纯数据投影、完整资源 Object Path 保留、兼容性判断、完整节点产量模拟和排序 |
+| `scripts/blueprint_translator/harvest_ranking.py` | 一个版本的公共导入兼容 facade；实际公式、攻击计算与排序策略由 `harvest/model/` 持有 |
 | `scripts/rank_ark_harvest.py` | 扫描 DevKit、解析生物和组件、追踪伤害类型继承与资源覆盖、生成报告 |
 | `scripts/blueprint_translator/harvest_report_validation.py` | 定义完整报告与压缩报告之间的验证合同 |
 | `scripts/verify_ark_harvest_report.py` | 从命令行执行压缩合同验证 |
-| `scripts/blueprint_translator/harvest_evaluation_catalog.py` | 全 Content 生物候选发现、祖先链确认、物种折叠和紧凑攻击事实目录 |
+| `scripts/blueprint_translator/harvest/build/` | 全 Content 生物候选发现、祖先链确认、asset projection 与 evaluation catalog assembly |
+| `scripts/blueprint_translator/harvest/evaluation/` | metric contract、canonical variant 审计、runtime cohort、单物种计算、同 tier 排名与响应投影 |
+| `scripts/blueprint_translator/harvest_evaluation_catalog.py` | 一个版本的公共导入兼容 facade；不拥有 evaluation 或 catalog build 行为 |
 | `scripts/blueprint_translator/harvest_catalog_sqlite.py` | 将 canonical 节点 JSON 构建成分页、搜索、过滤和详情用 SQLite 读模型 |
-| `scripts/blueprint_translator/harvest_node_repository.py` | 只读打开 SQLite，并校验其绑定的源 JSON SHA-256；不一致时失败关闭 |
+| `scripts/blueprint_translator/harvest/repository/dataset_loader.py` | 只读打开 SQLite，并校验其绑定的源 JSON SHA-256；不一致时失败关闭 |
+| `scripts/blueprint_translator/harvest_node_repository.py` | 一个版本的公共导入兼容 facade；实际查询职责由 `harvest/repository/` 中的聚焦服务承担 |
 | `scripts/blueprint_translator/harvest_ranking_verifier.py` | 从底层事实独立抽样复算正向和反向排行 |
 | `scripts/build_ark_harvest_explorer.py` | 八个受控子命令、staging 验收、原子提升与失败回滚的总编排器 |
 | `analysis/harvest_rankings/resource_catalog.json` | 已发现资源类到 HarvestComponent 的索引 |

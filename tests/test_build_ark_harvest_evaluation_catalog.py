@@ -1,7 +1,7 @@
 import tempfile
 import sys
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 
@@ -20,9 +20,26 @@ from build_ark_harvest_evaluation_catalog import (  # noqa: E402
 from blueprint_translator.creature_asset_scan_cache import (  # noqa: E402
     CreatureAssetScanCache,
 )
+from blueprint_translator.harvest.build.constants import (  # noqa: E402
+    _devkit_root_from_content_root,
+)
 
 
 class BuildArkHarvestEvaluationCatalogTests(unittest.TestCase):
+    def test_default_devkit_root_handles_windows_paths_on_posix(self):
+        drive = "C:"
+        content_root = PurePosixPath(
+            drive
+            + r"\Program Files\Epic Games\ARKDevkit\Projects\ShooterGame\Content"
+        )
+
+        root = _devkit_root_from_content_root(content_root)
+
+        self.assertEqual(
+            str(root),
+            str(Path(drive + r"\Program Files\Epic Games\ARKDevkit")),
+        )
+
     def test_rideability_requires_an_explicit_allow_riding_fact(self):
         self.assertEqual(
             _rideability(

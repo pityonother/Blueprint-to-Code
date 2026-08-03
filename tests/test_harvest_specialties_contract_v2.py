@@ -182,7 +182,7 @@ class HarvestSpecialtiesContractV2Tests(unittest.TestCase):
                 sqlite_catalog_path=sqlite_path,
             )
             with patch(
-                "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+                "blueprint_translator.harvest.evaluation.engine.evaluate_attack_resource",
                 side_effect=fake_evaluate,
             ):
                 result = repository.creature_specialties(
