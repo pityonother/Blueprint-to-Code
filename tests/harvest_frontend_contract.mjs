@@ -572,6 +572,427 @@ try {
   assert.match(legacySpecialtyHtml, /节点旧版榜首指数 43.7/);
   assert.doesNotMatch(legacySpecialtyHtml, /本龙预计产量/);
 
+  const rankingContractV2 = {
+    ok: true,
+    schema: 'blueprint-to-code.harvest-ranking-result/v4',
+    contractVersion: 'harvest-ranking-contract/v2',
+    identity: {
+      extractorVersion: 'extractor/v3',
+      modelVersion: 'model/v2',
+      policyVersion: 'policy/v2',
+      resultSchemaVersion: 'blueprint-to-code.harvest-ranking-result/v4',
+      nodeCatalogRevision: '1'.repeat(64),
+      evaluationCatalogRevision: '2'.repeat(64),
+      componentCatalogRevision: '3'.repeat(64),
+    },
+    dataset: {},
+    node: { id: 'node', name: 'Node', objectPath: '/Game/Node' },
+    resource: {
+      entryIndex: 0,
+      resource: 'PrimalItemResource_Metal_C',
+      displayName: 'Metal',
+      nodeResourceId: 'resource',
+    },
+    queryPolicy: {
+      evidence: 'includeConditional',
+      variant: 'CANONICAL_VARIANT',
+      metric: 'staticCompleteNodeTargetYield',
+      availability: 'GLOBAL_TRANSFER_ALLOWED',
+    },
+    methodology: {
+      metric: 'staticCompleteNodeTargetYield',
+      scoreBasis: 'STATIC_COMPLETE_NODE_TARGET_RESOURCE_UNITS',
+      warning: '静态指标不是实测。',
+      firstHitTiming: 'FIRST_HIT_AT_END_OF_FIRST_ATTACK_CYCLE',
+    },
+    confirmedStatus: 'AVAILABLE',
+    conditionalStatus: 'AVAILABLE',
+    scopeStatus: 'PARTIAL',
+    claimsGlobalTop: false,
+    coverage: {},
+    runtimeCoverage: { publishableExactRows: 0 },
+    confirmedItems: [{
+      rank: 1,
+      creature: 'Confirmed creature',
+      creatureObjectPath: '/Game/Dinos/Confirmed',
+      speciesKey: 'confirmed',
+      attackName: 'Hit',
+      attackInterval: 1,
+      attackIntervalSource: 'GENERAL_ATTACK_INTERVAL',
+      rankingStatus: 'RANKED',
+      rankingTier: 'CONFIRMED',
+      staticCompleteNodeTargetYield: 20,
+      estimatedYieldPerNode: 20,
+      relativeToNodeTopPercent: 100,
+      runtimeStatus: 'NOT_MEASURED',
+      evidence: { status: 'CONFIRMED', gaps: [] },
+      variantSelection: {
+        policy: 'CANONICAL_VARIANT',
+        selectedObjectPath: '/Game/Dinos/Confirmed',
+        higherExploratoryVariantExists: true,
+      },
+      scoreBreakdown: {
+        omittedFactors: ['MAP_AVAILABILITY', 'EFFECTIVENESS_QUANTITY_MULTIPLIER_NOT_MODELED'],
+      },
+    }],
+    conditionalItems: [{
+      rank: 1,
+      creature: '<script>Conditional high</script>',
+      creatureObjectPath: '/Game/Dinos/Conditional',
+      speciesKey: 'conditional',
+      attackName: 'Conditional hit',
+      attackInterval: 0.5,
+      rankingStatus: 'RANKED',
+      rankingTier: 'CONDITIONAL',
+      staticCompleteNodeTargetYield: 2000,
+      estimatedYieldPerNode: 2000,
+      relativeToNodeTopPercent: 100,
+      evidence: { status: 'PARTIAL', gaps: ['BLUEPRINT_RIDER_ELIGIBILITY_NOT_RECOVERED'] },
+      variantSelection: {
+        policy: 'CANONICAL_VARIANT',
+        selectedObjectPath: '/Game/Dinos/Conditional',
+      },
+    }],
+    items: [],
+  };
+  rankingContractV2.items = [
+    ...rankingContractV2.confirmedItems,
+    ...rankingContractV2.conditionalItems,
+  ];
+  const rankingV2Html = renderHarvestRankingResult(rankingContractV2);
+  assert.match(rankingV2Html, /已确认榜（独立编号）/);
+  assert.match(rankingV2Html, /条件性估算（不占已确认名次）/);
+  assert.match(rankingV2Html, /静态单节点目标资源总产量/);
+  assert.match(rankingV2Html, /规范榜未自动取最大/);
+  assert.match(rankingV2Html, /未实测/);
+  assert.match(rankingV2Html, /GLOBAL_TRANSFER_ALLOWED/);
+  assert.match(rankingV2Html, /EFFECTIVENESS_QUANTITY_MULTIPLIER_NOT_MODELED/);
+  assert.doesNotMatch(rankingV2Html, /<script>Conditional high<\/script>/);
+
+  const rankingMetricContracts = [
+    {
+      metric: 'staticCompleteNodeTargetYield',
+      scoreBasis: 'STATIC_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE',
+      unit: 'target_resource_units/node',
+      value: 41.25,
+      displayValue: '41.25',
+    },
+    {
+      metric: 'staticYieldPerAttackCycleSecond',
+      scoreBasis: 'STATIC_TARGET_RESOURCE_UNITS_PER_ATTACK_CYCLE_SECOND',
+      unit: 'target_resource_units/attack_cycle_second',
+      value: 52.5,
+      displayValue: '52.5',
+    },
+    {
+      metric: 'observedYieldPerNode',
+      scoreBasis: 'OBSERVED_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE',
+      unit: 'target_resource_units/node',
+      value: 63.75,
+      displayValue: '63.75',
+    },
+    {
+      metric: 'observedYieldPerSecond',
+      scoreBasis: 'OBSERVED_TARGET_RESOURCE_UNITS_PER_SECOND',
+      unit: 'target_resource_units/second',
+      value: 74.125,
+      displayValue: '74.13',
+    },
+  ];
+  for (const contract of rankingMetricContracts) {
+    const metricRow = {
+      ...rankingContractV2.confirmedItems[0],
+      selectedMetric: contract.metric,
+      selectedMetricValue: contract.value,
+      [contract.metric]: contract.value,
+    };
+    const metricHtml = renderHarvestRankingResult({
+      ...rankingContractV2,
+      queryPolicy: {
+        ...rankingContractV2.queryPolicy,
+        // Methodology is authoritative even if a stale compatibility field disagrees.
+        metric: 'staticCompleteNodeTargetYield',
+      },
+      methodology: {
+        ...rankingContractV2.methodology,
+        metric: contract.metric,
+        scoreBasis: contract.scoreBasis,
+        unit: contract.unit,
+      },
+      confirmedItems: [metricRow],
+      conditionalItems: [],
+      items: [metricRow],
+    });
+    assert.ok(
+      metricHtml.includes(contract.scoreBasis),
+      `${contract.metric} must preserve methodology.scoreBasis`,
+    );
+    assert.ok(
+      metricHtml.includes(contract.unit),
+      `${contract.metric} must preserve methodology.unit`,
+    );
+    assert.ok(
+      metricHtml.includes(`>${contract.displayValue}<`),
+      `${contract.metric} must render the methodology-selected metric value`,
+    );
+  }
+
+  const observedProfileHtml = renderHarvestRankingResult({
+    ...rankingContractV2,
+    queryPolicy: {
+      ...rankingContractV2.queryPolicy,
+      metric: 'observedYieldPerNode',
+      runtimeProfileId: 'server-pve-1',
+      includePreliminary: true,
+    },
+    methodology: {
+      ...rankingContractV2.methodology,
+      metric: 'observedYieldPerNode',
+      scoreBasis: 'OBSERVED_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE',
+      unit: 'target_resource_units/node',
+    },
+    runtimeCoverage: {
+      runtimeProfilesAvailable: ['server-pve-1', 'single-player-1'],
+      runtimeProfileSelected: 'server-pve-1',
+      publishableConfirmedRows: 0,
+      preliminaryRows: 1,
+      syntheticExcluded: 0,
+      profileMismatchExcluded: 3,
+    },
+    confirmedItems: [],
+    conditionalItems: [{
+      ...rankingContractV2.confirmedItems[0],
+      observedYieldPerNode: 9,
+      selectedMetric: 'observedYieldPerNode',
+      selectedMetricValue: 9,
+      runtimeStatus: 'OBSERVED_PRELIMINARY',
+      runtimeObservation: {
+        runtimeProfileId: 'server-pve-1',
+        evidenceTier: 'OBSERVED_PRELIMINARY',
+      },
+    }],
+    items: [],
+  });
+  assert.ok(observedProfileHtml.includes('runtimeProfileId'));
+  assert.ok(observedProfileHtml.includes('server-pve-1'));
+  assert.ok(observedProfileHtml.includes('includePreliminary=true'));
+  assert.ok(observedProfileHtml.includes('OBSERVED_PRELIMINARY'));
+  assert.ok(observedProfileHtml.includes('id="harvest-ranking-runtime-profile"'));
+  assert.ok(observedProfileHtml.includes('id="harvest-ranking-include-preliminary"'));
+  assert.match(
+    observedProfileHtml,
+    /id="harvest-ranking-include-preliminary" type="checkbox" checked/,
+  );
+
+  const unselectedRuntimeProfileHtml = renderHarvestRankingResult({
+    ...rankingContractV2,
+    runtimeCoverage: {
+      runtimeProfilesAvailable: ['server-pve-1', 'single-player-1'],
+      runtimeProfileSelected: null,
+      publishableConfirmedRows: 2,
+      preliminaryRows: 0,
+    },
+  });
+  assert.ok(unselectedRuntimeProfileHtml.includes('请选择一个环境'));
+  assert.ok(unselectedRuntimeProfileHtml.includes('受控实测单节点（先选环境）'));
+
+  const compatibilityConfirmed = {
+    ...rankingContractV2.confirmedItems[0],
+    creature: 'Confirmed authoritative first',
+  };
+  const compatibilityConditional = {
+    ...rankingContractV2.conditionalItems[0],
+    creature: 'Compatibility conditional first',
+  };
+  const splitTierHtml = renderHarvestRankingResult({
+    ...rankingContractV2,
+    confirmedItems: [compatibilityConfirmed],
+    conditionalItems: [compatibilityConditional],
+    // Deliberately adversarial compatibility order: it must not drive either tier.
+    items: [compatibilityConditional, compatibilityConfirmed],
+  });
+  const confirmedTierIndex = splitTierHtml.indexOf('harvest-ranking-tier confirmed');
+  const conditionalTierIndex = splitTierHtml.indexOf('harvest-ranking-tier conditional');
+  const confirmedCreatureIndex = splitTierHtml.indexOf('Confirmed authoritative first');
+  const conditionalCreatureIndex = splitTierHtml.indexOf('Compatibility conditional first');
+  assert.ok(confirmedTierIndex >= 0);
+  assert.ok(conditionalTierIndex > confirmedTierIndex);
+  assert.ok(confirmedCreatureIndex > confirmedTierIndex);
+  assert.ok(confirmedCreatureIndex < conditionalTierIndex);
+  assert.ok(conditionalCreatureIndex > conditionalTierIndex);
+
+  const conditionalOnlyHtml = renderHarvestRankingResult({
+    ...rankingContractV2,
+    confirmedItems: [],
+    conditionalItems: [compatibilityConditional],
+    items: [compatibilityConditional],
+  });
+  assert.equal(
+    (conditionalOnlyHtml.match(/harvest-ranking-tier confirmed/g) || []).length,
+    1,
+  );
+  assert.equal(
+    (conditionalOnlyHtml.match(/harvest-ranking-tier conditional/g) || []).length,
+    1,
+  );
+
+  const specialtyContractV2 = {
+    ...specialtyV2,
+    schema: 'blueprint-to-code.harvest-creature-specialties/v3',
+    contractVersion: 'harvest-ranking-contract/v2',
+    identity: rankingContractV2.identity,
+    queryPolicy: rankingContractV2.queryPolicy,
+    confirmedStatus: 'AVAILABLE',
+    conditionalStatus: 'UNAVAILABLE',
+    methodology: {
+      ...specialtyV2.methodology,
+      metric: 'staticCompleteNodeTargetYield',
+      sortMetric: 'relativeToNodeTopPercent DESC, selectedMetricValue DESC, resourceDisplayName, nodeName, nodeId',
+    },
+    confirmedItems: [{
+      ...specialtyV2.items[0],
+      selectedMetricValue: 10,
+      nodeTopSelectedMetricValue: 10,
+      relativeToNodeTopPercent: 100,
+      staticCompleteNodeTargetYield: 10,
+      variantSelection: { selectedObjectPath: '/Game/Dinos/Anky' },
+    }],
+    conditionalItems: [],
+  };
+  specialtyContractV2.items = specialtyContractV2.confirmedItems;
+  const specialtyContractHtml = renderHarvestCreatureSpecialties(specialtyContractV2);
+  assert.match(specialtyContractHtml, /RELATIVE-FIRST/);
+  assert.match(specialtyContractHtml, /相对同层节点榜首 100%/);
+  assert.match(specialtyContractHtml, /界面不重新排序/);
+  assert.match(specialtyContractHtml, /已确认专长（独立编号）/);
+  assert.match(specialtyContractHtml, /条件性专长（不占已确认名次）/);
+
+  for (const contract of rankingMetricContracts) {
+    const specialtyMetricRow = {
+      ...specialtyContractV2.confirmedItems[0],
+      selectedMetric: contract.metric,
+      selectedMetricValue: contract.value,
+      nodeTopSelectedMetricValue: contract.value,
+      [contract.metric]: contract.value,
+    };
+    const specialtyMetricHtml = renderHarvestCreatureSpecialties({
+      ...specialtyContractV2,
+      queryPolicy: {
+        ...specialtyContractV2.queryPolicy,
+        metric: 'staticCompleteNodeTargetYield',
+      },
+      methodology: {
+        ...specialtyContractV2.methodology,
+        metric: contract.metric,
+        scoreBasis: contract.scoreBasis,
+        unit: contract.unit,
+      },
+      confirmedItems: [specialtyMetricRow],
+      conditionalItems: [],
+      items: [specialtyMetricRow],
+    });
+    assert.ok(
+      specialtyMetricHtml.includes(contract.scoreBasis),
+      `reverse ${contract.metric} must preserve methodology.scoreBasis`,
+    );
+    assert.ok(
+      specialtyMetricHtml.includes(contract.unit),
+      `reverse ${contract.metric} must preserve methodology.unit`,
+    );
+    assert.ok(
+      specialtyMetricHtml.includes(`value="${contract.metric}" selected`),
+      `reverse ${contract.metric} must treat methodology.metric as authoritative`,
+    );
+    assert.ok(
+      specialtyMetricHtml.includes(contract.displayValue),
+      `reverse ${contract.metric} must render the selected metric value`,
+    );
+  }
+
+  const observedSpecialtyProfileHtml = renderHarvestCreatureSpecialties({
+    ...specialtyContractV2,
+    queryPolicy: {
+      ...specialtyContractV2.queryPolicy,
+      runtimeProfileId: 'server-pve-1',
+      includePreliminary: true,
+    },
+    methodology: {
+      ...specialtyContractV2.methodology,
+      metric: 'observedYieldPerSecond',
+      scoreBasis: 'OBSERVED_TARGET_RESOURCE_UNITS_PER_SECOND',
+      unit: 'target_resource_units/second',
+      runtime: true,
+    },
+    runtimeCoverage: {
+      runtimeProfilesAvailable: ['server-pve-1', 'single-player-1'],
+      runtimeProfileSelected: 'server-pve-1',
+      publishableConfirmedRows: 0,
+      preliminaryRows: 1,
+    },
+    confirmedItems: [],
+    conditionalItems: [{
+      ...specialtyContractV2.confirmedItems[0],
+      runtimeStatus: 'OBSERVED_PRELIMINARY',
+      selectedMetric: 'observedYieldPerSecond',
+      selectedMetricValue: 3,
+      nodeTopSelectedMetricValue: 3,
+    }],
+    items: [],
+  });
+  assert.ok(observedSpecialtyProfileHtml.includes('runtimeProfilesAvailable'));
+  assert.ok(observedSpecialtyProfileHtml.includes('server-pve-1'));
+  assert.ok(observedSpecialtyProfileHtml.includes('includePreliminary=true'));
+  assert.ok(observedSpecialtyProfileHtml.includes('OBSERVED_PRELIMINARY'));
+  assert.ok(observedSpecialtyProfileHtml.includes('id="harvest-specialty-runtime-profile"'));
+  assert.ok(observedSpecialtyProfileHtml.includes('id="harvest-specialty-include-preliminary"'));
+  assert.match(
+    observedSpecialtyProfileHtml,
+    /id="harvest-specialty-include-preliminary" type="checkbox" checked/,
+  );
+
+  const unselectedSpecialtyProfileHtml = renderHarvestCreatureSpecialties({
+    ...specialtyContractV2,
+    runtimeCoverage: {
+      runtimeProfilesAvailable: ['server-pve-1', 'single-player-1'],
+      runtimeProfileSelected: null,
+      publishableConfirmedRows: 2,
+      preliminaryRows: 0,
+    },
+  });
+  assert.ok(unselectedSpecialtyProfileHtml.includes('请选择一个环境'));
+  assert.ok(unselectedSpecialtyProfileHtml.includes('受控实测单节点（先选环境）'));
+
+  const reverseConfirmed = {
+    ...specialtyContractV2.confirmedItems[0],
+    resource: {
+      ...specialtyContractV2.confirmedItems[0].resource,
+      displayName: 'Confirmed specialty authoritative',
+    },
+  };
+  const reverseConditional = {
+    ...specialtyContractV2.confirmedItems[0],
+    rankingTier: 'CONDITIONAL',
+    resource: {
+      ...specialtyContractV2.confirmedItems[0].resource,
+      displayName: 'Compatibility conditional specialty first',
+    },
+  };
+  const reverseSplitHtml = renderHarvestCreatureSpecialties({
+    ...specialtyContractV2,
+    confirmedItems: [reverseConfirmed],
+    conditionalItems: [reverseConditional],
+    items: [reverseConditional, reverseConfirmed],
+  });
+  const reverseConfirmedTierIndex = reverseSplitHtml.indexOf('harvest-ranking-tier confirmed');
+  const reverseConditionalTierIndex = reverseSplitHtml.indexOf('harvest-ranking-tier conditional');
+  const reverseConfirmedRowIndex = reverseSplitHtml.indexOf('Confirmed specialty authoritative');
+  const reverseConditionalRowIndex = reverseSplitHtml.indexOf('Compatibility conditional specialty first');
+  assert.ok(reverseConfirmedTierIndex >= 0);
+  assert.ok(reverseConditionalTierIndex > reverseConfirmedTierIndex);
+  assert.ok(reverseConfirmedRowIndex > reverseConfirmedTierIndex);
+  assert.ok(reverseConfirmedRowIndex < reverseConditionalTierIndex);
+  assert.ok(reverseConditionalRowIndex > reverseConditionalTierIndex);
+
   const buildHtml = renderHarvestBuildPanel({
     id: 'job-1',
     status: 'RUNNING',

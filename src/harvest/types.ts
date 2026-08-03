@@ -218,6 +218,22 @@ export interface HarvestRankingRow {
   harvestQuantityMultiplier?: number;
   resourceWeightShare?: number;
   estimatedYieldPerNode?: number;
+  staticCompleteNodeTargetYield?: number;
+  staticYieldPerAttackCycleSecond?: number;
+  staticAttackCycleSecondsToDepleteNode?: number;
+  staticFirstHitTiming?: string;
+  observedYieldPerNode?: number | null;
+  observedYieldPerSecond?: number | null;
+  runtimeStatus?: string;
+  scoreBasis?: string;
+  runtimeObservation?: {
+    observationSetId?: string | null;
+    runtimeProfileId?: string | null;
+    environmentFingerprint?: string | null;
+    evidenceTier?: string;
+    trialCount?: number | null;
+    synthetic?: false;
+  };
   /** @deprecated Compatibility field for harvest-ranking-result/v1 and /v2. */
   engineComparisonIndex?: number;
   relativeToNodeTopPercent?: number;
@@ -233,6 +249,62 @@ export interface HarvestRankingRow {
     resource?: string;
     gaps?: string[];
   };
+  scoreBreakdown?: {
+    metric?: string;
+    grantCalls?: number;
+    resourceWeightShare?: number;
+    expectedQuantityPerSelection?: number;
+    estimatedHits?: number;
+    effectiveDamagePerHit?: number;
+    evidenceTier?: string;
+    omittedFactors?: string[];
+  };
+  variantSelection?: {
+    policy?: string;
+    selectedObjectPath?: string;
+    canonicalObjectPath?: string | null;
+    selectionReasons?: string[];
+    excludedVariantClasses?: string[];
+    ambiguous?: boolean;
+    ambiguityReasons?: string[];
+    excludedObjectPaths?: string[];
+    higherExploratoryVariantExists?: boolean;
+    comparison?: Array<{
+      objectPath?: string;
+      creature?: string;
+      selectedMetricValue?: number;
+      rankingTier?: string;
+      canonical?: boolean;
+      exploratoryBest?: boolean;
+    }>;
+  };
+}
+
+export type HarvestRankingMetric =
+  | 'staticCompleteNodeTargetYield'
+  | 'staticYieldPerAttackCycleSecond'
+  | 'observedYieldPerNode'
+  | 'observedYieldPerSecond';
+
+export interface HarvestRankingQueryPolicy {
+  evidence: 'confirmed' | 'includeConditional' | string;
+  variant: 'CANONICAL_VARIANT' | 'ALL_VARIANTS' | 'BEST_DISCOVERED_VARIANT_EXPLORATORY' | string;
+  metric: HarvestRankingMetric | string;
+  availability: 'GLOBAL_TRANSFER_ALLOWED' | string;
+  runtimeProfileId?: string | null;
+  includePreliminary?: boolean;
+  exploratory?: boolean;
+}
+
+export interface HarvestRankingIdentity {
+  extractorVersion?: string;
+  modelVersion?: string;
+  policyVersion?: string;
+  resultSchemaVersion?: string;
+  nodeCatalogRevision?: string;
+  evaluationCatalogRevision?: string;
+  componentCatalogRevision?: string;
+  runtimeObservationRevision?: string;
 }
 
 export interface HarvestRankingCoverage {
@@ -268,6 +340,18 @@ export interface HarvestRankingCoverage {
   attacksIncompatible?: number;
   attacksExcludedByScope?: number;
   excludedByReason?: Record<string, number>;
+  attacksConditionallyEvaluated?: number;
+  conditionallyRankedAttacks?: number;
+  conditionalEvaluationByReason?: Record<string, number>;
+  rowsWithEffectivenessField?: number;
+  rowsWithNonNeutralEffectiveness?: number;
+  rowsConditionalBecauseEffectiveness?: number;
+  canonicalVariantAmbiguousSpecies?: number;
+  canonicalCreatureAssetsAudited?: number;
+  canonicalVariantsAudited?: number;
+  variantSelectionAuditsReturned?: number;
+  variantSelectionAuditsOmitted?: number;
+  canonicalVariantAmbiguityExamples?: HarvestVariantSelectionAudit[];
   creatureAssetsExcludedFromScope?: number;
   attacksExcludedByCreatureScope?: number;
   excludedCreatureByReason?: Record<string, number>;
@@ -281,6 +365,19 @@ export interface HarvestRankingCoverage {
   nonRankedForNodeResource?: number;
   returned?: number;
   omitted?: number;
+  returnedConfirmed?: number;
+  returnedConditional?: number;
+  omittedConfirmed?: number;
+  omittedConditional?: number;
+}
+
+export interface HarvestVariantSelectionAudit {
+  speciesKey: string;
+  canonicalObjectPath: string | null;
+  selectionReasons: string[];
+  excludedVariantClasses: string[];
+  ambiguous: boolean;
+  ambiguityReasons: string[];
 }
 
 export interface HarvestRankingReasonGroup {
@@ -294,6 +391,8 @@ export interface HarvestRankingReasonGroup {
 
 export interface HarvestRankingResult extends HarvestApiResult {
   schema: string;
+  contractVersion?: string;
+  identity?: HarvestRankingIdentity;
   dataset: HarvestDatasetMeta;
   node: {
     id: string;
@@ -306,13 +405,24 @@ export interface HarvestRankingResult extends HarvestApiResult {
   methodology: {
     metric: string;
     scoreBasis: string;
+    unit?: string;
+    runtime?: boolean;
     relativeBasis?: string;
     warning: string;
     formulaVersion?: string;
     usageScope?: string;
     evaluationMode?: string;
     variantGrouping?: string;
+    contractVersion?: string;
+    policyVersion?: string;
+    metricLabel?: string;
+    firstHitTiming?: string;
+    variantSelection?: string;
+    availabilityPolicy?: string;
   };
+  queryPolicy?: HarvestRankingQueryPolicy;
+  confirmedStatus?: string;
+  conditionalStatus?: string;
   scopeStatus: string;
   claimScope?: string;
   claimsCompleteWithinScope?: boolean;
@@ -343,6 +453,19 @@ export interface HarvestRankingResult extends HarvestApiResult {
     damageTypes?: string;
     blockers?: string[];
   };
+  runtimeCoverage?: {
+    filesScanned?: number;
+    syntheticExcluded?: number;
+    publishableExactRows?: number;
+    runtimeProfilesAvailable?: string[];
+    runtimeProfileSelected?: string | null;
+    publishableConfirmedRows?: number;
+    preliminaryRows?: number;
+    profileMismatchExcluded?: number;
+  };
+  variantSelectionAudits?: HarvestVariantSelectionAudit[];
+  confirmedItems?: HarvestRankingRow[];
+  conditionalItems?: HarvestRankingRow[];
   items: HarvestRankingRow[];
 }
 
@@ -378,6 +501,10 @@ export interface HarvestCreatureSpecialtyRow extends HarvestRankingRow {
     harvestComponentPackagePath?: string;
   };
   nodeTopEstimatedYieldPerNode?: number;
+  nodeTopStaticCompleteNodeTargetYield?: number;
+  selectedMetric?: string;
+  selectedMetricValue?: number;
+  nodeTopSelectedMetricValue?: number;
   /** @deprecated Compatibility field for harvest-creature-specialties/v1. */
   nodeTopEngineComparisonIndex?: number;
   relativeToNodeTopPercent: number;
@@ -388,6 +515,9 @@ export interface HarvestCreatureSpecialtyRow extends HarvestRankingRow {
     attackIndex?: number;
     attackName?: string;
     estimatedYieldPerNode?: number;
+    staticCompleteNodeTargetYield?: number;
+    selectedMetric?: string;
+    selectedMetricValue?: number;
     /** @deprecated Compatibility field for harvest-creature-specialties/v1. */
     engineComparisonIndex?: number;
     rankingTier?: string;
@@ -397,8 +527,13 @@ export interface HarvestCreatureSpecialtyRow extends HarvestRankingRow {
 
 export interface HarvestCreatureSpecialties extends HarvestApiResult {
   schema: string;
+  contractVersion?: string;
+  identity?: HarvestRankingIdentity;
   dataset: HarvestDatasetMeta;
   species: HarvestCreatureSummary;
+  queryPolicy?: HarvestRankingQueryPolicy;
+  confirmedStatus?: string;
+  conditionalStatus?: string;
   methodology: HarvestRankingResult['methodology'] & {
     sortMetric?: string;
     relativeBasis?: string;
@@ -411,6 +546,7 @@ export interface HarvestCreatureSpecialties extends HarvestApiResult {
     status?: string;
     blockers?: string[];
   };
+  runtimeCoverage?: HarvestRankingResult['runtimeCoverage'];
   coverage: HarvestRankingCoverage & {
     speciesVariantsMatched?: number;
     nodeResourcePairsDiscovered?: number;
@@ -430,6 +566,8 @@ export interface HarvestCreatureSpecialties extends HarvestApiResult {
   offset?: number;
   limit?: number;
   nextOffset?: number | null;
+  confirmedItems?: HarvestCreatureSpecialtyRow[];
+  conditionalItems?: HarvestCreatureSpecialtyRow[];
   items: HarvestCreatureSpecialtyRow[];
 }
 

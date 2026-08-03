@@ -1,0 +1,59 @@
+{
+  "schema": "blueprint-to-code.harvest-runtime-observation/v2",
+  "observationSetId": "runtime://example/replace-before-use",
+  "runtimeProfileId": "profile://example/replace-before-use",
+  "environmentFingerprint": "503e928981aed8e7f550d592f7e1219727ca8e530f8a3be32da0d93726138875",
+  "synthetic": true,
+  "environment": {
+    "gameBuild": "REPLACE_WITH_RECORDED_BUILD",
+    "map": "REPLACE_WITH_RECORDED_MAP",
+    "sessionType": "REPLACE_WITH_SINGLE_PLAYER_OR_SERVER_TYPE",
+    "HarvestAmountMultiplier": 1.0,
+    "otherHarvestMultipliers": {
+      "DinoHarvestingDamageMultiplier": 1.0,
+      "PlayerHarvestingDamageMultiplier": 1.0
+    },
+    "mods": [],
+    "creature": {
+      "level": 1,
+      "meleePercent": 100.0,
+      "relevantStats": {}
+    },
+    "buffs": [],
+    "genes": [],
+    "worldState": {
+      "mission": "NONE",
+      "weather": "REPLACE_WITH_RECORDED_WEATHER"
+    },
+    "nodeFreshnessContract": "FRESH_COMPLETE_NODE",
+    "measurementMethod": {
+      "kind": "INVENTORY_DELTA",
+      "randomQuantity": true,
+      "recommendedSampleCount": 20
+    },
+    "notes": "Synthetic field template only. This is not a real measurement."
+  },
+  "subject": {
+    "nodeId": "REPLACE_WITH_EXACT_NODE_ID",
+    "nodeResourceId": "REPLACE_WITH_EXACT_NODE_RESOURCE_ID",
+    "speciesKey": "replace-with-exact-species-key",
+    "creatureObjectPath": "/Game/REPLACE/WITH/EXACT/Creature.Creature_C",
+    "attackIndex": 0
+  },
+  "staticModel": {
+    "modelVersion": "harvest-estimated-yield-per-node/v1-native-static-profile",
+    "extractorVersion": "REPLACE_WITH_EXTRACTOR_VERSION",
+    "policyVersion": "harvest-ranking-policy/v2-confirmed-canonical-relative-specialty",
+    "nodeCatalogRevision": "0000000000000000000000000000000000000000000000000000000000000000",
+    "evaluationCatalogRevision": "0000000000000000000000000000000000000000000000000000000000000000",
+    "componentCatalogRevision": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "trials": [
+    {
+      "trialId": "replace-with-real-trial-id",
+      "durationSeconds": 1.0,
+      "hits": [],
+      "finalResourceUnits": 0.0
+    }
+  ]
+}

@@ -1,5 +1,47 @@
 # ARK 资源采集排行系统：证据、口径与使用方法
 
+> 当前公开查询合同为 `harvest-ranking-contract/v2`。旧文中出现的 `estimatedYieldPerNode` 与 best-discovered variant 是迁移背景；v2 的权威字段、分榜与默认策略以本节为准。
+
+## Ranking Contract v2
+
+### 四种 metric 的机读合同
+
+`methodology.metric` 是本次排序的权威指标，`scoreBasis`、`unit` 和 `runtime` 必须与下表逐项一致；每条排行 row 的 `scoreBasis` 也必须等于所选 metric 的合同值，`scoreBreakdown.metric` 必须等于所选 metric。前端和下游不能根据字段名自行换算另一种口径。
+
+| `metric` | `scoreBasis` | `unit` | `runtime` |
+| --- | --- | --- | --- |
+| `staticCompleteNodeTargetYield` | `STATIC_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE` | `target_resource_units/node` | `false` |
+| `staticYieldPerAttackCycleSecond` | `STATIC_TARGET_RESOURCE_UNITS_PER_ATTACK_CYCLE_SECOND` | `target_resource_units/attack_cycle_second` | `false` |
+| `observedYieldPerNode` | `OBSERVED_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE` | `target_resource_units/node` | `true` |
+| `observedYieldPerSecond` | `OBSERVED_TARGET_RESOURCE_UNITS_PER_SECOND` | `target_resource_units/second` | `true` |
+
+`staticCompleteNodeTargetYield` 是权威静态单节点总量；`estimatedYieldPerNode` 只保留为同值兼容别名，不能成为第二套排序公式。`staticYieldPerAttackCycleSecond` 的静态耗时是 `estimatedHitsToDepleteNode × effectiveAttackInterval`，`methodology.firstHitTiming` 固定为 `FIRST_HIT_AT_END_OF_FIRST_ATTACK_CYCLE`：一次攻击也消耗一个完整攻击周期。它不是包含动画、移动、耐力、负重、节点密度或服务器 hook 的真实每秒产量。
+
+### 证据层与兼容字段
+
+- 默认 HTTP `evidence=confirmed`；UI 为了同时展示两个证据层，会显式请求 `evidence=includeConditional`。
+- `confirmedItems` 与 `conditionalItems` 各自在自己的证据层内独立编号、计算第一名和 `relativeToNodeTopPercent`。条件性高分永远不占已确认名次或已确认基线；已确认为空时返回 `UNAVAILABLE`，不提升条件性结果。
+- 兼容字段 `items` **只等于 `confirmedItems`**。旧客户端读取 `items` 时不会把条件性结果压进主榜。
+
+### 通用 variant 分类与失败关闭
+
+默认 `variantPolicy=CANONICAL_VARIANT`。分类只读取通用对象路径标记，不读取分数，也没有物种白名单：测试/调试路径归为 `TEST`，任务、Boss、活动和地图变体分别归为 `MISSION`、`BOSS`、`EVENT`、`MAP_VARIANT`；仍带 `variant` 或 `special` 标记但无法确定类别的路径归为 `UNKNOWN_VARIANT`，其余才是 `BASE`。
+
+path class 只有一个 `BASE` 时直接选中，原因是 `UNIQUE_BASE_VARIANT`。若同一物种有多个 path-class `BASE`，系统再读取这些候选已经提取出的 `parentChain`：不继承同物种另一个 `BASE` 候选的项是 ancestry root；只有恰好一个 ancestry root 时才可选中，并记录 `UNIQUE_ANCESTRY_ROOT_BASE_VARIANT`，继承它的 BASE 候选从 canonical 选择中降级并在 `excludedVariantClasses` 记为 `UNKNOWN_VARIANT`。没有 `BASE`、parentChain 不足以确定唯一 root，或存在多个彼此独立的 roots 时，`canonicalObjectPath=null`、`ambiguous=true`，默认 canonical 榜排除该物种；绝不按最短路径或最高分兜底。canonical 审计在应用 `TAMED_RIDDEN` 排名范围前覆盖完整发现目录；当前正式目录是 1,406 个生物资产、280 个物种、26 个歧义物种。coverage 报告完整资产/物种计数，离线 changed-cases audit 的 `canonicalVariantAudit.audits` 保存每个物种的完整审计；HTTP 的 `variantSelectionAudits` 与歧义示例仍各自最多返回 10 条，避免 `limit` 很小时携带无界载荷。每条示例仍保留 `selectionReasons`、`excludedVariantClasses` 和实际歧义原因。`ALL_VARIANTS` 与 `BEST_DISCOVERED_VARIANT_EXPLORATORY` 必须显式请求，后者仍是探索视图，不能伪装成 canonical 结论。
+
+### Runtime profile 隔离与发布层级
+
+- 只有通过 v2 observation 校验、`synthetic=false` 且属于本次选中 `runtimeProfileId` 的精确对象，才能提供 observed 指标。不同 profile 的 trial 或平均值绝不混合；同一 profile 必须绑定唯一的 12 字段 `environmentFingerprint`。
+- 1–2 个真实 trial 是 `OBSERVED_PRELIMINARY`，默认排除；只有显式 `includePreliminary=true` 才能审阅。至少 3 个真实 trial 才是 `OBSERVED_CONFIRMED`。
+- `synthetic=true` 始终是 `SYNTHETIC_NOT_PUBLISHABLE`，不论 trial 数量都不能进入公开 overlay，也不能制造 runtime gold。
+- observed 查询有且仅有一个非 synthetic profile 时自动选择它；多个 profile 同时存在时必须显式选择，显式 profile 不存在时返回稳定的 `HARVEST_RUNTIME_PROFILE_NOT_FOUND`，多个 profile 未选择时返回 `HARVEST_RUNTIME_PROFILE_REQUIRED`。零 profile 时返回空的 unavailable observed 榜。直接调用 engine 也执行相同防线：unprofiled、旧 status、trial 数与 preliminary/confirmed status 不一致、synthetic 行都不能发布。确认状态只适用于该 profile 记录的精确环境，不能外推到另一地图、倍率、Mod、build 或生物状态。
+
+- 默认地图策略是 `GLOBAL_TRANSFER_ALLOWED`。当前证据不足以实现 `NATIVE_MAP_EVIDENCE_ONLY`，因此服务端不会接受它。
+- 反向专长排序固定为：`relativeToNodeTopPercent DESC`、`methodology.metric` 指定的绝对指标 DESC、资源显示名、节点名、节点 ID。前端按服务端顺序渲染，不重新排序。
+- 每个结果绑定 extractor、model、policy、result schema、node/evaluation/component revision；缓存键包含这些身份、精确 resource `entryIndex`、查询策略与 runtime observation revision。身份不一致时 repository fail closed 并要求重建。
+
+Effectiveness 的当前证据结论和实验门槛见 [HARVEST_EFFECTIVENESS_QUANTITY_GAP_zh.md](HARVEST_EFFECTIVENESS_QUANTITY_GAP_zh.md)。受控 observation 见 [HARVEST_RUNTIME_TEST_PROTOCOL_zh.md](HARVEST_RUNTIME_TEST_PROTOCOL_zh.md)。
+
 ## 1. 这套系统解决什么问题
 
 这套系统不再让 AI 每次读取一份巨大的蓝图转储后自行猜测，而是把本地 ARK DevKit 资产预处理成四层兼容结果：
@@ -116,7 +158,7 @@ estimatedYieldPerNode       = 36 * 0.6116504801 * 1.5
                             = 33.029126...
 ```
 
-`AttackInterval = 0.5` 仍保留作速度诊断，但不参与完整节点总产量排序。`engineComparisonIndex` 只保留一个发布周期作为兼容别名，并被强制等于 `estimatedYieldPerNode`；旧的攻速系数放在 `legacyDiagnostics`，绝不参与排名。
+`AttackInterval = 0.5` 不参与 `staticCompleteNodeTargetYield` 的完整节点总产量排序；只有显式选择 `staticYieldPerAttackCycleSecond` 时，才按首击位于首周期末的合同参与静态周期速度排序。`engineComparisonIndex` 只保留一个发布周期作为静态总量兼容别名，并被强制等于 `estimatedYieldPerNode`；旧的攻速系数放在 `legacyDiagnostics`，绝不参与 v2 排名。
 
 这里的 `0.629999995...` 和 `0.400000005...` 是资产中浮点数的实际序列化表示；Markdown 为便于阅读显示为 `0.63` 和 `0.4`，完整精度保留在 `.full.json`。
 
@@ -222,7 +264,7 @@ estimatedYieldPerNode = sum(grantCalls)
 - 同一 DevKit 资产版本；
 - 相同服务器和运行时条件。
 
-它不是“每击资源数”，也不是“资源/秒”。`AttackInterval` 和 `harvestPressurePerSecond` 仅保留为诊断，因为它们没有真实动画墙钟校准，也不改变同一完整节点最终能发放多少资源。
+它不是“每击资源数”，也不是运行时“资源/秒”。`AttackInterval` 不改变同一完整节点最终能发放多少资源；显式选择 `staticYieldPerAttackCycleSecond` 时，它只用于静态攻击周期折算，仍没有真实动画墙钟校准。`harvestPressurePerSecond` 继续只作旧诊断。
 
 以下因素当前明确不进入标准化产量模型：
 
@@ -234,7 +276,7 @@ estimatedYieldPerNode = sum(grantCalls)
 - 受控环境中的实测掉落；
 - 非线性数量随机分布、单单位采集和非零 additional-effectiveness 分支（当前行会失败关闭）。
 
-所以报告中的 `observedYieldPerSecond` 按设计保持 `null`。当前字段明确叫“预计完整节点产量”，不是游戏实测；受控实测用于校准标准化 profile 和发现尚未恢复的运行时 hook。
+所以没有精确、同 profile 的合法 observation 时，`observedYieldPerNode` 与 `observedYieldPerSecond` 按设计保持 `null`。只有选中 profile 内通过校验的非 synthetic 实测可以填入这两个字段；静态字段不是游戏实测。受控实测用于检验标准化模型和发现尚未恢复的运行时 hook，不能反向补造静态或 runtime 证据。
 
 每个可排名行同时返回结构化 `scoreBreakdown`。它逐项列出 grant calls、资源权重占比、单次选择期望数量、预计命中次数和有效每击伤害；`contributions` 只包含实际进入公式的量，`omittedFactors` 则明确列出 runtime Blueprint、Buff、基因、任务、服务器/Mod hook、移动、耐力、负重、AoE/节点密度、地图可用性、自动采集、冷却/蓄力，以及尚未证明消费者语义的 `EffectivenessQuantityMultiplier`。缺失因素不会被填成 `0`。
 
@@ -247,7 +289,7 @@ Explorer 查询只针对当前选中的“节点定义 + HarvestComponent + 资�
 - `bUseBlueprintAdjustOutputDamage` 会直接改变产量输入，当前必须 `UNRANKED`，不能用未调整的基础伤害代替；
 - 只有没有条件原因、且生物和排行证据均确认的行，才进入 `CONFIRMED` 层。
 
-正向查询的 `relativeToNodeTopPercent` 是该行预计完整节点产量除以同一节点资源的第一名产量。反向“某只恐龙擅长什么”同样以 `estimatedYieldPerNode` 作为唯一主排序和并列名次依据，再展开引用该精确 Component/resource/entry 组合的节点；`relativeToNodeTopPercent` 只作辅助说明，不影响顺序。这个百分比表示相对当前可评估候选的完整节点总产量，不是掉落概率、采集速度或实测资源/秒。
+正向查询的 `relativeToNodeTopPercent` 是该行所选 `methodology.metric` 除以同一证据层、同一节点资源的第一名同指标值。反向“某只恐龙擅长什么”沿用同一个所选指标，再展开引用该精确 Component/resource/entry 组合的节点；已确认与条件性基线始终分开。这个百分比不是掉落概率，也不能把静态周期指标解释成运行时资源/秒。
 
 ## 6. 报告压缩合同
 
@@ -306,6 +348,36 @@ Resource Explorer 使用另一组正式运行产物：`harvest_ranking_all_resou
 三资源批量报告为 `2337269 → 47268` 字符（减少 `97.98%`，估算 `11817` token），Metal、Stone、Wood 分别保留 `36/56/72` 条 canonical 候选及各自的独立视图。第一次生成曾达到 `14593` token，并被 12,000 上限正确拒绝；改成有界组件索引和每资源 Top-K 后才通过。
 
 当前验证器不重新读取并哈希现场 DevKit 文件；它验证两份报告彼此一致，并验证 full 内完整扫描清单与 compact 指纹一致。如果 DevKit 更新，仍必须重新运行排行脚本，才能取得新的现场 SHA-256。当前全资源/Foliage Explorer 的生成结果和边界见 `ARK_RESOURCE_NODE_EXPLORER_MVP_zh.md`。
+
+### 6.3 Ranking Contract v2 的独立正向/反向验证
+
+`verify_ark_harvest_rankings.py` 不导入生产 `HarvestEvaluationEngine` 或 `evaluate_attack_resource` 来计算 expected。它在 verifier 内维护独立的四指标映射和完整节点模拟，并通过 Repository 黑盒回调比较生产结果：
+
+- 正向逐一验证 `staticCompleteNodeTargetYield`、`staticYieldPerAttackCycleSecond`、`observedYieldPerNode`、`observedYieldPerSecond` 的 selected value、`scoreBreakdown.metric`、`scoreBasis`、单位、runtime 标记、已确认/条件性分层、canonical variant audit 和 coverage；
+- 静态周期指标独立按 `完整节点目标资源单位 / (预计击数 × 正有效攻击间隔)` 计算；间隔缺失、零或负数时失败关闭，不补 `0`；
+- observed 指标只接受同一个明确 `runtimeProfileId` 下、`synthetic=false` 的受控 observation；preliminary 必须显式 opt-in，且仍只进入条件性层；
+- 反向 specialties 由 verifier 自己的正向行构造，并使用同一 evidence tier、metric、variant、availability 和 runtime profile 的节点榜首作为 baseline；排序固定为相对百分比降序、selected metric 降序、稳定资源/节点身份，competition rank 在分页切片前完成；
+- 报告用 `coverageByDirection.forward/reverse` 逐 metric 标出 `VERIFIED`、`FAILED` 或 `SKIPPED_WITH_REASON`。没有受控 runtime fixture 时，observed 不会以零行假装已验证，而会明确跳过及说明原因。
+
+默认静态验证示例：
+
+```powershell
+python scripts\verify_ark_harvest_rankings.py `
+  --sample-size 128 `
+  --output "$env:TEMP\harvest_ranking_verification.json"
+```
+
+受控 observed 验证必须显式提供 observation 目录和 profile：
+
+```powershell
+python scripts\verify_ark_harvest_rankings.py `
+  --sample-size 128 `
+  --runtime-observations analysis\harvest_rankings\runtime_observations `
+  --runtime-profile-id <exact-runtime-profile-id> `
+  --output "$env:TEMP\harvest_ranking_verification.json"
+```
+
+此验证只证明“生产正向/反向合同与独立 verifier oracle 一致”。即使全部通过，也不证明静态模型或 observation 等于真实游戏的普遍产量；verifier 不生成 runtime gold，也不会把 synthetic 数据升级为实测证据。
 
 ## 7. 运行与验证
 

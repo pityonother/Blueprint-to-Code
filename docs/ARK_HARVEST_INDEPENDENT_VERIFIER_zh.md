@@ -60,9 +60,42 @@ python scripts\verify_ark_harvest_rankings.py --all
 - `1`：发现资格、预计节点产量或 Top 结果差异；
 - `2`：输入目录无效、读取失败或验证器运行错误。
 
-也可以用 `--reference-results <json>` 对比预先捕获的 API 结果。文件根对象以 `nodeId::nodeResourceId` 为键，值为对应的排行响应。这适合把生成和验证放进两个独立进程或 CI 作业。
+也可以用 `--reference-results <json>` 对比预先捕获的 API 结果。这适合把生成和验证放进两个独立进程或 CI 作业。参考文件格式取决于排行合同版本。
 
-黑盒对比以 `estimatedYieldPerNode` 和 Top-N 顺序为准。`engineComparisonIndex` 只是过渡兼容字段：参考结果可以不提供；如果仍提供，其数值必须与 `estimatedYieldPerNode` 完全一致，不能成为另一套冲突的排行指标。
+旧合同/v1 使用 flat 根对象，以 `nodeId::nodeResourceId` 为键，值为对应的完整排行响应：
+
+```json
+{
+  "metal-node::metal-entry": {
+    "items": []
+  }
+}
+```
+
+v2 必须先按正向方向和 metric 分桶，再以 `nodeId::nodeResourceId` 为键：
+
+```json
+{
+  "forward": {
+    "staticCompleteNodeTargetYield": {
+      "metal-node::metal-entry": {
+        "confirmedItems": [],
+        "conditionalItems": []
+      }
+    },
+    "staticYieldPerAttackCycleSecond": {
+      "metal-node::metal-entry": {
+        "confirmedItems": [],
+        "conditionalItems": []
+      }
+    }
+  }
+}
+```
+
+没有 `--runtime-observations` 时，两个 observed metric 会明确标记为 `SKIPPED_WITH_REASON`，静态验证文件仍必须同时提供上述两个静态 metric 桶。提供受控 runtime observation 后，恰好一个非 synthetic profile 会自动选择；多个 profile 必须明确指定。此时还必须用同一结构提供 `observedYieldPerNode` 与 `observedYieldPerSecond` 桶。捕获文件模式当前不提供 reverse specialties 回调，因此 reverse coverage 会明确跳过。
+
+v2 黑盒对比会逐 metric 核对 selected value、Top-N 顺序、row `scoreBasis` 与 `scoreBreakdown.metric`；反向专长 row 也使用同一套四 metric 合同。独立实现自行执行 runtime profile 单选、单 profile 自动选择、synthetic/preliminary/status 防线，并在应用 `TAMED_RIDDEN` 前独立统计完整 canonical 资产/物种审计。`engineComparisonIndex` 只是过渡兼容字段：参考结果可以不提供；如果仍提供，其数值必须与静态完整节点指标完全一致，不能成为另一套冲突的排行指标。
 
 这个门禁验证的是已恢复静态证据范围内的完整节点预计产量与排序一致性。运行时 Blueprint、Buff、基因、任务和服务器倍率仍不在这个静态模型内，因此后续游戏实测用于校准模型边界，而不是把当前结果解释成资源/秒。
 

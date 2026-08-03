@@ -25,6 +25,9 @@ from blueprint_tool_server import (  # noqa: E402
     start_harvest_build_for_request,
     static_content_type,
 )
+from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
+    HarvestEvaluationEngine,
+)
 from blueprint_translator.harvest_build_jobs import (  # noqa: E402
     HarvestBuildAlreadyRunning,
     HarvestBuildArgumentError,
@@ -39,24 +42,168 @@ class _FakeRepository:
     def get_node(self, node_id):
         return {"id": node_id}
 
-    def rankings(self, node_id, node_resource_id, *, limit):
+    def rankings(self, node_id, node_resource_id, *, limit, **policies):
         return {
             "node": {"id": node_id},
             "resource": {"nodeResourceId": node_resource_id},
             "limit": limit,
+            "policies": policies,
         }
 
     def list_creatures(self, **kwargs):
         return {"schema": "creature-page", "arguments": kwargs, "items": []}
 
-    def creature_specialties(self, species_key, *, offset, limit):
+    def creature_specialties(self, species_key, *, offset, limit, **policies):
         return {
             "schema": "specialties",
             "species": {"speciesKey": species_key},
             "offset": offset,
             "limit": limit,
+            "policies": policies,
             "items": [],
         }
+
+
+def _metric_contract_node_catalog() -> dict[str, object]:
+    return {
+        "dataset": {
+            "revision": "1" * 64,
+            "componentDatasetRevision": "2" * 64,
+            "evaluationDatasetRevision": "3" * 64,
+        },
+        "nodes": [
+            {
+                "id": "node",
+                "name": "Node",
+                "objectPath": "/Game/Nodes/Node.Node",
+                "harvestComponent": {"packagePath": "/Game/Components/Test"},
+                "resources": {
+                    "items": [
+                        {
+                            "entryIndex": 0,
+                            "resource": "PrimalItemResource_Test_C",
+                            "displayName": "Test resource",
+                            "nodeResourceId": "resource",
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+
+
+def _metric_contract_evaluation_catalog() -> dict[str, object]:
+    return {
+        "schema": "ark-harvest-evaluation-catalog/v2",
+        "dataset": {
+            "revision": "3" * 64,
+            "componentDatasetRevision": "2" * 64,
+            "extractorVersion": "extractor-test/v1",
+        },
+        "methodology": {
+            "contractVersion": "harvest-ranking-contract/v2",
+            "usageScope": "TAMED_RIDDEN",
+        },
+        "coverage": {"claimsAllCreatures": True},
+        "components": [
+            {
+                "objectPath": "/Game/Components/Test.Test",
+                "resourceEntries": [],
+                "damageEntries": [],
+            }
+        ],
+        "damageTypeParents": {},
+        "resourceDamageOverrides": [],
+        "damageTypeGaps": {},
+        "creatures": [
+            {
+                "name": "Alpha",
+                "speciesKey": "alpha",
+                "objectPath": (
+                    "/Game/PrimalEarth/Dinos/Alpha/"
+                    "Alpha_Character_BP.Alpha_Character_BP"
+                ),
+                "tameability": {"status": "ALLOWED", "reasonCodes": []},
+                "rideability": {"status": "ALLOWED", "reasonCodes": []},
+                "attacks": [
+                    {
+                        "attackIndex": 0,
+                        "attackName": "Harvest",
+                        "attackInterval": 2.0,
+                        "gaps": [],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _metric_contract_attack_result(**kwargs: object) -> dict[str, object]:
+    attack = kwargs["attack"]
+    assert isinstance(attack, dict)
+    return {
+        "rankingStatus": "RANKED",
+        "creature": kwargs["creature"],
+        "creatureObjectPath": kwargs["creature_object_path"],
+        "attackIndex": attack["attackIndex"],
+        "attackName": attack["attackName"],
+        "attackInterval": attack["attackInterval"],
+        "estimatedHitsToDepleteNode": 2,
+        "estimatedYieldPerNode": 12.0,
+        "engineComparisonIndex": 12.0,
+        "missingFacts": [],
+        "warnings": [],
+        "scoreBreakdown": {"metric": "estimatedYieldPerNode"},
+    }
+
+
+class _MetricContractRepository(_FakeRepository):
+    def rankings(self, node_id, node_resource_id, *, limit, **policies):
+        engine_policies = {
+            name: value
+            for name, value in policies.items()
+            if name
+            in {
+                "evidence_policy",
+                "variant_policy",
+                "metric",
+                "availability_policy",
+            }
+        }
+        runtime_observations = {
+            (
+                "node",
+                "resource",
+                "alpha",
+                (
+                    "/game/primalearth/dinos/alpha/"
+                    "alpha_character_bp.alpha_character_bp"
+                ),
+                0,
+            ): {
+                "observationSetId": "runtime://profile-a/alpha",
+                "runtimeProfileId": "profile-a",
+                "synthetic": False,
+                "trialCount": 3,
+                "observedYieldPerNode": 9.0,
+                "observedYieldPerSecond": 3.0,
+                "runtimeStatus": "OBSERVED_CONFIRMED",
+            }
+        }
+        with patch(
+            "blueprint_translator.harvest_evaluation_catalog.evaluate_attack_resource",
+            side_effect=_metric_contract_attack_result,
+        ):
+            return HarvestEvaluationEngine(
+                _metric_contract_evaluation_catalog()
+            ).rank_node_resource(
+                _metric_contract_node_catalog(),
+                node_id=node_id,
+                node_resource_id=node_resource_id,
+                limit=limit,
+                runtime_observations=runtime_observations,
+                **engine_policies,
+            )
 
 
 class _FakeBuildManager:
@@ -206,6 +353,199 @@ class HarvestHttpContractTests(unittest.TestCase):
         self.assertEqual(node["id"], "node-metal")
         self.assertEqual(ranking["resource"]["nodeResourceId"], "node-resource-metal")
         self.assertEqual(ranking["limit"], 10)
+        self.assertEqual(
+            ranking["policies"],
+            {
+                "evidence_policy": "confirmed",
+                "variant_policy": "CANONICAL_VARIANT",
+                "metric": "staticCompleteNodeTargetYield",
+                "availability_policy": "GLOBAL_TRANSFER_ALLOWED",
+            },
+        )
+
+    def test_ranking_query_accepts_only_explicit_v2_policy_values(self):
+        with patch.object(tool_server, "HARVEST_REPOSITORY", _FakeRepository()):
+            result = query_harvest_ranking_for_request(
+                "nodeId=node&nodeResourceId=resource&policy=includeConditional&"
+                "variantPolicy=BEST_DISCOVERED_VARIANT_EXPLORATORY&"
+                "metric=staticYieldPerAttackCycleSecond&"
+                "availabilityPolicy=GLOBAL_TRANSFER_ALLOWED"
+            )
+
+        self.assertEqual(result["policies"]["evidence_policy"], "includeConditional")
+        self.assertEqual(
+            result["policies"]["variant_policy"],
+            "BEST_DISCOVERED_VARIANT_EXPLORATORY",
+        )
+        self.assertEqual(
+            result["policies"]["metric"], "staticYieldPerAttackCycleSecond"
+        )
+        with patch.object(tool_server, "HARVEST_REPOSITORY", _FakeRepository()):
+            with self.assertRaises(tool_server.ApiProblem) as raised:
+                query_harvest_ranking_for_request(
+                    "nodeId=node&nodeResourceId=resource&metric=weightedComposite"
+                )
+        self.assertEqual(raised.exception.status, 400)
+        self.assertEqual(
+            raised.exception.payload["code"], "INVALID_HARVEST_RANKING_POLICY"
+        )
+
+    def test_ranking_api_preserves_metric_specific_score_basis_and_unit(self):
+        metric_contracts = {
+            "staticCompleteNodeTargetYield": {
+                "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+                "unit": "target_resource_units/node",
+            },
+            "staticYieldPerAttackCycleSecond": {
+                "scoreBasis": (
+                    "STATIC_TARGET_RESOURCE_UNITS_PER_ATTACK_CYCLE_SECOND"
+                ),
+                "unit": "target_resource_units/attack_cycle_second",
+            },
+            "observedYieldPerNode": {
+                "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+                "unit": "target_resource_units/node",
+            },
+            "observedYieldPerSecond": {
+                "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_SECOND",
+                "unit": "target_resource_units/second",
+            },
+        }
+
+        for metric, expected in metric_contracts.items():
+            with self.subTest(metric=metric), patch.object(
+                tool_server,
+                "HARVEST_REPOSITORY",
+                _MetricContractRepository(),
+            ):
+                result = query_harvest_ranking_for_request(
+                    f"nodeId=node&nodeResourceId=resource&metric={metric}"
+                )
+
+            self.assertEqual(result["methodology"]["metric"], metric)
+            self.assertEqual(
+                result["methodology"]["scoreBasis"],
+                expected["scoreBasis"],
+            )
+            self.assertEqual(result["methodology"]["unit"], expected["unit"])
+
+    def test_observed_ranking_forwards_profile_and_preliminary_policy(self):
+        cases = (
+            ("true", True),
+            ("false", False),
+        )
+        for raw_value, expected in cases:
+            with self.subTest(include_preliminary=raw_value), patch.object(
+                tool_server,
+                "HARVEST_REPOSITORY",
+                _FakeRepository(),
+            ):
+                result = query_harvest_ranking_for_request(
+                    "nodeId=node&nodeResourceId=resource&"
+                    "metric=observedYieldPerNode&runtimeProfileId=profile-a&"
+                    f"includePreliminary={raw_value}"
+                )
+
+            self.assertEqual(result["policies"]["runtime_profile_id"], "profile-a")
+            self.assertIs(result["policies"]["include_preliminary"], expected)
+
+        with patch.object(tool_server, "HARVEST_REPOSITORY", _FakeRepository()):
+            specialties = query_harvest_creature_specialties_for_request(
+                "alpha",
+                "metric=observedYieldPerSecond&runtimeProfileId=profile-b&"
+                "includePreliminary=true",
+            )
+
+        self.assertEqual(
+            specialties["policies"]["runtime_profile_id"],
+            "profile-b",
+        )
+        self.assertIs(
+            specialties["policies"]["include_preliminary"],
+            True,
+        )
+
+    def test_observed_ranking_rejects_non_strict_preliminary_boolean(self):
+        for raw_value in ("1", "TRUE", "yes", ""):
+            with self.subTest(include_preliminary=raw_value), patch.object(
+                tool_server,
+                "HARVEST_REPOSITORY",
+                _FakeRepository(),
+            ):
+                with self.assertRaises(tool_server.ApiProblem) as raised:
+                    query_harvest_ranking_for_request(
+                        "nodeId=node&nodeResourceId=resource&"
+                        "metric=observedYieldPerNode&"
+                        f"includePreliminary={raw_value}"
+                    )
+
+            self.assertEqual(raised.exception.status, 400)
+            self.assertEqual(
+                raised.exception.payload["code"],
+                "INVALID_HARVEST_INCLUDE_PRELIMINARY",
+            )
+
+    def test_observed_ranking_without_profile_surfaces_multiple_profile_error(self):
+        class _MultipleRuntimeProfilesRepository(_FakeRepository):
+            def rankings(self, node_id, node_resource_id, *, limit, **policies):
+                raise ValueError(
+                    "Multiple runtime profiles are available; select runtimeProfileId."
+                )
+
+        with patch.object(
+            tool_server,
+            "HARVEST_REPOSITORY",
+            _MultipleRuntimeProfilesRepository(),
+        ):
+            with self.assertRaises(tool_server.ApiProblem) as raised:
+                query_harvest_ranking_for_request(
+                    "nodeId=node&nodeResourceId=resource&metric=observedYieldPerNode"
+                )
+
+        self.assertEqual(raised.exception.status, 400)
+        self.assertNotEqual(
+            raised.exception.payload["code"],
+            "INVALID_HARVEST_RANKING_POLICY",
+        )
+        self.assertIn("runtimeProfileId", raised.exception.payload["error"])
+
+    def test_runtime_profile_errors_keep_stable_machine_readable_codes(self):
+        cases = (
+            (
+                "HARVEST_RUNTIME_PROFILE_REQUIRED",
+                "Multiple runtime profiles are available; select runtimeProfileId.",
+            ),
+            (
+                "HARVEST_RUNTIME_PROFILE_NOT_FOUND",
+                "Requested runtimeProfileId 'missing' is not available.",
+            ),
+        )
+        for code, message in cases:
+            class _TypedRuntimeProfileErrorRepository(_FakeRepository):
+                def rankings(
+                    self,
+                    node_id,
+                    node_resource_id,
+                    *,
+                    limit,
+                    **policies,
+                ):
+                    raise tool_server.HarvestRuntimeProfileError(code, message)
+
+            with self.subTest(code=code), patch.object(
+                tool_server,
+                "HARVEST_REPOSITORY",
+                _TypedRuntimeProfileErrorRepository(),
+            ):
+                with self.assertRaises(tool_server.ApiProblem) as raised:
+                    query_harvest_ranking_for_request(
+                        "nodeId=node&nodeResourceId=resource&"
+                        "metric=observedYieldPerNode"
+                    )
+
+            self.assertEqual(raised.exception.status, 400)
+            self.assertEqual(raised.exception.payload["code"], code)
+            self.assertIn("runtimeProfileId", raised.exception.payload["error"])
 
     def test_invalid_node_filter_is_returned_as_bounded_client_error(self):
         class _RejectingRepository(_FakeRepository):
@@ -255,6 +595,7 @@ class HarvestHttpContractTests(unittest.TestCase):
         self.assertEqual(specialties["species"]["speciesKey"], "AnKy")
         self.assertEqual(specialties["offset"], 2)
         self.assertEqual(specialties["limit"], 100)
+        self.assertEqual(specialties["policies"]["evidence_policy"], "confirmed")
 
     def test_build_query_start_and_cancel_delegate_only_typed_options(self):
         manager = _FakeBuildManager()

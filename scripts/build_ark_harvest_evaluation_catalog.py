@@ -22,14 +22,19 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from blueprint_translator.harvest_evaluation_catalog import (  # noqa: E402
+    AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
     EVALUATION_CATALOG_SCHEMA,
+    HARVEST_RANKING_CONTRACT_VERSION,
     HARVEST_RANKING_POLICY_VERSION,
+    METRIC_STATIC_TOTAL,
+    POLICY_CONFIRMED,
     TAMED_RIDDEN,
+    VARIANT_CANONICAL,
     extract_creature_identity,
 )
 from blueprint_translator.harvest_ranking import (  # noqa: E402
+    STATIC_COMPLETE_NODE_SCORE_BASIS,
     YIELD_MODEL_VERSION,
-    YIELD_SCORE_BASIS,
     extract_creature_attacks,
 )
 from blueprint_translator.creature_asset_scan_cache import (  # noqa: E402
@@ -716,6 +721,7 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
             "extractorVersion": CREATURE_EXTRACTOR_VERSION,
         },
         "methodology": {
+            "contractVersion": HARVEST_RANKING_CONTRACT_VERSION,
             "formulaVersion": FORMULA_VERSION,
             "policyVersion": HARVEST_RANKING_POLICY_VERSION,
             "usageScope": TAMED_RIDDEN,
@@ -724,8 +730,11 @@ def build_catalog(args: argparse.Namespace) -> dict[str, Any]:
             "rideabilityRequirement": "B_ALLOW_RIDING_TRUE",
             "candidateDiscoveryProof": "FILENAME_PATTERN_NOT_GLOBAL_CLASS_REGISTRY",
             "variantGrouping": "DINO_NAME_TAG_THEN_OBJECT_PATH",
-            "metric": "estimatedYieldPerNode",
-            "scoreBasis": YIELD_SCORE_BASIS,
+            "defaultEvidencePolicy": POLICY_CONFIRMED,
+            "defaultVariantPolicy": VARIANT_CANONICAL,
+            "defaultAvailabilityPolicy": AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
+            "metric": METRIC_STATIC_TOTAL,
+            "scoreBasis": STATIC_COMPLETE_NODE_SCORE_BASIS,
             "attackCadenceRole": "DIAGNOSTIC_ONLY_NOT_USED_FOR_COMPLETE_NODE_YIELD",
         },
         "coverage": {

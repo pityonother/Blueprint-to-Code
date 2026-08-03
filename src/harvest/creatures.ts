@@ -3,6 +3,7 @@ import type {
   HarvestCreaturePage,
   HarvestCreatureSpecialties,
   HarvestCreatureSummary,
+  HarvestRankingMetric,
 } from './types';
 
 
@@ -58,6 +59,123 @@ function hasEstimatedYieldMetric(result: HarvestCreatureSpecialties): boolean {
       (row) => typeof row.estimatedYieldPerNode === 'number'
         && Number.isFinite(row.estimatedYieldPerNode),
     );
+}
+
+
+function renderSpecialtyTier(
+  heading: string,
+  rows: NonNullable<HarvestCreatureSpecialties['items']>,
+  unit: string,
+  empty: string,
+  conditional: boolean,
+): string {
+  return `
+    <section class="harvest-ranking-tier ${conditional ? 'conditional' : 'confirmed'}">
+      <h3>${escapeHtml(heading)}</h3>
+      ${rows.length ? `<div class="harvest-specialty-list" role="list">${rows.map((row) => `
+        <article class="harvest-specialty-row" role="listitem">
+          <div class="harvest-specialty-rank"><span>${escapeHtml(row.rank)}</span><small>本榜名次</small></div>
+          <div class="harvest-specialty-identity">
+            <strong>${escapeHtml(displayResource(row.resource))}</strong>
+            <span>${escapeHtml(row.node.name || row.node.id)}</span>
+            <code>${escapeHtml(row.resource.resource)}</code>
+          </div>
+          <div class="harvest-specialty-score">
+            <strong>相对同层节点榜首 ${escapeHtml(formatScore(row.relativeToNodeTopPercent))}%</strong>
+            <small>绝对值 ${escapeHtml(formatScore(row.selectedMetricValue))}${unit ? ` <code>${escapeHtml(unit)}</code>` : ''}</small>
+            <small>同层榜首 ${escapeHtml(formatScore(row.nodeTopSelectedMetricValue))}${unit ? ` <code>${escapeHtml(unit)}</code>` : ''}</small>
+            ${row.runtimeStatus ? `<small>实测：<code>${escapeHtml(row.runtimeStatus)}</code></small>` : ''}
+          </div>
+          <div class="harvest-specialty-attack">
+            <strong>${escapeHtml(row.attackName || '攻击名称未恢复')}</strong>
+            <small>榜首：${escapeHtml(row.nodeTop.creature || row.nodeTop.speciesKey || '未知')} · ${escapeHtml(row.nodeTop.attackName || '攻击未知')}</small>
+            <small>变体：<code>${escapeHtml(row.variantSelection?.selectedObjectPath || row.creatureObjectPath || '未标记')}</code></small>
+            <span class="status-pill ${row.rankingTier === 'CONFIRMED' ? 'good' : 'warn'}">${row.rankingTier === 'CONFIRMED' ? '已确认' : '条件性估算'}</span>
+          </div>
+        </article>
+      `).join('')}</div>` : `<div class="empty-state compact">${escapeHtml(empty)}</div>`}
+    </section>
+  `;
+}
+
+
+function renderHarvestCreatureSpecialtiesV2(
+  result: HarvestCreatureSpecialties,
+): string {
+  const confirmed = result.confirmedItems || [];
+  const conditional = result.conditionalItems || [];
+  const metric = result.methodology.metric;
+  const unit = result.methodology.unit || '';
+  const variant = result.queryPolicy?.variant || 'CANONICAL_VARIANT';
+  const includePreliminary = result.queryPolicy?.includePreliminary === true;
+  const runtimeProfilesAvailable = result.runtimeCoverage?.runtimeProfilesAvailable || [];
+  const runtimeProfileSelected = result.runtimeCoverage?.runtimeProfileSelected
+    || result.queryPolicy?.runtimeProfileId
+    || '';
+  const observedMetric = result.methodology.runtime === true || metric.startsWith('observed');
+  const runtimeAvailable = runtimeProfilesAvailable.length > 0
+    || (result.runtimeCoverage?.publishableConfirmedRows || 0) > 0
+    || (includePreliminary && (result.runtimeCoverage?.preliminaryRows || 0) > 0);
+  const runtimeProfileReady = runtimeProfilesAvailable.length <= 1 || Boolean(runtimeProfileSelected);
+  const observedMetricAvailable = runtimeAvailable && runtimeProfileReady;
+  const runtimeProfileOptions = runtimeProfilesAvailable.map((profileId) => `
+    <option value="${escapeHtml(profileId)}" ${profileId === runtimeProfileSelected ? 'selected' : ''}>${escapeHtml(profileId)}</option>
+  `).join('');
+  return `
+    <section class="panel harvest-creature-detail-pane" aria-label="恐龙擅长资源排行" data-ranking-contract="v2">
+      <div class="harvest-ranking-heading">
+        <div>
+          <p class="eyebrow">RELATIVE-FIRST · RANKING CONTRACT V2</p>
+          <h2>${escapeHtml(displayCreature(result.species))} 擅长什么</h2>
+          <p>服务端先按同证据层的相对节点榜首百分比，再按所选绝对指标排序；界面不重新排序。</p>
+        </div>
+        <span class="status-pill ${result.confirmedStatus === 'AVAILABLE' ? 'good' : 'warn'}">已确认榜 ${result.confirmedStatus === 'AVAILABLE' ? '可用' : '不可用'}</span>
+      </div>
+      <div class="harvest-ranking-policy-controls" aria-label="反向排行口径">
+        <label>指标
+          <select id="harvest-specialty-metric">
+            <option value="staticCompleteNodeTargetYield" ${metric === 'staticCompleteNodeTargetYield' ? 'selected' : ''}>静态单节点总产量</option>
+            <option value="staticYieldPerAttackCycleSecond" ${metric === 'staticYieldPerAttackCycleSecond' ? 'selected' : ''}>静态攻击周期速度</option>
+            <option value="observedYieldPerNode" ${metric === 'observedYieldPerNode' ? 'selected' : ''} ${observedMetricAvailable ? '' : 'disabled'}>受控实测单节点${runtimeAvailable ? (runtimeProfileReady ? '' : '（先选环境）') : '（未实测）'}</option>
+            <option value="observedYieldPerSecond" ${metric === 'observedYieldPerSecond' ? 'selected' : ''} ${observedMetricAvailable ? '' : 'disabled'}>受控实测每秒${runtimeAvailable ? (runtimeProfileReady ? '' : '（先选环境）') : '（未实测）'}</option>
+          </select>
+        </label>
+        <label>变体
+          <select id="harvest-specialty-variant">
+            <option value="CANONICAL_VARIANT" ${variant === 'CANONICAL_VARIANT' ? 'selected' : ''}>规范变体（默认）</option>
+            <option value="ALL_VARIANTS" ${variant === 'ALL_VARIANTS' ? 'selected' : ''}>全部变体</option>
+            <option value="BEST_DISCOVERED_VARIANT_EXPLORATORY" ${variant === 'BEST_DISCOVERED_VARIANT_EXPLORATORY' ? 'selected' : ''}>探索性最高变体</option>
+          </select>
+        </label>
+        ${runtimeProfilesAvailable.length ? `<label>实测环境
+          <select id="harvest-specialty-runtime-profile">
+            <option value="">${runtimeProfilesAvailable.length === 1 ? '自动使用唯一环境' : '请选择一个环境'}</option>
+            ${runtimeProfileOptions}
+          </select>
+        </label>
+        <label><input id="harvest-specialty-include-preliminary" type="checkbox" ${includePreliminary ? 'checked' : ''}> 显式包含初步观察</label>` : ''}
+        <span>地图可用性：<code>${escapeHtml(result.queryPolicy?.availability || 'GLOBAL_TRANSFER_ALLOWED')}</code></span>
+        ${observedMetric ? `<span>runtimeProfileId：<code>${escapeHtml(runtimeProfileSelected || 'AUTO_OR_REQUIRED')}</code></span>` : ''}
+        ${observedMetric ? `<span><code>includePreliminary=${includePreliminary ? 'true' : 'false'}</code></span>` : ''}
+      </div>
+      ${renderSpecialtyTier('已确认专长（独立编号）', confirmed, unit, '没有已确认专长；条件性结果不会被提升。', false)}
+      ${renderSpecialtyTier('条件性专长（不占已确认名次）', conditional, unit, '当前请求没有条件性专长。', true)}
+      <details class="harvest-scope-details">
+        <summary>证据身份与排序合同</summary>
+        <p>Metric <code>${escapeHtml(metric)}</code></p>
+        <p>Score basis <code>${escapeHtml(result.methodology.scoreBasis || '缺失')}</code></p>
+        <p>Unit <code>${escapeHtml(unit || '未标记')}</code></p>
+        <p><code>${escapeHtml(result.methodology.sortMetric || '')}</code></p>
+        <p>Extractor <code>${escapeHtml(result.identity?.extractorVersion || '缺失')}</code></p>
+        <p>Model <code>${escapeHtml(result.identity?.modelVersion || '缺失')}</code></p>
+        <p>Policy <code>${escapeHtml(result.identity?.policyVersion || '缺失')}</code></p>
+        <p>Result schema <code>${escapeHtml(result.identity?.resultSchemaVersion || result.schema)}</code></p>
+        ${observedMetric ? `<p>runtimeProfilesAvailable <code>${escapeHtml(runtimeProfilesAvailable.join(', ') || '无')}</code></p>` : ''}
+        ${observedMetric ? `<p>runtimeProfileSelected <code>${escapeHtml(runtimeProfileSelected || '未选择')}</code></p>` : ''}
+        ${observedMetric ? `<p><code>includePreliminary=${includePreliminary ? 'true' : 'false'}</code></p>` : ''}
+      </details>
+    </section>
+  `;
 }
 
 
@@ -127,6 +245,9 @@ export function renderHarvestCreaturePage(
 export function renderHarvestCreatureSpecialties(
   result: HarvestCreatureSpecialties,
 ): string {
+  if (result.contractVersion === 'harvest-ranking-contract/v2') {
+    return renderHarvestCreatureSpecialtiesV2(result);
+  }
   const rows = result.items || [];
   const isEstimatedYield = hasEstimatedYieldMetric(result);
   const page = result.page || {
@@ -230,6 +351,10 @@ export class HarvestCreatureExplorer {
   private query = '';
   private offset = 0;
   private specialtyOffset = 0;
+  private specialtyMetric: HarvestRankingMetric = 'staticCompleteNodeTargetYield';
+  private specialtyVariantPolicy = 'CANONICAL_VARIANT';
+  private specialtyRuntimeProfileId = '';
+  private specialtyIncludePreliminary = false;
   private loadingPage = false;
   private loadingSpecialties = false;
   private initialized = false;
@@ -246,6 +371,23 @@ export class HarvestCreatureExplorer {
     this.selectedSpeciesKey = params.get('species') || '';
     this.offset = Math.max(0, Number(params.get('creatureOffset') || 0));
     this.specialtyOffset = Math.max(0, Number(params.get('specialtyOffset') || 0));
+    const requestedMetric = params.get('specialtyMetric');
+    if (
+      requestedMetric === 'staticYieldPerAttackCycleSecond'
+      || requestedMetric === 'observedYieldPerNode'
+      || requestedMetric === 'observedYieldPerSecond'
+    ) {
+      this.specialtyMetric = requestedMetric;
+    }
+    const requestedVariant = params.get('specialtyVariant');
+    if (
+      requestedVariant === 'ALL_VARIANTS'
+      || requestedVariant === 'BEST_DISCOVERED_VARIANT_EXPLORATORY'
+    ) {
+      this.specialtyVariantPolicy = requestedVariant;
+    }
+    this.specialtyRuntimeProfileId = params.get('specialtyRuntimeProfile') || '';
+    this.specialtyIncludePreliminary = params.get('specialtyIncludePreliminary') === 'true';
   }
 
   ensureLoaded(force = false): void {
@@ -333,6 +475,45 @@ export class HarvestCreatureExplorer {
         void this.selectSpecies(this.selectedSpeciesKey, this.specialtyOffset);
       });
     });
+    document.querySelector<HTMLSelectElement>('#harvest-specialty-metric')?.addEventListener('change', (event) => {
+      const requested = (event.currentTarget as HTMLSelectElement).value;
+      if (
+        requested === 'staticCompleteNodeTargetYield'
+        || requested === 'staticYieldPerAttackCycleSecond'
+        || requested === 'observedYieldPerNode'
+        || requested === 'observedYieldPerSecond'
+      ) {
+        this.specialtyMetric = requested;
+        this.specialtyOffset = 0;
+        this.updateUrl();
+        void this.selectSpecies(this.selectedSpeciesKey, 0);
+      }
+    });
+    document.querySelector<HTMLSelectElement>('#harvest-specialty-variant')?.addEventListener('change', (event) => {
+      const requested = (event.currentTarget as HTMLSelectElement).value;
+      if (
+        requested === 'CANONICAL_VARIANT'
+        || requested === 'ALL_VARIANTS'
+        || requested === 'BEST_DISCOVERED_VARIANT_EXPLORATORY'
+      ) {
+        this.specialtyVariantPolicy = requested;
+        this.specialtyOffset = 0;
+        this.updateUrl();
+        void this.selectSpecies(this.selectedSpeciesKey, 0);
+      }
+    });
+    document.querySelector<HTMLSelectElement>('#harvest-specialty-runtime-profile')?.addEventListener('change', (event) => {
+      this.specialtyRuntimeProfileId = (event.currentTarget as HTMLSelectElement).value.trim();
+      this.specialtyOffset = 0;
+      this.updateUrl();
+      void this.selectSpecies(this.selectedSpeciesKey, 0);
+    });
+    document.querySelector<HTMLInputElement>('#harvest-specialty-include-preliminary')?.addEventListener('change', (event) => {
+      this.specialtyIncludePreliminary = (event.currentTarget as HTMLInputElement).checked;
+      this.specialtyOffset = 0;
+      this.updateUrl();
+      void this.selectSpecies(this.selectedSpeciesKey, 0);
+    });
     document.querySelectorAll<HTMLButtonElement>('[data-creature-action]').forEach((button) => {
       button.addEventListener('click', () => {
         if (button.dataset.creatureAction === 'refresh' || button.dataset.creatureAction === 'retry') {
@@ -417,7 +598,17 @@ export class HarvestCreatureExplorer {
       const params = new URLSearchParams({
         offset: String(this.specialtyOffset),
         limit: '24',
+        policy: 'includeConditional',
+        metric: this.specialtyMetric,
+        variantPolicy: this.specialtyVariantPolicy,
+        availabilityPolicy: 'GLOBAL_TRANSFER_ALLOWED',
       });
+      if (this.specialtyRuntimeProfileId) {
+        params.set('runtimeProfileId', this.specialtyRuntimeProfileId);
+      }
+      if (this.specialtyIncludePreliminary) {
+        params.set('includePreliminary', 'true');
+      }
       const result = await fetchHarvestJson<HarvestCreatureSpecialties>(
         `/api/harvest/creatures/${encodeURIComponent(speciesKey)}/specialties?${params.toString()}`,
         this.specialtyController.signal,
@@ -450,6 +641,10 @@ export class HarvestCreatureExplorer {
       creatureOffset: this.offset ? String(this.offset) : '',
       species: this.selectedSpeciesKey,
       specialtyOffset: this.specialtyOffset ? String(this.specialtyOffset) : '',
+      specialtyMetric: this.specialtyMetric,
+      specialtyVariant: this.specialtyVariantPolicy,
+      specialtyRuntimeProfile: this.specialtyRuntimeProfileId,
+      specialtyIncludePreliminary: this.specialtyIncludePreliminary ? 'true' : '',
     };
     Object.entries(values).forEach(([key, value]) => {
       if (value) {

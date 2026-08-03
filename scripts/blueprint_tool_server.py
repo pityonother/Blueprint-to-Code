@@ -5,6 +5,8 @@ with Vite into dist/ and calls these JSON endpoints to run the existing
 Blueprint translator, open reports, and prepare ARK DevKit export requests.
 """
 
+# ruff: noqa: E402 - local package imports follow the SCRIPT_ROOT bootstrap.
+
 from __future__ import annotations
 
 import argparse
@@ -45,6 +47,21 @@ from blueprint_translator.harvest_node_repository import (
     HarvestDatasetInvalid,
     HarvestDatasetNotBuilt,
     HarvestNodeRepository,
+)
+from blueprint_translator.harvest_evaluation_catalog import (
+    AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
+    METRIC_OBSERVED_PER_NODE,
+    METRIC_OBSERVED_PER_SECOND,
+    METRIC_STATIC_CYCLE_SPEED,
+    METRIC_STATIC_TOTAL,
+    POLICY_CONFIRMED,
+    POLICY_INCLUDE_CONDITIONAL,
+    VARIANT_ALL,
+    VARIANT_BEST_DISCOVERED_EXPLORATORY,
+    VARIANT_CANONICAL,
+)
+from blueprint_translator.harvest_runtime_observations import (
+    HarvestRuntimeProfileError,
 )
 from blueprint_translator.harvest_build_jobs import (
     HarvestBuildAlreadyRunning,
@@ -90,7 +107,7 @@ from blueprint_server.request import (
     read_json_object,
 )
 from blueprint_server.responses import (
-    encode_json_response,
+    encode_json_response,  # noqa: F401 - compatibility re-export for callers/tests
     error_payload,
     prepare_json_response,
     static_content_type,
@@ -132,6 +149,9 @@ HARVEST_EVALUATION_CATALOG_PATH = (
 HARVEST_SQLITE_CATALOG_PATH = (
     PROJECT_ROOT / "analysis" / "harvest_nodes" / "harvest_catalog.sqlite"
 )
+HARVEST_RUNTIME_OBSERVATION_ROOT = (
+    PROJECT_ROOT / "analysis" / "harvest_rankings" / "runtime_observations"
+)
 HARVEST_REPOSITORY = HarvestNodeRepository(
     HARVEST_CATALOG_PATH,
     HARVEST_RANKING_PATH,
@@ -141,6 +161,7 @@ HARVEST_REPOSITORY = HarvestNodeRepository(
         if HARVEST_SQLITE_CATALOG_PATH.is_file()
         else None
     ),
+    runtime_observation_root=HARVEST_RUNTIME_OBSERVATION_ROOT,
 )
 HARVEST_BUILD_MANAGER = HarvestBuildJobManager(project_root=PROJECT_ROOT)
 
@@ -1388,8 +1409,87 @@ def query_harvest_node_for_request(node_id: str) -> dict[str, object]:
         raise _harvest_dataset_problem(exc) from exc
 
 
+def _harvest_runtime_ranking_options(
+    values: dict[str, list[str]],
+    metric: str,
+) -> dict[str, object]:
+    raw_preliminary_values = values.get("includePreliminary", [])
+    if len(raw_preliminary_values) > 1:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_INCLUDE_PRELIMINARY",
+                "error": "includePreliminary must be exactly true or false.",
+            },
+        )
+    include_preliminary = False
+    if raw_preliminary_values:
+        raw_preliminary = raw_preliminary_values[0].strip()
+        if raw_preliminary not in {"true", "false"}:
+            raise ApiProblem(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "ok": False,
+                    "code": "INVALID_HARVEST_INCLUDE_PRELIMINARY",
+                    "error": "includePreliminary must be exactly true or false.",
+                },
+            )
+        include_preliminary = raw_preliminary == "true"
+
+    raw_profile_values = values.get("runtimeProfileId", [])
+    if len(raw_profile_values) > 1:
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_RUNTIME_PROFILE",
+                "error": "runtimeProfileId must identify exactly one runtime profile.",
+            },
+        )
+    runtime_profile_id = (
+        raw_profile_values[0].strip() if raw_profile_values else ""
+    )
+
+    options: dict[str, object] = {}
+    if runtime_profile_id:
+        options["runtime_profile_id"] = runtime_profile_id
+    if metric in {METRIC_OBSERVED_PER_NODE, METRIC_OBSERVED_PER_SECOND}:
+        options["include_preliminary"] = include_preliminary
+    elif raw_preliminary_values:
+        options["include_preliminary"] = include_preliminary
+    return options
+
+
+def _harvest_runtime_profile_problem(exc: ValueError) -> ApiProblem | None:
+    detail = str(exc).strip()
+    normalized = detail.casefold()
+    code = str(getattr(exc, "code", "")).strip()
+    if not code.startswith("HARVEST_RUNTIME_PROFILE_"):
+        if "runtimeprofileid" not in normalized:
+            return None
+        if "multiple runtime profiles" in normalized:
+            code = "HARVEST_RUNTIME_PROFILE_REQUIRED"
+        elif "not found" in normalized or "unknown" in normalized:
+            code = "HARVEST_RUNTIME_PROFILE_NOT_FOUND"
+        else:
+            return None
+
+    if code == "HARVEST_RUNTIME_PROFILE_NOT_FOUND":
+        error = "The requested runtimeProfileId was not found."
+    else:
+        error = (
+            "Observed ranking requires runtimeProfileId when multiple "
+            "comparable runtime profiles are available."
+        )
+    return ApiProblem(
+        HTTPStatus.BAD_REQUEST,
+        {"ok": False, "code": code, "error": error},
+    )
+
+
 def query_harvest_ranking_for_request(query: str) -> dict[str, object]:
-    values = parse_qs(query)
+    values = parse_qs(query, keep_blank_values=True)
     node_id = values.get("nodeId", [""])[0].strip()
     node_resource_id = values.get("nodeResourceId", [""])[0].strip()
     if not node_id or not node_resource_id:
@@ -1408,11 +1508,56 @@ def query_harvest_ranking_for_request(query: str) -> dict[str, object]:
             parse_report_query_int(values.get("limit", [""])[0], "limit", 10),
         ),
     )
+    evidence_policy = values.get("policy", [POLICY_CONFIRMED])[0].strip()
+    variant_policy = values.get("variantPolicy", [VARIANT_CANONICAL])[0].strip()
+    metric = values.get("metric", [METRIC_STATIC_TOTAL])[0].strip()
+    availability_policy = values.get(
+        "availabilityPolicy", [AVAILABILITY_GLOBAL_TRANSFER_ALLOWED]
+    )[0].strip()
+    allowed_values = {
+        "policy": {POLICY_CONFIRMED, POLICY_INCLUDE_CONDITIONAL},
+        "variantPolicy": {
+            VARIANT_CANONICAL,
+            VARIANT_ALL,
+            VARIANT_BEST_DISCOVERED_EXPLORATORY,
+        },
+        "metric": {
+            METRIC_STATIC_TOTAL,
+            METRIC_STATIC_CYCLE_SPEED,
+            METRIC_OBSERVED_PER_NODE,
+            METRIC_OBSERVED_PER_SECOND,
+        },
+        "availabilityPolicy": {AVAILABILITY_GLOBAL_TRANSFER_ALLOWED},
+    }
+    requested_values = {
+        "policy": evidence_policy,
+        "variantPolicy": variant_policy,
+        "metric": metric,
+        "availabilityPolicy": availability_policy,
+    }
+    if any(
+        requested_values[name] not in allowed
+        for name, allowed in allowed_values.items()
+    ):
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_RANKING_POLICY",
+                "error": "Invalid harvest ranking policy.",
+            },
+        )
+    runtime_options = _harvest_runtime_ranking_options(values, metric)
     try:
         return HARVEST_REPOSITORY.rankings(
             node_id,
             node_resource_id,
             limit=limit,
+            evidence_policy=evidence_policy,
+            variant_policy=variant_policy,
+            metric=metric,
+            availability_policy=availability_policy,
+            **runtime_options,
         )
     except KeyError as exc:
         code = str(exc).strip("'")
@@ -1422,6 +1567,23 @@ def query_harvest_ranking_for_request(query: str) -> dict[str, object]:
         ) from exc
     except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
         raise _harvest_dataset_problem(exc) from exc
+    except HarvestRuntimeProfileError as exc:
+        runtime_problem = _harvest_runtime_profile_problem(exc)
+        if runtime_problem is not None:
+            raise runtime_problem from exc
+        raise
+    except ValueError as exc:
+        runtime_problem = _harvest_runtime_profile_problem(exc)
+        if runtime_problem is not None:
+            raise runtime_problem from exc
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_RANKING_POLICY",
+                "error": "Invalid harvest ranking policy.",
+            },
+        ) from exc
 
 
 def query_harvest_creatures_for_request(query: str) -> dict[str, object]:
@@ -1460,7 +1622,7 @@ def query_harvest_creature_specialties_for_request(
                 "error": "A creature species key is required.",
             },
         )
-    values = parse_qs(query)
+    values = parse_qs(query, keep_blank_values=True)
     offset = max(
         0,
         parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
@@ -1472,11 +1634,23 @@ def query_harvest_creature_specialties_for_request(
             parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
         ),
     )
+    evidence_policy = values.get("policy", [POLICY_CONFIRMED])[0].strip()
+    variant_policy = values.get("variantPolicy", [VARIANT_CANONICAL])[0].strip()
+    metric = values.get("metric", [METRIC_STATIC_TOTAL])[0].strip()
+    availability_policy = values.get(
+        "availabilityPolicy", [AVAILABILITY_GLOBAL_TRANSFER_ALLOWED]
+    )[0].strip()
+    runtime_options = _harvest_runtime_ranking_options(values, metric)
     try:
         return HARVEST_REPOSITORY.creature_specialties(
             species_key,
             offset=offset,
             limit=limit,
+            evidence_policy=evidence_policy,
+            variant_policy=variant_policy,
+            metric=metric,
+            availability_policy=availability_policy,
+            **runtime_options,
         )
     except KeyError as exc:
         raise ApiProblem(
@@ -1489,6 +1663,23 @@ def query_harvest_creature_specialties_for_request(
         ) from exc
     except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
         raise _harvest_dataset_problem(exc) from exc
+    except HarvestRuntimeProfileError as exc:
+        runtime_problem = _harvest_runtime_profile_problem(exc)
+        if runtime_problem is not None:
+            raise runtime_problem from exc
+        raise
+    except ValueError as exc:
+        runtime_problem = _harvest_runtime_profile_problem(exc)
+        if runtime_problem is not None:
+            raise runtime_problem from exc
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "INVALID_HARVEST_RANKING_POLICY",
+                "error": "Invalid harvest ranking policy.",
+            },
+        ) from exc
 
 
 def _harvest_build_problem(exc: Exception) -> ApiProblem:
