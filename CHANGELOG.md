@@ -6,6 +6,22 @@ match it.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-04
+
+### Distribution
+
+- Added a downloadable Windows x64 portable ZIP with the prebuilt frontend and
+  a bundled Python runtime, so users do not need a system Python or Node.js.
+- Added upstream-runtime provenance, exact inventory verification, an internal
+  `SHA256SUMS.txt`, and an external ZIP SHA-256 sidecar.
+- Added a clean-extract startup gate for the bundled runtime and loopback web
+  service.
+- Kept GitHub's automatic `Source code` archives as developer-only source
+  downloads; the user-facing portable asset has an explicit stable name.
+- Kept captures, analysis databases, knowledge-base snapshots, Native Evidence,
+  ARK assets, DevKit, DLL/PDB files, and builder-specific paths out of the
+  public portable package.
+
 ## [0.3.0] - 2026-08-03
 
 ### Blueprint

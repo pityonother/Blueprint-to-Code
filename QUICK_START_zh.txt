@@ -1,0 +1,35 @@
+Blueprint to Code v0.3.1 Windows 便携版
+========================================
+
+下载文件
+--------
+
+请下载：BlueprintToCode-v0.3.1-windows-x64-portable.zip
+不要下载 GitHub 自动生成的 Source code (zip)，那个文件只给开发者使用，不能直接运行。
+
+开始使用
+--------
+
+1. 把 ZIP 完整解压到一个普通、可写的目录；不要直接在压缩包预览窗口里运行。
+2. 双击 START_HERE.bat。
+3. 浏览器会打开 http://127.0.0.1:8765/。
+4. 使用期间保持命令窗口开启；关闭命令窗口会停止本地服务。
+
+便携包已经包含 Python 和预构建网页，不需要另外安装 Python，也不需要安装 Node.js。
+网页和本地服务可直接启动；要读取并分析你自己的 ARK Blueprint 资产，电脑仍需合法安装
+ARK DevKit。工具会优先自动发现 Epic Games Launcher 安装的 DevKit。
+
+排错
+----
+
+- 网页没有自动打开：手动访问 http://127.0.0.1:8765/。
+- 无法启动或找不到资产：双击 DIAGNOSE.bat，并按窗口提示检查。
+- Windows 安全提示：当前便携 ZIP 未做代码签名；请只从本项目正式 GitHub Release 下载，
+  并用同一 Release 中的 .sha256 文件核对 ZIP。
+
+数据与隐私
+----------
+
+服务只监听本机 127.0.0.1。公开便携包不包含 ARK 游戏资产、DevKit、DLL/PDB、开发者
+本机的 Capture/Evidence、分析数据库、Knowledge Base 或 Native Evidence。你的输出会写入
+解压目录内的 captures、analysis 和 logs 目录。

@@ -24,7 +24,7 @@ class VersionConsistencyTests(unittest.TestCase):
         self.assertEqual(package["version"], version)
         self.assertEqual(lock["version"], version)
         self.assertEqual(lock["packages"][""]["version"], version)
-        self.assertEqual(version, "0.3.0")
+        self.assertEqual(version, "0.3.1")
 
     def test_release_manifest_reads_the_same_version_source(self):
         version = read_project_version(ROOT)
