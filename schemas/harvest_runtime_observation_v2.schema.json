@@ -7,6 +7,8 @@
   "required": [
     "schema",
     "observationSetId",
+    "runtimeProfileId",
+    "environmentFingerprint",
     "synthetic",
     "environment",
     "subject",
@@ -16,16 +18,88 @@
   "properties": {
     "schema": {"const": "blueprint-to-code.harvest-runtime-observation/v2"},
     "observationSetId": {"type": "string", "pattern": "^runtime://"},
+    "runtimeProfileId": {"type": "string", "minLength": 1},
+    "environmentFingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "synthetic": {"type": "boolean"},
     "environment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["gameBuild", "serverSettings", "mods", "map", "notes"],
+      "required": [
+        "gameBuild",
+        "map",
+        "sessionType",
+        "HarvestAmountMultiplier",
+        "otherHarvestMultipliers",
+        "mods",
+        "creature",
+        "buffs",
+        "genes",
+        "worldState",
+        "nodeFreshnessContract",
+        "measurementMethod"
+      ],
       "properties": {
         "gameBuild": {"type": "string", "minLength": 1},
-        "serverSettings": {"type": "object"},
-        "mods": {"type": "array", "items": {"type": "string"}},
         "map": {"type": "string", "minLength": 1},
+        "sessionType": {"type": "string", "minLength": 1},
+        "HarvestAmountMultiplier": {"type": "number", "minimum": 0},
+        "otherHarvestMultipliers": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"type": "number", "minimum": 0}
+        },
+        "mods": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "version"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "version": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "creature": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "meleePercent", "relevantStats"],
+          "properties": {
+            "level": {"type": "integer", "minimum": 1},
+            "meleePercent": {"type": "number", "minimum": 0},
+            "relevantStats": {
+              "type": "object",
+              "propertyNames": {"minLength": 1},
+              "additionalProperties": {"type": "number", "minimum": 0}
+            }
+          }
+        },
+        "buffs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "genes": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "worldState": {
+          "type": "object",
+          "propertyNames": {"minLength": 1}
+        },
+        "nodeFreshnessContract": {"type": "string", "minLength": 1},
+        "measurementMethod": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "randomQuantity", "recommendedSampleCount"],
+          "properties": {
+            "kind": {"type": "string", "minLength": 1},
+            "randomQuantity": {"type": "boolean"},
+            "recommendedSampleCount": {"type": "integer", "minimum": 1}
+          }
+        },
         "notes": {"type": "string", "minLength": 1}
       }
     },

@@ -20,6 +20,7 @@ from .harvest_evaluation_catalog import (
     EVALUATION_CATALOG_SCHEMA,
     HARVEST_RANKING_CONTRACT_VERSION,
     HARVEST_RANKING_POLICY_VERSION,
+    METRIC_CONTRACTS,
     METRIC_STATIC_TOTAL,
     POLICY_CONFIRMED,
     POLICY_INCLUDE_CONDITIONAL,
@@ -38,6 +39,7 @@ from .harvest_ranking import (
 )
 from .harvest_runtime_observations import (
     HarvestRuntimeObservationIndex,
+    HarvestRuntimeProfileError,
     load_harvest_runtime_observations,
 )
 from .resource_nodes import query_resource_nodes, rank_node_resource
@@ -48,6 +50,9 @@ _REVISION_PATTERN = re.compile(r"[0-9a-f]{64}")
 _LAZY_CACHE_CAPACITY = 256
 _TOP_BASELINE_CACHE_CAPACITY = 1024
 _CREATURE_PAIR_CACHE_CAPACITY = 2048
+_V2_TIER_BASELINE_CACHE_CAPACITY = 1024
+_SPECIALTY_RESPONSE_CACHE_CAPACITY = 128
+_RUNTIME_OBSERVATION_CACHE_CAPACITY = 32
 CREATURE_SPECIALTIES_SCHEMA = "blueprint-to-code.harvest-creature-specialties/v3"
 CREATURE_PAGE_SCHEMA = "blueprint-to-code.harvest-creature-page/v1"
 
@@ -113,6 +118,57 @@ def _compact_specialty_row(row: dict[str, Any]) -> dict[str, Any]:
         for key in _SPECIALTY_ROW_FIELDS
         if key in row
     }
+
+
+def _specialty_competition_key(row: dict[str, Any]) -> tuple[float, float]:
+    return (
+        float(row.get("relativeToNodeTopPercent") or 0.0),
+        float(row.get("selectedMetricValue") or 0.0),
+    )
+
+
+def _specialty_identity_text(value: object) -> str:
+    return str(value or "").strip().replace("\\", "/").casefold()
+
+
+def _specialty_identity_key(row: dict[str, Any]) -> tuple[object, ...]:
+    """Order equal specialty scores by immutable resource/node identities."""
+
+    resource = row.get("resource")
+    resource = resource if isinstance(resource, dict) else {}
+    node = row.get("node")
+    node = node if isinstance(node, dict) else {}
+    entry_index = resource.get("entryIndex")
+    stable_entry_index = (
+        (0, int(entry_index), "")
+        if isinstance(entry_index, int) and not isinstance(entry_index, bool)
+        else (1, 0, _specialty_identity_text(entry_index))
+    )
+    attack_index = row.get("attackIndex")
+    stable_attack_index = (
+        (0, int(attack_index), "")
+        if isinstance(attack_index, int) and not isinstance(attack_index, bool)
+        else (1, 0, _specialty_identity_text(attack_index))
+    )
+    return (
+        _specialty_identity_text(resource.get("nodeResourceId")),
+        _specialty_identity_text(node.get("id")),
+        _specialty_identity_text(resource.get("resource")),
+        _specialty_identity_text(node.get("objectPath")),
+        stable_entry_index,
+        _specialty_identity_text(resource.get("harvestComponentPackagePath")),
+        _specialty_identity_text(row.get("creatureObjectPath")),
+        stable_attack_index,
+    )
+
+
+def _specialty_page_sort_key(row: dict[str, Any]) -> tuple[object, ...]:
+    competition_key = _specialty_competition_key(row)
+    return (
+        -competition_key[0],
+        -competition_key[1],
+        *_specialty_identity_key(row),
+    )
 
 
 def _creature_representative_key(creature: dict[str, Any]) -> tuple[int, int, str]:
@@ -683,9 +739,18 @@ class HarvestNodeRepository:
         self._sqlite_signature: tuple[int, int] | None = None
         self._sqlite_source_signature: tuple[int, int] | None = None
         self._sqlite_catalog: SQLiteHarvestCatalog | None = None
-        self._runtime_observation_signature: tuple[tuple[str, int, int], ...] | None = None
-        self._runtime_expected_identity: tuple[tuple[str, str], ...] | None = None
-        self._runtime_observation_index: HarvestRuntimeObservationIndex | None = None
+        self._runtime_dataset_signature: tuple[
+            tuple[tuple[str, int, int], ...],
+            tuple[tuple[str, str], ...],
+        ] | None = None
+        self._runtime_observation_cache: OrderedDict[
+            tuple[
+                tuple[tuple[str, int, int], ...],
+                tuple[tuple[str, str], ...],
+                tuple[str | None, bool, bool],
+            ],
+            HarvestRuntimeObservationIndex,
+        ] = OrderedDict()
         self._lazy_ranking_cache: OrderedDict[tuple[object, ...], dict[str, Any]] = (
             OrderedDict()
         )
@@ -694,6 +759,12 @@ class HarvestNodeRepository:
         ] = OrderedDict()
         self._creature_pair_cache: OrderedDict[
             tuple[str, str, str, str, int | None, str], dict[str, Any]
+        ] = OrderedDict()
+        self._v2_tier_baseline_cache: OrderedDict[
+            tuple[object, ...], dict[str, Any]
+        ] = OrderedDict()
+        self._specialty_response_cache: OrderedDict[
+            tuple[object, ...], dict[str, Any]
         ] = OrderedDict()
 
     @staticmethod
@@ -790,6 +861,11 @@ class HarvestNodeRepository:
                 self._sqlite_catalog = reader
                 self._sqlite_signature = signature
                 self._sqlite_source_signature = source_signature
+                self._lazy_ranking_cache.clear()
+                self._top_baseline_cache.clear()
+                self._creature_pair_cache.clear()
+                self._v2_tier_baseline_cache.clear()
+                self._specialty_response_cache.clear()
             return self._sqlite_catalog
 
     def _catalog_for_node(self, node_id: str) -> dict[str, Any]:
@@ -870,6 +946,8 @@ class HarvestNodeRepository:
                 self._lazy_ranking_cache.clear()
                 self._top_baseline_cache.clear()
                 self._creature_pair_cache.clear()
+                self._v2_tier_baseline_cache.clear()
+                self._specialty_response_cache.clear()
             if self._evaluation_engine is None:
                 raise HarvestDatasetInvalid(
                     "Harvest evaluation catalog engine is unavailable."
@@ -879,11 +957,19 @@ class HarvestNodeRepository:
     def _load_runtime_observations(
         self,
         expected_identity: dict[str, str] | None = None,
+        *,
+        runtime_profile_id: str | None = None,
+        include_preliminary: bool = False,
+        allow_unselected_profiles: bool = False,
     ) -> HarvestRuntimeObservationIndex:
         root = self.runtime_observation_root
         if root is None or not root.exists():
             return load_harvest_runtime_observations(
-                Path("__harvest_runtime_observations_absent__")
+                Path("__harvest_runtime_observations_absent__"),
+                expected_identity=expected_identity,
+                runtime_profile_id=runtime_profile_id,
+                include_preliminary=include_preliminary,
+                allow_unselected_profiles=allow_unselected_profiles,
             )
         if not root.is_dir():
             raise HarvestDatasetInvalid(
@@ -896,26 +982,45 @@ class HarvestNodeRepository:
             )
         )
         expected_signature = tuple(sorted((expected_identity or {}).items()))
+        request_signature = (
+            str(runtime_profile_id).strip() if runtime_profile_id is not None else None,
+            bool(include_preliminary),
+            bool(allow_unselected_profiles),
+        )
+        dataset_signature = (signature, expected_signature)
+        cache_key = (signature, expected_signature, request_signature)
         with self._lock:
-            if (
-                self._runtime_observation_index is None
-                or signature != self._runtime_observation_signature
-                or expected_signature != self._runtime_expected_identity
-            ):
-                try:
-                    index = load_harvest_runtime_observations(
-                        root,
-                        expected_identity=expected_identity,
-                    )
-                except (OSError, ValueError) as exc:
-                    raise HarvestDatasetInvalid(str(exc)) from exc
-                self._runtime_observation_index = index
-                self._runtime_observation_signature = signature
-                self._runtime_expected_identity = expected_signature
+            if dataset_signature != self._runtime_dataset_signature:
+                self._runtime_dataset_signature = dataset_signature
+                self._runtime_observation_cache.clear()
                 self._lazy_ranking_cache.clear()
                 self._top_baseline_cache.clear()
                 self._creature_pair_cache.clear()
-            return self._runtime_observation_index
+                self._v2_tier_baseline_cache.clear()
+                self._specialty_response_cache.clear()
+            cached = self._runtime_observation_cache.pop(cache_key, None)
+            if cached is not None:
+                self._runtime_observation_cache[cache_key] = cached
+                return cached
+            try:
+                index = load_harvest_runtime_observations(
+                    root,
+                    expected_identity=expected_identity,
+                    runtime_profile_id=runtime_profile_id,
+                    include_preliminary=include_preliminary,
+                    allow_unselected_profiles=allow_unselected_profiles,
+                )
+            except HarvestRuntimeProfileError:
+                raise
+            except (OSError, ValueError) as exc:
+                raise HarvestDatasetInvalid(str(exc)) from exc
+            self._runtime_observation_cache[cache_key] = index
+            while (
+                len(self._runtime_observation_cache)
+                > _RUNTIME_OBSERVATION_CACHE_CAPACITY
+            ):
+                self._runtime_observation_cache.popitem(last=False)
+            return index
 
     @staticmethod
     def _runtime_identity(
@@ -1015,12 +1120,29 @@ class HarvestNodeRepository:
         if "confirmedItems" in result or "conditionalItems" in result:
             result["confirmedItems"] = confirmed_items
             result["conditionalItems"] = conditional_items
-            items = [*confirmed_items, *conditional_items]
+            items = list(confirmed_items)
         else:
             items = [dict(row) for row in result.get("items", [])[:bounded_limit]]
         result["items"] = items
         coverage = dict(result.get("coverage") or {})
-        ranked_total = int(coverage.get("rankedForNodeResource") or len(items))
+        if "confirmedItems" in result or "conditionalItems" in result:
+            confirmed_total = int(
+                coverage.get("rankedSpeciesConfirmed") or len(confirmed_items)
+            )
+            conditional_total = int(
+                coverage.get("rankedSpeciesConditional") or len(conditional_items)
+            )
+            coverage["returnedConfirmed"] = len(confirmed_items)
+            coverage["returnedConditional"] = len(conditional_items)
+            coverage["omittedConfirmed"] = max(
+                0, confirmed_total - len(confirmed_items)
+            )
+            coverage["omittedConditional"] = max(
+                0, conditional_total - len(conditional_items)
+            )
+            ranked_total = confirmed_total
+        else:
+            ranked_total = int(coverage.get("rankedForNodeResource") or len(items))
         coverage["returned"] = len(items)
         coverage["omitted"] = max(0, ranked_total - len(items))
         result["coverage"] = coverage
@@ -1039,6 +1161,8 @@ class HarvestNodeRepository:
         variant_policy: str,
         metric: str,
         availability_policy: str,
+        runtime_profile_id: str | None = None,
+        include_preliminary: bool = False,
     ) -> dict[str, Any]:
         evaluation_revision, _component_revision = self._evaluation_revisions(
             node_catalog,
@@ -1068,7 +1192,17 @@ class HarvestNodeRepository:
         evaluation_dataset = dict(evaluation_catalog.get("dataset") or {})
         node_dataset = dict(node_catalog.get("dataset") or {})
         runtime_index = self._load_runtime_observations(
-            self._runtime_identity(node_catalog, evaluation_catalog)
+            self._runtime_identity(node_catalog, evaluation_catalog),
+            runtime_profile_id=runtime_profile_id,
+            include_preliminary=include_preliminary,
+            allow_unselected_profiles=not bool(
+                METRIC_CONTRACTS.get(metric, {}).get("runtime")
+            ),
+        )
+        runtime_node_identity: tuple[str, ...] = (
+            (node_id, node_resource_id)
+            if bool(METRIC_CONTRACTS.get(metric, {}).get("runtime"))
+            else ()
         )
         cache_key = (
             str(evaluation_dataset.get("extractorVersion") or ""),
@@ -1081,12 +1215,15 @@ class HarvestNodeRepository:
             component_package.casefold(),
             resource_class.casefold(),
             resource_entry_index,
+            *runtime_node_identity,
             usage_scope,
             evidence_policy,
             variant_policy,
             metric,
             availability_policy,
             runtime_index.revision,
+            runtime_index.runtime_profile_selected,
+            bool(include_preliminary),
         )
         with self._lock:
             cached = self._lazy_ranking_cache.pop(cache_key, None)
@@ -1103,14 +1240,18 @@ class HarvestNodeRepository:
                 metric=metric,
                 availability_policy=availability_policy,
                 runtime_observations=runtime_index.rows,
+                runtime_profile_id=runtime_index.runtime_profile_selected,
+                include_preliminary=include_preliminary,
+                runtime_profiles_available=getattr(
+                    runtime_index, "runtime_profiles_available", None
+                ),
             )
             identity = dict(computed.get("identity") or {})
             identity["runtimeObservationRevision"] = runtime_index.revision
             computed["identity"] = identity
             computed["runtimeCoverage"] = {
                 "filesScanned": runtime_index.files_scanned,
-                "syntheticExcluded": runtime_index.synthetic_excluded,
-                "publishableExactRows": len(runtime_index.rows),
+                **runtime_index.coverage,
             }
             with self._lock:
                 existing = self._lazy_ranking_cache.pop(cache_key, None)
@@ -1126,6 +1267,88 @@ class HarvestNodeRepository:
             component_package=component_package,
             limit=limit,
         )
+
+    def _v2_tier_baselines(
+        self,
+        engine: HarvestEvaluationEngine,
+        node_catalog: dict[str, Any],
+        *,
+        evaluation_revision: str,
+        node_id: str,
+        node_resource_id: str,
+        evidence_policy: str,
+        variant_policy: str,
+        metric: str,
+        availability_policy: str,
+        runtime_index: HarvestRuntimeObservationIndex,
+        include_preliminary: bool,
+    ) -> dict[str, Any]:
+        """Cache the two evidence-tier baselines without materializing a cross product."""
+
+        node_dataset = dict(node_catalog.get("dataset") or {})
+        cache_key = (
+            "V2_TIER_BASELINES",
+            str(node_dataset.get("revision") or ""),
+            evaluation_revision,
+            YIELD_MODEL_VERSION,
+            HARVEST_RANKING_POLICY_VERSION,
+            RANKING_RESULT_SCHEMA,
+            node_id,
+            node_resource_id,
+            evidence_policy,
+            variant_policy,
+            metric,
+            availability_policy,
+            runtime_index.revision,
+            runtime_index.runtime_profile_selected,
+            bool(include_preliminary),
+        )
+        with self._lock:
+            cached = self._v2_tier_baseline_cache.pop(cache_key, None)
+            if cached is not None:
+                self._v2_tier_baseline_cache[cache_key] = cached
+                return copy.deepcopy(cached)
+
+        ranking = engine.rank_node_resource(
+            node_catalog,
+            node_id=node_id,
+            node_resource_id=node_resource_id,
+            limit=1,
+            evidence_policy=evidence_policy,
+            variant_policy=variant_policy,
+            metric=metric,
+            availability_policy=availability_policy,
+            runtime_observations=runtime_index.rows,
+            runtime_profile_id=runtime_index.runtime_profile_selected,
+            include_preliminary=include_preliminary,
+            runtime_profiles_available=getattr(
+                runtime_index, "runtime_profiles_available", None
+            ),
+        )
+        computed: dict[str, Any] = {}
+        for tier, field in (
+            ("CONFIRMED", "confirmedItems"),
+            ("CONDITIONAL", "conditionalItems"),
+        ):
+            rows = ranking.get(field)
+            computed[tier] = (
+                dict(rows[0])
+                if isinstance(rows, list)
+                and rows
+                and isinstance(rows[0], dict)
+                else None
+            )
+
+        with self._lock:
+            existing = self._v2_tier_baseline_cache.pop(cache_key, None)
+            cached = existing if existing is not None else copy.deepcopy(computed)
+            self._v2_tier_baseline_cache[cache_key] = cached
+            while (
+                len(self._v2_tier_baseline_cache)
+                > _V2_TIER_BASELINE_CACHE_CAPACITY
+            ):
+                self._v2_tier_baseline_cache.popitem(last=False)
+        return copy.deepcopy(cached)
 
     def _top_baseline(
         self,
@@ -1395,16 +1618,11 @@ class HarvestNodeRepository:
         variant_policy: str = VARIANT_CANONICAL,
         metric: str = METRIC_STATIC_TOTAL,
         availability_policy: str = AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
+        runtime_profile_id: str | None = None,
+        include_preliminary: bool = False,
     ) -> dict[str, Any]:
         """Return v2-contract specialties in relative-first server order."""
 
-        if self.sqlite_catalog_path is not None:
-            try:
-                node_catalog = self._load_sqlite_catalog().catalog_for_specialties()
-            except SQLiteHarvestCatalogInvalid as exc:
-                raise HarvestDatasetInvalid(str(exc)) from exc
-        else:
-            node_catalog = self._load_catalog()
         evaluation_catalog, engine = self._load_evaluation()
         methodology = evaluation_catalog.get("methodology")
         if not isinstance(methodology, dict) or methodology.get(
@@ -1415,15 +1633,30 @@ class HarvestNodeRepository:
                 offset=offset,
                 limit=limit,
             )
-        runtime_index = self._load_runtime_observations(
-            self._runtime_identity(node_catalog, evaluation_catalog)
-        )
+        sqlite_catalog: SQLiteHarvestCatalog | None = None
+        if self.sqlite_catalog_path is not None:
+            try:
+                sqlite_catalog = self._load_sqlite_catalog()
+                node_catalog = {"dataset": sqlite_catalog.dataset()}
+            except SQLiteHarvestCatalogInvalid as exc:
+                raise HarvestDatasetInvalid(str(exc)) from exc
+        else:
+            node_catalog = self._load_catalog()
         # Validate policy values through the authoritative engine before any
         # potentially expensive traversal.
         if evidence_policy not in {POLICY_CONFIRMED, POLICY_INCLUDE_CONDITIONAL}:
             raise ValueError("Unsupported harvest evidence policy.")
+        metric_contract = METRIC_CONTRACTS.get(metric)
+        if metric_contract is None:
+            raise ValueError("Unsupported harvest ranking metric.")
+        runtime_index = self._load_runtime_observations(
+            self._runtime_identity(node_catalog, evaluation_catalog),
+            runtime_profile_id=runtime_profile_id,
+            include_preliminary=include_preliminary,
+            allow_unselected_profiles=not bool(metric_contract["runtime"]),
+        )
 
-        evaluation_revision, _component_revision = self._evaluation_revisions(
+        evaluation_revision, component_revision = self._evaluation_revisions(
             node_catalog, evaluation_catalog
         )
         requested_key = " ".join(str(species_key or "").casefold().split())
@@ -1445,15 +1678,52 @@ class HarvestNodeRepository:
         ]
         if not variants:
             raise KeyError("HARVEST_SPECIES_NOT_FOUND")
+        bounded_offset = max(0, int(offset))
+        bounded_limit = max(1, min(int(limit), 100))
+        node_dataset = dict(node_catalog.get("dataset") or {})
+        evaluation_dataset = dict(evaluation_catalog.get("dataset") or {})
+        specialty_cache_key = (
+            str(node_dataset.get("revision") or ""),
+            evaluation_revision,
+            component_revision,
+            str(evaluation_dataset.get("extractorVersion") or ""),
+            YIELD_MODEL_VERSION,
+            HARVEST_RANKING_POLICY_VERSION,
+            CREATURE_SPECIALTIES_SCHEMA,
+            requested_key,
+            bounded_offset,
+            bounded_limit,
+            evidence_policy,
+            variant_policy,
+            metric,
+            availability_policy,
+            runtime_index.revision,
+            runtime_index.runtime_profile_selected,
+            bool(include_preliminary),
+        )
+        with self._lock:
+            cached_specialty = self._specialty_response_cache.pop(
+                specialty_cache_key, None
+            )
+            if cached_specialty is not None:
+                self._specialty_response_cache[
+                    specialty_cache_key
+                ] = cached_specialty
+                return copy.deepcopy(cached_specialty)
+        if sqlite_catalog is not None:
+            try:
+                node_catalog = sqlite_catalog.catalog_for_specialties()
+            except SQLiteHarvestCatalogInvalid as exc:
+                raise HarvestDatasetInvalid(str(exc)) from exc
         species_engine = HarvestEvaluationEngine(
             {**evaluation_catalog, "creatures": variants}
         )
 
-        representatives: OrderedDict[
-            tuple[str, str, int | None], tuple[str, str]
-        ] = OrderedDict()
+        representatives: OrderedDict[tuple[object, ...], tuple[str, str]] = (
+            OrderedDict()
+        )
         occurrences: list[
-            tuple[tuple[str, str, int | None], dict[str, Any], dict[str, Any]]
+            tuple[tuple[object, ...], dict[str, Any], dict[str, Any]]
         ] = []
         nodes = node_catalog.get("nodes")
         for node in nodes if isinstance(nodes, list) else []:
@@ -1476,7 +1746,7 @@ class HarvestNodeRepository:
                     and not isinstance(raw_entry_index, bool)
                     else None
                 )
-                key = (
+                evaluation_key: tuple[object, ...] = (
                     component_package.casefold(),
                     str(resource.get("resource") or "").casefold(),
                     entry_index,
@@ -1485,11 +1755,20 @@ class HarvestNodeRepository:
                     str(node.get("id") or ""),
                     str(resource.get("nodeResourceId") or ""),
                 )
+                key = (
+                    (*evaluation_key, *pair)
+                    if bool(metric_contract["runtime"])
+                    else evaluation_key
+                )
                 representatives.setdefault(key, pair)
                 occurrences.append((key, node, resource))
 
-        selected_by_key: dict[tuple[str, str, int | None], dict[str, Any]] = {}
-        top_by_key: dict[tuple[str, str, int | None], dict[str, Any]] = {}
+        selected_by_key: dict[
+            tuple[object, ...], dict[str, dict[str, Any]]
+        ] = {}
+        top_by_key: dict[
+            tuple[object, ...], dict[str, dict[str, Any]]
+        ] = {}
         pair_dispositions: Counter[str] = Counter()
         for key, (node_id, node_resource_id) in representatives.items():
             selected_result = species_engine.rank_node_resource(
@@ -1502,143 +1781,142 @@ class HarvestNodeRepository:
                 metric=metric,
                 availability_policy=availability_policy,
                 runtime_observations=runtime_index.rows,
-            )
-            selected_candidates = [
-                *selected_result.get("confirmedItems", []),
-                *selected_result.get("conditionalItems", []),
-            ]
-            selected_row = next(
-                (
-                    dict(row)
-                    for row in selected_candidates
-                    if isinstance(row, dict)
-                    and str(row.get("speciesKey") or "").casefold()
-                    == requested_key
+                runtime_profile_id=runtime_index.runtime_profile_selected,
+                include_preliminary=include_preliminary,
+                runtime_profiles_available=getattr(
+                    runtime_index, "runtime_profiles_available", None
                 ),
-                None,
             )
-            if selected_row is None:
+            selected_rows_by_tier: dict[str, dict[str, Any]] = {}
+            for tier, field in (
+                ("CONFIRMED", "confirmedItems"),
+                ("CONDITIONAL", "conditionalItems"),
+            ):
+                rows = selected_result.get(field)
+                selected_row = next(
+                    (
+                        dict(row)
+                        for row in rows
+                        if isinstance(row, dict)
+                        and str(row.get("speciesKey") or "").casefold()
+                        == requested_key
+                    ),
+                    None,
+                ) if isinstance(rows, list) else None
+                if selected_row is not None:
+                    selected_rows_by_tier[tier] = selected_row
+            if not selected_rows_by_tier:
                 pair_dispositions["NOT_RANKED_FOR_SPECIES"] += 1
                 continue
-            full_result = engine.rank_node_resource(
+            tier_baselines = self._v2_tier_baselines(
+                engine,
                 node_catalog,
+                evaluation_revision=evaluation_revision,
                 node_id=node_id,
                 node_resource_id=node_resource_id,
-                limit=10,
                 evidence_policy=POLICY_INCLUDE_CONDITIONAL,
                 variant_policy=variant_policy,
                 metric=metric,
                 availability_policy=availability_policy,
-                runtime_observations=runtime_index.rows,
+                runtime_index=runtime_index,
+                include_preliminary=include_preliminary,
             )
-            tier_key = (
-                "confirmedItems"
-                if selected_row.get("rankingTier") == "CONFIRMED"
-                else "conditionalItems"
-            )
-            tier_rows = full_result.get(tier_key)
-            top_row = (
-                dict(tier_rows[0])
-                if isinstance(tier_rows, list)
-                and tier_rows
-                and isinstance(tier_rows[0], dict)
-                else None
-            )
-            if top_row is None:
-                pair_dispositions[f"{tier_key.upper()}_BASELINE_UNAVAILABLE"] += 1
-                continue
-            selected_by_key[key] = selected_row
-            top_by_key[key] = top_row
-            pair_dispositions["RANKED"] += 1
+            for tier_key, selected_row in selected_rows_by_tier.items():
+                cached_top_row = tier_baselines.get(tier_key)
+                top_row = (
+                    dict(cached_top_row)
+                    if isinstance(cached_top_row, dict)
+                    else None
+                )
+                if top_row is None:
+                    pair_dispositions[f"{tier_key}_BASELINE_UNAVAILABLE"] += 1
+                    continue
+                selected_by_key.setdefault(key, {})[tier_key] = selected_row
+                top_by_key.setdefault(key, {})[tier_key] = top_row
+            if key in selected_by_key:
+                pair_dispositions["RANKED"] += 1
 
         ranked_rows: list[dict[str, Any]] = []
         for key, node, resource in occurrences:
-            selected_row = selected_by_key.get(key)
-            top_row = top_by_key.get(key)
-            if selected_row is None or top_row is None:
-                continue
-            selected_score = selected_row.get(metric)
-            top_score = top_row.get(metric)
-            if (
-                not isinstance(selected_score, (int, float))
-                or isinstance(selected_score, bool)
-                or not isinstance(top_score, (int, float))
-                or isinstance(top_score, bool)
-                or float(top_score) <= 0
-            ):
-                continue
-            relative_percent = round(
-                min(100.0, max(0.0, float(selected_score) / float(top_score) * 100.0)),
-                6,
-            )
-            component_ref = node.get("harvestComponent")
-            component_package = canonical_package_path(
-                component_ref.get("packagePath")
-                if isinstance(component_ref, dict)
-                else ""
-            )
-            ranked_rows.append(
-                {
-                    **_compact_specialty_row(selected_row),
-                    "node": {
-                        "id": node.get("id"),
-                        "name": node.get("name"),
-                        "objectPath": node.get("objectPath"),
-                    },
-                    "resource": {
-                        **resource,
-                        "harvestComponentPackagePath": component_package,
-                    },
-                    "selectedMetric": metric,
-                    "selectedMetricValue": float(selected_score),
-                    "nodeTopSelectedMetricValue": float(top_score),
-                    "nodeTopStaticCompleteNodeTargetYield": top_row.get(
-                        "staticCompleteNodeTargetYield"
+            selected_rows_by_tier = selected_by_key.get(key, {})
+            top_rows_by_tier = top_by_key.get(key, {})
+            for tier_key in ("CONFIRMED", "CONDITIONAL"):
+                selected_row = selected_rows_by_tier.get(tier_key)
+                top_row = top_rows_by_tier.get(tier_key)
+                if selected_row is None or top_row is None:
+                    continue
+                selected_score = selected_row.get(metric)
+                top_score = top_row.get(metric)
+                if (
+                    not isinstance(selected_score, (int, float))
+                    or isinstance(selected_score, bool)
+                    or not isinstance(top_score, (int, float))
+                    or isinstance(top_score, bool)
+                    or float(top_score) <= 0
+                ):
+                    continue
+                relative_percent = round(
+                    min(
+                        100.0,
+                        max(0.0, float(selected_score) / float(top_score) * 100.0),
                     ),
-                    "nodeTopEstimatedYieldPerNode": top_row.get(
-                        "estimatedYieldPerNode"
-                    ),
-                    "relativeToNodeTopPercent": relative_percent,
-                    "relativeBasisTier": selected_row.get("rankingTier"),
-                    "nodeTop": {
-                        "speciesKey": top_row.get("speciesKey"),
-                        "creature": top_row.get("creature"),
-                        "creatureObjectPath": top_row.get("creatureObjectPath"),
-                        "attackIndex": top_row.get("attackIndex"),
-                        "attackName": top_row.get("attackName"),
+                    6,
+                )
+                component_ref = node.get("harvestComponent")
+                component_package = canonical_package_path(
+                    component_ref.get("packagePath")
+                    if isinstance(component_ref, dict)
+                    else ""
+                )
+                ranked_rows.append(
+                    {
+                        **_compact_specialty_row(selected_row),
+                        "node": {
+                            "id": node.get("id"),
+                            "name": node.get("name"),
+                            "objectPath": node.get("objectPath"),
+                        },
+                        "resource": {
+                            **resource,
+                            "harvestComponentPackagePath": component_package,
+                        },
                         "selectedMetric": metric,
-                        "selectedMetricValue": float(top_score),
-                        "staticCompleteNodeTargetYield": top_row.get(
+                        "selectedMetricValue": float(selected_score),
+                        "nodeTopSelectedMetricValue": float(top_score),
+                        "nodeTopStaticCompleteNodeTargetYield": top_row.get(
                             "staticCompleteNodeTargetYield"
                         ),
-                        "estimatedYieldPerNode": top_row.get("estimatedYieldPerNode"),
-                        "rankingTier": top_row.get("rankingTier"),
-                        "evidence": copy.deepcopy(top_row.get("evidence") or {}),
-                    },
-                }
-            )
+                        "nodeTopEstimatedYieldPerNode": top_row.get(
+                            "estimatedYieldPerNode"
+                        ),
+                        "relativeToNodeTopPercent": relative_percent,
+                        "relativeBasisTier": selected_row.get("rankingTier"),
+                        "nodeTop": {
+                            "speciesKey": top_row.get("speciesKey"),
+                            "creature": top_row.get("creature"),
+                            "creatureObjectPath": top_row.get("creatureObjectPath"),
+                            "attackIndex": top_row.get("attackIndex"),
+                            "attackName": top_row.get("attackName"),
+                            "selectedMetric": metric,
+                            "selectedMetricValue": float(top_score),
+                            "staticCompleteNodeTargetYield": top_row.get(
+                                "staticCompleteNodeTargetYield"
+                            ),
+                            "estimatedYieldPerNode": top_row.get(
+                                "estimatedYieldPerNode"
+                            ),
+                            "rankingTier": top_row.get("rankingTier"),
+                            "evidence": copy.deepcopy(top_row.get("evidence") or {}),
+                        },
+                    }
+                )
 
         def rank_tier(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            rows.sort(
-                key=lambda row: (
-                    -float(row.get("relativeToNodeTopPercent") or 0.0),
-                    -float(row.get("selectedMetricValue") or 0.0),
-                    str(
-                        row.get("resource", {}).get("displayName")
-                        or row.get("resource", {}).get("resource")
-                        or ""
-                    ).casefold(),
-                    str(row.get("node", {}).get("name") or "").casefold(),
-                    str(row.get("node", {}).get("id") or ""),
-                )
-            )
+            rows.sort(key=_specialty_page_sort_key)
             previous_primary: tuple[float, float] | None = None
             previous_rank = 0
             for ordinal, row in enumerate(rows, start=1):
-                primary = (
-                    float(row.get("relativeToNodeTopPercent") or 0.0),
-                    float(row.get("selectedMetricValue") or 0.0),
-                )
+                primary = _specialty_competition_key(row)
                 if previous_primary is None or primary != previous_primary:
                     previous_rank = ordinal
                     previous_primary = primary
@@ -1655,8 +1933,6 @@ class HarvestNodeRepository:
             *confirmed_all,
             *(conditional_all if evidence_policy == POLICY_INCLUDE_CONDITIONAL else []),
         ]
-        bounded_offset = max(0, int(offset))
-        bounded_limit = max(1, min(int(limit), 100))
         page_rows = visible_rows[bounded_offset : bounded_offset + bounded_limit]
         confirmed_page = [
             copy.deepcopy(row)
@@ -1677,10 +1953,8 @@ class HarvestNodeRepository:
             if str(value)
         ]
         representative = min(variants, key=_creature_representative_key)
-        evaluation_dataset = dict(evaluation_catalog.get("dataset") or {})
-        node_dataset = dict(node_catalog.get("dataset") or {})
         total = len(visible_rows)
-        return {
+        response = {
             "schema": CREATURE_SPECIALTIES_SCHEMA,
             "contractVersion": HARVEST_RANKING_CONTRACT_VERSION,
             "identity": {
@@ -1711,6 +1985,8 @@ class HarvestNodeRepository:
                 "variant": variant_policy,
                 "metric": metric,
                 "availability": availability_policy,
+                "runtimeProfileId": runtime_index.runtime_profile_selected,
+                "includePreliminary": bool(include_preliminary),
                 "exploratory": variant_policy
                 == "BEST_DISCOVERED_VARIANT_EXPLORATORY",
             },
@@ -1720,13 +1996,18 @@ class HarvestNodeRepository:
                 "metric": metric,
                 "sortMetric": (
                     "relativeToNodeTopPercent DESC, selectedMetricValue DESC, "
-                    "resourceDisplayName, nodeName, nodeId"
+                    "resource.nodeResourceId, node.id, resource.resource, "
+                    "node.objectPath, resource.entryIndex, "
+                    "resource.harvestComponentPackagePath, "
+                    "creatureObjectPath, attackIndex"
                 ),
                 "relativeBasis": "SAME_EVIDENCE_TIER_NODE_RESOURCE_TOP",
                 "tiePolicy": (
                     "COMPETITION_RANK_FOR_EQUAL_RELATIVE_PERCENT_AND_SELECTED_METRIC"
                 ),
-                "scoreBasis": YIELD_SCORE_BASIS,
+                "scoreBasis": metric_contract["scoreBasis"],
+                "unit": metric_contract["unit"],
+                "runtime": metric_contract["runtime"],
             },
             "confirmedStatus": "AVAILABLE" if confirmed_all else "UNAVAILABLE",
             "conditionalStatus": "AVAILABLE" if conditional_all else "UNAVAILABLE",
@@ -1757,8 +2038,7 @@ class HarvestNodeRepository:
             },
             "runtimeCoverage": {
                 "filesScanned": runtime_index.files_scanned,
-                "syntheticExcluded": runtime_index.synthetic_excluded,
-                "publishableExactRows": len(runtime_index.rows),
+                **runtime_index.coverage,
             },
             "page": {
                 "offset": bounded_offset,
@@ -1777,8 +2057,24 @@ class HarvestNodeRepository:
             ),
             "confirmedItems": confirmed_page,
             "conditionalItems": conditional_page,
-            "items": [*confirmed_page, *conditional_page],
+            "items": list(confirmed_page),
         }
+        with self._lock:
+            existing = self._specialty_response_cache.pop(
+                specialty_cache_key, None
+            )
+            cached_specialty = (
+                existing if existing is not None else copy.deepcopy(response)
+            )
+            self._specialty_response_cache[
+                specialty_cache_key
+            ] = cached_specialty
+            while (
+                len(self._specialty_response_cache)
+                > _SPECIALTY_RESPONSE_CACHE_CAPACITY
+            ):
+                self._specialty_response_cache.popitem(last=False)
+        return copy.deepcopy(cached_specialty)
 
     def get_node(self, node_id: str) -> dict[str, Any]:
         if self.sqlite_catalog_path is not None:
@@ -1803,6 +2099,8 @@ class HarvestNodeRepository:
         variant_policy: str = VARIANT_CANONICAL,
         metric: str = METRIC_STATIC_TOTAL,
         availability_policy: str = AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
+        runtime_profile_id: str | None = None,
+        include_preliminary: bool = False,
     ) -> dict[str, Any]:
         catalog = self._catalog_for_node(node_id)
         if self.evaluation_catalog_path is not None:
@@ -1818,6 +2116,8 @@ class HarvestNodeRepository:
                 variant_policy=variant_policy,
                 metric=metric,
                 availability_policy=availability_policy,
+                runtime_profile_id=runtime_profile_id,
+                include_preliminary=include_preliminary,
             )
         ranking = self._load_ranking()
         dataset = catalog.get("dataset")

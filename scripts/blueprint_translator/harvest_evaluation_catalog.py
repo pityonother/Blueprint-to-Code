@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 import math
 from typing import Any, Iterable, Mapping
 
 from .harvest_ranking import (
-    STATIC_COMPLETE_NODE_SCORE_BASIS,
     YIELD_MODEL_VERSION,
     YIELD_SCORE_BASIS,
     evaluate_attack_resource,
+)
+from .harvest_runtime_observations import (
+    MINIMUM_CONFIRMED_TRIALS,
+    RUNTIME_STATUS_OBSERVED_CONFIRMED,
+    RUNTIME_STATUS_OBSERVED_PRELIMINARY,
+    HarvestRuntimeProfileError,
 )
 from .resource_nodes import canonical_package_path
 
@@ -34,19 +40,46 @@ METRIC_OBSERVED_PER_NODE = "observedYieldPerNode"
 METRIC_OBSERVED_PER_SECOND = "observedYieldPerSecond"
 AVAILABILITY_GLOBAL_TRANSFER_ALLOWED = "GLOBAL_TRANSFER_ALLOWED"
 
+METRIC_CONTRACTS: dict[str, dict[str, object]] = {
+    METRIC_STATIC_TOTAL: {
+        "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+        "unit": "target_resource_units/node",
+        "runtime": False,
+    },
+    METRIC_STATIC_CYCLE_SPEED: {
+        "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_ATTACK_CYCLE_SECOND",
+        "unit": "target_resource_units/attack_cycle_second",
+        "runtime": False,
+    },
+    METRIC_OBSERVED_PER_NODE: {
+        "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+        "unit": "target_resource_units/node",
+        "runtime": True,
+    },
+    METRIC_OBSERVED_PER_SECOND: {
+        "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_SECOND",
+        "unit": "target_resource_units/second",
+        "runtime": True,
+    },
+}
+
 _EVIDENCE_POLICIES = {POLICY_CONFIRMED, POLICY_INCLUDE_CONDITIONAL}
 _VARIANT_POLICIES = {
     VARIANT_CANONICAL,
     VARIANT_ALL,
     VARIANT_BEST_DISCOVERED_EXPLORATORY,
 }
-_RANKING_METRICS = {
-    METRIC_STATIC_TOTAL,
-    METRIC_STATIC_CYCLE_SPEED,
-    METRIC_OBSERVED_PER_NODE,
-    METRIC_OBSERVED_PER_SECOND,
-}
+_RANKING_METRICS = set(METRIC_CONTRACTS)
 _AVAILABILITY_POLICIES = {AVAILABILITY_GLOBAL_TRANSFER_ALLOWED}
+
+_VARIANT_BASE = "BASE"
+_VARIANT_MAP = "MAP_VARIANT"
+_VARIANT_MISSION = "MISSION"
+_VARIANT_BOSS = "BOSS"
+_VARIANT_EVENT = "EVENT"
+_VARIANT_TEST = "TEST"
+_VARIANT_UNKNOWN = "UNKNOWN_VARIANT"
+_VARIANT_SELECTION_AUDIT_LIMIT = 10
 
 
 def _estimated_yield(row: dict[str, Any]) -> float | None:
@@ -77,7 +110,7 @@ def _stable_row_identity(row: dict[str, Any]) -> tuple[str, str, int, str]:
 
 
 def _canonical_variant_key(creature: dict[str, Any]) -> tuple[int, int, str]:
-    """Select a stable base identity without reading any ranking score."""
+    """Return deterministic variant ordering without granting canonical status."""
 
     object_path = str(creature.get("objectPath") or "")
     normalized = object_path.casefold()
@@ -88,6 +121,147 @@ def _canonical_variant_key(creature: dict[str, Any]) -> tuple[int, int, str]:
     else:
         package_priority = 2
     return package_priority, len(object_path), normalized
+
+
+def _variant_class(creature: dict[str, Any]) -> str:
+    """Classify a variant from generic path markers, never a species allowlist."""
+
+    object_path = str(creature.get("objectPath") or "").replace("\\", "/")
+    normalized = object_path.casefold()
+    segments = [segment for segment in normalized.split("/") if segment]
+    if not segments:
+        return _VARIANT_UNKNOWN
+
+    def has_marker(*markers: str) -> bool:
+        return any(
+            marker in segment
+            for marker in markers
+            for segment in segments
+        )
+
+    if has_marker("test", "debug", "developer"):
+        return _VARIANT_TEST
+    if has_marker("mission"):
+        return _VARIANT_MISSION
+    if has_marker("boss"):
+        return _VARIANT_BOSS
+    if has_marker("event"):
+        return _VARIANT_EVENT
+    if has_marker("mapvariant", "map_variant") or "/maps/" in normalized:
+        return _VARIANT_MAP
+    if has_marker("variant", "special"):
+        return _VARIANT_UNKNOWN
+    return _VARIANT_BASE
+
+
+def _normalized_variant_package(value: object) -> str:
+    return canonical_package_path(value).casefold()
+
+
+def _base_variant_ancestry(
+    base_candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ancestry roots and derived BASE candidates using explicit chains."""
+
+    package_by_identity = {
+        id(creature): _normalized_variant_package(creature.get("objectPath"))
+        for creature in base_candidates
+    }
+    roots: list[dict[str, Any]] = []
+    derived: list[dict[str, Any]] = []
+    for creature in base_candidates:
+        own_package = package_by_identity[id(creature)]
+        parent_chain = creature.get("parentChain")
+        ancestor_packages = {
+            _normalized_variant_package(value)
+            for value in parent_chain
+            if _normalized_variant_package(value)
+        } if isinstance(parent_chain, list) else set()
+        ancestor_packages.discard(own_package)
+        other_base_packages = {
+            package
+            for other_identity, package in package_by_identity.items()
+            if other_identity != id(creature) and package
+        }
+        if ancestor_packages & other_base_packages:
+            derived.append(creature)
+        else:
+            roots.append(creature)
+    return roots, derived
+
+
+def _canonical_variant_audit(
+    species_key: str,
+    variants: list[dict[str, Any]],
+) -> dict[str, Any]:
+    classified = [
+        (creature, _variant_class(creature))
+        for creature in variants
+    ]
+    base_candidates = [
+        creature
+        for creature, variant_class in classified
+        if variant_class == _VARIANT_BASE
+    ]
+    excluded_classes = sorted(
+        {
+            variant_class
+            for _creature, variant_class in classified
+            if variant_class != _VARIANT_BASE
+        }
+    )
+    ancestry_roots: list[dict[str, Any]] = []
+    derived_base_candidates: list[dict[str, Any]] = []
+    if len(base_candidates) > 1:
+        ancestry_roots, derived_base_candidates = _base_variant_ancestry(
+            base_candidates
+        )
+        if derived_base_candidates:
+            excluded_classes = sorted(
+                {*excluded_classes, _VARIANT_UNKNOWN}
+            )
+
+    if len(base_candidates) == 1:
+        canonical_path: str | None = str(
+            base_candidates[0].get("objectPath") or ""
+        )
+        selection_reasons = ["UNIQUE_BASE_VARIANT"]
+        ambiguous = False
+        ambiguity_reasons: list[str] = []
+    elif len(ancestry_roots) == 1:
+        canonical_path = str(ancestry_roots[0].get("objectPath") or "")
+        selection_reasons = ["UNIQUE_ANCESTRY_ROOT_BASE_VARIANT"]
+        ambiguous = False
+        ambiguity_reasons = []
+    elif not base_candidates:
+        canonical_path = None
+        selection_reasons = []
+        ambiguous = True
+        ambiguity_reasons = [
+            "CANONICAL_VARIANT_AMBIGUOUS",
+            "NO_BASE_VARIANT_CANDIDATE",
+        ]
+    else:
+        canonical_path = None
+        selection_reasons = []
+        ambiguous = True
+        ambiguity_reasons = [
+            "CANONICAL_VARIANT_AMBIGUOUS",
+            "MULTIPLE_BASE_VARIANT_CANDIDATES",
+            (
+                "NO_ANCESTRY_ROOT_BASE_VARIANT"
+                if not ancestry_roots
+                else "MULTIPLE_ANCESTRY_ROOT_BASE_VARIANTS"
+            ),
+        ]
+    return {
+        "speciesKey": species_key,
+        "canonicalObjectPath": canonical_path,
+        "selectionReasons": selection_reasons,
+        "excludedVariantClasses": excluded_classes,
+        "ambiguous": ambiguous,
+        "ambiguityReasons": ambiguity_reasons,
+    }
 
 
 def _metric_value(row: dict[str, Any], metric: str) -> float | None:
@@ -101,7 +275,7 @@ def _metric_value(row: dict[str, Any], metric: str) -> float | None:
     return float(value)
 
 
-def _enrich_v2_metrics(row: dict[str, Any]) -> None:
+def _enrich_v2_metrics(row: dict[str, Any], *, metric: str) -> None:
     static_total = _estimated_yield(row)
     row["staticCompleteNodeTargetYield"] = static_total
     # Compatibility is intentionally a value alias, never a second formula.
@@ -128,10 +302,149 @@ def _enrich_v2_metrics(row: dict[str, Any]) -> None:
     row.setdefault("observedYieldPerNode", None)
     row.setdefault("observedYieldPerSecond", None)
     row.setdefault("runtimeStatus", "NOT_MEASURED")
+    row["scoreBasis"] = METRIC_CONTRACTS[metric]["scoreBasis"]
     breakdown = dict(row.get("scoreBreakdown") or {})
-    if breakdown:
-        breakdown["metric"] = METRIC_STATIC_TOTAL
-        row["scoreBreakdown"] = breakdown
+    breakdown["metric"] = metric
+    row["scoreBreakdown"] = breakdown
+
+
+def _runtime_profile_context(
+    runtime_observations: Mapping[
+        tuple[str, str, str, str, int], Mapping[str, Any]
+    ]
+    | None,
+    *,
+    requested_profile_id: str | None,
+    runtime_metric: bool,
+    validated_profiles_available: Iterable[str] | None = None,
+) -> tuple[str | None, dict[str, Any]]:
+    """Select one comparable direct-call profile and report stable coverage."""
+
+    observations = [
+        row
+        for row in (runtime_observations or {}).values()
+        if isinstance(row, Mapping)
+    ]
+    available_profiles = sorted(
+        {
+            normalized
+            for value in (
+                validated_profiles_available
+                if validated_profiles_available is not None
+                else (
+                    row.get("runtimeProfileId")
+                    for row in observations
+                    if row.get("synthetic") is False
+                )
+            )
+            if (normalized := str(value or "").strip())
+        }
+    )
+    selected_profile = (
+        str(requested_profile_id).strip()
+        if requested_profile_id is not None
+        else None
+    )
+    if runtime_metric:
+        if selected_profile is not None:
+            if selected_profile not in available_profiles:
+                raise HarvestRuntimeProfileError(
+                    "HARVEST_RUNTIME_PROFILE_NOT_FOUND",
+                    f"Requested runtimeProfileId {selected_profile!r} is not available.",
+                )
+        elif len(available_profiles) > 1:
+            raise HarvestRuntimeProfileError(
+                "HARVEST_RUNTIME_PROFILE_REQUIRED",
+                "Multiple runtime profiles are available; select runtimeProfileId.",
+            )
+        elif available_profiles:
+            selected_profile = available_profiles[0]
+
+    synthetic_excluded = 0
+    publishable_confirmed_rows = 0
+    preliminary_rows = 0
+    profile_mismatch_excluded = 0
+    for observation in observations:
+        if observation.get("synthetic") is not False:
+            if observation.get("synthetic") is True:
+                synthetic_excluded += 1
+            continue
+        observation_profile = str(
+            observation.get("runtimeProfileId") or ""
+        ).strip()
+        if selected_profile is None:
+            continue
+        if observation_profile != selected_profile:
+            profile_mismatch_excluded += 1
+            continue
+        runtime_status = str(observation.get("runtimeStatus") or "")
+        trial_count = observation.get("trialCount")
+        if (
+            runtime_status == RUNTIME_STATUS_OBSERVED_CONFIRMED
+            and isinstance(trial_count, int)
+            and not isinstance(trial_count, bool)
+            and trial_count >= MINIMUM_CONFIRMED_TRIALS
+        ):
+            publishable_confirmed_rows += 1
+        elif (
+            runtime_status == RUNTIME_STATUS_OBSERVED_PRELIMINARY
+            and isinstance(trial_count, int)
+            and not isinstance(trial_count, bool)
+            and 0 < trial_count < MINIMUM_CONFIRMED_TRIALS
+        ):
+            preliminary_rows += 1
+
+    return selected_profile, {
+        "runtimeProfilesAvailable": available_profiles,
+        "runtimeProfileSelected": selected_profile,
+        "publishableConfirmedRows": publishable_confirmed_rows,
+        "preliminaryRows": preliminary_rows,
+        "syntheticExcluded": synthetic_excluded,
+        "profileMismatchExcluded": profile_mismatch_excluded,
+    }
+
+
+def _eligible_runtime_observation(
+    observation: object,
+    *,
+    runtime_profile_id: str | None,
+    include_preliminary: bool,
+) -> Mapping[str, Any] | None:
+    """Reject injected runtime rows that bypass the validated file loader."""
+
+    if (
+        not isinstance(observation, Mapping)
+        or observation.get("synthetic") is not False
+        or runtime_profile_id is None
+        or str(observation.get("runtimeProfileId") or "").strip()
+        != runtime_profile_id
+    ):
+        return None
+    trial_count = observation.get("trialCount")
+    if (
+        not isinstance(trial_count, int)
+        or isinstance(trial_count, bool)
+        or trial_count <= 0
+    ):
+        return None
+    runtime_status = str(observation.get("runtimeStatus") or "")
+    if runtime_status == RUNTIME_STATUS_OBSERVED_CONFIRMED:
+        if trial_count < MINIMUM_CONFIRMED_TRIALS:
+            return None
+    elif runtime_status == RUNTIME_STATUS_OBSERVED_PRELIMINARY:
+        if trial_count >= MINIMUM_CONFIRMED_TRIALS or not include_preliminary:
+            return None
+    else:
+        return None
+    for field in ("observedYieldPerNode", "observedYieldPerSecond"):
+        value = observation.get(field)
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+        ):
+            return None
+    return observation
 
 
 def _semantic_property_value(prop: dict[str, Any]) -> Any:
@@ -283,6 +596,34 @@ class HarvestEvaluationEngine:
         self.resource_damage_overrides = _override_map(
             catalog.get("resourceDamageOverrides")
         )
+        all_variants_by_species: dict[str, list[dict[str, Any]]] = {}
+        for creature in self.creatures:
+            species_key = str(
+                creature.get("speciesKey")
+                or creature.get("objectPath")
+                or creature.get("name")
+                or ""
+            ).casefold()
+            if species_key:
+                all_variants_by_species.setdefault(species_key, []).append(creature)
+        self._canonical_variant_audit_by_species = {
+            species_key: _canonical_variant_audit(species_key, variants)
+            for species_key, variants in sorted(all_variants_by_species.items())
+        }
+        self._canonical_variant_audits = [
+            self._canonical_variant_audit_by_species[species_key]
+            for species_key in sorted(self._canonical_variant_audit_by_species)
+        ]
+        self._canonical_ambiguous_variant_audits = [
+            audit
+            for audit in self._canonical_variant_audits
+            if audit["ambiguous"] is True
+        ]
+
+    def canonical_variant_audits(self) -> list[dict[str, Any]]:
+        """Return the complete offline audit before ranking-scope exclusions."""
+
+        return deepcopy(self._canonical_variant_audits)
 
     def _rank_node_resource_v1(
         self,
@@ -665,6 +1006,9 @@ class HarvestEvaluationEngine:
             tuple[str, str, str, str, int], Mapping[str, Any]
         ]
         | None = None,
+        runtime_profile_id: str | None = None,
+        include_preliminary: bool = False,
+        runtime_profiles_available: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Return Ranking Contract v2 rows, split by evidence tier.
 
@@ -694,6 +1038,12 @@ class HarvestEvaluationEngine:
             raise ValueError("Unsupported harvest ranking metric.")
         if availability_policy not in _AVAILABILITY_POLICIES:
             raise ValueError("Unsupported harvest availability policy.")
+        runtime_profile_id, runtime_coverage = _runtime_profile_context(
+            runtime_observations,
+            requested_profile_id=runtime_profile_id,
+            runtime_metric=METRIC_CONTRACTS[metric]["runtime"] is True,
+            validated_profiles_available=runtime_profiles_available,
+        )
 
         node, resource = find_node_and_resource(
             node_catalog, node_id, node_resource_id
@@ -727,6 +1077,9 @@ class HarvestEvaluationEngine:
         attacks_conditionally_evaluated = 0
         conditionally_ranked_attacks = 0
         attacks_excluded_by_creature_scope = 0
+        rows_with_effectiveness_field = 0
+        rows_with_non_neutral_effectiveness = 0
+        rows_conditional_because_effectiveness = 0
         for creature in self.creatures:
             tameability = creature.get("tameability")
             rideability = creature.get("rideability")
@@ -761,11 +1114,21 @@ class HarvestEvaluationEngine:
             if species_key:
                 grouped.setdefault(species_key, []).append(creature)
 
+        variant_audit_by_species = self._canonical_variant_audit_by_species
+        all_variant_selection_audits = self._canonical_variant_audits
+        ambiguous_variant_audits = self._canonical_ambiguous_variant_audits
+        variant_selection_audits = [
+            deepcopy(audit)
+            for audit in all_variant_selection_audits[
+                :_VARIANT_SELECTION_AUDIT_LIMIT
+            ]
+        ]
+
         all_species_rows: list[dict[str, Any]] = []
         attacks_evaluated = 0
-        for species_key, variants in grouped.items():
-            canonical_creature = min(variants, key=_canonical_variant_key)
-            canonical_path = str(canonical_creature.get("objectPath") or "")
+        for species_key, variants in sorted(grouped.items()):
+            variant_audit = variant_audit_by_species[species_key]
+            canonical_path = variant_audit["canonicalObjectPath"]
             variant_best_rows_by_tier: dict[str, list[dict[str, Any]]] = {
                 "CONFIRMED": [],
                 "CONDITIONAL": [],
@@ -821,7 +1184,20 @@ class HarvestEvaluationEngine:
                     dispositions[disposition] += 1
                     if disposition != "RANKED":
                         continue
-                    _enrich_v2_metrics(row)
+                    effectiveness = row.get("effectivenessQuantityMultiplier")
+                    if "effectivenessQuantityMultiplier" in row:
+                        rows_with_effectiveness_field += 1
+                    effectiveness_is_non_neutral = (
+                        isinstance(effectiveness, (int, float))
+                        and not isinstance(effectiveness, bool)
+                        and not math.isclose(
+                            float(effectiveness), 1.0, rel_tol=0.0, abs_tol=1e-9
+                        )
+                    )
+                    if effectiveness_is_non_neutral:
+                        rows_with_non_neutral_effectiveness += 1
+                        rows_conditional_because_effectiveness += 1
+                    _enrich_v2_metrics(row, metric=metric)
                     runtime_key = (
                         str(node_id),
                         str(node_resource_id),
@@ -834,7 +1210,18 @@ class HarvestEvaluationEngine:
                         if runtime_observations is not None
                         else None
                     )
-                    if runtime_observation is not None:
+                    runtime_observation = _eligible_runtime_observation(
+                        runtime_observation,
+                        runtime_profile_id=runtime_profile_id,
+                        include_preliminary=include_preliminary,
+                    )
+                    runtime_status = (
+                        str(runtime_observation.get("runtimeStatus") or "")
+                        if runtime_observation is not None
+                        else ""
+                    )
+                    runtime_observation_is_eligible = runtime_observation is not None
+                    if runtime_observation_is_eligible:
                         row.update(
                             {
                                 "observedYieldPerNode": runtime_observation.get(
@@ -849,6 +1236,13 @@ class HarvestEvaluationEngine:
                                 "runtimeObservation": {
                                     "observationSetId": runtime_observation.get(
                                         "observationSetId"
+                                    ),
+                                    "runtimeProfileId": runtime_observation.get(
+                                        "runtimeProfileId"
+                                    )
+                                    or runtime_profile_id,
+                                    "environmentFingerprint": runtime_observation.get(
+                                        "environmentFingerprint"
                                     ),
                                     "trialCount": runtime_observation.get("trialCount"),
                                     "synthetic": False,
@@ -879,16 +1273,17 @@ class HarvestEvaluationEngine:
                     evidence_gaps.extend(
                         str(value) for value in row.get("missingFacts", []) if value
                     )
-                    effectiveness = row.get("effectivenessQuantityMultiplier")
-                    if (
-                        isinstance(effectiveness, (int, float))
-                        and not isinstance(effectiveness, bool)
-                        and not math.isclose(
-                            float(effectiveness), 1.0, rel_tol=0.0, abs_tol=1e-9
-                        )
-                    ):
+                    if effectiveness_is_non_neutral:
                         evidence_gaps.append(
                             "EFFECTIVENESS_QUANTITY_MULTIPLIER_NOT_MODELED"
+                        )
+                    if (
+                        METRIC_CONTRACTS[metric]["runtime"] is True
+                        and runtime_observation_is_eligible
+                        and runtime_status == "OBSERVED_PRELIMINARY"
+                    ):
+                        evidence_gaps.append(
+                            "OBSERVED_PRELIMINARY_MINIMUM_TRIALS_NOT_MET"
                         )
                     evidence_gaps = sorted(set(evidence_gaps))
                     confirmed = not evidence_gaps
@@ -1014,6 +1409,16 @@ class HarvestEvaluationEngine:
                         "policy": variant_policy,
                         "selectedObjectPath": selected_path,
                         "canonicalObjectPath": canonical_path,
+                        "selectionReasons": list(
+                            variant_audit["selectionReasons"]
+                        ),
+                        "excludedVariantClasses": list(
+                            variant_audit["excludedVariantClasses"]
+                        ),
+                        "ambiguous": variant_audit["ambiguous"],
+                        "ambiguityReasons": list(
+                            variant_audit["ambiguityReasons"]
+                        ),
                         "excludedObjectPaths": [
                             path for path in variant_paths if path != selected_path
                         ],
@@ -1069,7 +1474,9 @@ class HarvestEvaluationEngine:
             if evidence_policy == POLICY_INCLUDE_CONDITIONAL
             else []
         )
-        compatibility_items = [*confirmed_items, *conditional_items]
+        # The legacy alias remains confirmed-only so older clients cannot flatten
+        # a conditional winner into the primary ranking.
+        compatibility_items = list(confirmed_items)
 
         coverage = dict(self.catalog.get("coverage") or {})
         coverage.update(
@@ -1086,6 +1493,27 @@ class HarvestEvaluationEngine:
                 "conditionalEvaluationByReason": dict(
                     sorted(conditional_evaluations.items())
                 ),
+                "rowsWithEffectivenessField": rows_with_effectiveness_field,
+                "rowsWithNonNeutralEffectiveness": (
+                    rows_with_non_neutral_effectiveness
+                ),
+                "rowsConditionalBecauseEffectiveness": (
+                    rows_conditional_because_effectiveness
+                ),
+                "canonicalVariantAmbiguousSpecies": len(
+                    ambiguous_variant_audits
+                ),
+                "canonicalCreatureAssetsAudited": len(self.creatures),
+                "canonicalVariantsAudited": len(all_variant_selection_audits),
+                "variantSelectionAuditsReturned": len(variant_selection_audits),
+                "variantSelectionAuditsOmitted": max(
+                    0,
+                    len(all_variant_selection_audits)
+                    - len(variant_selection_audits),
+                ),
+                "canonicalVariantAmbiguityExamples": [
+                    deepcopy(audit) for audit in ambiguous_variant_audits[:10]
+                ],
                 "creatureAssetsExcludedFromScope": sum(excluded_creatures.values()),
                 "attacksExcludedByCreatureScope": attacks_excluded_by_creature_scope,
                 "excludedCreatureByReason": dict(sorted(excluded_creatures.items())),
@@ -1097,9 +1525,7 @@ class HarvestEvaluationEngine:
                 "returned": len(compatibility_items),
                 "omitted": max(
                     0,
-                    len(confirmed_all)
-                    + (len(conditional_all) if evidence_policy == POLICY_INCLUDE_CONDITIONAL else 0)
-                    - len(compatibility_items),
+                    len(confirmed_all) - len(compatibility_items),
                 ),
             }
         )
@@ -1134,6 +1560,16 @@ class HarvestEvaluationEngine:
             METRIC_OBSERVED_PER_NODE: "受控实测单节点目标资源产量",
             METRIC_OBSERVED_PER_SECOND: "受控实测每秒目标资源产量",
         }
+        metric_contract = METRIC_CONTRACTS[metric]
+        metric_warning = (
+            "实测指标仅可在所选 runtimeProfileId 环境内比较；preliminary 仍为条件性"
+            "结果，synthetic 永不进入可发布排行。"
+            if metric_contract["runtime"] is True
+            else (
+                "静态模型指标不是服务器环境下的实测产量或真实每秒产量；条件性结果"
+                "不会占用已确认榜名次或基线。"
+            )
+        )
         return {
             "schema": RANKING_RESULT_SCHEMA,
             "contractVersion": HARVEST_RANKING_CONTRACT_VERSION,
@@ -1153,6 +1589,8 @@ class HarvestEvaluationEngine:
                 "variant": variant_policy,
                 "metric": metric,
                 "availability": availability_policy,
+                "runtimeProfileId": runtime_profile_id,
+                "includePreliminary": bool(include_preliminary),
                 "exploratory": variant_policy
                 == VARIANT_BEST_DISCOVERED_EXPLORATORY,
             },
@@ -1163,7 +1601,9 @@ class HarvestEvaluationEngine:
                 "formulaVersion": YIELD_MODEL_VERSION,
                 "metric": metric,
                 "metricLabel": metric_labels[metric],
-                "scoreBasis": STATIC_COMPLETE_NODE_SCORE_BASIS,
+                "scoreBasis": metric_contract["scoreBasis"],
+                "unit": metric_contract["unit"],
+                "runtime": metric_contract["runtime"],
                 "firstHitTiming": "FIRST_HIT_AT_END_OF_FIRST_ATTACK_CYCLE",
                 "relativeBasis": "WITHIN_SAME_EVIDENCE_TIER_SELECTED_METRIC",
                 "tiePolicy": "COMPETITION_RANK_FOR_EQUAL_SELECTED_METRIC_1_1_3",
@@ -1173,10 +1613,7 @@ class HarvestEvaluationEngine:
                     "COMPATIBILITY_ALIAS_EQUAL_TO_STATIC_COMPLETE_NODE_TARGET_YIELD_"
                     "NEVER_USED_FOR_ORDERING"
                 ),
-                "warning": (
-                    "静态指标不是服务器环境下的实测产量或真实每秒产量；"
-                    "条件性结果不会占用已确认榜名次或基线。"
-                ),
+                "warning": metric_warning,
             },
             "confirmedStatus": "AVAILABLE" if confirmed_all else "UNAVAILABLE",
             "conditionalStatus": "AVAILABLE" if conditional_all else "UNAVAILABLE",
@@ -1193,6 +1630,8 @@ class HarvestEvaluationEngine:
                 "blockers": claim_blockers,
             },
             "coverage": coverage,
+            "runtimeCoverage": runtime_coverage,
+            "variantSelectionAudits": variant_selection_audits,
             "confirmedItems": confirmed_items,
             "conditionalItems": conditional_items,
             "items": compatibility_items,
