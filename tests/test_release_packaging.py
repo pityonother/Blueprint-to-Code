@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "bundled Windows Python executable")
     def test_packager_bootstraps_scripts_directory_for_embedded_python(self):
         python = ROOT / "runtime" / "python" / "python.exe"
         script = ROOT / "scripts" / "package_full_env.py"

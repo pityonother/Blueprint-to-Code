@@ -1,6 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
+# The embedded-path configuration is verified byte-for-byte against python.org.
+# Never rewrite its line endings during checkout on another operating system.
+/runtime/python/python313._pth -text whitespace=cr-at-eol
+
 # Publish the sanitized ARK discovery review bundle without placing 500+ MB in Git history.
 knowledge_base/discovery_bundle.zip filter=lfs diff=lfs merge=lfs -text
 

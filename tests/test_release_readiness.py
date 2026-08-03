@@ -58,6 +58,7 @@ class ReleaseReadinessTests(unittest.TestCase):
             launcher,
         )
 
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell launcher contract")
     def test_start_here_passes_its_root_to_powershell_without_code_interpolation(self):
         launcher = (ROOT / "START_HERE.bat").read_text(encoding="utf-8")
 
@@ -99,6 +100,7 @@ class ReleaseReadinessTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(process.stdout.strip(), str(special_root.resolve()))
 
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell launcher contract")
     def test_start_here_matches_only_its_exact_server_script_path(self):
         launcher = (ROOT / "START_HERE.bat").read_text(encoding="utf-8")
 
