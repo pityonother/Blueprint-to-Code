@@ -33,10 +33,10 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Python test dependencies
+      - name: Install Python quality dependencies
         run: >-
           python -m pip install pytest==9.0.3 cryptography==49.0.0
-          jsonschema==4.26.0
+          jsonschema==4.26.0 ruff==0.15.20
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -47,27 +47,259 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Check changed lines for whitespace errors
+      - name: Resolve changed-file base
+        id: diff-base
+        shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
-          if git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
-            git diff --check "$BASE_SHA" HEAD
+          set -euo pipefail
+
+          candidate=""
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            candidate="$PR_BASE_SHA"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            candidate="$PUSH_BEFORE_SHA"
+          fi
+
+          zero_sha="0000000000000000000000000000000000000000"
+          base_sha=""
+          if [[ -n "$candidate" && "$candidate" != "$zero_sha" ]] \
+            && git cat-file -e "$candidate^{commit}" 2>/dev/null; then
+            base_sha="$(git merge-base "$candidate" HEAD || true)"
+          fi
+
+          if [[ -z "$base_sha" ]] \
+            && git cat-file -e "HEAD^{commit}" 2>/dev/null \
+            && git cat-file -e "HEAD^1^{commit}" 2>/dev/null; then
+            base_sha="$(git rev-parse HEAD^1)"
+          fi
+
+          if [[ -z "$base_sha" ]]; then
+            base_sha="$(git hash-object -t tree --stdin -w < /dev/null)"
+          fi
+
+          printf 'base=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+          printf 'Resolved changed-file base: %s\n' "$base_sha"
+
+      - name: Check changed lines for whitespace errors
+        shell: bash
+        env:
+          DIFF_BASE: ${{ steps.diff-base.outputs.base }}
+        run: |
+          set -euo pipefail
+          git diff --check "$DIFF_BASE" HEAD
+
+      - name: Lint changed Python files
+        shell: bash
+        env:
+          DIFF_BASE: ${{ steps.diff-base.outputs.base }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' python_files < <(
+            git diff --name-only --diff-filter=ACMR -z \
+              "$DIFF_BASE" HEAD -- '*.py'
+          )
+          if (( ${#python_files[@]} == 0 )); then
+            echo "No changed Python files; Ruff has nothing to check."
           else
-            git diff --check HEAD^ HEAD
+            printf 'Ruff checking %d changed Python file(s).\n' \
+              "${#python_files[@]}"
+            python -m ruff check -- "${python_files[@]}"
           fi
 
       - name: Run full Python suite
         run: python -m pytest -q
+
+      - name: Run targeted Harvest Python suite
+        shell: bash
+        run: python -m pytest -q tests/test_*harvest*.py
 
       - name: Run frontend contracts
         run: |
           node tests/api_frontend_contract.mjs
           node tests/frontend_core_contract.mjs
           node tests/harvest_frontend_contract.mjs
+          node tests/knowledge_frontend_contract.mjs
 
       - name: Build frontend
         run: npm run build
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
+
+      - name: Scan changed files for local paths, known secrets, and generated artifacts
+        shell: bash
+        env:
+          DIFF_BASE: ${{ steps.diff-base.outputs.base }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          from pathlib import Path, PurePosixPath
+          import re
+          import subprocess
+          import sys
+
+          base = os.environ["DIFF_BASE"]
+          result = subprocess.run(
+              [
+                  "git",
+                  "diff",
+                  "--name-only",
+                  "--diff-filter=ACMR",
+                  "-z",
+                  base,
+                  "HEAD",
+              ],
+              check=True,
+              stdout=subprocess.PIPE,
+          )
+          changed = [
+              os.fsdecode(item)
+              for item in result.stdout.split(b"\0")
+              if item
+          ]
+
+          generated_directories = {
+              "__pycache__",
+              ".pytest_cache",
+              ".ruff_cache",
+              "node_modules",
+              "dist",
+              "build",
+              "coverage",
+              "htmlcov",
+          }
+          generated_prefixes = (
+              "analysis/harvest_nodes/",
+              "analysis/harvest_rankings/",
+              "analysis/harvest_runtime_observations/",
+          )
+          generated_suffixes = (
+              ".pyc",
+              ".pyo",
+              ".class",
+              ".o",
+              ".obj",
+              ".exe",
+              ".dll",
+              ".pdb",
+              ".dylib",
+              ".so",
+              ".db",
+              ".sqlite",
+              ".sqlite3",
+              ".sqlite-wal",
+              ".sqlite-shm",
+              ".uasset",
+              ".uexp",
+              ".ubulk",
+          )
+
+          slash = rb"[\\/]"
+          local_path_patterns = (
+              re.compile(rb"(?i)\b[A-Z]:" + slash),
+              re.compile(
+                  rb"(?i)(?:^|[^A-Za-z0-9_])"
+                  + slash
+                  + rb"(?:home|Users|root|tmp|var"
+                  + slash
+                  + rb"tmp)"
+                  + slash
+              ),
+              re.compile(
+                  rb"(?i)(?:^|[^A-Za-z0-9_])"
+                  + slash
+                  + rb"mnt"
+                  + slash
+                  + rb"[A-Z]"
+                  + slash
+                  + rb"Users"
+                  + slash
+              ),
+          )
+          known_secret_patterns = (
+              re.compile(re.escape(b"gh" + b"p_") + rb"[A-Za-z0-9]{20,}"),
+              re.compile(
+                  re.escape(b"github" + b"_pat_")
+                  + rb"[A-Za-z0-9_]{20,}"
+              ),
+              re.compile(re.escape(b"AK" + b"IA") + rb"[0-9A-Z]{16}"),
+              re.compile(re.escape(b"sk" + b"-") + rb"[A-Za-z0-9_-]{20,}"),
+              re.compile(
+                  re.escape(b"-----BEGIN " + b"PRIVATE KEY-----")
+              ),
+          )
+          secret_assignment = re.compile(
+              rb"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|"
+              rb"password|private[_-]?key)\b\s*[:=]\s*['\"]"
+              rb"([^'\"\r\n]{8,})['\"]"
+          )
+          placeholder_prefixes = (
+              b"$" + b"{{",
+              b"${",
+              b"$",
+              b"<",
+              b"example",
+              b"test",
+              b"dummy",
+              b"fake",
+              b"changeme",
+              b"not-a-real",
+          )
+
+          findings: list[str] = []
+          for name in changed:
+              normalized = PurePosixPath(name.replace("\\", "/"))
+              lowered_parts = {part.lower() for part in normalized.parts}
+              lowered_name = normalized.name.lower()
+              normalized_name = normalized.as_posix().lower()
+              if (
+                  lowered_parts & generated_directories
+                  or normalized_name.startswith(generated_prefixes)
+                  or lowered_name.endswith(generated_suffixes)
+                  or lowered_name in {".coverage", ".ds_store"}
+              ):
+                  findings.append(f"generated artifact path: {name!r}")
+
+              path = Path(name)
+              if not path.exists() and not path.is_symlink():
+                  findings.append(f"changed path missing from checkout: {name!r}")
+                  continue
+              if path.is_symlink():
+                  data = os.fsencode(os.readlink(path))
+              elif path.is_file():
+                  data = path.read_bytes()
+              else:
+                  findings.append(f"changed path is not a regular file: {name!r}")
+                  continue
+
+              if any(pattern.search(data) for pattern in local_path_patterns):
+                  findings.append(f"local absolute path content: {name!r}")
+              if any(pattern.search(data) for pattern in known_secret_patterns):
+                  findings.append(f"known secret signature: {name!r}")
+              for match in secret_assignment.finditer(data):
+                  value = match.group(1).strip().lower()
+                  if not value.startswith(placeholder_prefixes):
+                      findings.append(f"hard-coded secret assignment: {name!r}")
+                      break
+
+          if findings:
+              print("Changed-file safety scan failed:", file=sys.stderr)
+              for finding in findings:
+                  print(f"- {finding}", file=sys.stderr)
+              raise SystemExit(1)
+
+          print(
+              "Changed-file safety scan passed for "
+              f"{len(changed)} file(s)."
+          )
+          PY
 
       - name: Validate committed claim fixture
         run: >-
