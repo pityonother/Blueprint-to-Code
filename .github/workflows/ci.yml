@@ -71,12 +71,6 @@ jobs:
             base_sha="$(git merge-base "$candidate" HEAD || true)"
           fi
 
-          if [[ -z "$base_sha" ]] \
-            && git cat-file -e "HEAD^{commit}" 2>/dev/null \
-            && git cat-file -e "HEAD^1^{commit}" 2>/dev/null; then
-            base_sha="$(git rev-parse HEAD^1)"
-          fi
-
           if [[ -z "$base_sha" ]]; then
             base_sha="$(git hash-object -t tree --stdin -w < /dev/null)"
           fi
@@ -99,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -d '' python_files < <(
-            git diff --name-only --diff-filter=ACMR -z \
+            git diff --name-only --diff-filter=ACMRT -z \
               "$DIFF_BASE" HEAD -- '*.py'
           )
           if (( ${#python_files[@]} == 0 )); then
@@ -139,6 +133,7 @@ jobs:
           python - <<'PY'
           from __future__ import annotations
 
+          from collections import Counter
           import os
           from pathlib import Path, PurePosixPath
           import re
@@ -151,7 +146,7 @@ jobs:
                   "git",
                   "diff",
                   "--name-only",
-                  "--diff-filter=ACMR",
+                  "--diff-filter=ACMRT",
                   "-z",
                   base,
                   "HEAD",
@@ -205,17 +200,22 @@ jobs:
 
           slash = rb"[\\/]"
           local_path_patterns = (
-              re.compile(rb"(?i)\b[A-Z]:" + slash),
               re.compile(
-                  rb"(?i)(?:^|[^A-Za-z0-9_])"
+                  rb"(?im)(?<![A-Za-z0-9_])[A-Z]:"
+                  + slash
+                  + rb"[^\r\n]*"
+              ),
+              re.compile(
+                  rb"(?im)(?<![A-Za-z0-9_])"
                   + slash
                   + rb"(?:home|Users|root|tmp|var"
                   + slash
                   + rb"tmp)"
                   + slash
+                  + rb"[^\r\n]*"
               ),
               re.compile(
-                  rb"(?i)(?:^|[^A-Za-z0-9_])"
+                  rb"(?im)(?<![A-Za-z0-9_])"
                   + slash
                   + rb"mnt"
                   + slash
@@ -223,10 +223,15 @@ jobs:
                   + slash
                   + rb"Users"
                   + slash
+                  + rb"[^\r\n]*"
               ),
           )
           known_secret_patterns = (
-              re.compile(re.escape(b"gh" + b"p_") + rb"[A-Za-z0-9]{20,}"),
+              re.compile(
+                  re.escape(b"gh")
+                  + rb"[pousr]_"
+                  + rb"[A-Za-z0-9]{20,}"
+              ),
               re.compile(
                   re.escape(b"github" + b"_pat_")
                   + rb"[A-Za-z0-9_]{20,}"
@@ -234,13 +239,15 @@ jobs:
               re.compile(re.escape(b"AK" + b"IA") + rb"[0-9A-Z]{16}"),
               re.compile(re.escape(b"sk" + b"-") + rb"[A-Za-z0-9_-]{20,}"),
               re.compile(
-                  re.escape(b"-----BEGIN " + b"PRIVATE KEY-----")
+                  rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"
               ),
           )
           secret_assignment = re.compile(
-              rb"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|"
-              rb"password|private[_-]?key)\b\s*[:=]\s*['\"]"
-              rb"([^'\"\r\n]{8,})['\"]"
+              rb"(?i)(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+[_-])*"
+              rb"(?:api[_-]?key|access[_-]?token|client[_-]?secret|"
+              rb"secret[_-]?access[_-]?key|password|private[_-]?key)\b"
+              rb"\s*[:=]\s*(?:['\"]([^'\"\r\n]{8,})['\"]|"
+              rb"([^\s#'\"\r\n]{8,}))"
           )
           placeholder_prefixes = (
               b"$" + b"{{",
@@ -277,16 +284,25 @@ jobs:
               if not path.exists() and not path.is_symlink():
                   findings.append(f"changed path missing from checkout: {name!r}")
                   continue
-              if not path.is_file() and not path.is_symlink():
+              if path.is_symlink():
+                  findings.append(f"changed symbolic link is forbidden: {name!r}")
+                  continue
+              if not path.is_file():
                   findings.append(f"changed path is not a regular file: {name!r}")
                   continue
-
-              content_diff = subprocess.run(
+              if path.stat().st_size > 5 * 1024 * 1024:
+                  findings.append(f"changed file exceeds 5 MiB scan limit: {name!r}")
+                  continue
+              current_data = path.read_bytes()
+              if b"\0" in current_data:
+                  findings.append(f"changed binary file is forbidden: {name!r}")
+                  continue
+              numstat = subprocess.run(
                   [
                       "git",
                       "diff",
                       "--no-ext-diff",
-                      "--unified=0",
+                      "--numstat",
                       base,
                       "HEAD",
                       "--",
@@ -295,22 +311,43 @@ jobs:
                   check=True,
                   stdout=subprocess.PIPE,
               ).stdout
-              in_hunk = False
-              added_lines: list[bytes] = []
-              for line in content_diff.splitlines():
-                  if line.startswith(b"@@"):
-                      in_hunk = True
-                      continue
-                  if in_hunk and line.startswith(b"+"):
-                      added_lines.append(line[1:])
-              data = b"\n".join(added_lines)
+              if any(
+                  line.startswith(b"-\t-\t")
+                  for line in numstat.splitlines()
+              ):
+                  findings.append(f"binary diff is forbidden: {name!r}")
+                  continue
 
-              if any(pattern.search(data) for pattern in local_path_patterns):
-                  findings.append(f"local absolute path content: {name!r}")
-              if any(pattern.search(data) for pattern in known_secret_patterns):
-                  findings.append(f"known secret signature: {name!r}")
-              for match in secret_assignment.finditer(data):
-                  value = match.group(1).strip().lower()
+              base_blob = subprocess.run(
+                  ["git", "show", f"{base}:{name}"],
+                  check=False,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+              )
+              base_data = base_blob.stdout if base_blob.returncode == 0 else b""
+
+              for pattern in local_path_patterns:
+                  current_matches = Counter(pattern.findall(current_data))
+                  base_matches = Counter(pattern.findall(base_data))
+                  if current_matches - base_matches:
+                      findings.append(f"local absolute path content: {name!r}")
+                      break
+              for pattern in known_secret_patterns:
+                  current_matches = Counter(pattern.findall(current_data))
+                  base_matches = Counter(pattern.findall(base_data))
+                  if current_matches - base_matches:
+                      findings.append(f"known secret signature: {name!r}")
+                      break
+              base_assignments = Counter(
+                  match.group(0)
+                  for match in secret_assignment.finditer(base_data)
+              )
+              for match in secret_assignment.finditer(current_data):
+                  assignment = match.group(0)
+                  if base_assignments[assignment] > 0:
+                      base_assignments[assignment] -= 1
+                      continue
+                  value = (match.group(1) or match.group(2)).strip().lower()
                   if not value.startswith(placeholder_prefixes):
                       findings.append(f"hard-coded secret assignment: {name!r}")
                       break
