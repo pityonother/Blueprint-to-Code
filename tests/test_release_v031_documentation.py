@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -59,8 +62,26 @@ class ReleaseV031DocumentationTests(unittest.TestCase):
 
         self.assertEqual(
             package["scripts"]["package:windows"],
-            "runtime/python/python.exe scripts/package_windows_portable.py",
+            r"runtime\python\python.exe scripts\package_windows_portable.py",
         )
+
+    @unittest.skipUnless(os.name == "nt", "Windows npm command contract")
+    def test_package_windows_npm_command_reaches_the_packager(self):
+        npm = shutil.which("npm.cmd") or shutil.which("npm")
+        self.assertIsNotNone(npm)
+
+        process = subprocess.run(
+            [str(npm), "run", "package:windows", "--", "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+        self.assertEqual(process.returncode, 0, process.stderr or process.stdout)
+        self.assertIn("Build the public Blueprint to Code Windows x64 portable ZIP", process.stdout)
 
     def test_changelog_records_the_downloadable_portable_release(self):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

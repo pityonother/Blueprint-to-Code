@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "control": "npm run build && python scripts/blueprint_tool_server.py --open",
-    "package:windows": "runtime/python/python.exe scripts/package_windows_portable.py",
+    "package:windows": "runtime\\python\\python.exe scripts\\package_windows_portable.py",
     "preview": "vite preview"
   },
   "devDependencies": {
