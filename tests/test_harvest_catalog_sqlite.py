@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -124,6 +125,23 @@ def _catalog() -> dict[str, object]:
 
 
 class HarvestCatalogSQLiteTests(unittest.TestCase):
+    def test_cli_bootstraps_scripts_path_under_isolated_python(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(ROOT / "scripts" / "build_harvest_catalog_sqlite.py"),
+                "--help",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("indexed SQLite catalog", completed.stdout)
+
     def test_resource_object_path_is_the_facet_and_filter_identity_with_legacy_class_support(self):
         resource_class = "PrimalItemResource_CommonMushroom_C"
         aberration_path = (

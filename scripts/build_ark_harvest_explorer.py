@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -43,6 +44,32 @@ DEFAULT_MAP_SCAN_CACHE = (
     PROJECT_ROOT / "analysis" / "harvest_nodes" / "map_reference_scan_cache.json"
 )
 DEFAULT_IMAGE_CACHE_ROOT = PROJECT_ROOT / "analysis" / "harvest_nodes" / "images"
+
+INDEPENDENT_VERIFICATION_SCHEMA = (
+    "blueprint-to-code.harvest-independent-verification/v2"
+)
+INDEPENDENT_VERIFICATION_METRIC_CONTRACTS: dict[str, dict[str, object]] = {
+    "staticCompleteNodeTargetYield": {
+        "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+        "unit": "target_resource_units/node",
+        "runtime": False,
+    },
+    "staticYieldPerAttackCycleSecond": {
+        "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_ATTACK_CYCLE_SECOND",
+        "unit": "target_resource_units/attack_cycle_second",
+        "runtime": False,
+    },
+    "observedYieldPerNode": {
+        "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+        "unit": "target_resource_units/node",
+        "runtime": True,
+    },
+    "observedYieldPerSecond": {
+        "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_SECOND",
+        "unit": "target_resource_units/second",
+        "runtime": True,
+    },
+}
 
 PROMOTION_BEGIN_LINE = "[promotion-critical] begin"
 PROMOTION_COMMIT_COMPLETE_LINE = "[promotion-critical] commit-complete"
@@ -334,6 +361,141 @@ def _expected_query_payload(full_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _verification_count(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer.")
+    return value
+
+
+def _canonical_json_sha256(value: object) -> str:
+    canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validated_independent_verification(
+    payload: dict[str, Any],
+    *,
+    expected_node_catalog_sha256: str,
+    expected_evaluation_catalog_sha256: str,
+) -> dict[str, int]:
+    if (
+        payload.get("schema") != INDEPENDENT_VERIFICATION_SCHEMA
+        or payload.get("status") != "PASS"
+    ):
+        raise ValueError("Staged independent ranking verification did not pass.")
+    selection = payload.get("selection")
+    comparison = payload.get("comparison")
+    coverage = payload.get("coverageByDirection")
+    methodology = payload.get("methodology")
+    inputs = payload.get("inputs")
+    if not all(
+        isinstance(value, dict)
+        for value in (selection, comparison, coverage, methodology, inputs)
+    ):
+        raise ValueError("Staged independent ranking verification is incomplete.")
+    reported_node_sha = inputs.get("nodeCatalogSha256")
+    reported_evaluation_sha = inputs.get("evaluationCatalogSha256")
+    if (
+        not _is_sha256(expected_node_catalog_sha256)
+        or not _is_sha256(expected_evaluation_catalog_sha256)
+        or not _is_sha256(reported_node_sha)
+        or not _is_sha256(reported_evaluation_sha)
+        or reported_node_sha != expected_node_catalog_sha256
+        or reported_evaluation_sha != expected_evaluation_catalog_sha256
+    ):
+        raise ValueError(
+            "Staged independent verification is not bound to the current catalogs."
+        )
+    targets_selected = _verification_count(
+        selection.get("targetsSelected"),
+        "selection.targetsSelected",
+    )
+    if targets_selected < 1:
+        raise ValueError("Staged independent ranking verification checked no targets.")
+    forward = coverage.get("forward")
+    metric_contracts = methodology.get("metricContracts")
+    if not isinstance(forward, dict) or not isinstance(metric_contracts, dict):
+        raise ValueError("Staged independent metric coverage is incomplete.")
+    expected_metrics = list(INDEPENDENT_VERIFICATION_METRIC_CONTRACTS)
+    if (
+        metric_contracts != INDEPENDENT_VERIFICATION_METRIC_CONTRACTS
+        or methodology.get("metricsAttempted") != expected_metrics
+        or set(forward) != set(expected_metrics)
+    ):
+        raise ValueError("Staged independent metric contract is not exact v2.")
+
+    expected_comparisons = 0
+    static_metrics_verified = 0
+    for metric, contract in INDEPENDENT_VERIFICATION_METRIC_CONTRACTS.items():
+        metric_coverage = forward.get(metric)
+        if not isinstance(contract, dict) or not isinstance(metric_coverage, dict):
+            raise ValueError("Staged independent metric coverage is incomplete.")
+        metric_selected = _verification_count(
+            metric_coverage.get("targetsSelected"),
+            f"coverageByDirection.forward.{metric}.targetsSelected",
+        )
+        metric_compared = _verification_count(
+            metric_coverage.get("targetsCompared"),
+            f"coverageByDirection.forward.{metric}.targetsCompared",
+        )
+        if metric_selected != targets_selected:
+            raise ValueError("Staged independent metric selection is inconsistent.")
+        status = metric_coverage.get("status")
+        runtime_metric = contract.get("runtime") is True
+        if status == "VERIFIED":
+            if metric_compared != targets_selected:
+                raise ValueError("Staged independent metric coverage is incomplete.")
+            expected_comparisons += metric_compared
+            if not runtime_metric:
+                static_metrics_verified += 1
+        elif (
+            runtime_metric
+            and status == "SKIPPED_WITH_REASON"
+            and metric_compared == 0
+            and str(metric_coverage.get("reason") or "").strip()
+        ):
+            continue
+        else:
+            raise ValueError("Staged independent metric coverage did not pass.")
+
+    compared = _verification_count(
+        comparison.get("targetsCompared"),
+        "comparison.targetsCompared",
+    )
+    mismatches = _verification_count(
+        comparison.get("mismatchCount"),
+        "comparison.mismatchCount",
+    )
+    required_static_metrics = sum(
+        contract["runtime"] is False
+        for contract in INDEPENDENT_VERIFICATION_METRIC_CONTRACTS.values()
+    )
+    if (
+        static_metrics_verified != required_static_metrics
+        or compared != expected_comparisons
+        or mismatches
+    ):
+        raise ValueError("Staged independent ranking comparison is inconsistent.")
+    return {
+        "targetsSelected": targets_selected,
+        "metricComparisons": compared,
+        "staticMetricsVerified": static_metrics_verified,
+    }
+
+
 def validate_staged_dataset(args: argparse.Namespace) -> dict[str, Any]:
     """Validate every staged artifact used by AI and by the live repository."""
 
@@ -358,6 +520,7 @@ def validate_staged_dataset(args: argparse.Namespace) -> dict[str, Any]:
 
     evaluation_text = paths["evaluation"].read_text(encoding="utf-8")
     evaluation_payload = json.loads(evaluation_text)
+    node_payload = json.loads(paths["nodeCatalog"].read_text(encoding="utf-8"))
     if evaluation_payload.get("schema") != EVALUATION_CATALOG_SCHEMA:
         raise ValueError("Staged evaluation catalog schema is invalid.")
     evaluation_dataset = evaluation_payload.get("dataset")
@@ -395,23 +558,11 @@ def validate_staged_dataset(args: argparse.Namespace) -> dict[str, Any]:
     independent_verification = json.loads(
         paths["independentVerification"].read_text(encoding="utf-8")
     )
-    if (
-        independent_verification.get("schema")
-        != "blueprint-to-code.harvest-independent-verification/v2"
-        or independent_verification.get("status") != "PASS"
-    ):
-        raise ValueError("Staged independent ranking verification did not pass.")
-    independent_selection = independent_verification.get("selection")
-    independent_comparison = independent_verification.get("comparison")
-    if (
-        not isinstance(independent_selection, dict)
-        or not isinstance(independent_comparison, dict)
-        or int(independent_selection.get("targetsSelected") or 0) < 1
-        or int(independent_comparison.get("targetsCompared") or 0)
-        != int(independent_selection.get("targetsSelected") or 0)
-        or int(independent_comparison.get("mismatchCount") or 0) != 0
-    ):
-        raise ValueError("Staged independent ranking verification checked no targets.")
+    independent_summary = _validated_independent_verification(
+        independent_verification,
+        expected_node_catalog_sha256=_canonical_json_sha256(node_payload),
+        expected_evaluation_catalog_sha256=_canonical_json_sha256(evaluation_payload),
+    )
 
     sqlite_catalog = SQLiteHarvestCatalog(paths["sqliteCatalog"])
     sqlite_catalog.assert_matches_source(paths["nodeCatalog"])
@@ -424,7 +575,7 @@ def validate_staged_dataset(args: argparse.Namespace) -> dict[str, Any]:
         sqlite_catalog_path=paths["sqliteCatalog"],
     )
     page = repository.list_nodes(limit=1)
-    nodes = json.loads(paths["nodeCatalog"].read_text(encoding="utf-8")).get("nodes")
+    nodes = node_payload.get("nodes")
     ranked_smoke = False
     for node in nodes if isinstance(nodes, list) else []:
         resources = node.get("resources", {}).get("items", []) if isinstance(node, dict) else []
@@ -450,7 +601,8 @@ def validate_staged_dataset(args: argparse.Namespace) -> dict[str, Any]:
             "creatureAssetsCataloged"
         ),
         "fullRows": validation.get("checks", {}).get("fullRows"),
-        "independentTargets": independent_comparison.get("targetsCompared"),
+        "independentTargets": independent_summary["targetsSelected"],
+        "independentMetricComparisons": independent_summary["metricComparisons"],
         "sqliteBytes": paths["sqliteCatalog"].stat().st_size,
     }
 

@@ -106,6 +106,7 @@ class CiContractTests(unittest.TestCase):
 
         required_commands = (
             "python -m pip install pytest==9.0.3",
+            "python -m ruff check scripts tests",
             "python -m pytest -q",
             "npm ci",
             "npm run build",
@@ -114,6 +115,8 @@ class CiContractTests(unittest.TestCase):
             "node tests/frontend_core_contract.mjs",
             "node tests/harvest_frontend_contract.mjs",
             "python scripts/validate_report_claims.py",
+            "python scripts/validate_report_registry.py",
+            "python scripts/check_release_content.py --git-ref",
             "python tests/test_release_readiness.py",
             "python tests/test_release_packaging.py",
             "python tests/test_version_consistency.py",
@@ -128,6 +131,8 @@ class CiContractTests(unittest.TestCase):
         )
         self.assertIn("--formal", workflow)
         self.assertIn("git diff --check", workflow)
+        self.assertIn("<redacted-changed-path>", workflow)
+        self.assertNotIn("{name!r}", workflow)
         self.assertNotIn("tests.test_release_readiness", workflow)
 
     def test_ci_does_not_embed_a_native_fixture_runner_or_secret(self):
@@ -145,6 +150,9 @@ class CiContractTests(unittest.TestCase):
         required_fragments = (
             "ruff==0.15.20",
             "python -m ruff check --",
+            "Resolve exact release candidate ref",
+            "github.event.pull_request.head.sha",
+            "steps.release-ref.outputs.ref",
             "python -m pytest -q tests/test_*harvest*.py",
             "node tests/knowledge_frontend_contract.mjs",
             "npm audit --audit-level=high",

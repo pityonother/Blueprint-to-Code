@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from blueprint_translator.graph_queue import (
+from blueprint_translator.graph_queue import (  # noqa: E402
     classify_graph_queue_item,
     graph_queue_summary,
     graph_queue_text_for_mode,

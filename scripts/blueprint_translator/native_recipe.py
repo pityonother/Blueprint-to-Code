@@ -708,7 +708,7 @@ def create_native_recipe_evidence_manifest(
             "Ghidra recipe export schema is invalid.",
         )
     binary = _mapping(identity.get("binary"), "native identity binary")
-    pdb = _mapping(identity.get("pdb"), "native identity PDB")
+    _mapping(identity.get("pdb"), "native identity PDB")
     if (
         str(raw.get("program") or "").casefold()
         != str(binary.get("module") or "").casefold()

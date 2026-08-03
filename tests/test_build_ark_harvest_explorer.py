@@ -11,9 +11,13 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+NODE_CATALOG_SHA256 = "a" * 64
+EVALUATION_CATALOG_SHA256 = "b" * 64
+
 from build_ark_harvest_explorer import (  # noqa: E402
     _dataset_paths,
     _expected_query_payload,
+    _validated_independent_verification,
     main,
     parse_args,
     plan_commands,
@@ -22,7 +26,79 @@ from build_ark_harvest_explorer import (  # noqa: E402
 import build_ark_harvest_explorer as build_explorer  # noqa: E402
 
 
+def _metric_aware_verification() -> dict[str, object]:
+    selected = 128
+    static_metrics = (
+        "staticCompleteNodeTargetYield",
+        "staticYieldPerAttackCycleSecond",
+    )
+    runtime_metrics = ("observedYieldPerNode", "observedYieldPerSecond")
+    contracts = {
+        "staticCompleteNodeTargetYield": {
+            "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+            "unit": "target_resource_units/node",
+            "runtime": False,
+        },
+        "staticYieldPerAttackCycleSecond": {
+            "scoreBasis": "STATIC_TARGET_RESOURCE_UNITS_PER_ATTACK_CYCLE_SECOND",
+            "unit": "target_resource_units/attack_cycle_second",
+            "runtime": False,
+        },
+        "observedYieldPerNode": {
+            "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_COMPLETE_NODE",
+            "unit": "target_resource_units/node",
+            "runtime": True,
+        },
+        "observedYieldPerSecond": {
+            "scoreBasis": "OBSERVED_TARGET_RESOURCE_UNITS_PER_SECOND",
+            "unit": "target_resource_units/second",
+            "runtime": True,
+        },
+    }
+    forward = {
+        **{
+            metric: {
+                "status": "VERIFIED",
+                "targetsSelected": selected,
+                "targetsCompared": selected,
+            }
+            for metric in static_metrics
+        },
+        **{
+            metric: {
+                "status": "SKIPPED_WITH_REASON",
+                "reason": "CONTROLLED_RUNTIME_FIXTURE_AND_PROFILE_REQUIRED",
+                "targetsSelected": selected,
+                "targetsCompared": 0,
+            }
+            for metric in runtime_metrics
+        },
+    }
+    return {
+        "schema": "blueprint-to-code.harvest-independent-verification/v2",
+        "status": "PASS",
+        "methodology": {
+            "metricContracts": contracts,
+            "metricsAttempted": list(contracts),
+        },
+        "inputs": {
+            "nodeCatalogSha256": NODE_CATALOG_SHA256,
+            "evaluationCatalogSha256": EVALUATION_CATALOG_SHA256,
+        },
+        "selection": {"targetsSelected": selected},
+        "coverageByDirection": {"forward": forward},
+        "comparison": {"targetsCompared": 256, "mismatchCount": 0},
+    }
+
+
 class BuildArkHarvestExplorerTests(unittest.TestCase):
+    def validate_verification(self, payload: dict[str, object]) -> dict[str, int]:
+        return _validated_independent_verification(
+            payload,
+            expected_node_catalog_sha256=NODE_CATALOG_SHA256,
+            expected_evaluation_catalog_sha256=EVALUATION_CATALOG_SHA256,
+        )
+
     def test_query_contract_is_exactly_derived_from_full_report(self):
         full = {
             "schema": "ark-harvest-ranking/v2",
@@ -40,6 +116,73 @@ class BuildArkHarvestExplorerTests(unittest.TestCase):
         self.assertEqual(query["bestRows"], full["bestRows"])
         self.assertNotIn("rows", query)
         self.assertEqual(query["querySchema"], "ark-harvest-ranking-query/v2")
+
+    def test_metric_aware_verification_accepts_static_pass_and_runtime_skip(self):
+        summary = self.validate_verification(_metric_aware_verification())
+
+        self.assertEqual(
+            summary,
+            {
+                "targetsSelected": 128,
+                "metricComparisons": 256,
+                "staticMetricsVerified": 2,
+            },
+        )
+
+    def test_metric_aware_verification_rejects_old_single_metric_total(self):
+        payload = _metric_aware_verification()
+        payload["comparison"]["targetsCompared"] = 128
+
+        with self.assertRaisesRegex(ValueError, "comparison is inconsistent"):
+            self.validate_verification(payload)
+
+    def test_metric_aware_verification_requires_reason_for_runtime_skip(self):
+        payload = _metric_aware_verification()
+        runtime = payload["coverageByDirection"]["forward"][
+            "observedYieldPerNode"
+        ]
+        runtime.pop("reason")
+
+        with self.assertRaisesRegex(ValueError, "metric coverage did not pass"):
+            self.validate_verification(payload)
+
+    def test_metric_aware_verification_requires_exact_v2_metrics(self):
+        payload = _metric_aware_verification()
+        payload["methodology"]["metricContracts"] = {
+            "fabricatedMetric": {"runtime": False}
+        }
+
+        with self.assertRaisesRegex(ValueError, "metric contract is not exact v2"):
+            self.validate_verification(payload)
+
+    def test_metric_aware_verification_rejects_coerced_counts(self):
+        for invalid in (True, 1.5, "128"):
+            with self.subTest(invalid=invalid):
+                payload = _metric_aware_verification()
+                payload["selection"]["targetsSelected"] = invalid
+                with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                    self.validate_verification(payload)
+
+    def test_independent_verification_is_bound_to_both_current_catalogs(self):
+        payload = _metric_aware_verification()
+        for field, changed_sha in (
+            ("nodeCatalogSha256", "c" * 64),
+            ("evaluationCatalogSha256", "d" * 64),
+        ):
+            with self.subTest(field=field):
+                changed = {
+                    **payload,
+                    "inputs": {**payload["inputs"], field: changed_sha},
+                }
+                with self.assertRaisesRegex(ValueError, "current catalogs"):
+                    self.validate_verification(changed)
+
+    def test_independent_verification_requires_valid_input_hashes(self):
+        payload = _metric_aware_verification()
+        payload["inputs"]["nodeCatalogSha256"] = "not-a-sha"
+
+        with self.assertRaisesRegex(ValueError, "current catalogs"):
+            self.validate_verification(payload)
 
     def test_plan_builds_evaluation_catalog_before_final_node_catalog(self):
         with tempfile.TemporaryDirectory() as temp_dir:

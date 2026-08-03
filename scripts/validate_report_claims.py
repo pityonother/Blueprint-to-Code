@@ -21,7 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.runtime_calibration import (
+from blueprint_translator.runtime_calibration import (  # noqa: E402
     INSUFFICIENT_OBSERVATIONS,
     RUNTIME_CALIBRATED,
     RUNTIME_CONFIRMED,

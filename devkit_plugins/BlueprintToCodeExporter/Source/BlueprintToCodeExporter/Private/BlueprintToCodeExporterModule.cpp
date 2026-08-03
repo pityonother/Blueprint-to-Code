@@ -5,6 +5,8 @@
 #include "EdGraph/EdGraph.h"
 #include "Engine/Blueprint.h"
 #include "Framework/Notifications/NotificationManager.h"
+#include "HAL/PlatformMisc.h"
+#include "HAL/PlatformProcess.h"
 #include "Interfaces/IPluginManager.h"
 #include "IContentBrowserSingleton.h"
 #include "Misc/FileHelper.h"
@@ -20,7 +22,6 @@
 namespace
 {
 const TCHAR* ExportSchema = TEXT("blueprint-translator.graph-pages.cpp.v1");
-const TCHAR* DefaultProjectRoot = TEXT("C:/Users/ac/Documents/project gaming/Blueprint to Code");
 
 template <typename GraphArrayType>
 bool ArrayContainsGraph(const GraphArrayType& Graphs, const UEdGraph* Graph)
@@ -267,13 +268,12 @@ FString FBlueprintToCodeExporterModule::ResolveProjectRoot() const
     FString EnvRoot = FPlatformMisc::GetEnvironmentVariable(TEXT("BLUEPRINT_TO_CODE_ROOT"));
     if (!EnvRoot.IsEmpty())
     {
+        EnvRoot = FPaths::ConvertRelativePathToFull(EnvRoot);
         FPaths::NormalizeDirectoryName(EnvRoot);
-        return EnvRoot;
-    }
-
-    if (FPaths::DirectoryExists(DefaultProjectRoot))
-    {
-        return DefaultProjectRoot;
+        if (!EnvRoot.IsEmpty())
+        {
+            return EnvRoot;
+        }
     }
 
     const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("BlueprintToCodeExporter"));
@@ -284,13 +284,22 @@ FString FBlueprintToCodeExporterModule::ResolveProjectRoot() const
         {
             if (FPaths::FileExists(FPaths::Combine(Candidate, TEXT("scripts"), TEXT("bp_clipboard_to_prompt.py"))))
             {
+                FPaths::NormalizeDirectoryName(Candidate);
                 return Candidate;
             }
             Candidate = FPaths::GetPath(Candidate);
         }
     }
 
-    return FPaths::Combine(FPlatformProcess::UserDir(), TEXT("Documents"), TEXT("Blueprint to Code"));
+    FString FallbackRoot = FPaths::ConvertRelativePathToFull(
+        FPaths::Combine(
+            FPlatformProcess::UserDir(),
+            TEXT("Documents"),
+            TEXT("Blueprint to Code")
+        )
+    );
+    FPaths::NormalizeDirectoryName(FallbackRoot);
+    return FallbackRoot;
 }
 
 FString FBlueprintToCodeExporterModule::MakeCaptureDirectoryName(const FString& RawName) const

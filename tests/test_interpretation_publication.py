@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from unittest import mock
 
@@ -338,6 +339,30 @@ class InterpretationPublicationTests(unittest.TestCase):
 
         self.assertEqual(after_create, before)
         self.assertEqual(after_remove, before)
+
+    def test_directory_identity_ignores_mutable_windows_attributes(self) -> None:
+        plain = SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_mode=0o40755,
+            st_file_attributes=0x10,
+        )
+        mutable_flags_changed = SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_mode=0o40755,
+            st_file_attributes=0x10 | 0x20 | 0x2000,
+        )
+        reparse_point = SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_mode=0o40755,
+            st_file_attributes=0x10 | 0x400,
+        )
+
+        stable = publication_module._stable_directory_identity
+        self.assertEqual(stable(mutable_flags_changed), stable(plain))
+        self.assertNotEqual(stable(reparse_point), stable(plain))
 
     def test_directory_binding_rejects_plain_directory_replacement(self) -> None:
         bound = Path(self._temporary.name) / "bound-directory"

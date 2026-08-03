@@ -1,0 +1,57 @@
+{
+  "schema": "blueprint-to-code-report-registry/v1",
+  "releasePolicy": {
+    "activeFormalErrorsMustEqual": 0,
+    "historicalIssuesRemainVisible": true
+  },
+  "reports": [
+    {
+      "reportPath": "reports/ARK_FISH_BASKET_CAPTURABLE_CREATURES_2026-07-26_zh.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Reference analysis retained for diagnostic use; it is not an active formal release claim set."
+    },
+    {
+      "reportPath": "reports/ARK_PLAYER_VISIBLE_REWARD_MODEL_DEEP_DIVE_2026-07-26.md",
+      "status": "HISTORICAL_PROVENANCE_INCOMPLETE",
+      "claimManifest": "reports/manifests/ark-player-visible-reward-model-2026-07-26.claims.json",
+      "reason": "Historical native provenance remains incomplete and must stay visible but non-active."
+    },
+    {
+      "reportPath": "reports/FEROX_COMPLETE_GAMEPLAY_AND_GENE_TRAITS_2026-07-26.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Reference analysis retained for diagnostic use; it is not an active formal release claim set."
+    },
+    {
+      "reportPath": "reports/FEROX_ELEMENT_CONSUMED_NO_TAMING_PROGRESS_2026-07-26.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Reference analysis retained for diagnostic use; it is not an active formal release claim set."
+    },
+    {
+      "reportPath": "reports/FEROX_FORCE_FLEE_MECHANISM_2026-07-26.md",
+      "status": "HISTORICAL_PROVENANCE_INCOMPLETE",
+      "claimManifest": "reports/manifests/ferox-force-flee-mechanism-2026-07-26.claims.json",
+      "reason": "Historical native provenance remains incomplete and must stay visible but non-active."
+    },
+    {
+      "reportPath": "reports/TIDES_OF_FORTUNE_COMPLETE_NATIVE_2026-07-26.md",
+      "status": "HISTORICAL_PROVENANCE_INCOMPLETE",
+      "claimManifest": "reports/manifests/tides-of-fortune-complete-native-2026-07-26.claims.json",
+      "reason": "Historical native provenance remains incomplete and must stay visible but non-active."
+    },
+    {
+      "reportPath": "reports/tides_of_fortune_2026-07-25.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Reference analysis retained for diagnostic use; it is not an active formal release claim set."
+    },
+    {
+      "reportPath": "reports/tides_of_fortune_exact_loot_2026-07-25.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Reference analysis retained for diagnostic use; it is not an active formal release claim set."
+    },
+    {
+      "reportPath": "reports/tides_of_fortune_loot_flow_player_guide_2026-07-25.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Reference analysis retained for diagnostic use; it is not an active formal release claim set."
+    }
+  ]
+}

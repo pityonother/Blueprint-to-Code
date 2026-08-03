@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -164,20 +165,24 @@ def _read_optional_pointer(path: Path) -> bytes | None:
         return None
 
 
-def _directory_identity(path: Path, *, label: str) -> tuple[int, ...]:
-    _require_plain_path_chain(path, label=label)
-    _require_plain_directory(path, label=label)
-    metadata = path.lstat()
-    # On POSIX, a directory's link count changes when this publisher creates or
-    # removes child directories.  It is therefore mutable contents metadata,
-    # not stable identity.  Device/inode plus the plain-directory checks retain
-    # replacement, symlink, junction, and reparse-point protection.
+def _stable_directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    # Link count and timestamps change when children are created or renamed.
+    # Windows also allows unrelated directory attributes such as ARCHIVE and
+    # NOT_CONTENT_INDEXED to change asynchronously.  Only the reparse bit has
+    # path-binding meaning; the plain-path checks reject it at every sample.
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400))
     return (
         int(metadata.st_dev),
         int(metadata.st_ino),
         int(metadata.st_mode),
-        int(getattr(metadata, "st_file_attributes", 0)),
+        int(getattr(metadata, "st_file_attributes", 0)) & reparse_flag,
     )
+
+
+def _directory_identity(path: Path, *, label: str) -> tuple[int, ...]:
+    _require_plain_path_chain(path, label=label)
+    _require_plain_directory(path, label=label)
+    return _stable_directory_identity(path.lstat())
 
 
 def _require_directory_binding(

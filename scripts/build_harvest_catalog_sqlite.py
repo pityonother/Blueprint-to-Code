@@ -5,12 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-from blueprint_translator.harvest_catalog_sqlite import convert_resource_node_catalog
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from blueprint_translator.harvest_catalog_sqlite import (  # noqa: E402
+    convert_resource_node_catalog,
+)
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_CATALOG = (
     PROJECT_ROOT / "analysis" / "harvest_nodes" / "resource_node_catalog.json"
 )

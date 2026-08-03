@@ -8,6 +8,9 @@ Blueprint to Code 是面向 ARK DevKit / Unreal Blueprint 的本地、证据优�
 证据，并可选连接与 DLL/PDB hash 绑定的 Native Evidence。项目版本以根目录
 [`VERSION`](VERSION) 为唯一来源。
 
+当前软件版本为 `0.3.0`；发布范围、分发边界与已知限制见
+[v0.3.0 Release notes](docs/releases/v0.3.0.md)。
+
 它不是完整 Blueprint decompiler，不会恢复开发者的原始 C++，也不保证生成可编译
 C++。伪代码、Ghidra 伪 C 和静态排行都只是有明确来源与失效边界的分析产物。
 仓库和发布包不包含 ARK DevKit、游戏资产、ShooterGame DLL/PDB、Ghidra workspace

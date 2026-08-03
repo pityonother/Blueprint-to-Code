@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pityonother.github.io/Blueprint-to-Code/schemas/report_registry_v1.schema.json",
+  "title": "Blueprint to Code report release registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "releasePolicy", "reports"],
+  "properties": {
+    "schema": {"const": "blueprint-to-code-report-registry/v1"},
+    "releasePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activeFormalErrorsMustEqual",
+        "historicalIssuesRemainVisible"
+      ],
+      "properties": {
+        "activeFormalErrorsMustEqual": {"const": 0},
+        "historicalIssuesRemainVisible": {"const": true}
+      }
+    },
+    "reports": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reportPath", "status", "reason"],
+        "properties": {
+          "reportPath": {
+            "type": "string",
+            "pattern": "^reports/[^/]+\\.md$"
+          },
+          "status": {
+            "enum": [
+              "ACTIVE_FORMAL",
+              "HISTORICAL_PROVENANCE_INCOMPLETE",
+              "DIAGNOSTIC"
+            ]
+          },
+          "claimManifest": {
+            "type": "string",
+            "pattern": "^reports/manifests/[^/]+\\.claims\\.json$"
+          },
+          "reason": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"status": {"const": "DIAGNOSTIC"}},
+              "required": ["status"]
+            },
+            "then": {"not": {"required": ["claimManifest"]}},
+            "else": {"required": ["claimManifest"]}
+          }
+        ]
+      }
+    }
+  }
+}
