@@ -9,14 +9,39 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from package_windows_portable import (  # noqa: E402
+    PORTABLE_REQUIRED_FILES,
     build_portable_manifest,
     portable_asset_name,
     should_include_portable_path,
+    validate_portable_entries,
+    validate_required_portable_names,
     verify_python_runtime,
 )
 
 
 class WindowsPortablePackageTests(unittest.TestCase):
+    def test_required_files_include_user_instructions_and_runtime_provenance(self):
+        self.assertTrue(
+            {
+                "QUICK_START_zh.txt",
+                "docs/USER_GUIDE_zh.md",
+                "runtime/PYTHON_RUNTIME_SOURCE.txt",
+                "runtime/python/LICENSE.txt",
+                "runtime/python/python.exe",
+                "dist/index.html",
+            }.issubset(PORTABLE_REQUIRED_FILES)
+        )
+
+    def test_required_file_validator_rejects_a_missing_quick_start(self):
+        names = {
+            f"BlueprintToCode/{relative}"
+            for relative in PORTABLE_REQUIRED_FILES
+            if relative != "QUICK_START_zh.txt"
+        }
+
+        with self.assertRaisesRegex(ValueError, "QUICK_START_zh.txt"):
+            validate_required_portable_names(names)
+
     def test_public_package_path_policy_is_data_minimal(self):
         included = (
             "START_HERE.bat",
@@ -50,12 +75,34 @@ class WindowsPortablePackageTests(unittest.TestCase):
             ".github/workflows/release-windows.yml",
             "reports/private-review.md",
             "START_GHIDRA.bat",
+            "scripts/private.pem",
+            "scripts/private.key",
+            "scripts/.npmrc",
+            "src/cache.sqlite",
+            "public/installer.msi",
+            "scripts/tool.whl",
         )
 
         self.assertTrue(all(should_include_portable_path(path) for path in included))
         self.assertTrue(
             all(not should_include_portable_path(path) for path in excluded)
         )
+
+    def test_content_policy_rejects_any_user_path_and_binary_secret(self):
+        entries = {
+            "BlueprintToCode/scripts/local-note.txt": (
+                "C:" + r"\Users\victim\Desktop\private.txt"
+            ).encode(),
+        }
+        with self.assertRaisesRegex(ValueError, "absolute-path"):
+            validate_portable_entries(ROOT, entries)
+
+        binary_secret = b"\x00-----BEGIN " + b"PRIVATE KEY-----\x00"
+        with self.assertRaisesRegex(ValueError, "secret-signature"):
+            validate_portable_entries(
+                ROOT,
+                {"BlueprintToCode/scripts/opaque.bin.txt": binary_secret},
+            )
 
     def test_bundled_runtime_matches_the_pinned_python_org_archive(self):
         result = verify_python_runtime(ROOT)
@@ -100,7 +147,7 @@ class WindowsPortablePackageTests(unittest.TestCase):
             manifest["excludedData"],
             ["analysis", "captures", "knowledge_base", "native_evidence"],
         )
-        self.assertNotIn("C:\\Users", str(manifest))
+        self.assertNotIn("C:" + r"\Users", str(manifest))
 
     def test_release_asset_name_is_stable_and_user_facing(self):
         self.assertEqual(

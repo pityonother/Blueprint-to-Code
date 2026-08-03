@@ -1,0 +1,78 @@
+name: Windows portable package
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-portable-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set up smoke-test Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build the Windows portable assets
+        run: >-
+          npm run package:windows --
+          --output-dir "$env:RUNNER_TEMP\portable"
+
+      - name: Clean-extract smoke test with bundled Python
+        run: >-
+          python scripts/smoke_test_windows_portable.py
+          --archive "$env:RUNNER_TEMP\portable\BlueprintToCode-v0.3.1-windows-x64-portable.zip"
+
+      - name: Assert the tracked checkout stayed clean
+        run: |
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dirtyPaths = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($dirtyPaths.Count -ne 0) {
+            throw "Portable build modified the tracked checkout."
+          }
+
+      - name: Upload the verified portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueprintToCode-v0.3.1-windows-x64-portable
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}\portable\BlueprintToCode-v0.3.1-windows-x64-portable.zip
+            ${{ runner.temp }}\portable\BlueprintToCode-v0.3.1-windows-x64-portable.zip.sha256

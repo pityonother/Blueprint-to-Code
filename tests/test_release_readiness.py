@@ -1,3 +1,4 @@
+import os
 import subprocess
 import shutil
 import tempfile
@@ -56,6 +57,47 @@ class ReleaseReadinessTests(unittest.TestCase):
             "echo DevKit Content root: %BLUEPRINT_TO_CODE_DEVKIT_CONTENT_ROOT%",
             launcher,
         )
+
+    def test_start_here_passes_its_root_to_powershell_without_code_interpolation(self):
+        launcher = (ROOT / "START_HERE.bat").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'set "BLUEPRINT_TO_CODE_LAUNCH_ROOT=%~dp0"',
+            launcher,
+        )
+        self.assertIn(
+            "Resolve-Path -LiteralPath $env:BLUEPRINT_TO_CODE_LAUNCH_ROOT",
+            launcher,
+        )
+        self.assertNotIn("Resolve-Path '%~dp0'", launcher)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            special_root = Path(temp_dir) / "O'Hare & portable"
+            special_root.mkdir()
+            environment = dict(os.environ)
+            environment["BLUEPRINT_TO_CODE_LAUNCH_ROOT"] = str(special_root)
+            process = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "$root=(Resolve-Path -LiteralPath "
+                        "$env:BLUEPRINT_TO_CODE_LAUNCH_ROOT).Path; "
+                        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+                        "Write-Output $root"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+                check=False,
+            )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stdout.strip(), str(special_root.resolve()))
 
 
 if __name__ == "__main__":

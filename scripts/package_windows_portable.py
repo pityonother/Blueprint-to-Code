@@ -33,11 +33,32 @@ from package_full_env import (  # noqa: E402
     sanitize_repository_url,
     should_include_tracked,
 )
+from release_content_policy import (  # noqa: E402
+    ReleaseArchiveEntry,
+    _path_category,
+    scan_release_entries,
+)
 
 
 PACKAGE_TYPE = "windows-portable-user-release"
 PACKAGE_SCHEMA = "blueprint-to-code.windows-portable-package.v1"
 RUNTIME_SOURCE_FILE = "runtime/PYTHON_RUNTIME_SOURCE.txt"
+PORTABLE_REQUIRED_FILES = frozenset(
+    {
+        "DIAGNOSE.bat",
+        "PACKAGE_MANIFEST.json",
+        "QUICK_START_zh.txt",
+        "SHA256SUMS.txt",
+        "START_HERE.bat",
+        "VERSION",
+        "dist/index.html",
+        "docs/USER_GUIDE_zh.md",
+        "runtime/PYTHON_RUNTIME_SOURCE.txt",
+        "runtime/python/LICENSE.txt",
+        "runtime/python/python.exe",
+        "scripts/blueprint_tool_server.py",
+    }
+)
 _ROOT_FILES = {
     "CHANGELOG.md",
     "DIAGNOSE.bat",
@@ -102,10 +123,13 @@ def should_include_portable_path(path: str) -> bool:
     normalized = _normalized_relative(path)
     if not should_include_tracked(normalized):
         return False
+    if normalized.startswith("runtime/python/") or normalized == RUNTIME_SOURCE_FILE:
+        return True
+    if _path_category(normalized) is not None:
+        return False
     return (
         normalized in _ROOT_FILES
         or normalized in _DOC_FILES
-        or normalized == RUNTIME_SOURCE_FILE
         or any(normalized.startswith(prefix) for prefix in _SOURCE_PREFIXES)
     )
 
@@ -275,20 +299,66 @@ def _source_bytes(source: Path | bytes) -> bytes:
     return source if isinstance(source, bytes) else source.read_bytes()
 
 
-def _reject_builder_path_leaks(root: Path, entries: dict[str, Path | bytes]) -> None:
-    markers = {
-        str(root.resolve()).casefold(),
-        root.resolve().as_posix().casefold(),
+def _portable_scan_path(relative: str) -> str:
+    if relative.startswith("dist/"):
+        dist_relative = relative.removeprefix("dist/")
+        if PurePosixPath(dist_relative).suffix.casefold() == ".png":
+            return f"public/assets/portable-dist/{dist_relative}"
+        return f"portable_dist/{dist_relative}"
+    if relative == RUNTIME_SOURCE_FILE:
+        return "portable_runtime/PYTHON_RUNTIME_SOURCE.txt"
+    if relative in _PLACEHOLDER_FILES or relative in {
+        "PACKAGE_MANIFEST.json",
+        "SHA256SUMS.txt",
+    }:
+        return f"portable_generated/{relative.replace('/', '_')}"
+    return relative
+
+
+def validate_portable_entries(root: Path, entries: dict[str, Path | bytes]) -> None:
+    """Apply the source scanner to every non-runtime portable entry."""
+
+    project_root = root.resolve()
+    runtime_names = {
+        f"runtime/python/{path.relative_to(project_root / 'runtime' / 'python').as_posix()}"
+        for path in (project_root / "runtime" / "python").rglob("*")
+        if path.is_file()
     }
+    if any(
+        name.removeprefix(f"{ARCHIVE_ROOT}/").startswith("runtime/python/")
+        for name in entries
+    ):
+        verify_python_runtime(project_root)
+    scan_entries: list[ReleaseArchiveEntry] = []
     for archive_name, source in entries.items():
         relative = archive_name.removeprefix(f"{ARCHIVE_ROOT}/")
         _validate_portable_relative_path(relative)
-        raw = _source_bytes(source)
-        if b"\0" in raw:
+        if relative.startswith("runtime/python/"):
+            if relative not in runtime_names:
+                raise ValueError(f"unverified portable runtime entry: {relative}")
             continue
-        text = raw.decode("utf-8", errors="ignore").casefold()
-        if any(marker and marker in text for marker in markers):
-            raise ValueError(f"portable package leaks the builder path: {relative}")
+        scan_entries.append(
+            ReleaseArchiveEntry(
+                _portable_scan_path(relative),
+                _source_bytes(source),
+                "file",
+            )
+        )
+    report = scan_release_entries(scan_entries, repository_root=project_root)
+    if report.findings:
+        categories = ",".join(sorted({item.category for item in report.findings}))
+        raise ValueError(f"portable content policy findings: {categories}")
+
+
+def validate_required_portable_names(names: set[str] | list[str]) -> None:
+    normalized = {name.replace("\\", "/") for name in names}
+    missing = sorted(
+        f"{ARCHIVE_ROOT}/{relative}"
+        for relative in PORTABLE_REQUIRED_FILES
+        if f"{ARCHIVE_ROOT}/{relative}" not in normalized
+    )
+    if missing:
+        raise ValueError(f"portable archive is missing required files: {missing}")
 
 
 def _verify_public_archive(
@@ -301,6 +371,7 @@ def _verify_public_archive(
         names = [name.replace("\\", "/") for name in archive.namelist()]
         if len(names) != len(set(names)):
             raise ValueError("portable archive contains duplicate paths")
+        validate_required_portable_names(names)
         expected_names = set(expected_hashes) | {f"{ARCHIVE_ROOT}/SHA256SUMS.txt"}
         if set(names) != expected_names:
             raise ValueError("portable archive entry set differs from its checksums")
@@ -385,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
         _add_entry(entries, "PACKAGE_MANIFEST.json", manifest_bytes)
-        _reject_builder_path_leaks(root, entries)
+        validate_portable_entries(root, entries)
 
         hashes = {
             name: _sha256_bytes(source)
