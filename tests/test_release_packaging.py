@@ -1,7 +1,10 @@
+import hashlib
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -197,6 +200,229 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertEqual(manifest["commit"], "a" * 40)
         self.assertNotIn("source", manifest)
         self.assertNotIn("C:\\Users", str(manifest))
+
+    def test_v3_sample_selection_packages_only_current_and_pointed_revision(self):
+        from package_full_env import discover_sample_evidence_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = Path(temp_dir) / "PointedFixture"
+            evidence_dir = asset_dir / "evidence"
+            revision_dir = evidence_dir / "revisions" / "revision-current"
+            orphan_dir = evidence_dir / "revisions" / "revision-orphan"
+            staging_dir = evidence_dir / ".staging-unpublished"
+            revision_dir.mkdir(parents=True)
+            orphan_dir.mkdir(parents=True)
+            staging_dir.mkdir()
+
+            pointer = evidence_dir / "current.json"
+            database = revision_dir / "evidence.sqlite"
+            manifest = revision_dir / "manifest.json"
+            agent_index = revision_dir / "agent_index.md"
+            database_raw = b"current-database"
+            index_raw = b"# current index\n"
+            manifest_raw = (
+                json.dumps(
+                    {
+                        "revisionId": "revision-current",
+                        "artifacts": {
+                            "agentIndex": {
+                                "bytes": len(index_raw),
+                                "sha256": hashlib.sha256(index_raw).hexdigest(),
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+            pointer_raw = (
+                json.dumps(
+                    {
+                        "revisionId": "revision-current",
+                        "manifestSha256": manifest_sha,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            for path, content in (
+                (pointer, pointer_raw),
+                (database, database_raw),
+                (manifest, manifest_raw),
+                (agent_index, index_raw),
+                (orphan_dir / "evidence.sqlite", b"orphan"),
+                (staging_dir / "evidence.sqlite", b"staging"),
+                (revision_dir / "evidence.sqlite-wal", b"wal"),
+                (revision_dir / "evidence.sqlite-shm", b"shm"),
+            ):
+                path.write_bytes(content)
+            (evidence_dir / "evidence.sqlite").write_bytes(b"v2 compatibility")
+            (evidence_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+            (asset_dir / "output").mkdir()
+            (asset_dir / "output" / "agent_index.md").write_text(
+                "# v2 compatibility\n", encoding="utf-8"
+            )
+            state = SimpleNamespace(
+                source_kind="INDEXED_V3_CURRENT",
+                pointer_path=pointer,
+                database_path=database,
+                manifest_path=manifest,
+                agent_index_path=agent_index,
+                database_bytes=len(database_raw),
+                database_sha256=hashlib.sha256(database_raw).hexdigest(),
+                manifest_sha256=manifest_sha,
+                pointer_sha256=hashlib.sha256(pointer_raw).hexdigest(),
+            )
+
+            with patch(
+                "blueprint_translator.evidence_repository.resolve_asset_evidence_state",
+                return_value=state,
+            ):
+                resolved, selected = discover_sample_evidence_files(asset_dir)
+
+            self.assertIs(resolved, state)
+            self.assertEqual(
+                [relative.as_posix() for relative, _source in selected],
+                [
+                    "evidence/current.json",
+                    "evidence/revisions/revision-current/evidence.sqlite",
+                    "evidence/revisions/revision-current/manifest.json",
+                    "evidence/revisions/revision-current/agent_index.md",
+                ],
+            )
+            selected_payloads = {source for _relative, source in selected}
+            self.assertNotIn(b"orphan", selected_payloads)
+            self.assertNotIn(b"staging", selected_payloads)
+            self.assertNotIn(b"wal", selected_payloads)
+            self.assertNotIn(b"shm", selected_payloads)
+            self.assertNotIn(b"v2 compatibility", selected_payloads)
+            self.assertTrue(
+                all(str(asset_dir.resolve()) not in relative.as_posix() for relative, _ in selected)
+            )
+
+    def test_v3_sample_selection_supports_pruned_v2_compatibility_files(self):
+        from package_full_env import discover_sample_evidence_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = Path(temp_dir) / "PrunedFixture"
+            revision_dir = asset_dir / "evidence" / "revisions" / "revision-pruned"
+            revision_dir.mkdir(parents=True)
+            pointer = asset_dir / "evidence" / "current.json"
+            database = revision_dir / "evidence.sqlite"
+            manifest = revision_dir / "manifest.json"
+            agent_index = revision_dir / "agent_index.md"
+            database_raw = b"database"
+            index_raw = b"# index\n"
+            manifest_raw = (
+                json.dumps(
+                    {
+                        "revisionId": "revision-pruned",
+                        "artifacts": {
+                            "agentIndex": {
+                                "bytes": len(index_raw),
+                                "sha256": hashlib.sha256(index_raw).hexdigest(),
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+            pointer_raw = (
+                json.dumps(
+                    {
+                        "revisionId": "revision-pruned",
+                        "manifestSha256": manifest_sha,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            pointer.write_bytes(pointer_raw)
+            database.write_bytes(database_raw)
+            manifest.write_bytes(manifest_raw)
+            agent_index.write_bytes(index_raw)
+            state = SimpleNamespace(
+                source_kind="INDEXED_V3_CURRENT",
+                pointer_path=pointer,
+                database_path=database,
+                manifest_path=manifest,
+                agent_index_path=agent_index,
+                database_bytes=len(database_raw),
+                database_sha256=hashlib.sha256(database_raw).hexdigest(),
+                manifest_sha256=manifest_sha,
+                pointer_sha256=hashlib.sha256(pointer_raw).hexdigest(),
+            )
+
+            with patch(
+                "blueprint_translator.evidence_repository.resolve_asset_evidence_state",
+                return_value=state,
+            ):
+                _resolved, selected = discover_sample_evidence_files(asset_dir)
+
+            self.assertEqual(len(selected), 4)
+            self.assertFalse((asset_dir / "evidence" / "evidence.sqlite").exists())
+            self.assertFalse((asset_dir / "evidence" / "manifest.json").exists())
+            self.assertFalse((asset_dir / "output" / "agent_index.md").exists())
+
+    def test_tampered_v3_current_fails_closed_even_when_v2_compatibility_exists(self):
+        from package_full_env import discover_sample_evidence_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = Path(temp_dir) / "TamperedFixture"
+            evidence_dir = asset_dir / "evidence"
+            output_dir = asset_dir / "output"
+            evidence_dir.mkdir(parents=True)
+            output_dir.mkdir()
+            (evidence_dir / "current.json").write_text("{tampered", encoding="utf-8")
+            (evidence_dir / "evidence.sqlite").write_bytes(b"v2 compatibility")
+            (evidence_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+            (output_dir / "agent_index.md").write_text("# v2\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "JSON_INVALID"):
+                discover_sample_evidence_files(asset_dir)
+
+    def test_v2_sample_selection_keeps_legacy_package_layout(self):
+        from package_full_env import discover_sample_evidence_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = Path(temp_dir) / "V2Fixture"
+            evidence_dir = asset_dir / "evidence"
+            output_dir = asset_dir / "output"
+            evidence_dir.mkdir(parents=True)
+            output_dir.mkdir()
+            database = evidence_dir / "evidence.sqlite"
+            manifest = evidence_dir / "manifest.json"
+            agent_index = output_dir / "agent_index.md"
+            database.write_bytes(b"v2 database")
+            manifest.write_text("{}\n", encoding="utf-8")
+            agent_index.write_text("# v2 index\n", encoding="utf-8")
+            state = SimpleNamespace(
+                source_kind="INDEXED_V2_COMPATIBILITY",
+                pointer_path=None,
+                database_path=database,
+                manifest_path=manifest,
+                agent_index_path=agent_index,
+                database_bytes=database.stat().st_size,
+                database_sha256=hashlib.sha256(database.read_bytes()).hexdigest(),
+            )
+
+            with patch(
+                "blueprint_translator.evidence_repository.resolve_asset_evidence_state",
+                return_value=state,
+            ):
+                _resolved, selected = discover_sample_evidence_files(asset_dir)
+
+            self.assertEqual(
+                [relative.as_posix() for relative, _source in selected],
+                [
+                    "evidence/evidence.sqlite",
+                    "evidence/manifest.json",
+                    "output/agent_index.md",
+                ],
+            )
 
 
 if __name__ == "__main__":

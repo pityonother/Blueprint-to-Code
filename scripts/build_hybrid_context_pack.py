@@ -498,7 +498,10 @@ def main(argv: list[str] | None = None) -> int:
     current_revision: str | None = None
     current_source: str | None = None
     if args.asset_dir is not None:
-        _calls, identity = extract_blueprint_calls(args.asset_dir.resolve())
+        asset_dir = Path(
+            os.path.abspath(os.path.expanduser(os.fspath(args.asset_dir)))
+        )
+        _calls, identity = extract_blueprint_calls(asset_dir)
         current_revision = identity["revisionId"]
         current_source = identity["sourceFingerprint"]
     with open_hybrid_evidence_repository(args.hybrid_dir) as hybrid, open_native_evidence_repository(

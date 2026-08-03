@@ -20,7 +20,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.evidence_query import EvidenceQueryService
+from blueprint_translator.evidence_query import EvidenceQueryService  # noqa: E402
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    resolve_asset_evidence_state,
+)
 
 
 DEFAULT_ITERATIONS = 25
@@ -67,6 +70,8 @@ def benchmark_database(
     iterations: int = DEFAULT_ITERATIONS,
     max_search_p95_ms: float = DEFAULT_SEARCH_P95_MS,
     max_two_hop_p95_ms: float = DEFAULT_TWO_HOP_P95_MS,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
 ) -> dict[str, Any]:
     path = Path(database_path).expanduser().resolve()
     if iterations <= 0:
@@ -80,7 +85,11 @@ def benchmark_database(
         "pageSize": 25,
         "budgetTokens": 8000,
     }
-    with EvidenceQueryService.open(path) as service:
+    with EvidenceQueryService.open(
+        path,
+        expected_sha256=expected_sha256,
+        expected_size=expected_size,
+    ) as service:
         discovery = service.query(search_request)
         node = next(
             (
@@ -163,17 +172,24 @@ def main(argv: list[str] | None = None) -> int:
     database_path = (
         args.database
         if args.database is not None
-        else args.asset_dir / "evidence" / "evidence.sqlite"
-        if args.asset_dir is not None
         else DEFAULT_DATABASE
     )
+    expected_sha256: str | None = None
+    expected_size: int | None = None
     try:
+        if args.asset_dir is not None:
+            state = resolve_asset_evidence_state(args.asset_dir)
+            database_path = state.database_path
+            expected_sha256 = state.database_sha256
+            expected_size = state.database_bytes
         result = benchmark_database(
             database_path,
             search_query=args.search_query,
             iterations=args.iterations,
             max_search_p95_ms=args.max_search_p95_ms,
             max_two_hop_p95_ms=args.max_two_hop_p95_ms,
+            expected_sha256=expected_sha256,
+            expected_size=expected_size,
         )
     except Exception as exc:
         result = {

@@ -246,6 +246,12 @@ def capture_dir_for_asset(asset: dict[str, Any], capture_root: Path) -> Path:
 
 
 def load_capture(capture_dir: Path) -> dict[str, Any]:
+    from blueprint_translator.evidence_repository import (
+        evidence_state_metadata,
+        open_resolved_asset_repository,
+        resolve_asset_evidence_state,
+    )
+
     paths = {
         "package": capture_dir / "uasset_package.json",
         "graph_nodes": capture_dir / "uasset_graph_nodes.json",
@@ -259,10 +265,17 @@ def load_capture(capture_dir: Path) -> dict[str, Any]:
         "evidence_store": capture_dir / "evidence" / "evidence.sqlite",
         "agent_index": capture_dir / "output" / "agent_index.md",
     }
-    if paths["evidence_store"].is_file():
-        from blueprint_translator.evidence_repository import open_asset_repository
-
-        with open_asset_repository(capture_dir) as repository:
+    try:
+        evidence_state = resolve_asset_evidence_state(
+            capture_dir,
+            allow_stale=False,
+        )
+    except FileNotFoundError:
+        evidence_state = None
+    if evidence_state is not None:
+        paths["evidence_store"] = evidence_state.database_path
+        paths["agent_index"] = evidence_state.agent_index_path
+        with open_resolved_asset_repository(evidence_state) as repository:
             overview = repository.query({"operation": "overview", "budgetTokens": 800})
             identity = repository.identity()
             graph_rows = repository.graph_summaries()
@@ -334,6 +347,7 @@ def load_capture(capture_dir: Path) -> dict[str, Any]:
         return {
             "capture_dir": capture_dir,
             "paths": paths,
+            "evidence_publication": evidence_state_metadata(evidence_state),
             "package": {
                 "uasset_path": identity.get("uasset_path"),
                 "summary": {"package_name": str(identity.get("object_path") or "").split(".", 1)[0]},

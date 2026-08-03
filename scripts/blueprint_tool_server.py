@@ -42,6 +42,11 @@ from blueprint_translator.capture import (
 from blueprint_translator.artifact_modes import normalize_artifact_mode
 from blueprint_translator.devkit_paths import first_existing_devkit_content_root
 from blueprint_translator.graph_queue import graph_queue_summary, graph_queue_text_for_mode
+from blueprint_translator.evidence_publication import (
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_path_chain,
+)
 from blueprint_translator.evidence_repository import open_asset_repository
 from blueprint_translator.harvest_node_repository import (
     HarvestDatasetInvalid,
@@ -76,7 +81,8 @@ from blueprint_translator.report_query import (
     MAX_REPORT_QUERY_BUDGET,
     REPORT_FILES,
     build_report_view,
-    resolve_report_path,
+    read_report_source,
+    resolve_report_source,
 )
 from blueprint_translator.utils import read_clipboard, safe_filename
 from blueprint_translator.uasset_graphs import (
@@ -484,10 +490,39 @@ def uasset_structure_counts(asset_dir: Path) -> dict[str, int]:
     }
 
 
-def indexed_asset_metrics(asset_dir: Path) -> tuple[dict[str, int], int, str]:
+def _indexed_evidence_declared(asset_dir: Path) -> bool:
+    for candidate in (
+        asset_dir / "evidence" / "current.json",
+        asset_dir / "evidence" / "evidence.sqlite",
+    ):
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        return True
+    return False
+
+
+def _evidence_public_metadata(repository: object) -> dict[str, object]:
+    """Return the bounded, path-free evidence identity exposed by HTTP."""
+
+    return {
+        "sourceKind": str(getattr(repository, "source_kind")),
+        "freshnessStatus": str(getattr(repository, "freshness_status")),
+        "releaseAuthority": bool(getattr(repository, "release_authority")),
+        "migrationRequired": bool(getattr(repository, "migration_required")),
+        "manifestSha256": getattr(repository, "manifest_sha256"),
+        "pointerSha256": getattr(repository, "pointer_sha256"),
+    }
+
+
+def indexed_asset_metrics(
+    asset_dir: Path,
+) -> tuple[dict[str, int], int, str, dict[str, object]]:
     with open_asset_repository(asset_dir) as repository:
         overview = repository.query({"operation": "overview", "budgetTokens": 800})
         graph_rows = repository.graph_summaries()
+        evidence_metadata = _evidence_public_metadata(repository)
     summary = overview.get("summary", {})
     status_rows = [
         (str(row.get("status") or "").casefold(), graph_name_key(str(row.get("name") or "")))
@@ -508,12 +543,12 @@ def indexed_asset_metrics(asset_dir: Path) -> tuple[dict[str, int], int, str]:
     }
     default_count = int(summary.get("defaultCount") or 0)
     revision = str(overview.get("asset", {}).get("revisionId") or "")
-    return graph_counts, default_count, revision
+    return graph_counts, default_count, revision, evidence_metadata
 
 
 def uasset_graph_read_counts(asset_dir: Path) -> dict[str, int]:
-    if (asset_dir / "evidence" / "evidence.sqlite").is_file():
-        graph_counts, _, _ = indexed_asset_metrics(asset_dir)
+    if _indexed_evidence_declared(asset_dir):
+        graph_counts, _, _, _ = indexed_asset_metrics(asset_dir)
         return graph_counts
     payload = read_json_file(asset_dir / "uasset_graph_nodes.json")
     if not isinstance(payload, dict):
@@ -555,9 +590,15 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
     context_pack_path = output_dir / "context_pack.json"
     queue_counts = graph_queue_counts(asset_dir)
     structure_counts = uasset_structure_counts(asset_dir)
-    evidence_database_path = asset_dir / "evidence" / "evidence.sqlite"
-    if evidence_database_path.is_file():
-        graph_read_counts, evidence_default_count, evidence_revision = indexed_asset_metrics(asset_dir)
+    has_indexed_evidence = _indexed_evidence_declared(asset_dir)
+    evidence_metadata: dict[str, object] = {}
+    if has_indexed_evidence:
+        (
+            graph_read_counts,
+            evidence_default_count,
+            evidence_revision,
+            evidence_metadata,
+        ) = indexed_asset_metrics(asset_dir)
     else:
         graph_read_counts = uasset_graph_read_counts(asset_dir)
         evidence_default_count = 0
@@ -574,8 +615,11 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
         key: (asset_dir / Path(*parts)).is_file()
         for key, parts in REPORT_TARGETS.items()
     }
+    if has_indexed_evidence:
+        # The repository open above already validated the manifest-bound index.
+        reports["agent_index"] = True
     preserved_legacy_reports = bool(
-        evidence_database_path.is_file()
+        has_indexed_evidence
         and any(
             reports.get(key, False)
             for key in ("behavior_summary", "asset_report", "diagnostics_report", "call_graph_summary")
@@ -585,7 +629,7 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
     return {
         "name": asset_dir.name,
         "path": str(asset_dir),
-        "graphs": graph_read_counts["graphs"] if evidence_database_path.is_file() else graph_count(asset_dir),
+        "graphs": graph_read_counts["graphs"] if has_indexed_evidence else graph_count(asset_dir),
         "hasGraphQueue": graph_queue_path.is_file(),
         "graphQueueCount": queue_counts["total"],
         "graphQueueCompactCount": queue_counts["compact"],
@@ -601,8 +645,8 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
         "uassetCollapsedGraphCount": structure_counts["collapsed"],
         "uassetStandaloneGraphCount": structure_counts["standalone"],
         "uassetFunctionCount": structure_counts["function"],
-        "hasUassetGraphRead": uasset_graph_read_path.is_file() or evidence_database_path.is_file(),
-        "hasEvidenceStore": evidence_database_path.is_file(),
+        "hasUassetGraphRead": uasset_graph_read_path.is_file() or has_indexed_evidence,
+        "hasEvidenceStore": has_indexed_evidence,
         "evidenceRevision": evidence_revision,
         "uassetReadGraphCount": graph_read_counts["graphs"],
         "uassetReadNodeCount": graph_read_counts["nodes"],
@@ -625,6 +669,7 @@ def asset_summary(asset_dir: Path) -> dict[str, object]:
         "assetMemoryCardExists": asset_memory_card_path.is_file(),
         "contextPackExists": context_pack_path.is_file(),
         "exportQuality": devkit_export_quality(asset_dir, components_data),
+        **evidence_metadata,
     }
 
 
@@ -642,7 +687,7 @@ def list_assets() -> list[dict[str, object]]:
             or (path / "uasset_class_defaults.json").is_file()
             or (path / "graph_candidates_uasset.json").is_file()
             or (path / "uasset_graph_nodes.json").is_file()
-            or (path / "evidence" / "evidence.sqlite").is_file()
+            or _indexed_evidence_declared(path)
         ):
             assets.append(asset_summary(path))
     return assets
@@ -903,10 +948,12 @@ def resolve_asset_dir(raw_path: str) -> Path:
     asset_dir = Path(unquote(raw_path))
     if not asset_dir.is_absolute():
         asset_dir = PROJECT_ROOT / asset_dir
-    asset_dir = asset_dir.resolve()
-    if not asset_dir.is_dir():
-        raise ValueError("Asset directory does not exist.")
-    if not is_within(asset_dir, PROJECT_ROOT):
+    asset_dir = _lexical_absolute(asset_dir)
+    _require_plain_path_chain(asset_dir, label="asset directory")
+    _require_plain_directory(asset_dir, label="asset directory")
+    if os.path.normcase(os.path.commonpath((asset_dir, PROJECT_ROOT))) != os.path.normcase(
+        os.fspath(PROJECT_ROOT)
+    ):
         raise ValueError("Asset directory must be inside the project.")
     return asset_dir
 
@@ -940,14 +987,22 @@ def query_asset_evidence(
         or ":" in identifier
     ):
         raise ValueError("asset identifier must be one directory name inside the capture root")
-    root = Path(capture_root).expanduser().resolve()
-    asset_dir = (root / identifier).resolve()
-    if not is_within(asset_dir, root) or not asset_dir.is_dir():
+    root = _lexical_absolute(capture_root)
+    _require_plain_path_chain(root, label="capture root")
+    _require_plain_directory(root, label="capture root")
+    asset_dir = _lexical_absolute(root / identifier)
+    _require_plain_path_chain(asset_dir, label="asset directory")
+    if (
+        os.path.normcase(os.path.commonpath((asset_dir, root)))
+        != os.path.normcase(os.fspath(root))
+        or not asset_dir.is_dir()
+    ):
         raise ValueError("asset identifier does not resolve to a capture directory")
     if not isinstance(request, dict):
         raise ValueError("evidence query request must be an object")
     with open_asset_repository(asset_dir) as repository:
-        return repository.query(request)
+        result = repository.query(request)
+        return {**result, **_evidence_public_metadata(repository)}
 
 
 def query_report_for_request(
@@ -962,9 +1017,12 @@ def query_report_for_request(
     budget: int = DEFAULT_REPORT_QUERY_BUDGET,
     context_lines: int = 2,
 ) -> dict[str, object]:
-    report_path = resolve_report_path(asset_dir, target)
+    report_path, report_text, evidence_metadata = read_report_source(
+        asset_dir,
+        target,
+    )
     result = build_report_view(
-        report_path.read_text(encoding="utf-8-sig", errors="replace"),
+        report_text,
         mode=mode,
         query=query,
         section=section,
@@ -973,7 +1031,7 @@ def query_report_for_request(
         token_budget=min(max(int(budget or 0), 1), MAX_REPORT_QUERY_BUDGET),
         context_lines=min(max(int(context_lines or 0), 0), MAX_REPORT_CONTEXT_LINES),
     )
-    return {"path": str(report_path), **result}
+    return {"path": str(report_path), **result, **evidence_metadata}
 
 
 def parse_report_query_int(raw_value: str, name: str, default: int) -> int:
@@ -1023,7 +1081,7 @@ def report_generation_command(
     """Build current human reports, refreshing indexed sources in dual mode first."""
 
     root = asset_dir.expanduser().resolve()
-    if not (root / "evidence" / "evidence.sqlite").is_file():
+    if not _indexed_evidence_declared(root):
         return analyzer_command(root, report_level, keep_stale_output=keep_stale_output)
     if report_level not in {"compact", "standard", "debug"}:
         raise ValueError("Invalid report level.")
@@ -2222,9 +2280,23 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/open":
                 asset_dir = resolve_asset_dir(str(body.get("assetPath") or ""))
-                target_path = resolve_target(asset_dir, str(body.get("target") or ""), OPEN_TARGETS)
+                requested_target = str(body.get("target") or "")
+                if requested_target == "agent_index":
+                    target_path, evidence_metadata = resolve_report_source(
+                        asset_dir,
+                        requested_target,
+                    )
+                else:
+                    target_path = resolve_target(asset_dir, requested_target, OPEN_TARGETS)
+                    evidence_metadata = {}
                 open_path(target_path)
-                self.send_json({"ok": True, "path": str(target_path)})
+                self.send_json(
+                    {
+                        "ok": True,
+                        "path": str(target_path),
+                        **evidence_metadata,
+                    }
+                )
                 return
             if self.path == "/api/open-captures":
                 CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -2374,12 +2446,30 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         values = parse_qs(query)
         try:
             asset_dir = resolve_asset_dir(values.get("assetPath", [""])[0])
-            target_path = resolve_target(asset_dir, values.get("target", [""])[0], REPORT_TARGETS)
-            if not target_path.is_file():
-                self.send_error_json("Report file does not exist.", HTTPStatus.NOT_FOUND)
-                return
-            content = target_path.read_text(encoding="utf-8-sig", errors="replace")
-            self.send_json({"ok": True, "path": str(target_path), "content": content})
+            target = values.get("target", [""])[0]
+            if target == "agent_index":
+                target_path, content, evidence_metadata = read_report_source(
+                    asset_dir,
+                    target,
+                )
+            else:
+                target_path = resolve_target(asset_dir, target, REPORT_TARGETS)
+                evidence_metadata = {}
+                if not target_path.is_file():
+                    self.send_error_json("Report file does not exist.", HTTPStatus.NOT_FOUND)
+                    return
+                content = target_path.read_text(
+                    encoding="utf-8-sig",
+                    errors="replace",
+                )
+            self.send_json(
+                {
+                    "ok": True,
+                    "path": str(target_path),
+                    "content": content,
+                    **evidence_metadata,
+                }
+            )
         except Exception as exc:
             self.send_error_json(str(exc))
 

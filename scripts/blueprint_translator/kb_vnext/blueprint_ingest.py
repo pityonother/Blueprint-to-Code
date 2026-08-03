@@ -9,10 +9,16 @@ import re
 import sqlite3
 import zlib
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote
 
+from ..evidence_publication import (
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_path_chain,
+)
 from ..evidence_schema import (
     EVIDENCE_SCHEMA_VERSION,
     LEGACY_CAPTURE_PARSER_VERSION,
@@ -20,10 +26,22 @@ from ..evidence_schema import (
     make_default_ref,
     make_revision_id,
 )
+from ..evidence_repository import (
+    ResolvedEvidenceState,
+    open_bound_evidence_database,
+    resolve_asset_evidence_state,
+)
+from ..evidence_revision import (
+    EVIDENCE_REVISION_MANIFEST_SCHEMA,
+    EvidenceArtifactInvalid,
+)
 from ..evidence_writer import DIRECT_PAYLOAD_PARSER_VERSION
 from .fact_store import FactValue, store_fact
 from .ontology import OntologyBundle
-from .source_manifest import SourceRevision
+from .source_manifest import (
+    SourceRevision,
+    live_capture_evidence_fingerprint,
+)
 
 
 MAX_INLINE_CONTAINER_ITEMS = 64
@@ -1186,16 +1204,26 @@ def _validate_identity(
         raise _RejectedAsset("Evidence manifest is missing")
     if manifest_path.is_file():
         manifest = _read_json_object(manifest_path)
-        expected = {
-            "asset_id": identity.asset_id,
-            "asset_name": identity.asset_name,
-            "object_path": identity.object_path,
-            "revision_id": identity.revision_id,
-            "source_fingerprint": identity.source_fingerprint,
-            "parser_version": identity.parser_version,
-            "schema": identity.schema_version,
-            "database": "evidence.sqlite",
-        }
+        if manifest.get("schema") == EVIDENCE_REVISION_MANIFEST_SCHEMA:
+            expected = {
+                "assetId": identity.asset_id,
+                "objectPath": identity.object_path,
+                "revisionId": identity.revision_id,
+                "sourceFingerprint": identity.source_fingerprint,
+                "parserVersion": identity.parser_version,
+                "evidenceSchemaVersion": identity.schema_version,
+            }
+        else:
+            expected = {
+                "asset_id": identity.asset_id,
+                "asset_name": identity.asset_name,
+                "object_path": identity.object_path,
+                "revision_id": identity.revision_id,
+                "source_fingerprint": identity.source_fingerprint,
+                "parser_version": identity.parser_version,
+                "schema": identity.schema_version,
+                "database": "evidence.sqlite",
+            }
         if any(
             str(manifest.get(key) or "") != value
             for key, value in expected.items()
@@ -1389,11 +1417,28 @@ def _asset_candidates(
 
 
 def _safe_asset_root(capture_root: Path, asset_name: str) -> Path:
-    root = capture_root.resolve()
-    candidate = (root / asset_name).resolve()
+    root = _lexical_absolute(capture_root)
+    _require_plain_path_chain(root, label="capture root")
+    _require_plain_directory(root, label="capture root")
+    candidate = _lexical_absolute(root / asset_name)
     if not asset_name or candidate.parent != root or _contains_local_path(asset_name):
         raise _RejectedAsset("unsafe capture asset name")
     return candidate
+
+
+def _resolve_live_evidence_state(asset_root: Path) -> ResolvedEvidenceState:
+    """Classify stale live evidence as a freshness gap, not trusted input."""
+
+    try:
+        return resolve_asset_evidence_state(asset_root)
+    except EvidenceArtifactInvalid as error:
+        if error.code == "STALE_SOURCE":
+            raise _FreshnessGap(str(error)) from error
+        raise
+    except ValueError as error:
+        if str(error).startswith("STALE_EVIDENCE_SOURCE:"):
+            raise _FreshnessGap(str(error)) from error
+        raise
 
 
 def _capture_asset_name(candidate: _AssetCandidate) -> str:
@@ -1496,10 +1541,9 @@ def materialize_blueprint_defaults(
                     capture_root,
                     capture_asset_name,
                 )
-                evidence_directory = asset_root / "evidence"
-                database_path = (
-                    evidence_directory / "evidence.sqlite"
-                )
+                evidence_state = _resolve_live_evidence_state(asset_root)
+                evidence_directory = evidence_state.database_path.parent
+                database_path = evidence_state.database_path
             if not database_path.is_file():
                 raise _RejectedAsset("Evidence database is missing")
             explicit = (
@@ -1507,20 +1551,31 @@ def materialize_blueprint_defaults(
                 if explicit_sources is not None
                 else None
             )
+            evidence_fingerprint = (
+                _blueprint_aggregate_fingerprint(database_path)
+                if frozen_evidence_root
+                else live_capture_evidence_fingerprint(evidence_state)
+            )
             if (
                 explicit is not None
-                and _blueprint_aggregate_fingerprint(database_path)
-                != explicit.fingerprint
+                and evidence_fingerprint != explicit.fingerprint
             ):
                 raise _RejectedAsset(
                     "Evidence aggregate changed after source manifest scan"
                 )
-            evidence = sqlite3.connect(
-                f"file:{database_path.resolve().as_posix()}?mode=ro",
-                uri=True,
-            )
-            evidence.row_factory = sqlite3.Row
-            evidence.execute("PRAGMA query_only=ON")
+            evidence_stack = ExitStack()
+            if frozen_evidence_root:
+                evidence = sqlite3.connect(
+                    f"file:{database_path.resolve().as_posix()}?mode=ro",
+                    uri=True,
+                )
+                evidence.row_factory = sqlite3.Row
+                evidence.execute("PRAGMA query_only=ON")
+                evidence_stack.callback(evidence.close)
+            else:
+                evidence = evidence_stack.enter_context(
+                    open_bound_evidence_database(evidence_state)
+                )
             try:
                 identity = _validate_identity(
                     evidence,
@@ -1579,12 +1634,17 @@ def materialize_blueprint_defaults(
                             "class_defaults contains a noncanonical identity"
                         )
             finally:
-                evidence.close()
-            if (
-                explicit is not None
-                and _blueprint_aggregate_fingerprint(database_path)
-                != explicit.fingerprint
-            ):
+                evidence_stack.close()
+            if frozen_evidence_root:
+                materialized_fingerprint = _blueprint_aggregate_fingerprint(
+                    database_path
+                )
+            else:
+                materialized_state = _resolve_live_evidence_state(asset_root)
+                materialized_fingerprint = live_capture_evidence_fingerprint(
+                    materialized_state
+                )
+            if materialized_fingerprint != evidence_fingerprint:
                 raise _RejectedAsset(
                     "Evidence aggregate changed during materialization"
                 )

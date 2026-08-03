@@ -347,38 +347,41 @@ def _decode_evidence_json(value: object, fallback: object = "") -> object:
         return fallback
 
 
-def _read_v2_compare_tables(database_path: Path) -> dict[str, list[dict[str, object]]]:
-    """Read canonical compare rows through a SQLite read-only connection."""
+def _read_v2_compare_tables(
+    connection: sqlite3.Connection,
+) -> dict[str, list[dict[str, object]]]:
+    """Read canonical compare rows from the repository's bound connection.
 
-    connection = sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    try:
-        queries = {
-            "nodes": (
-                "SELECT node_ref, graph_ref, local_index, node_identity, name, label, class_name, node_type, "
-                "control_kind, function_name, variable_name, event_name, delegate_name, macro_name, comment, "
-                "x, y, confidence FROM nodes ORDER BY graph_ref, local_index"
-            ),
-            "pins": (
-                "SELECT pin_ref, node_ref, ordinal, native_pin_id, persistent_guid, name, direction, category, "
-                "subcategory, default_value_json, default_object, confidence FROM pins ORDER BY node_ref, ordinal"
-            ),
-            "edges": (
-                "SELECT edge_ref, graph_ref, source_pin_ref, target_pin_ref, kind, confidence, resolution_status "
-                "FROM edges ORDER BY graph_ref, source_pin_ref, target_pin_ref, kind"
-            ),
-            "observations": (
-                "SELECT observation_ref, graph_ref, source_node_ref, source_pin_ref, target_node_ref, target_pin_ref, "
-                "target_node_name, target_native_pin_id, target_pin_name, kind, status, resolution_status, confidence "
-                "FROM edge_observations ORDER BY graph_ref, observation_ref"
-            ),
-        }
-        return {
-            key: [dict(row) for row in connection.execute(sql).fetchall()]
-            for key, sql in queries.items()
-        }
-    finally:
-        connection.close()
+    The caller owns ``connection``.  In particular, this helper must not
+    re-open ``repository.database_path`` after publication validation: that
+    would let a path replacement splice rows from a different generation into
+    the already-resolved compare payload.
+    """
+
+    queries = {
+        "nodes": (
+            "SELECT node_ref, graph_ref, local_index, node_identity, name, label, class_name, node_type, "
+            "control_kind, function_name, variable_name, event_name, delegate_name, macro_name, comment, "
+            "x, y, confidence FROM nodes ORDER BY graph_ref, local_index"
+        ),
+        "pins": (
+            "SELECT pin_ref, node_ref, ordinal, native_pin_id, persistent_guid, name, direction, category, "
+            "subcategory, default_value_json, default_object, confidence FROM pins ORDER BY node_ref, ordinal"
+        ),
+        "edges": (
+            "SELECT edge_ref, graph_ref, source_pin_ref, target_pin_ref, kind, confidence, resolution_status "
+            "FROM edges ORDER BY graph_ref, source_pin_ref, target_pin_ref, kind"
+        ),
+        "observations": (
+            "SELECT observation_ref, graph_ref, source_node_ref, source_pin_ref, target_node_ref, target_pin_ref, "
+            "target_node_name, target_native_pin_id, target_pin_name, kind, status, resolution_status, confidence "
+            "FROM edge_observations ORDER BY graph_ref, observation_ref"
+        ),
+    }
+    return {
+        key: [dict(row) for row in connection.execute(sql).fetchall()]
+        for key, sql in queries.items()
+    }
 
 
 def _stable_pin_id(row: dict[str, object]) -> str:
@@ -631,8 +634,27 @@ def load_asset_payload_input(args: argparse.Namespace, asset_dir_text: str, keyw
     asset_dir = Path(os.path.expandvars(asset_dir_text)).expanduser()
     if not asset_dir.exists() or not asset_dir.is_dir():
         raise FileNotFoundError(f"Asset directory not found: {asset_dir}")
-    if (asset_dir / "evidence" / "evidence.sqlite").is_file():
-        from .evidence_repository import open_asset_repository
+    from .evidence_repository import (
+        open_asset_repository,
+        resolve_asset_evidence_state,
+    )
+
+    indexed_evidence = False
+    for marker in (
+        asset_dir / "evidence" / "current.json",
+        asset_dir / "evidence" / "evidence.sqlite",
+    ):
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            continue
+        indexed_evidence = True
+        break
+    if indexed_evidence:
+        # Once an indexed generation is declared, every resolver failure is
+        # authoritative.  Never reinterpret a damaged current pointer as a
+        # legacy capture merely because a bound artifact is missing.
+        resolve_asset_evidence_state(asset_dir)
 
         with open_asset_repository(asset_dir) as repository:
             identity = repository.identity()
@@ -640,8 +662,9 @@ def load_asset_payload_input(args: argparse.Namespace, asset_dir_text: str, keyw
             graph_rows = repository.graph_summaries()
             defaults = repository.default_summaries(include_values=True)
             gaps = repository.gap_summaries()
-            database_path = Path(repository.database_path)
-        tables = _read_v2_compare_tables(database_path)
+            tables = _read_v2_compare_tables(
+                repository._service._connection  # noqa: SLF001 - repository owns the bound connection
+            )
         graphs = _project_v2_graphs(graph_rows, tables, keywords)
         graph_name_by_ref = {
             str(graph.get("source") or ""): str(graph.get("graph_name") or "")

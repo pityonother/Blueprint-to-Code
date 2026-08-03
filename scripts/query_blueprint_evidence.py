@@ -11,7 +11,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.evidence_repository import open_asset_repository
+from blueprint_translator.evidence_repository import open_asset_repository  # noqa: E402
 
 
 def _add_budget(parser: argparse.ArgumentParser, default: int = 1000) -> None:
@@ -160,6 +160,16 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 request["selector"] = {"ref": str(matches[0]["ref"])}
             response = repository.query(request)
+            response.update(
+                {
+                    "sourceKind": repository.source_kind,
+                    "freshnessStatus": repository.freshness_status,
+                    "releaseAuthority": repository.release_authority,
+                    "migrationRequired": repository.migration_required,
+                    "manifestSha256": repository.manifest_sha256,
+                    "pointerSha256": repository.pointer_sha256,
+                }
+            )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 2

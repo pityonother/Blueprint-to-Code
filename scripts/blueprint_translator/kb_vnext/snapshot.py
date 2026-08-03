@@ -18,6 +18,16 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from ..evidence_publication import (
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_path_chain,
+)
+from ..evidence_repository import (
+    ResolvedEvidenceState,
+    evidence_state_metadata,
+    open_bound_evidence_database,
+)
 from .class_hierarchy import class_hierarchy_contract_fingerprint
 from .cutover_readiness import (
     BURN_IN_ATTESTATION_SCHEMA,
@@ -63,6 +73,7 @@ from .schema_capabilities import CORE_SCHEMA_VERSION
 from .source_manifest import (
     SNAPSHOT_SEMANTIC_INPUT_KEYS,
     compare_source_manifests,
+    resolve_live_capture_evidence_states,
     scan_source_manifest,
     source_manifest_binding,
     source_manifest_from_binding,
@@ -810,16 +821,17 @@ def _semantic_producer_contract_fingerprint() -> str:
 def _sha256_named_file_set(
     inputs: list[tuple[str, Path]],
     *,
-    digest_overrides: dict[Path, str] | None = None,
+    digest_overrides: Mapping[str, str] | None = None,
 ) -> str:
     """Hash files by portable logical name, including explicit missing inputs."""
 
     digest = hashlib.sha256()
     seen: set[str] = set()
-    file_hashes = {
-        path.resolve(): value
-        for path, value in (digest_overrides or {}).items()
+    overrides = {
+        name.replace("\\", "/").strip("/"): value
+        for name, value in (digest_overrides or {}).items()
     }
+    file_hashes: dict[Path, str] = {}
     for logical_name, path in sorted(inputs, key=lambda item: item[0]):
         normalized_name = logical_name.replace("\\", "/").strip("/")
         if not normalized_name or normalized_name in seen:
@@ -829,7 +841,18 @@ def _sha256_named_file_set(
         seen.add(normalized_name)
         digest.update(normalized_name.encode("utf-8"))
         digest.update(b"\0")
-        if path.is_file():
+        if normalized_name in overrides:
+            observed_hash = overrides[normalized_name]
+            if (
+                len(observed_hash) != 64
+                or any(character not in "0123456789abcdef" for character in observed_hash)
+            ):
+                raise ValueError(
+                    f"Invalid semantic input digest override: {normalized_name}"
+                )
+            digest.update(b"FILE\0")
+            digest.update(observed_hash.encode("ascii"))
+        elif path.is_file():
             resolved_path = path.resolve()
             if resolved_path not in file_hashes:
                 file_hashes[resolved_path] = _sha256_file(resolved_path)
@@ -872,7 +895,9 @@ def _portable_package_name(value: object) -> object:
     return normalized
 
 
-def _evidence_database_semantic_sha256(path: Path) -> str:
+def _evidence_database_semantic_sha256(
+    state: ResolvedEvidenceState,
+) -> str:
     """Hash Evidence schema and typed rows independent of SQLite layout.
 
     ``asset_revisions.uasset_path`` is a machine-local locator.  Its portable
@@ -882,12 +907,7 @@ def _evidence_database_semantic_sha256(path: Path) -> str:
 
     digest = hashlib.sha256()
     try:
-        connection = sqlite3.connect(
-            f"file:{path.resolve().as_posix()}?mode=ro",
-            uri=True,
-        )
-        try:
-            connection.execute("PRAGMA query_only=ON")
+        with open_bound_evidence_database(state) as connection:
             for pragma_name in ("application_id", "user_version"):
                 value = connection.execute(
                     f"PRAGMA {pragma_name}"
@@ -974,34 +994,47 @@ def _evidence_database_semantic_sha256(path: Path) -> str:
                 )
                 for row_hash in sorted(row_hashes):
                     _update_digest(digest, row_hash)
-        finally:
-            connection.close()
     except sqlite3.DatabaseError:
         # Malformed/unsupported Evidence stores are rejected by ingestion.
         # Their raw bytes still need a stable identity before that happens.
-        return _sha256_file(path)
+        return state.database_sha256
     return digest.hexdigest()
 
 
 def _capture_semantic_inputs_sha256(capture_root: Path) -> str:
     """Hash every capture artifact that Blueprint ingestion can consume."""
 
+    capture_root = _lexical_absolute(capture_root)
+    _require_plain_path_chain(capture_root, label="capture root")
+    try:
+        capture_root.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        _require_plain_directory(capture_root, label="capture root")
     inputs: list[tuple[str, Path]] = []
-    evidence_database_hashes: dict[Path, str] = {}
-    evidence_databases = (
-        list(capture_root.glob("*/evidence/evidence.sqlite"))
-        if capture_root.is_dir()
-        else []
-    )
-    for evidence_path in sorted(
-        evidence_databases,
-        key=lambda path: path.relative_to(capture_root).as_posix(),
-    ):
-        asset_root = evidence_path.parent.parent
+    evidence_artifact_hashes: dict[str, str] = {}
+    states = resolve_live_capture_evidence_states(capture_root)
+    state_markers: list[dict[str, object]] = []
+    for state in states:
+        evidence_path = state.database_path
+        asset_root = state.asset_dir
         asset_name = asset_root.relative_to(capture_root).as_posix()
         prefix = f"captures/{asset_name}"
-        evidence_database_hashes[evidence_path.resolve()] = (
-            _evidence_database_semantic_sha256(evidence_path)
+        state_markers.append(
+            {
+                "asset": asset_name,
+                **evidence_state_metadata(state),
+            }
+        )
+        evidence_artifact_hashes[f"{prefix}/evidence/evidence.sqlite"] = (
+            _evidence_database_semantic_sha256(state)
+        )
+        evidence_artifact_hashes[f"{prefix}/evidence/manifest.json"] = (
+            hashlib.sha256(state.manifest_raw).hexdigest()
+        )
+        evidence_artifact_hashes[f"{prefix}/output/agent_index.md"] = (
+            hashlib.sha256(state.agent_index_raw).hexdigest()
         )
         inputs.extend(
             [
@@ -1011,48 +1044,45 @@ def _capture_semantic_inputs_sha256(capture_root: Path) -> str:
                 ),
                 (
                     f"{prefix}/evidence/manifest.json",
-                    evidence_path.with_name("manifest.json"),
+                    state.manifest_path,
+                ),
+                (
+                    f"{prefix}/output/agent_index.md",
+                    state.agent_index_path,
                 ),
             ]
         )
 
         revision_rows: list[tuple[str, str]] = []
         package_manifest_rows: list[tuple[str, str]] = []
-        connection: sqlite3.Connection | None = None
         try:
-            connection = sqlite3.connect(
-                f"file:{evidence_path.resolve().as_posix()}?mode=ro",
-                uri=True,
-            )
-            revision_rows = [
-                (str(row[0] or ""), str(row[1] or ""))
-                for row in connection.execute(
-                    """
-                    SELECT revision_id, uasset_path
-                    FROM asset_revisions
-                    ORDER BY revision_id, uasset_path
-                    """
-                )
-            ]
-            package_manifest_rows = [
-                (str(row[0] or ""), str(row[1] or ""))
-                for row in connection.execute(
-                    """
-                    SELECT revision_id, path
-                    FROM source_manifest
-                    WHERE source_kind='package_binary'
-                    ORDER BY revision_id, path
-                    """
-                )
-            ]
+            with open_bound_evidence_database(state) as connection:
+                revision_rows = [
+                    (str(row[0] or ""), str(row[1] or ""))
+                    for row in connection.execute(
+                        """
+                        SELECT revision_id, uasset_path
+                        FROM asset_revisions
+                        ORDER BY revision_id, uasset_path
+                        """
+                    )
+                ]
+                package_manifest_rows = [
+                    (str(row[0] or ""), str(row[1] or ""))
+                    for row in connection.execute(
+                        """
+                        SELECT revision_id, path
+                        FROM source_manifest
+                        WHERE source_kind='package_binary'
+                        ORDER BY revision_id, path
+                        """
+                    )
+                ]
         except sqlite3.DatabaseError:
             # The Evidence database itself remains part of the digest.  A
             # malformed schema is rejected later by the bounded importer.
             revision_rows = []
             package_manifest_rows = []
-        finally:
-            if connection is not None:
-                connection.close()
 
         manifest_paths_by_revision: dict[str, list[str]] = {}
         for revision_id, manifest_path in package_manifest_rows:
@@ -1095,10 +1125,21 @@ def _capture_semantic_inputs_sha256(capture_root: Path) -> str:
                         expected_path,
                     )
                 )
-    return _sha256_named_file_set(
+    artifact_digest = _sha256_named_file_set(
         inputs,
-        digest_overrides=evidence_database_hashes,
+        digest_overrides=evidence_artifact_hashes,
     )
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "schema": "ark-kb-live-capture-inputs/v3",
+                "artifactDigest": artifact_digest,
+                "states": state_markers,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _snapshot_semantic_input_hashes(
@@ -2683,7 +2724,14 @@ def build_vnext_snapshot(
     project_root = project_root.resolve()
     discovery_database = discovery_database.resolve()
     legacy_kb_root = legacy_kb_root.resolve()
-    capture_root = capture_root.resolve()
+    capture_root = _lexical_absolute(capture_root)
+    _require_plain_path_chain(capture_root, label="capture root")
+    try:
+        capture_root.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        _require_plain_directory(capture_root, label="capture root")
     native_root = native_root.resolve()
     runtime_root = (
         runtime_root.resolve()

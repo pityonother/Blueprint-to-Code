@@ -12,9 +12,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import build_asset_context_pack  # noqa: E402
 from blueprint_translator.context_pack import estimate_tokens, render_context_pack  # noqa: E402
+from blueprint_translator.evidence_revision import EvidenceArtifactInvalid  # noqa: E402
 from blueprint_translator.evidence_writer import (  # noqa: E402
-    write_evidence_store_from_capture,
-    write_evidence_store_from_payload,
+    migrate_asset_capture,
+    write_evidence_artifacts_from_payload,
 )
 
 
@@ -153,10 +154,7 @@ def _make_indexed_fixture(root: Path) -> tuple[Path, dict[str, object]]:
             ],
         },
     )
-    result = write_evidence_store_from_capture(
-        asset_dir,
-        asset_dir / "evidence" / "evidence.sqlite",
-    )
+    result = migrate_asset_capture(asset_dir, publish_v3=False)
     return asset_dir, result
 
 
@@ -257,16 +255,42 @@ def _make_question_indexed_fixture(root: Path) -> Path:
             ),
         ],
     }
-    write_evidence_store_from_payload(
+    write_evidence_artifacts_from_payload(
         "/Game/Test/QuestionContextFixture.QuestionContextFixture",
         None,
         payload,
-        asset_dir / "evidence" / "evidence.sqlite",
+        asset_dir,
     )
     return asset_dir
 
 
 class EvidenceRepositoryContextPackTests(unittest.TestCase):
+    def test_build_pack_uses_pruned_v3_current_and_fails_closed_on_pointer_tamper(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = _make_question_indexed_fixture(Path(temp_dir))
+            revision_dir = next((asset_dir / "evidence" / "revisions").iterdir())
+            authoritative_index = (revision_dir / "agent_index.md").read_bytes()
+            for path in (
+                asset_dir / "evidence" / "evidence.sqlite",
+                asset_dir / "evidence" / "manifest.json",
+                asset_dir / "output" / "agent_index.md",
+            ):
+                path.unlink(missing_ok=True)
+
+            _formula, _memory, pack = build_asset_context_pack.build_pack(
+                asset_dir,
+                "health regeneration",
+                1200,
+            )
+            self.assertTrue(pack["revision_id"])
+            self.assertEqual((revision_dir / "agent_index.md").read_bytes(), authoritative_index)
+
+            (asset_dir / "evidence" / "current.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            with self.assertRaises(EvidenceArtifactInvalid):
+                build_asset_context_pack.build_pack(asset_dir, "health", 1200)
+
     def test_repository_question_selects_distinct_high_signal_refs_and_real_v2_pointers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             asset_dir = _make_question_indexed_fixture(Path(temp_dir))

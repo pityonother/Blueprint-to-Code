@@ -16,7 +16,7 @@ from blueprint_translator.report_query import (  # noqa: E402
     MAX_REPORT_QUERY_BUDGET,
     REPORT_FILES,
     build_report_view,
-    resolve_report_path,
+    read_report_source,
 )
 
 
@@ -24,15 +24,14 @@ def report_inventory(asset_dir: Path) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for key in REPORT_FILES:
         try:
-            path = resolve_report_path(asset_dir, key)
+            path, text, _metadata = read_report_source(asset_dir, key)
         except (FileNotFoundError, ValueError):
             continue
-        text = path.read_text(encoding="utf-8-sig", errors="replace")
         rows.append(
             {
                 "report": key,
                 "path": str(path.resolve()),
-                "bytes": path.stat().st_size,
+                "bytes": len(text.encode("utf-8")),
                 "estimated_tokens": estimate_tokens(text),
                 "default_read": key in {"context_pack", "asset_memory_card"},
             }
@@ -100,8 +99,10 @@ def main() -> int:
         return 0
 
     try:
-        report_path = resolve_report_path(asset_dir, args.report)
-        report_text = report_path.read_text(encoding="utf-8-sig", errors="replace")
+        report_path, report_text, _metadata = read_report_source(
+            asset_dir,
+            args.report,
+        )
         result = build_report_view(
             report_text,
             mode=args.mode,

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import sys
@@ -12,7 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import blueprint_tool_server as tool_server  # noqa: E402
 from blueprint_translator.evidence_schema import ensure_evidence_schema  # noqa: E402
-from blueprint_tool_server import (
+from blueprint_tool_server import (  # noqa: E402
     OPEN_TARGETS,
     REPORT_TARGETS,
     append_notes_for_functions,
@@ -92,12 +93,54 @@ def _write_indexed_asset(
                 ") VALUES (?, ?, 'graph', ?, ?, ?)",
                 (f"{scope_ref}/diagnostic/{ordinal}", revision_id, scope_ref, status, reason_code),
             )
+        source_bytes = b"tool-server-fixture-source"
+        connection.execute(
+            "INSERT INTO source_manifest(revision_id, path, sha256, size_bytes, source_kind) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                revision_id,
+                "@memory/tool_server_fixture",
+                hashlib.sha256(source_bytes).hexdigest(),
+                len(source_bytes),
+                "in_memory_fixture",
+            ),
+        )
         connection.commit()
     finally:
         connection.close()
     output_dir = asset_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "agent_index.md").write_text("# Indexed evidence\n", encoding="utf-8")
+    (output_dir / "agent_index.md").write_text(
+        f"# Indexed evidence\n\n- Revision: `{revision_id}`\n",
+        encoding="utf-8",
+    )
+    (asset_dir / "evidence" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "ark.blueprint.evidence.v2",
+                "asset_id": asset_id,
+                "asset_name": asset_dir.name,
+                "object_path": f"/Game/Test/{asset_dir.name}.{asset_dir.name}",
+                "revision_id": revision_id,
+                "source_fingerprint": "fixture-fingerprint",
+                "parser_version": "fixture-parser",
+                "counts": {
+                    "graphs": len(statuses),
+                    "nodes": 0,
+                    "pins": 0,
+                    "links": 0,
+                },
+                "database": "evidence.sqlite",
+                "agent_index": "../output/agent_index.md",
+                "legacy_artifacts_deleted": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def wait_for_job(job_id: str, timeout_seconds: float = 5.0) -> dict[str, object]:
@@ -163,6 +206,12 @@ class ToolServerTests(unittest.TestCase):
         self.assertEqual(summary["uassetReadPartialCount"], 5)
         self.assertEqual(summary["uassetReadNeedsClipboardCount"], 1)
         self.assertEqual(summary["uassetReadLinkCount"], 3)
+        self.assertEqual(summary["sourceKind"], "INDEXED_V2_COMPATIBILITY")
+        self.assertEqual(summary["freshnessStatus"], "SOURCE_UNAVAILABLE")
+        self.assertFalse(summary["releaseAuthority"])
+        self.assertTrue(summary["migrationRequired"])
+        self.assertIsNone(summary["manifestSha256"])
+        self.assertIsNone(summary["pointerSha256"])
 
     def test_frontend_requests_indexed_artifacts_without_hardcoded_dual_mode(self):
         source = (ROOT / "src" / "main.ts").read_text(encoding="utf-8")

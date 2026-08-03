@@ -16,6 +16,16 @@ VALIDATE_SCRIPT = (
 )
 IMPORT_SCRIPT = PROJECT_ROOT / "scripts" / "import_ark_kb_gold_reviews.py"
 QUERY_GOLD = PROJECT_ROOT / "tests" / "fixtures" / "kb_query_gold_set.v1.json"
+SCRIPT_ROOT = PROJECT_ROOT / "scripts"
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from blueprint_translator.evidence_publication import (  # noqa: E402
+    migrate_v2_evidence_to_v3,
+)
+from blueprint_translator.evidence_writer import (  # noqa: E402
+    write_evidence_artifacts_from_payload,
+)
 
 
 class GoldReviewCliTests(unittest.TestCase):
@@ -208,56 +218,32 @@ class GoldReviewCliTests(unittest.TestCase):
             connection.commit()
             connection.close()
             captures = root / "captures"
-            evidence_db = (
-                captures
-                / "capture-a"
-                / "evidence"
-                / "evidence.sqlite"
+            asset_dir = captures / "capture-a"
+            package = asset_dir / "OwnerA.uasset"
+            package.parent.mkdir(parents=True)
+            package.write_bytes(b"gold-review-cli-live-evidence-v3")
+            write_evidence_artifacts_from_payload(
+                "/Game/Owner/A.Owner",
+                package,
+                {
+                    "asset_name": "OwnerA",
+                    "asset_path": "/Game/Owner/A.Owner",
+                    "graphs": [],
+                    "class_defaults": {
+                        "variables": {
+                            "RawClass": {
+                                "value": "/Game/Target/Raw.Raw_C",
+                                "type": "SoftObjectProperty",
+                                "confidence": "high",
+                                "source": "uasset_cdo_property_tag",
+                            }
+                        }
+                    },
+                },
+                asset_dir,
+                publish_v3=False,
             )
-            evidence_db.parent.mkdir(parents=True)
-            evidence = sqlite3.connect(evidence_db)
-            evidence.executescript(
-                """
-                CREATE TABLE asset_revisions (
-                    revision_id TEXT PRIMARY KEY,
-                    asset_id TEXT NOT NULL,
-                    asset_name TEXT NOT NULL,
-                    object_path TEXT NOT NULL,
-                    source_fingerprint TEXT NOT NULL,
-                    parser_version TEXT NOT NULL,
-                    schema_version TEXT NOT NULL,
-                    generated_at TEXT NOT NULL,
-                    uasset_path TEXT NOT NULL
-                );
-                CREATE TABLE class_defaults (
-                    default_ref TEXT PRIMARY KEY,
-                    revision_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    type_name TEXT NOT NULL,
-                    value_json TEXT NOT NULL,
-                    value_codec TEXT NOT NULL,
-                    value_blob BLOB,
-                    confidence TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    extra_json TEXT NOT NULL
-                );
-                INSERT INTO asset_revisions VALUES (
-                    'revision-a', 'asset-a', 'OwnerA',
-                    '/Game/Owner/A.Owner',
-                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                    'evidence-test/v1', 'ark.blueprint.evidence.v2',
-                    '2026-07-29T00:00:00+00:00', 'redacted'
-                );
-                INSERT INTO class_defaults VALUES (
-                    'bp://asset-a@revision-a/default/RawClass',
-                    'revision-a', 'RawClass', 'SoftObjectProperty',
-                    '"/Game/Target/Raw.Raw_C"', 'json', NULL, 'high',
-                    'uasset_cdo_property_tag', '{}'
-                );
-                """
-            )
-            evidence.commit()
-            evidence.close()
+            migrate_v2_evidence_to_v3(asset_dir, prune_v2=True)
             output = root / "packs"
             export = subprocess.run(
                 [

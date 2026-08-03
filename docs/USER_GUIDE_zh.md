@@ -80,8 +80,9 @@ G:\ARKDevkit\Projects\ShooterGame\Mods\Kaminan_server\Content
      仅供参考。
    - **需要手动补充**：这些图页 `.uasset` 解析失败，需要回 DevKit 复制粘贴。
 
-5. **第 4 步**：先点 **AI 证据索引 (agent_index)**。这是默认的新入口，里面有
-   Graph/Node/Pin/Wire/Default/Gap 数量、恢复率、当前 revision 和按需查询命令。
+5. **第 4 步**：先点 **AI 证据索引 (agent_index)**。网页会从
+   `evidence/current.json` 找到并验证它所指不可变 revision，再打开其中的索引；
+   里面有 Graph/Node/Pin/Wire/Default/Gap 数量、恢复率、当前 revision 和按需查询命令。
 
 如果你需要给人看的长篇中文说明，再点 **生成 / 刷新人类报告**。它会复用这个资产的同一 Object Path，以 `dual` 模式重新读取当前源，再生成与新 evidence 同源的
 `behavior_summary.md`、`asset_report.md` 等 legacy 人类报告；默认 indexed 读取不会为了这些长报告重复生成整套旧产物。
@@ -90,7 +91,8 @@ G:\ARKDevkit\Projects\ShooterGame\Mods\Kaminan_server\Content
 **载入失败图页到补采队列** → 在 DevKit 里 `Ctrl+A`、`Ctrl+C` → 展开补采面板
 逐个保存。
 
-多数情况下，把 `agent_index.md` 交给 AI，再让它按里面的命令查询具体证据就够了；不要把整个资产目录一次性丢给 AI。
+多数情况下，把 current pointer 所指 revision 内的 `agent_index.md` 交给 AI，再让
+它按里面的命令查询具体证据就够了；不要把整个资产目录一次性丢给 AI。
 
 > 想用旧的 DevKit 默认值导出器、做两个资产对比、生成 debug 报告、判定
 > notes.md 误报、查看历史资产或运行日志，统一在页面最下方“高级功能”折叠区里。
@@ -101,13 +103,20 @@ G:\ARKDevkit\Projects\ShooterGame\Mods\Kaminan_server\Content
 
 ### 1. AI 证据索引（默认、当前 revision）
 
-最重要，也是新资产默认一定会生成的文件。它很小，告诉 AI 当前证据的身份、数量、恢复率、未展开内容和下一条查询命令。
-
-对应文件：
+最重要，也是新资产默认一定会生成的文件。它很小，告诉 AI 当前证据的身份、数量、恢复率、未展开内容和下一条查询命令。规范读取链是：
 
 ```text
-captures/<资产名>/output/agent_index.md
+captures/<资产名>/evidence/current.json
+  -> evidence/revisions/<revisionId>/manifest.json
+  -> evidence/revisions/<revisionId>/agent_index.md
+  -> evidence/revisions/<revisionId>/evidence.sqlite
 ```
+
+不要把 `captures/<资产名>/output/agent_index.md` 当成“当前索引”。它与根部
+`evidence/evidence.sqlite`、`evidence/manifest.json` 都只是一个发布周期内的
+nonauthority compatibility copies；旧消费者迁移完成后可以显式 `--prune-v2`
+删除。若 current pointer 或所指 revision 验证失败，工具会直接报错，不会拿这些
+兼容副本掩盖问题。
 
 `AVAILABLE_NOT_RETURNED` 表示数据存在，只是这一次为了省 token 没展开；`NOT_RECOVERED` 才表示解析器没有恢复；`SOURCE_NOT_AVAILABLE` 表示实现位于父类、native 或其他资产。
 
@@ -202,7 +211,9 @@ Ctrl+C
 
 ### AI 证据索引
 
-默认先看。对应当前 evidence revision，适合直接交给 AI；需要细节时让 AI 运行索引中的有界查询。
+默认先看。按钮通过 `evidence/current.json` 打开所指不可变 revision 的索引，适合
+直接交给 AI；需要细节时让 AI 运行索引中的有界查询。不要手工把
+`output/agent_index.md` 兼容副本当成 current。
 
 ### 行为说明
 

@@ -19,7 +19,14 @@ if str(SCRIPT_ROOT) not in sys.path:
 from blueprint_translator.asset_ledger import (  # noqa: E402
     metadata_fingerprint,
 )
+from blueprint_translator.evidence_publication import (  # noqa: E402
+    migrate_v2_evidence_to_v3,
+)
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    resolve_asset_evidence_state,
+)
 from blueprint_translator.evidence_schema import (  # noqa: E402
+    ensure_evidence_schema,
     make_asset_id,
     make_default_ref,
     make_revision_id,
@@ -33,6 +40,7 @@ from blueprint_translator.kb_vnext.fact_store import (  # noqa: E402
 from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
 from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     SourceRevision,
+    live_capture_evidence_fingerprint,
     source_id,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
@@ -508,40 +516,7 @@ def _write_capture(
         )
     database_path = evidence_root / "evidence.sqlite"
     connection = sqlite3.connect(database_path)
-    connection.executescript(
-        """
-        CREATE TABLE asset_revisions(
-            revision_id TEXT PRIMARY KEY,
-            asset_id TEXT NOT NULL,
-            asset_name TEXT NOT NULL,
-            object_path TEXT NOT NULL,
-            source_fingerprint TEXT NOT NULL,
-            parser_version TEXT NOT NULL,
-            schema_version TEXT NOT NULL,
-            generated_at TEXT NOT NULL,
-            uasset_path TEXT NOT NULL
-        );
-        CREATE TABLE class_defaults(
-            default_ref TEXT PRIMARY KEY,
-            revision_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            type_name TEXT NOT NULL,
-            value_json TEXT NOT NULL,
-            value_codec TEXT NOT NULL,
-            value_blob BLOB,
-            confidence TEXT NOT NULL,
-            source TEXT NOT NULL,
-            extra_json TEXT NOT NULL
-        );
-        CREATE TABLE source_manifest(
-            revision_id TEXT NOT NULL,
-            path TEXT NOT NULL,
-            sha256 TEXT NOT NULL,
-            size_bytes INTEGER NOT NULL,
-            source_kind TEXT NOT NULL
-        );
-        """
-    )
+    ensure_evidence_schema(connection)
     connection.execute(
         "INSERT INTO asset_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
@@ -577,9 +552,22 @@ def _write_capture(
                 "parser_version": parser_version,
                 "schema": EVIDENCE_SCHEMA,
                 "database": "evidence.sqlite",
+                "agent_index": "../output/agent_index.md",
+                "counts": {
+                    "graphs": 0,
+                    "nodes": 0,
+                    "pins": 0,
+                    "edges": 0,
+                },
             },
             sort_keys=True,
         ),
+        encoding="utf-8",
+    )
+    output_root = asset_root / "output"
+    output_root.mkdir()
+    (output_root / "agent_index.md").write_text(
+        f"# BP_Test\n\nRevision: `{revision}`\n",
         encoding="utf-8",
     )
     return revision, database_path, package_fingerprint
@@ -696,21 +684,14 @@ def _capture_source_revision(
     *,
     fingerprint: str | None = None,
 ) -> SourceRevision:
-    database = capture_root / "BP_Test" / "evidence" / "evidence.sqlite"
-    manifest = database.parent / "manifest.json"
-    digest = hashlib.sha256()
-    for path in (database, manifest):
-        digest.update(path.name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\n")
+    state = resolve_asset_evidence_state(capture_root / "BP_Test")
     source_uri = "capture://BP_Test"
     return SourceRevision(
         source_id=source_id("BLUEPRINT_EVIDENCE", source_uri),
         source_kind="BLUEPRINT_EVIDENCE",
         source_uri=source_uri,
-        fingerprint=fingerprint or digest.hexdigest(),
-        size_bytes=database.stat().st_size,
+        fingerprint=fingerprint or live_capture_evidence_fingerprint(state),
+        size_bytes=state.database_bytes,
         entity_uri=OBJECT_PATH,
         revision_label=revision,
     )
@@ -969,6 +950,36 @@ class BlueprintIngestTests(unittest.TestCase):
                 for value in row
             )
             self.assertNotIn(r"C:\Users", persisted)
+            core.close()
+            discovery.close()
+
+    def test_ingests_pruned_v3_current_without_v2_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            revision, database_path, package_fingerprint = _write_capture(
+                root / "captures"
+            )
+            asset_dir = database_path.parents[1]
+            migrate_v2_evidence_to_v3(asset_dir, prune_v2=True)
+            discovery = _discovery(
+                revision,
+                package_path=asset_dir / "BP_Test.uasset",
+                package_fingerprint=package_fingerprint,
+            )
+            core = _core()
+
+            result = materialize_blueprint_defaults(
+                discovery,
+                core,
+                capture_root=root / "captures",
+                ontology=self.ontology,
+            )
+
+            self.assertEqual(result.counts["freshAssets"], 1)
+            self.assertGreater(result.counts["declaredFacts"], 0)
+            self.assertFalse(
+                (asset_dir / "evidence" / "evidence.sqlite").exists()
+            )
             core.close()
             discovery.close()
 
@@ -1975,6 +1986,7 @@ class BlueprintIngestTests(unittest.TestCase):
                 ontology=self.ontology,
             )
             self.assertEqual(result.counts["freshnessGapAssets"], 1)
+            self.assertEqual(result.counts["rejectedAssets"], 0)
             materialize_declared_defaults(
                 discovery,
                 core,

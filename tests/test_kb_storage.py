@@ -39,6 +39,7 @@ from blueprint_translator.kb_vnext.class_hierarchy import (  # noqa: E402
     class_hierarchy_source_fingerprint,
 )
 from blueprint_translator.evidence_schema import (  # noqa: E402
+    ensure_evidence_schema,
     make_asset_id,
     make_revision_id,
 )
@@ -85,40 +86,7 @@ def _blueprint_capture_fixture(
     evidence_root = asset_root / "evidence"
     evidence_root.mkdir(parents=True)
     connection = sqlite3.connect(evidence_root / "evidence.sqlite")
-    connection.executescript(
-        """
-        CREATE TABLE asset_revisions(
-            revision_id TEXT PRIMARY KEY,
-            asset_id TEXT NOT NULL,
-            asset_name TEXT NOT NULL,
-            object_path TEXT NOT NULL,
-            source_fingerprint TEXT NOT NULL,
-            parser_version TEXT NOT NULL,
-            schema_version TEXT NOT NULL,
-            generated_at TEXT NOT NULL,
-            uasset_path TEXT NOT NULL
-        );
-        CREATE TABLE class_defaults(
-            default_ref TEXT PRIMARY KEY,
-            revision_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            type_name TEXT NOT NULL,
-            value_json TEXT NOT NULL,
-            value_codec TEXT NOT NULL,
-            value_blob BLOB,
-            confidence TEXT NOT NULL,
-            source TEXT NOT NULL,
-            extra_json TEXT NOT NULL
-        );
-        CREATE TABLE source_manifest(
-            revision_id TEXT NOT NULL,
-            path TEXT NOT NULL,
-            sha256 TEXT NOT NULL,
-            size_bytes INTEGER NOT NULL,
-            source_kind TEXT NOT NULL
-        );
-        """
-    )
+    ensure_evidence_schema(connection)
     connection.execute(
         "INSERT INTO asset_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
@@ -169,9 +137,22 @@ def _blueprint_capture_fixture(
                 "parser_version": parser,
                 "schema": schema,
                 "database": "evidence.sqlite",
+                "agent_index": "../output/agent_index.md",
+                "counts": {
+                    "graphs": 0,
+                    "nodes": 0,
+                    "pins": 0,
+                    "edges": 0,
+                },
             },
             sort_keys=True,
         ),
+        encoding="utf-8",
+    )
+    output_root = asset_root / "output"
+    output_root.mkdir()
+    (output_root / "agent_index.md").write_text(
+        f"# BP_Base\n\nRevision: `{revision}`\n",
         encoding="utf-8",
     )
     stat = package_path.stat()
@@ -1863,16 +1844,22 @@ class KnowledgeStorageTests(unittest.TestCase):
             map_a.write_bytes(b'{"catalog":"a"}')
             map_b.write_bytes(b'{"catalog":"b"}')
 
-            capture_a = root / "captures-a" / "BP_Test" / "evidence"
-            capture_b = root / "captures-b" / "BP_Test" / "evidence"
-            capture_a.mkdir(parents=True)
-            capture_b.mkdir(parents=True)
-            (capture_a / "evidence.sqlite").write_bytes(
-                b"capture-evidence-a"
+            _blueprint_capture_fixture(root / "captures-a")
+            _blueprint_capture_fixture(root / "captures-b")
+            changed_capture = sqlite3.connect(
+                root
+                / "captures-b"
+                / "BP_Base"
+                / "evidence"
+                / "evidence.sqlite"
             )
-            (capture_b / "evidence.sqlite").write_bytes(
-                b"capture-evidence-b"
-            )
+            try:
+                changed_capture.execute(
+                    "UPDATE class_defaults SET value_json='8' WHERE name='Count'"
+                )
+                changed_capture.commit()
+            finally:
+                changed_capture.close()
 
             changed_project = root / "changed-project"
             shutil.copytree(
@@ -2199,29 +2186,26 @@ class KnowledgeStorageTests(unittest.TestCase):
                 output_dir=root / "out-baseline",
                 **common,
             )
-            variants = {
-                "capture manifest": _snapshot_identity_for_inputs(
+            with self.assertRaises(ValueError):
+                _snapshot_identity_for_inputs(
                     capture_root=manifest_captures,
                     output_dir=root / "out-manifest",
                     **common,
-                ),
-                "package binary": _snapshot_identity_for_inputs(
-                    capture_root=package_captures,
-                    output_dir=root / "out-package",
-                    **common,
-                ),
-            }
-
-        for input_kind, variant in variants.items():
-            with self.subTest(input_kind=input_kind):
-                self.assertNotEqual(
-                    variant["sourceSha256"],
-                    baseline["sourceSha256"],
                 )
-                self.assertNotEqual(
-                    variant["buildId"],
-                    baseline["buildId"],
-                )
+            package_variant = _snapshot_identity_for_inputs(
+                capture_root=package_captures,
+                output_dir=root / "out-package",
+                **common,
+            )
+            self.assertEqual(len(baseline["sourceSha256"]), 64)
+            self.assertNotEqual(
+                package_variant["sourceSha256"],
+                baseline["sourceSha256"],
+            )
+            self.assertNotEqual(
+                package_variant["buildId"],
+                baseline["buildId"],
+            )
 
     def test_capture_identity_is_portable_across_absolute_package_roots(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2441,12 +2425,10 @@ class KnowledgeStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             capture_root = root / "captures"
-            evidence_root = (
-                capture_root / "BP_External" / "evidence"
-            )
-            evidence_root.mkdir(parents=True)
+            _blueprint_capture_fixture(capture_root)
+            evidence_root = capture_root / "BP_Base" / "evidence"
             external_package = (
-                root / "devkit-content" / "BP_External.uasset"
+                root / "devkit-content" / "BP_Base.uasset"
             )
             external_package.parent.mkdir()
             external_package.write_bytes(b"external-uasset-v1")
@@ -2454,38 +2436,30 @@ class KnowledgeStorageTests(unittest.TestCase):
                 evidence_root / "evidence.sqlite"
             )
             try:
-                evidence.executescript(
+                evidence.execute(
                     """
-                    CREATE TABLE asset_revisions(
-                        revision_id TEXT PRIMARY KEY,
-                        uasset_path TEXT NOT NULL
-                    );
-                    CREATE TABLE source_manifest(
-                        revision_id TEXT NOT NULL,
-                        path TEXT NOT NULL,
-                        source_kind TEXT NOT NULL
-                    );
-                    """
+                    UPDATE asset_revisions
+                    SET uasset_path=?
+                    """,
+                    (str(external_package),),
                 )
                 evidence.execute(
-                    "INSERT INTO asset_revisions VALUES (?, ?)",
-                    ("revision-1", str(external_package)),
-                )
-                evidence.execute(
-                    "INSERT INTO source_manifest VALUES (?, ?, ?)",
+                    """
+                    UPDATE source_manifest
+                    SET path=?, sha256=?, size_bytes=?
+                    WHERE source_kind='package_binary'
+                    """,
                     (
-                        "revision-1",
-                        "binary/BP_External.uasset",
-                        "package_binary",
+                        "binary/BP_Base.uasset",
+                        hashlib.sha256(
+                            external_package.read_bytes()
+                        ).hexdigest(),
+                        external_package.stat().st_size,
                     ),
                 )
                 evidence.commit()
             finally:
                 evidence.close()
-            (evidence_root / "manifest.json").write_text(
-                '{"schema":"fixture"}',
-                encoding="utf-8",
-            )
 
             baseline = (
                 snapshot_module._capture_semantic_inputs_sha256(
@@ -2493,11 +2467,10 @@ class KnowledgeStorageTests(unittest.TestCase):
                 )
             )
             external_package.write_bytes(b"external-uasset-v2")
-            changed_primary = (
+            with self.assertRaises(ValueError):
                 snapshot_module._capture_semantic_inputs_sha256(
                     capture_root
                 )
-            )
             external_package.write_bytes(b"external-uasset-v1")
             restored = snapshot_module._capture_semantic_inputs_sha256(
                 capture_root
@@ -2511,7 +2484,6 @@ class KnowledgeStorageTests(unittest.TestCase):
                 )
             )
 
-        self.assertNotEqual(changed_primary, baseline)
         self.assertEqual(restored, baseline)
         self.assertNotEqual(added_sidecar, baseline)
 
@@ -2522,11 +2494,7 @@ class KnowledgeStorageTests(unittest.TestCase):
             discovery.write_bytes(b"stable-discovery-input")
             map_evidence = root / "map.json"
             map_evidence.write_bytes(b'{"catalog":"stable"}')
-            capture = root / "captures" / "BP_Test" / "evidence"
-            capture.mkdir(parents=True)
-            (capture / "evidence.sqlite").write_bytes(
-                b"stable-capture-evidence"
-            )
+            _blueprint_capture_fixture(root / "captures")
             native_root = root / "native"
             native_root.mkdir()
             unused_native_file = native_root / "not-consumed-by-core.json"

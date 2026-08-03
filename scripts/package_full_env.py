@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -298,7 +301,170 @@ def _verify_archive(
 
 def _resolve_input(root: Path, value: Path) -> Path:
     path = value.expanduser()
-    return (path if path.is_absolute() else root / path).resolve()
+    candidate = path if path.is_absolute() else root / path
+    # Preserve symlink/junction/reparse identity until the owning validator has
+    # inspected the complete lexical path chain.
+    return Path(os.path.abspath(os.fspath(candidate)))
+
+
+def _read_snapshot_file(
+    root: Path,
+    source: Path,
+    expected_relative: Path,
+) -> bytes:
+    lexical_source = Path(os.path.abspath(os.fspath(source)))
+    try:
+        actual_relative = lexical_source.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"sample evidence artifact is outside its asset: {source}"
+        ) from exc
+    if actual_relative != expected_relative:
+        raise ValueError(
+            "sample evidence artifact does not match the validated publication layout: "
+            f"{actual_relative.as_posix()}"
+        )
+    before = lexical_source.lstat()
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400))
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or lexical_source.is_symlink()
+        or bool(int(getattr(before, "st_file_attributes", 0)) & reparse_flag)
+        or int(before.st_nlink) != 1
+    ):
+        raise ValueError("sample evidence artifacts must be plain, unaliased files")
+    if before.st_size > 512 * 1024 * 1024:
+        raise ValueError("sample evidence artifact exceeds the snapshot size limit")
+    raw = lexical_source.read_bytes()
+    after = lexical_source.lstat()
+    before_identity = (
+        int(before.st_dev),
+        int(before.st_ino),
+        int(before.st_size),
+        int(before.st_mtime_ns),
+    )
+    after_identity = (
+        int(after.st_dev),
+        int(after.st_ino),
+        int(after.st_size),
+        int(after.st_mtime_ns),
+    )
+    if before_identity != after_identity or len(raw) != before.st_size:
+        raise ValueError("sample evidence artifact changed while snapshotting")
+    return raw
+
+
+def discover_sample_evidence_files(
+    sample_root: Path,
+) -> tuple[Any, list[tuple[Path, bytes]]]:
+    """Resolve the exact evidence generation that may enter the archive.
+
+    A v3 pointer is an authority boundary: only ``current.json`` and the three
+    files in its validated immutable revision are selected.  Compatibility v2
+    projections, orphan revisions, staging directories, and SQLite sidecars
+    are intentionally not discovered recursively.
+    """
+
+    from blueprint_translator.evidence_publication import evidence_publication_lock
+    from blueprint_translator.evidence_repository import resolve_asset_evidence_state
+
+    root = Path(os.path.abspath(os.fspath(sample_root.expanduser())))
+    with evidence_publication_lock(root):
+        state = resolve_asset_evidence_state(root, allow_stale=False)
+        if state.source_kind == "INDEXED_V3_CURRENT":
+            if state.pointer_path is None:
+                raise ValueError("INDEXED_V3_CURRENT evidence is missing current.json")
+            revision_dir = Path(state.manifest_path).parent
+            revision_id = revision_dir.name
+            expected = (
+                (Path(state.pointer_path), Path("evidence/current.json")),
+                (
+                    Path(state.database_path),
+                    Path("evidence/revisions") / revision_id / "evidence.sqlite",
+                ),
+                (
+                    Path(state.manifest_path),
+                    Path("evidence/revisions") / revision_id / "manifest.json",
+                ),
+                (
+                    Path(state.agent_index_path),
+                    Path("evidence/revisions") / revision_id / "agent_index.md",
+                ),
+            )
+        elif state.source_kind == "INDEXED_V2_COMPATIBILITY":
+            if state.pointer_path is not None:
+                raise ValueError("v2 compatibility evidence must not have a current pointer")
+            expected = (
+                (Path(state.database_path), Path("evidence/evidence.sqlite")),
+                (Path(state.manifest_path), Path("evidence/manifest.json")),
+                (Path(state.agent_index_path), Path("output/agent_index.md")),
+            )
+        else:
+            raise ValueError(f"unsupported sample evidence source: {state.source_kind}")
+
+        selected = [
+            (relative, _read_snapshot_file(root, source, relative))
+            for source, relative in expected
+        ]
+        snapshot = {relative.as_posix(): raw for relative, raw in selected}
+        database_relative = next(
+            relative.as_posix()
+            for relative, _raw in selected
+            if relative.name == "evidence.sqlite"
+        )
+        database_raw = snapshot[database_relative]
+        if (
+            len(database_raw) != state.database_bytes
+            or _sha256_bytes(database_raw) != state.database_sha256
+        ):
+            raise ValueError("sample evidence database snapshot differs from its binding")
+        if state.source_kind == "INDEXED_V3_CURRENT":
+            pointer_raw = snapshot["evidence/current.json"]
+            manifest_relative = next(
+                relative.as_posix()
+                for relative, _raw in selected
+                if relative.name == "manifest.json"
+            )
+            manifest_raw = snapshot[manifest_relative]
+            if _sha256_bytes(pointer_raw) != state.pointer_sha256:
+                raise ValueError("sample current pointer changed while snapshotting")
+            if _sha256_bytes(manifest_raw) != state.manifest_sha256:
+                raise ValueError("sample manifest changed while snapshotting")
+            pointer = json.loads(pointer_raw.decode("utf-8"))
+            manifest = json.loads(manifest_raw.decode("utf-8"))
+            if (
+                pointer.get("revisionId") != revision_id
+                or manifest.get("revisionId") != revision_id
+                or pointer.get("manifestSha256") != state.manifest_sha256
+            ):
+                raise ValueError("sample evidence snapshot mixes pointer generations")
+            index_relative = next(
+                relative.as_posix()
+                for relative, _raw in selected
+                if relative.name == "agent_index.md"
+            )
+            index_declaration = manifest["artifacts"]["agentIndex"]
+            index_raw = snapshot[index_relative]
+            if (
+                len(index_raw) != int(index_declaration["bytes"])
+                or _sha256_bytes(index_raw) != str(index_declaration["sha256"])
+            ):
+                raise ValueError("sample agent index snapshot differs from its binding")
+        return state, selected
+
+
+def _validate_sample_evidence_snapshot(
+    root: Path,
+    sample_asset: str,
+    files: list[tuple[Path, bytes]],
+) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="blueprint-evidence-package-snapshot-") as temporary:
+        asset_dir = Path(temporary) / sample_asset
+        for relative, raw in files:
+            destination = asset_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(raw)
+        return _validate_sample_evidence(root, asset_dir)
 
 
 def _validate_sample_evidence(root: Path, sample_root: Path) -> dict[str, object]:
@@ -388,7 +554,13 @@ def main(argv: list[str] | None = None) -> int:
 
         sample_root = _resolve_input(root, args.sample_asset_dir)
         report_root = _resolve_input(root, args.harvest_report_dir)
-        sample_validation = _validate_sample_evidence(root, sample_root)
+        sample_asset = sample_root.name
+        _sample_state, sample_files = discover_sample_evidence_files(sample_root)
+        sample_validation = _validate_sample_evidence_snapshot(
+            root,
+            sample_asset,
+            sample_files,
+        )
         report_triplets = discover_harvest_reports(report_root)
         verified_reports = _validate_harvest_reports(root, report_triplets)
 
@@ -406,17 +578,9 @@ def main(argv: list[str] | None = None) -> int:
                 build_devkit_content_root_config(args.devkit_content_root),
             )
 
-        sample_asset = sample_root.name
-        sample_files = (
-            sample_root / "evidence" / "evidence.sqlite",
-            sample_root / "evidence" / "manifest.json",
-            sample_root / "output" / "agent_index.md",
-        )
-        for path in sample_files:
-            if not path.is_file():
-                raise FileNotFoundError(path)
-            relative = Path("captures") / sample_asset / path.relative_to(sample_root)
-            _add_entry(entries, relative.as_posix(), path)
+        for sample_relative, snapshot_bytes in sample_files:
+            relative = Path("captures") / sample_asset / sample_relative
+            _add_entry(entries, relative.as_posix(), snapshot_bytes)
 
         report_files = {
             path

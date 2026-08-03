@@ -1,11 +1,13 @@
 import importlib.util
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -13,7 +15,9 @@ SCRIPT = ROOT / "scripts" / "bp_clipboard_to_prompt.py"
 FIXTURES = ROOT / "tests" / "fixtures"
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from blueprint_translator.evidence_writer import write_evidence_store_from_payload  # noqa: E402
+from blueprint_translator.evidence_revision import EvidenceArtifactInvalid  # noqa: E402
+from blueprint_translator.evidence_repository import EvidenceRepository  # noqa: E402
+from blueprint_translator.evidence_writer import write_evidence_artifacts_from_payload  # noqa: E402
 
 
 def _v2_compare_reader_payload(
@@ -233,7 +237,7 @@ def _write_v2_compare_asset(
     array_value: list[object] | None = None,
     harvest_default: dict[str, object] | None = None,
 ) -> None:
-    write_evidence_store_from_payload(
+    write_evidence_artifacts_from_payload(
         "/Game/Test/V2CompareFixture.V2CompareFixture",
         None,
         _v2_compare_reader_payload(
@@ -243,8 +247,18 @@ def _write_v2_compare_asset(
             array_value=array_value,
             harvest_default=harvest_default,
         ),
-        asset_dir / "evidence" / "evidence.sqlite",
+        asset_dir,
+        publish_v3=False,
     )
+
+
+def _prune_v2_compatibility(asset_dir: pathlib.Path) -> None:
+    for path in (
+        asset_dir / "evidence" / "evidence.sqlite",
+        asset_dir / "evidence" / "manifest.json",
+        asset_dir / "output" / "agent_index.md",
+    ):
+        path.unlink(missing_ok=True)
 
 
 def load_translator():
@@ -257,6 +271,98 @@ def load_translator():
 
 
 class CompareTests(unittest.TestCase):
+    def test_compare_keeps_one_bound_generation_when_database_path_is_replaced(self):
+        bp = load_translator()
+        keywords = bp.profile_keywords("ark", [])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            asset_dir = root / "published-a"
+            replacement_dir = root / "published-b"
+            write_evidence_artifacts_from_payload(
+                "/Game/Test/V2CompareFixture.V2CompareFixture",
+                None,
+                _v2_compare_reader_payload(pin_default=1.0, include_link=True),
+                asset_dir,
+            )
+            write_evidence_artifacts_from_payload(
+                "/Game/Test/V2CompareFixture.V2CompareFixture",
+                None,
+                _v2_compare_reader_payload(pin_default=9.0, include_link=False),
+                replacement_dir,
+            )
+            database_path = next(
+                (asset_dir / "evidence" / "revisions").glob("*/evidence.sqlite")
+            )
+            replacement_database = next(
+                (replacement_dir / "evidence" / "revisions").glob("*/evidence.sqlite")
+            )
+            original_graph_summaries = EvidenceRepository.graph_summaries
+
+            def replace_after_repository_open(
+                repository: EvidenceRepository,
+            ) -> list[dict[str, object]]:
+                rows = original_graph_summaries(repository)
+                shutil.copyfile(replacement_database, database_path)
+                return rows
+
+            with mock.patch.object(
+                EvidenceRepository,
+                "graph_summaries",
+                autospec=True,
+                side_effect=replace_after_repository_open,
+            ):
+                payload = bp.load_asset_payload_input(
+                    SimpleNamespace(), str(asset_dir), keywords
+                )
+
+        graph = payload["graphs"][0]["payload"]
+        self.assertIsInstance(graph, dict)
+        nodes = graph["nodes"]
+        reward_pin = next(
+            pin
+            for node in nodes
+            for pin in node["pins"]
+            if pin["name"] == "RewardValue"
+        )
+        self.assertEqual(reward_pin["default"], 1.0)
+        self.assertEqual(len(graph["links"]), 1)
+
+    def test_v3_current_compare_survives_pruned_v2_and_rejects_pointer_tamper(self):
+        bp = load_translator()
+        keywords = bp.profile_keywords("ark", [])
+        with tempfile.TemporaryDirectory() as tmp:
+            asset_dir = pathlib.Path(tmp) / "current-only"
+            write_evidence_artifacts_from_payload(
+                "/Game/Test/V2CompareFixture.V2CompareFixture",
+                None,
+                _v2_compare_reader_payload(pin_default=1.0, include_link=True),
+                asset_dir,
+            )
+            _prune_v2_compatibility(asset_dir)
+
+            payload = bp.load_asset_payload_input(
+                SimpleNamespace(), str(asset_dir), keywords
+            )
+            self.assertEqual(payload["metadata"]["node_count"], 2)
+
+            (asset_dir / "evidence" / "current.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            with self.assertRaises(EvidenceArtifactInvalid):
+                bp.load_asset_payload_input(SimpleNamespace(), str(asset_dir), keywords)
+
+            pointer_path = asset_dir / "evidence" / "current.json"
+            pointer = {
+                "schema": "blueprint-to-code.evidence-current/v1",
+                "revisionId": "a" * 24,
+                "manifest": f"revisions/{'a' * 24}/manifest.json",
+                "manifestSha256": "b" * 64,
+                "mode": "indexed",
+            }
+            pointer_path.write_text(json.dumps(pointer) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(FileNotFoundError, "EVIDENCE_REVISION_MISSING"):
+                bp.load_asset_payload_input(SimpleNamespace(), str(asset_dir), keywords)
+
     def test_v2_projection_detects_wiring_and_pin_default_only_changes_with_real_counts(self):
         bp = load_translator()
         keywords = bp.profile_keywords("ark", [])

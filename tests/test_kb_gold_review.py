@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -30,6 +31,12 @@ from blueprint_translator.kb_vnext.gold_review import (  # noqa: E402
     validate_registration_review_source,
     validate_review_set,
     validate_role_review_source,
+)
+from blueprint_translator.evidence_publication import (  # noqa: E402
+    migrate_v2_evidence_to_v3,
+)
+from blueprint_translator.evidence_writer import (  # noqa: E402
+    write_evidence_artifacts_from_payload,
 )
 
 
@@ -237,94 +244,43 @@ def _registration_discovery_db(path: Path) -> None:
 
 
 def _registration_capture_stores(root: Path) -> None:
-    database = root / "capture-a" / "evidence" / "evidence.sqlite"
-    database.parent.mkdir(parents=True)
-    connection = sqlite3.connect(database)
-    connection.executescript(
-        """
-        CREATE TABLE asset_revisions (
-            revision_id TEXT PRIMARY KEY,
-            asset_id TEXT NOT NULL,
-            asset_name TEXT NOT NULL,
-            object_path TEXT NOT NULL,
-            source_fingerprint TEXT NOT NULL,
-            parser_version TEXT NOT NULL,
-            schema_version TEXT NOT NULL,
-            generated_at TEXT NOT NULL,
-            uasset_path TEXT NOT NULL
-        );
-        CREATE TABLE class_defaults (
-            default_ref TEXT PRIMARY KEY,
-            revision_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            type_name TEXT NOT NULL,
-            value_json TEXT NOT NULL,
-            value_codec TEXT NOT NULL,
-            value_blob BLOB,
-            confidence TEXT NOT NULL,
-            source TEXT NOT NULL,
-            extra_json TEXT NOT NULL
-        );
-        """
+    asset_dir = root / "capture-a"
+    package = asset_dir / "OwnerA.uasset"
+    package.parent.mkdir(parents=True)
+    package.write_bytes(b"gold-review-live-evidence-v3")
+    variables = {
+        "RawClass": {
+            "value": "/Game/Target/Raw.Raw_C",
+            "type": "SoftObjectProperty",
+            "confidence": "high",
+            "source": "uasset_cdo_property_tag",
+        },
+        "ItemClass": {
+            "value": "/Game/Target/A.Target_C",
+            "type": "SoftObjectProperty",
+            "confidence": "high",
+            "source": "uasset_cdo_property_tag",
+        },
+        "LowConfidenceClass": {
+            "value": "/Game/Target/Ignored.Ignored_C",
+            "type": "SoftObjectProperty",
+            "confidence": "low",
+            "source": "uasset_cdo_property_tag",
+        },
+    }
+    write_evidence_artifacts_from_payload(
+        "/Game/Owner/A.Owner",
+        package,
+        {
+            "asset_name": "OwnerA",
+            "asset_path": "/Game/Owner/A.Owner",
+            "graphs": [],
+            "class_defaults": {"variables": variables},
+        },
+        asset_dir,
+        publish_v3=False,
     )
-    connection.execute(
-        "INSERT INTO asset_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            "revision-a",
-            "asset-a",
-            "OwnerA",
-            "/Game/Owner/A.Owner",
-            REVISION_SHA256,
-            "evidence-test/v1",
-            "ark.blueprint.evidence.v2",
-            "2026-07-29T00:00:00+00:00",
-            "redacted",
-        ),
-    )
-    defaults = (
-        (
-            "bp://asset-a@revision-a/default/RawClass",
-            "revision-a",
-            "RawClass",
-            "SoftObjectProperty",
-            json.dumps("/Game/Target/Raw.Raw_C"),
-            "json",
-            None,
-            "high",
-            "uasset_cdo_property_tag",
-            "{}",
-        ),
-        (
-            "bp://asset-a@revision-a/default/ItemClass",
-            "revision-a",
-            "ItemClass",
-            "SoftObjectProperty",
-            json.dumps("/Game/Target/A.Target_C"),
-            "json",
-            None,
-            "high",
-            "uasset_cdo_property_tag",
-            "{}",
-        ),
-        (
-            "bp://asset-a@revision-a/default/LowConfidenceClass",
-            "revision-a",
-            "LowConfidenceClass",
-            "SoftObjectProperty",
-            json.dumps("/Game/Target/Ignored.Ignored_C"),
-            "json",
-            None,
-            "low",
-            "uasset_cdo_property_tag",
-            "{}",
-        ),
-    )
-    connection.executemany(
-        "INSERT INTO class_defaults VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        defaults,
-    )
-    connection.commit()
-    connection.close()
+    migrate_v2_evidence_to_v3(asset_dir, prune_v2=True)
 
 
 def _role_discovery_db(path: Path) -> None:
@@ -799,6 +755,35 @@ class GoldReviewPackTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, serialized)
         validate_review_pack(first)
+
+    def test_registration_capture_identity_uses_portable_pointed_revision_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "discovery.sqlite"
+            captures_a = root / "machine-a" / "captures"
+            captures_b = root / "machine-b" / "captures"
+            _registration_discovery_db(database)
+            _registration_capture_stores(captures_a)
+            shutil.copytree(captures_a, captures_b)
+
+            source_a = registration_review_source_from_sqlite(
+                database,
+                captures_root=captures_a,
+            )
+            source_b = registration_review_source_from_sqlite(
+                database,
+                captures_root=captures_b,
+            )
+
+        self.assertEqual(
+            source_a["sourceIdentity"]["captureStoreSetSha256"],
+            source_b["sourceIdentity"]["captureStoreSetSha256"],
+        )
+        serialized = json.dumps(source_b, sort_keys=True)
+        self.assertNotIn(str(captures_a), serialized)
+        self.assertNotIn(str(captures_b), serialized)
 
     def test_registration_source_rejects_classifier_generated_candidates(
         self,

@@ -8,8 +8,8 @@
 
 | 维度 | 旧报告路径 | 当前 Evidence Store 路径 |
 | --- | --- | --- |
-| AI 默认入口 | 整份 Markdown 或逐图大 JSON | 不超过 1,500 estimated tokens 的 `agent_index.md` |
-| 事实存储 | 同一 Node/Pin/Link 在多份文件中重复 | revision 固定的 `evidence/evidence.sqlite` |
+| AI 默认入口 | 整份 Markdown 或逐图大 JSON | `evidence/current.json` 所指 revision 内、不超过 1,500 estimated tokens 的 `agent_index.md` |
+| 事实存储 | 同一 Node/Pin/Link 在多份文件中重复 | `current.json` 所指 revision 内、由 manifest hash 绑定的 `evidence.sqlite` |
 | 定位 | 依赖名称和长文本搜索 | revision 隔离的稳定 `bp://` Evidence ID |
 | 不确定性 | 截断、未解析、外部实现容易混在一起 | 明确区分确认、启发式、歧义、未恢复和来源不在本资产 |
 | 深挖 | 重新打开整张图或整份报告 | `search → entity → neighborhood/trace → gaps` 有界查询 |
@@ -26,7 +26,9 @@
 - 已构建的 `dist/`；
 - Windows 内置 Python runtime；
 - 项目脚本、文档和测试；
-- 可选的派生证据样例：`agent_index.md`、`evidence.sqlite`、`manifest.json`。
+- 可选的派生证据样例：`evidence/current.json` 与其所指
+  `evidence/revisions/<revisionId>/`（其中包含 `agent_index.md`、
+  `evidence.sqlite`、`manifest.json`）。
 
 完整环境包不包含：
 
@@ -82,11 +84,26 @@ runtime\python\python.exe scripts\migrate_capture_evidence.py `
   --asset-dir "captures\<AssetName>"
 ```
 
+将已验证的 v2 store 发布为 immutable v3 revision 时，默认保留 v2 compatibility
+artifacts；pointer/manifest 信任链、显式 `--prune-v2` 和恢复步骤见
+[Blueprint Evidence Publication v3](BLUEPRINT_EVIDENCE_PUBLICATION_V3_zh.md)。
+
+消费者的唯一规范入口是：
+
+```text
+evidence/current.json
+  -> evidence/revisions/<revisionId>/manifest.json
+  -> evidence.sqlite + agent_index.md
+```
+
+根部 `evidence/evidence.sqlite`、`evidence/manifest.json` 和
+`output/agent_index.md` 只保留一个发布周期，属于 nonauthority compatibility
+copies；完成消费者迁移后可显式 `--prune-v2`。它们不能声明 current，v3 pointer
+损坏时也不能作为静默回退来源。
+
 AI 的默认读取顺序：
 
 ```powershell
-Get-Content -Encoding UTF8 "captures\<AssetName>\output\agent_index.md"
-
 runtime\python\python.exe scripts\query_blueprint_evidence.py `
   --asset-dir "captures\<AssetName>" overview --budget 700
 
@@ -202,7 +219,7 @@ runtime\python\python.exe -m unittest discover -s tests -p "test_*.py"
 npm run build
 ```
 
-从现有不可变 `evidence.sqlite` 全量重建 AI 索引：
+从每个 `current.json` 所指不可变 revision 的 `evidence.sqlite` 重建 AI 索引：
 
 ```powershell
 runtime\python\python.exe scripts\rebuild_evidence_indexes.py `
@@ -240,11 +257,12 @@ runtime\python\python.exe scripts\package_full_env.py `
 
 ## 8. 接手维护时先读
 
-1. [Evidence Store v2 规格](BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
-2. [Native Evidence Store v1](NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md)
-3. [Hybrid Evidence Linking](HYBRID_EVIDENCE_LINKING_zh.md)
-4. [Buff_StriderHackingParent 真实案例](BUFF_STRIDER_HACKING_PARENT_EVIDENCE_V2_CASE_zh.md)
-5. [使用手册](USER_GUIDE_zh.md)
-6. [报告总结与公式提取标准](REPORT_SUMMARY_AND_FORMULA_STANDARD_zh.md)
+1. [Evidence Publication v3 操作合同](BLUEPRINT_EVIDENCE_PUBLICATION_V3_zh.md)
+2. [Evidence Store v2 规格](BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
+3. [Native Evidence Store v1](NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md)
+4. [Hybrid Evidence Linking](HYBRID_EVIDENCE_LINKING_zh.md)
+5. [Buff_StriderHackingParent 真实案例](BUFF_STRIDER_HACKING_PARENT_EVIDENCE_V2_CASE_zh.md)
+6. [使用手册](USER_GUIDE_zh.md)
+7. [报告总结与公式提取标准](REPORT_SUMMARY_AND_FORMULA_STANDARD_zh.md)
 
 维护时保持三条规则：先写失败测试；未知值不能归零或伪装成空值；任何面向 AI 的新入口都必须有预算、覆盖计数、分页和下一步查询。

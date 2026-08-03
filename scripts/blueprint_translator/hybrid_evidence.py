@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .evidence_repository import (
+    evidence_state_metadata,
+    open_bound_evidence_database,
+    resolve_asset_evidence_state,
+)
 from .evidence_schema import parse_evidence_ref
 from .native_evidence_store import parse_native_evidence_id, sha256_file
 
@@ -944,18 +949,9 @@ def _find_metadata_values(
 
 def extract_blueprint_calls(
     asset_dir: str | Path,
-) -> tuple[list[dict[str, object]], dict[str, str]]:
-    root = Path(asset_dir).expanduser().resolve()
-    database = root / "evidence" / "evidence.sqlite"
-    if not database.is_file():
-        raise FileNotFoundError(database)
-    connection = sqlite3.connect(
-        f"{database.as_uri()}?mode=ro",
-        uri=True,
-    )
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA query_only = ON")
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    evidence_state = resolve_asset_evidence_state(asset_dir)
+    with open_bound_evidence_database(evidence_state) as connection:
         identity = connection.execute(
             "SELECT revision_id, source_fingerprint FROM asset_revisions LIMIT 1"
         ).fetchone()
@@ -967,8 +963,6 @@ def extract_blueprint_calls(
             "FROM nodes WHERE trim(function_name) <> '' "
             "ORDER BY node_ref"
         ).fetchall()
-    finally:
-        connection.close()
     calls: list[dict[str, object]] = []
     for row in rows:
         metadata: dict[str, Any] = {}
@@ -1019,4 +1013,5 @@ def extract_blueprint_calls(
     return calls, {
         "revisionId": str(identity["revision_id"]),
         "sourceFingerprint": str(identity["source_fingerprint"]),
+        **evidence_state_metadata(evidence_state),
     }
