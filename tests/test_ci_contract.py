@@ -95,6 +95,9 @@ class CiContractTests(unittest.TestCase):
     def test_ci_uses_current_official_actions_and_read_only_permissions(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
+        self.assertIn("runs-on: windows-latest", workflow)
+        self.assertNotIn("runs-on: ubuntu-latest", workflow)
+        self.assertIn("defaults:\n      run:\n        shell: bash", workflow)
         self.assertIn("actions/checkout@v5", workflow)
         self.assertIn("actions/setup-python@v6", workflow)
         self.assertIn("actions/setup-node@v6", workflow)

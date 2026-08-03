@@ -91,7 +91,7 @@ class WindowsPortablePackageTests(unittest.TestCase):
     def test_content_policy_rejects_any_user_path_and_binary_secret(self):
         entries = {
             "BlueprintToCode/scripts/local-note.txt": (
-                "C:" + r"\Users\victim\Desktop\private.txt"
+                "C:" + "\\" + "Users" + r"\victim\Desktop\private.txt"
             ).encode(),
         }
         with self.assertRaisesRegex(ValueError, "absolute-path"):
