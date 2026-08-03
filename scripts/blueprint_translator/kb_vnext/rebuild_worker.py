@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -38,6 +39,7 @@ from .projections import (
     compute_core_projection_content_digest,
     compute_projection_artifact_content_digest,
 )
+from .roles import ROLE_CLASSIFIER_VERSION
 
 
 PENDING_REBUILD: Final = "PENDING_REBUILD"
@@ -82,6 +84,7 @@ _ATTEMPT_SCHEMA: Final = "ark-kb-rebuild-attempt/v1"
 _EXTERNAL_MARKER_SCHEMA: Final = "ark-kb-rebuild-external-marker/v1"
 _RETRYABLE_TERMINAL_STATUSES: Final = frozenset({FAILED, BLOCKED_GAP})
 _MAX_CLASS_CLOSURE_SCOPE: Final = 4096
+_FILE_ATTRIBUTE_REPARSE_POINT: Final = 0x400
 
 EXPECTED_REBUILD_WRITE_TABLES: Final[
     Mapping[str, frozenset[str]]
@@ -96,6 +99,7 @@ EXPECTED_REBUILD_WRITE_TABLES: Final[
                 "knowledge_roles",
                 "knowledge_depth_policies",
                 "role_metrics",
+                "role_signal_metrics",
             }
         ),
         "DOMAIN_ENTITY": frozenset({"domain_memberships"}),
@@ -167,6 +171,7 @@ _ROW_SCOPE_RULES: Final[
                 "knowledge_roles": _RowScopeRule(("entity_id",)),
                 "knowledge_depth_policies": _RowScopeRule(("entity_id",)),
                 "role_metrics": _RowScopeRule(("entity_id",)),
+                "role_signal_metrics": _RowScopeRule(("entity_id",)),
             }
         ),
         "DOMAIN_ENTITY": MappingProxyType(
@@ -254,6 +259,28 @@ class RebuildWorkerError(RuntimeError):
 
 class RebuildVerificationError(RebuildWorkerError):
     """The backend returned without producing a verified target state."""
+
+
+class _ProjectionRollbackIncomplete(RebuildWorkerError):
+    """Projection publication changed disk state but rollback was incomplete."""
+
+    def __init__(
+        self,
+        staging_dir: Path,
+        publish_error: BaseException,
+        restore_errors: Sequence[BaseException],
+    ) -> None:
+        residual = staging_dir.name
+        restore_types = ",".join(
+            type(error).__name__ for error in restore_errors
+        )
+        super().__init__(
+            "projection rollback incomplete; "
+            f"residual={residual}; "
+            f"publishError={type(publish_error).__name__}; "
+            f"restoreErrors={restore_types}"
+        )
+        self.residual = residual
 
 
 class RebuildBlockedGap(RuntimeError):
@@ -520,6 +547,8 @@ class RebuildBackend:
         projection_dir: Path | None = None,
         cache_connection: sqlite3.Connection | None = None,
     ) -> None:
+        if projection_dir is not None and _is_reparse_point(projection_dir):
+            raise ValueError("projection_dir cannot be a symlink or reparse point")
         self.__projection_dir = (
             projection_dir.resolve()
             if projection_dir is not None
@@ -986,6 +1015,11 @@ def _inspect_role(
         "SELECT * FROM role_metrics WHERE entity_id=?",
         (entity_id,),
     )
+    signals = _rows(
+        connection,
+        "SELECT * FROM role_signal_metrics WHERE entity_id=?",
+        (entity_id,),
+    )
     roles = _rows(
         connection,
         """
@@ -1011,6 +1045,7 @@ def _inspect_role(
     )
     complete = (
         len(metrics) == 1
+        and len(signals) == 1
         and bool(roles)
         and len(depth) == 1
         and all(
@@ -1026,6 +1061,7 @@ def _inspect_role(
         {
             "entityId": entity_id,
             "metrics": metrics,
+            "signals": signals,
             "roles": roles,
             "depth": depth,
         },
@@ -1922,9 +1958,25 @@ def _event_payload(
     ).fetchone()
     if row is None:
         raise RebuildWorkerError(f"invalidation event not found: {event_id}")
+    def reject_duplicates(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        payload = json.loads(str(row[0]))
-    except json.JSONDecodeError as error:
+        payload = json.loads(
+            str(row[0]),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON number: {value}")
+            ),
+        )
+    except (json.JSONDecodeError, ValueError) as error:
         raise RebuildWorkerError(
             f"invalidation event payload is invalid: {event_id}"
         ) from error
@@ -1933,6 +1985,148 @@ def _event_payload(
             f"invalidation event payload is not an object: {event_id}"
         )
     return payload
+
+
+def _role_scope_proof(
+    connection: sqlite3.Connection,
+    task: RebuildTask,
+) -> dict[str, object]:
+    event_payload = _event_payload(connection, task.event_id)
+    proof = event_payload.get("_roleScopeProof")
+    if not isinstance(proof, dict):
+        raise RebuildVerificationError("role dependency proof is missing")
+    expected_keys = {
+        "schema",
+        "classifierVersion",
+        "sourceRevisionId",
+        "triggerSourceRevisionIds",
+        "changedEntityIds",
+        "roleEntityIds",
+        "transitions",
+        "proof",
+    }
+    changed = proof.get("changedEntityIds")
+    role_ids = proof.get("roleEntityIds")
+    trigger_ids = proof.get("triggerSourceRevisionIds")
+    source_revision_id = proof.get("sourceRevisionId")
+    proof_uri = proof.get("proof")
+    body = dict(proof)
+    body.pop("proof", None)
+    queued_role_rows = [
+        (int(row[0]), str(row[1]))
+        for row in connection.execute(
+            """
+            SELECT downstream_id, dependency_reason
+            FROM invalidation_queue
+            WHERE event_id=? AND downstream_kind='ROLE_ENTITY'
+            ORDER BY downstream_id
+            """,
+            (task.event_id,),
+        )
+    ]
+    queued_role_ids = [row[0] for row in queued_role_rows]
+    def valid_ids(value: object) -> bool:
+        return (
+            isinstance(value, list)
+            and bool(value)
+            and all(type(item) is int and item > 0 for item in value)
+            and value == sorted(set(value))
+        )
+    if (
+        set(proof) != expected_keys
+        or proof.get("schema")
+        != "ark-kb-additive-role-dependency-scope/v1"
+        or proof.get("classifierVersion") != ROLE_CLASSIFIER_VERSION
+        or type(source_revision_id) is not int
+        or source_revision_id < 1
+        or not valid_ids(changed)
+        or not valid_ids(role_ids)
+        or not valid_ids(trigger_ids)
+        or not set(changed).issubset(role_ids)
+        or role_ids != queued_role_ids
+        or task.downstream_id not in role_ids
+        or not isinstance(proof.get("transitions"), list)
+        or proof_uri != "role-scope://" + _digest(body)
+    ):
+        raise RebuildVerificationError("role dependency proof is invalid")
+    durable_trigger_ids = event_payload.get("_upstreamRevisionIds")
+    event_row = connection.execute(
+        """
+        SELECT event_kind, upstream_revision_id
+        FROM invalidation_events WHERE event_id=?
+        """,
+        (task.event_id,),
+    ).fetchone()
+    if (
+        event_row is None
+        or str(event_row[0]).upper() != "ASSET"
+        or not valid_ids(durable_trigger_ids)
+        or durable_trigger_ids != trigger_ids
+        or (
+            event_row[1] is not None
+            and durable_trigger_ids != [int(event_row[1])]
+        )
+    ):
+        raise RebuildVerificationError(
+            "role dependency proof trigger revision scope is invalid"
+        )
+    revision = connection.execute(
+        """
+        SELECT source_kind, source_uri, producer_version, freshness_status
+        FROM source_revisions WHERE revision_id=?
+        """,
+        (source_revision_id,),
+    ).fetchone()
+    if (
+        revision is None
+        or str(revision[0]).lower() != "role_classifier"
+        or str(revision[1]) != f"classifier://{ROLE_CLASSIFIER_VERSION}"
+        or str(revision[2]) != ROLE_CLASSIFIER_VERSION
+        or str(revision[3]).upper() != "FRESH"
+    ):
+        raise RebuildVerificationError(
+            "role dependency proof source revision is not fresh"
+        )
+    trigger_placeholders = ",".join("?" for _ in trigger_ids)
+    trigger_rows = list(
+        connection.execute(
+            f"""
+            SELECT revision_id, freshness_status
+            FROM source_revisions
+            WHERE revision_id IN ({trigger_placeholders})
+            ORDER BY revision_id
+            """,
+            tuple(trigger_ids),
+        )
+    )
+    if [int(row[0]) for row in trigger_rows] != trigger_ids or any(
+        str(row[1]).upper() != "FRESH" for row in trigger_rows
+    ):
+        raise RebuildVerificationError(
+            "role dependency proof trigger revision is not fresh"
+        )
+    dependency_rows = {
+        (int(row[0]), int(row[1]), str(row[2]))
+        for row in connection.execute(
+            f"""
+            SELECT upstream_revision_id, downstream_id, dependency_reason
+            FROM invalidation_dependencies
+            WHERE upstream_revision_id IN ({trigger_placeholders})
+              AND downstream_kind='ROLE_ENTITY'
+            """,
+            tuple(trigger_ids),
+        )
+    }
+    expected_dependency_rows = {
+        (trigger_id, entity_id, reason)
+        for trigger_id in trigger_ids
+        for entity_id, reason in queued_role_rows
+    }
+    if dependency_rows != expected_dependency_rows:
+        raise RebuildVerificationError(
+            "role dependency proof dependency rows are invalid"
+        )
+    return proof
 
 
 def _attempt_record_is_valid(
@@ -2094,52 +2288,8 @@ def _projection_batch_hit(
     task: RebuildTask,
     state: RebuildTargetState,
 ) -> bool:
-    if task.downstream_kind != "PROJECTION" or not state.complete:
-        return False
-    payload = _event_payload(connection, task.event_id)
-    batch = payload.get(_PROJECTION_BATCH_KEY)
-    receipts = payload.get(_RECEIPTS_KEY)
-    if not isinstance(batch, dict) or not isinstance(receipts, dict):
-        return False
-
-    def row_scope_matches(receipt: Mapping[str, object]) -> bool:
-        verification = receipt.get("verification")
-        if not isinstance(verification, dict):
-            return False
-        row_scope = verification.get("rowScope")
-        if not isinstance(row_scope, dict):
-            return False
-        raw_names = row_scope.get("projectionNames")
-        if (
-            row_scope.get("mode") != "EXPLICIT_PROJECTION_BATCH"
-            or not isinstance(raw_names, list)
-            or not raw_names
-            or any(
-                not isinstance(name, str) or name not in _PROJECTION_NAMES
-                for name in raw_names
-            )
-            or len(raw_names) != len(set(raw_names))
-        ):
-            return False
-        scope_ids = {
-            str(_PROJECTION_NAMES.index(name) + 1)
-            for name in raw_names
-        }
-        return scope_ids == set(batch)
-
-    batch_proven = any(
-        isinstance(receipt, dict)
-        and receipt.get("downstreamKind") == "PROJECTION"
-        and receipt.get("status") == SUCCEEDED
-        and receipt.get("projectionBatch") == batch
-        and row_scope_matches(receipt)
-        and _receipt_is_valid(receipt)
-        for receipt in receipts.values()
-    )
-    return (
-        batch_proven
-        and batch.get(str(task.downstream_id)) == state.digest
-    )
+    del connection, task, state
+    return False
 
 
 def _projection_batch_state(
@@ -2425,7 +2575,12 @@ def _projection_scope(
         raise RebuildVerificationError(
             "projection task is outside its durable event batch"
         )
-    return tuple(_PROJECTION_NAMES[value - 1] for value in projection_ids)
+    expected_seed = _PROJECTION_NAMES[task.downstream_id - 1]
+    if seed != expected_seed:
+        raise RebuildVerificationError(
+            "projection downstream ID does not match its canonical name"
+        )
+    return (expected_seed,)
 
 
 def _row_scope_values(
@@ -2645,12 +2800,10 @@ def _row_scope_receipt(
         }
     if kind == "PROJECTION":
         return {
-            "mode": "EXPLICIT_PROJECTION_BATCH",
+            "mode": "EXACT_PROJECTION",
             "eventId": task.event_id,
             "targetId": task.downstream_id,
-            "projectionNames": list(
-                _projection_scope(connection, task, seed)
-            ),
+            "projectionName": _projection_scope(connection, task, seed)[0],
         }
     if kind == "CLASS_CLOSURE":
         if not isinstance(seed, _ClassClosureSeed):
@@ -2672,6 +2825,24 @@ def _row_scope_receipt(
             "mode": "ENTITY_URI",
             "targetId": task.downstream_id,
             "entityUri": uri,
+        }
+    if kind == "ROLE_ENTITY":
+        if "_roleScopeProof" not in _event_payload(
+            connection, task.event_id
+        ):
+            return {
+                "mode": "TASK_TARGET_ID",
+                "targetId": task.downstream_id,
+            }
+        proof = _role_scope_proof(connection, task)
+        return {
+            "mode": "PROVEN_PERCENTILE_CLOSURE",
+            "targetId": task.downstream_id,
+            "sourceRevisionId": proof["sourceRevisionId"],
+            "triggerSourceRevisionIds": proof["triggerSourceRevisionIds"],
+            "changedEntityIds": proof["changedEntityIds"],
+            "roleEntityIds": proof["roleEntityIds"],
+            "dependencyProof": proof["proof"],
         }
     if kind == "NATIVE_FUNCTION":
         if not isinstance(seed, tuple) or len(seed) != 3:
@@ -3245,7 +3416,11 @@ def _projection_staging_dir(
     ):
         return None
     parent = published_dir.parent
-    if not parent.is_dir():
+    if (
+        not parent.is_dir()
+        or _is_reparse_point(parent)
+        or _is_reparse_point(published_dir)
+    ):
         raise RebuildBlockedGap(
             "PROJECTION_PARENT_NOT_AVAILABLE",
             f"Projection parent directory does not exist: {parent}",
@@ -3258,12 +3433,70 @@ def _projection_staging_dir(
     )
 
 
+def _is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except FileNotFoundError:
+        return False
+    return bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _atomic_replace(source: Path, target: Path) -> None:
+    if os.name != "nt":
+        os.replace(source, target)
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return
+    import ctypes
+
+    move_file_ex = ctypes.windll.kernel32.MoveFileExW
+    move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    move_file_ex.restype = ctypes.c_int
+    movefile_replace_existing = 0x1
+    movefile_write_through = 0x8
+    if not move_file_ex(
+        str(source),
+        str(target),
+        movefile_replace_existing | movefile_write_through,
+    ):
+        raise ctypes.WinError()
+
+
 def _publish_projection_staging(
     staging_dir: Path,
     output_dir: Path,
     allowed_projection_names: Iterable[str],
 ) -> "_ProjectionPublication":
-    output_dir.mkdir(parents=False, exist_ok=True)
+    if (
+        not output_dir.is_dir()
+        or _is_reparse_point(output_dir)
+        or _is_reparse_point(staging_dir)
+        or staging_dir.stat().st_dev != output_dir.stat().st_dev
+    ):
+        raise RebuildVerificationError(
+            "projection publication paths are unsafe or cross-volume"
+        )
     allowed = frozenset(str(value) for value in allowed_projection_names)
     staged_projection_names = {
         path.stem for path in staging_dir.glob("*.sqlite") if path.is_file()
@@ -3271,7 +3504,7 @@ def _publish_projection_staging(
     if (
         not allowed
         or not allowed.issubset(_PROJECTION_NAMES)
-        or not staged_projection_names.issubset(allowed)
+        or staged_projection_names != allowed
     ):
         raise RebuildVerificationError(
             "staged projection artifacts exceed the durable event batch"
@@ -3290,7 +3523,8 @@ def _publish_projection_staging(
     invalid_targets = [
         target
         for target in targets
-        if target.exists() and not target.is_file()
+        if target.exists()
+        and (not target.is_file() or _is_reparse_point(target))
     ]
     if invalid_targets:
         raise RebuildVerificationError(
@@ -3304,20 +3538,44 @@ def _publish_projection_staging(
     try:
         for target in targets:
             if target.is_file():
-                target.replace(backup_dir / target.name)
+                backup = backup_dir / target.name
+                shutil.copy2(target, backup)
+                _fsync_file(backup)
                 backed_up.append(target.name)
+        _fsync_directory(backup_dir)
         for source, target in zip(sources, targets, strict=True):
-            source.replace(target)
+            if _is_reparse_point(source):
+                raise RebuildVerificationError(
+                    "projection staging artifact is a reparse point"
+                )
+            _fsync_file(source)
+            _atomic_replace(source, target)
             published.append(target.name)
-    except Exception:
-        for name in reversed(published):
-            target = output_dir / name
-            if target.is_file():
-                target.replace(staging_dir / name)
+    except Exception as publish_error:
+        restore_errors: list[BaseException] = []
         for name in reversed(backed_up):
             backup = backup_dir / name
             if backup.is_file():
-                backup.replace(output_dir / name)
+                try:
+                    _atomic_replace(backup, output_dir / name)
+                except Exception as restore_error:
+                    restore_errors.append(restore_error)
+        for name in reversed(published):
+            if name in backed_up:
+                continue
+            target = output_dir / name
+            if target.is_file():
+                try:
+                    target.unlink()
+                    _fsync_directory(output_dir)
+                except Exception as restore_error:
+                    restore_errors.append(restore_error)
+        if restore_errors:
+            raise _ProjectionRollbackIncomplete(
+                staging_dir,
+                publish_error,
+                restore_errors,
+            ) from publish_error
         raise
     return _ProjectionPublication(
         staging_dir=staging_dir,
@@ -3341,14 +3599,30 @@ def _restore_projection_publication(
     if publication is None:
         return
     backup_dir = publication.staging_dir / ".publish-backup"
-    for name in reversed(publication.published):
-        target = publication.output_dir / name
-        if target.is_file():
-            target.replace(publication.staging_dir / name)
+    restore_errors: list[BaseException] = []
     for name in reversed(publication.backed_up):
         backup = backup_dir / name
         if backup.is_file():
-            backup.replace(publication.output_dir / name)
+            try:
+                _atomic_replace(backup, publication.output_dir / name)
+            except Exception as restore_error:
+                restore_errors.append(restore_error)
+    for name in reversed(publication.published):
+        if name in publication.backed_up:
+            continue
+        target = publication.output_dir / name
+        if target.is_file():
+            try:
+                target.unlink()
+                _fsync_directory(publication.output_dir)
+            except Exception as restore_error:
+                restore_errors.append(restore_error)
+    if restore_errors:
+        raise _ProjectionRollbackIncomplete(
+            publication.staging_dir,
+            RuntimeError("post-publication verification failed"),
+            restore_errors,
+        )
 
 
 def _cleanup_projection_staging(staging_dir: Path | None) -> None:
@@ -3587,9 +3861,27 @@ def _run_task(
                 ]
             }
         )
+        explicit_domain_owner_rebuild = (
+            task.downstream_kind == "DOMAIN_ENTITY"
+            and touched == {"domain_memberships"}
+            and core_tracker.operations
+            >= {("domain_memberships", "DELETE")}
+            and not cache_tracker.operations
+        )
+        explicit_projection_rebuild = (
+            task.downstream_kind == "PROJECTION"
+            and external_marked
+            and touched == {"projection_runs"}
+            and bool(core_tracker.operations)
+            and not cache_tracker.operations
+        )
         verification_basis = "TARGET_STATE_CHANGED"
         if not semantic_changed and explicit_whole_cache_invalidation:
             verification_basis = "EXPLICIT_WHOLE_CACHE_INVALIDATION"
+        if not semantic_changed and explicit_domain_owner_rebuild:
+            verification_basis = "VERIFIED_DOMAIN_OWNER_TARGET_STATE"
+        if explicit_projection_rebuild:
+            verification_basis = "VERIFIED_PROJECTION_REBUILD"
         verification: dict[str, object] = {
             "basis": verification_basis,
             "coreWriteChanges": core_write_changes,
@@ -3623,6 +3915,8 @@ def _run_task(
                 and class_revision_verification is not None
             )
             or explicit_whole_cache_invalidation
+            or explicit_domain_owner_rebuild
+            or explicit_projection_rebuild
         )
         if not verified_work:
             raise RebuildVerificationError(
@@ -3666,25 +3960,7 @@ def _run_task(
                 raise RebuildVerificationError(
                     "published projection marker failed verification"
                 )
-        projection_batch = (
-            _projection_batch_state(connection, backend)
-            if task.downstream_kind == "PROJECTION"
-            else None
-        )
-        if projection_batch is not None:
-            queued_projection_names = _projection_scope(
-                connection,
-                task,
-                seed,
-            )
-            required_projection_ids = {
-                str(_PROJECTION_NAMES.index(name) + 1)
-                for name in queued_projection_names
-            }
-            if not required_projection_ids.issubset(projection_batch):
-                raise RebuildVerificationError(
-                    "projection batch did not verify every queued projection"
-                )
+        projection_batch = None
         proof = _write_receipt(
             connection,
             task,
@@ -3711,7 +3987,16 @@ def _run_task(
         )
     except RebuildBlockedGap as gap:
         _rollback_backend_transactions(connection, cache)
-        _restore_projection_publication(publication)
+        try:
+            _restore_projection_publication(publication)
+        except _ProjectionRollbackIncomplete as rollback_error:
+            return _finish_failure(
+                connection,
+                backend,
+                task,
+                seed,
+                rollback_error,
+            )
         _cleanup_projection_staging(staging_dir)
         return _finish_gap(
             connection,
@@ -3721,16 +4006,21 @@ def _run_task(
             gap.gap_code,
             gap.detail,
         )
-    except Exception as error:
+    except Exception as caught_error:
+        failure_error = caught_error
         _rollback_backend_transactions(connection, cache)
-        _restore_projection_publication(publication)
-        _cleanup_projection_staging(staging_dir)
+        try:
+            _restore_projection_publication(publication)
+        except _ProjectionRollbackIncomplete as rollback_error:
+            failure_error = rollback_error
+        if not isinstance(failure_error, _ProjectionRollbackIncomplete):
+            _cleanup_projection_staging(staging_dir)
         return _finish_failure(
             connection,
             backend,
             task,
             seed,
-            error,
+            failure_error,
         )
 
 

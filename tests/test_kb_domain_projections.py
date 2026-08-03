@@ -27,6 +27,7 @@ from blueprint_translator.kb_vnext.ontology import (  # noqa: E402
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
     DOMAIN_PROJECTIONS,
     PROJECTION_SCHEMA_VERSION,
+    build_domain_projection,
     build_domain_projections,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
@@ -99,6 +100,48 @@ class DomainProjectionTests(unittest.TestCase):
             ),
         )
         return core
+
+    def test_single_projection_build_does_not_rewrite_other_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            core = self._core(root / "core.sqlite")
+            core.commit()
+            output = root / "domain_exports"
+            output.mkdir()
+            unrelated = output / "loot_entries.sqlite"
+            unrelated.write_bytes(b"unrelated-sentinel")
+
+            result = build_domain_projection(
+                core=core,
+                projection_name="buff_effects",
+                output_path=output / "buff_effects.sqlite",
+                generated_at=GENERATED_AT,
+                ontology_version=self.ontology.version,
+                review_path=None,
+                snapshot_build_id="candidate-build",
+                snapshot_source_fingerprint="a" * 64,
+            )
+
+            self.assertEqual(result["path"], "buff_effects.sqlite")
+            self.assertEqual(unrelated.read_bytes(), b"unrelated-sentinel")
+            self.assertEqual(
+                core.execute(
+                    "SELECT projection_name FROM projection_runs"
+                ).fetchall(),
+                [("buff_effects",)],
+            )
+            projection = sqlite3.connect(output / "buff_effects.sqlite")
+            try:
+                metadata = dict(
+                    projection.execute("SELECT key, value FROM metadata")
+                )
+            finally:
+                projection.close()
+            self.assertEqual(metadata["snapshot_build_id"], "candidate-build")
+            self.assertEqual(
+                metadata["snapshot_source_fingerprint"], "a" * 64
+            )
+            core.close()
 
     def _fact(
         self,

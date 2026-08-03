@@ -19,7 +19,7 @@
 | Previous build | `20260730T162735-b46eb9304da3` |
 | Previous manifest SHA-256 | `9ae250a4dba1c01cd980cb8acee82831dd2516af822541e59afb96eb585a9e3c` |
 | Blueprint Evidence in Snapshot | `234` |
-| Snapshot count | `5` |
+| Snapshot count | `3`（约 `12.0 GiB`） |
 | Layout | `immutable-v2` |
 
 根 `knowledge_base/vnext/current.json` 只包含 `buildId` 和
@@ -97,44 +97,32 @@ manifest 中的 10 个数据库/投影均为 `integrity=ok`、FK violations `0`�
 
 ## 增量验证状态
 
-PR #27 已通过真实 Scarecrow 验收，并以 merge commit
-`86c7715dab7dc15635c0cb18789f36d5cd8f3f69` 合入 `main`。当前生产
-`QUERY_SNAPSHOT` Backend 已接通，但这次验收没有执行增量发布。
+生产 backend 代码现在覆盖 `FACT × 2`、`EFFECTIVE_ENTITY × 1`、
+`ROLE_ENTITY × proven scope`、`DOMAIN_ENTITY × proven scope`、
+`PROJECTION × 6` 与 `QUERY_SNAPSHOT × 1`。Role 会把全局 percentile 的精确
+受影响闭包写入 content-addressed proof；Domain 只拥有 class ancestry 与 typed
+registration 行；每个 Projection 任务只构建和原子替换一个 SQLite。
 
-目标：
-
-`/Game/PrimalEarth/CoreBlueprints/Engrams/EngramEntry_Scarecrow.EngramEntry_Scarecrow`
-
-已完成：
-
-- exact single addition；
-- reparse-safe whole-tree staging；
-- additive quarantine；
-- 选择性 ingest 2 facts；
-- `FACT × 2`；
-- `EFFECTIVE_ENTITY × 1`；
-- `QUERY_SNAPSHOT × 1`；
-- base-bound Delta Receipt v3；
-- `baseBindingVerified=true`。
-
-Worker 的真实结果：
+隔离 production-shaped 场景的本轮结果是：
 
 ```text
-SUCCEEDED=4
-BLOCKED_GAP=8
+attempted=12
+SUCCEEDED=12
+BLOCKED_GAP=0
 FAILED=0
+remaining_pending=0
+remaining_running=0
+worker.drained=true
 ```
 
-剩余队列仅由以下 Backend 缺口构成：
+这不是 live E4 证据。writer lock 下的实际只读复核得到 base Source Manifest
+fingerprint `fbb474d8ca1073dee5305cbe0247fdbec7fa4cbea97e882cb2cabc438b8750ca`；
+candidate fingerprint 与它不同，Source Diff 为 14 个新增和 9 个变更，
+包括多个 Blueprint Evidence 与 semantic/native/legacy 输入变化。生产 capability
+check 因此返回 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，没有进入 quarantine、
+ingest、worker、narrow gates 或 publisher。
 
-- `ROLE_ENTITY × 1`；
-- `DOMAIN_ENTITY × 1`；
-- `PROJECTION × 6`。
-
-prepublication receipt raw SHA-256：
-`6c56aa85ff43349ac20b64fae93058e51ad645d27660099c87758ca62c5e94b3`。
-
-这 4/12 个 terminal task 不等于增量发布完成。验收结果仍明确记录：
+本轮仍明确保持：
 
 ```text
 productionAuthority=false
@@ -143,15 +131,11 @@ e4Scenario2Complete=false
 cutoverEligible=false
 ```
 
-Scarecrow Evidence 当前存在于 live captures，但未进入 current Snapshot：
-
 - current Snapshot 仍有 `234` 个 Blueprint Evidence；
-- live captures 共有 `235` 个，其中 Scarecrow 是唯一未发布新增；
-- 当前只读 Source Diff 为 Scarecrow `BLUEPRINT_EVIDENCE added=1,
-  changed=0, deleted=0`，同步只有 `captures aggregate changed=1`；
-- 没有 `semanticProducerContract`、Discovery、Ontology、Gold、Native 或其他
-  semantic input drift；
-- 没有增量 Snapshot；current pointer 没有因 Scarecrow 回放而变化。
+- current build、manifest 与 pointer SHA-256 均未变化；
+- Snapshot 仍为 3 个，没有生成或发布增量 Snapshot；
+- `.incremental-staging` 与 `.build` 在审计时为空；
+- `mode=shadow`、`defaultQuerySource=legacy`、`cutoverEligible=false`。
 
 ## Verification evidence
 
@@ -159,7 +143,7 @@ Scarecrow Evidence 当前存在于 live captures，但未进入 current Snapshot
   `READY / FRESH / shadow / legacy`；
 - current → previous manifest hash binding 完全匹配；
 - manifest 绑定的 Source、Discovery、quality report 和数据库身份均已复核；
-- Scarecrow 最终只读扫描仍是 exact single addition；
+- live Source Diff 已复核为非选择性变化并在 staging 前 fail closed；
 - 旧 Snapshot 和 legacy 根目录 fallback 不参与 current 读取路径。
 
 公共 Git clone 不包含这些本机数据库或 Evidence。文档身份测试会在本机

@@ -19,6 +19,9 @@ from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
 from blueprint_translator.kb_vnext.native_ingest import (  # noqa: E402
     NativeEvidenceSet,
 )
+from blueprint_translator.kb_vnext.roles import (  # noqa: E402
+    materialize_discovery_roles,
+)
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CACHE_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
@@ -1214,6 +1217,24 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         "verify_base_bound_add_only_blueprint_delta_scope",
         verify_delta_scope,
     )
+
+    monkeypatch.setattr(
+        update,
+        "compute_additive_role_dependency_scope",
+        lambda *args, **kwargs: (
+            (1,),
+            {
+                "schema": "ark-kb-additive-role-dependency-scope/v1",
+                "classifierVersion": "fixture-role/v1",
+                "sourceRevisionId": 2,
+                "triggerSourceRevisionIds": [2],
+                "changedEntityIds": [1],
+                "roleEntityIds": [1],
+                "transitions": [],
+                "proof": "role-scope://fixture",
+            },
+        ),
+    )
     strict_scope_calls: list[
         tuple[
             tuple[int, ...],
@@ -1233,6 +1254,8 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         entity_ids: tuple[int, ...],
         fact_ids: tuple[int, ...],
         actual_write_tables: tuple[str, ...],
+        role_entity_ids: tuple[int, ...],
+        role_scope_proof: dict[str, object],
     ) -> update.InvalidationPlan:
         strict_scope_calls.append(
             (
@@ -1248,6 +1271,8 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
             entity_ids=entity_ids,
             fact_ids=fact_ids,
             actual_write_tables=actual_write_tables,
+            role_entity_ids=role_entity_ids,
+            role_scope_proof=role_scope_proof,
         )
 
     monkeypatch.setattr(
@@ -1358,6 +1383,207 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
     assert result["staging"]["sourceVerifiedUnchanged"] is True
     assert not workspace.temporary_root.exists()
     assert (paths.output / "current.json").read_bytes() == pointer_bytes
+
+
+def _write_role_discovery_fixture(path: Path) -> None:
+    discovery = sqlite3.connect(path)
+    try:
+        discovery.executescript(
+            """
+            CREATE TABLE assets(
+                object_path TEXT PRIMARY KEY,
+                asset_class_path TEXT NOT NULL,
+                generated_class_path TEXT NOT NULL,
+                parent_class_path TEXT NOT NULL,
+                native_parent_class_path TEXT NOT NULL,
+                identity_status TEXT NOT NULL,
+                identity_confidence TEXT NOT NULL,
+                is_blueprint INTEGER,
+                is_data_asset INTEGER,
+                is_data_table INTEGER,
+                is_function_library INTEGER,
+                is_blueprint_interface INTEGER,
+                is_map INTEGER,
+                capture_exists INTEGER,
+                evidence_freshness TEXT NOT NULL,
+                parse_status TEXT NOT NULL,
+                descendant_count INTEGER NOT NULL,
+                referencer_count INTEGER NOT NULL,
+                component_reuse_count INTEGER NOT NULL,
+                cross_domain_reference_count INTEGER NOT NULL,
+                registry_usage_count INTEGER NOT NULL,
+                query_hit_count INTEGER,
+                query_hit_status TEXT NOT NULL,
+                existing_report_count INTEGER,
+                existing_report_status TEXT NOT NULL,
+                graph_count INTEGER NOT NULL,
+                default_property_count INTEGER NOT NULL
+            );
+            INSERT INTO assets VALUES (
+                '/Game/Test/Added.Added', '/Script/Engine.Blueprint',
+                '/Game/Test/Added.Added_C', '/Script/Test.Fixture',
+                '/Script/Test.Fixture', 'CONFIRMED', 'HIGH',
+                1, 0, 0, 0, 0, 0, 1, 'FRESH', 'CONFIRMED',
+                0, 1, 0, 0, 0, NULL, 'NOT_MEASURED',
+                NULL, 'NOT_MEASURED', 1, 2
+            );
+            """
+        )
+        discovery.commit()
+    finally:
+        discovery.close()
+
+
+def test_production_shaped_additive_backends_drain_exact_12_of_12(
+    tmp_path: Path,
+) -> None:
+    workspace = _production_workspace(tmp_path)
+    _bind_production_staged_baseline(workspace)
+    discovery_path = tmp_path / "Discovery.sqlite"
+    _write_role_discovery_fixture(discovery_path)
+    workspace.discovery_path = discovery_path
+    workspace.candidate_build_id = "20260731T000000-candidate123"
+    workspace.candidate_source_fingerprint = "a" * 64
+    workspace.candidate_generated_at = "2026-07-31T00:00:00+00:00"
+    ontology = update.load_ontology(update.PROJECT_ROOT / "ontology")
+
+    discovery = sqlite3.connect(discovery_path)
+    core = sqlite3.connect(workspace.core_path)
+    core.execute("PRAGMA foreign_keys=ON")
+    try:
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                2, 'blueprint_evidence', 'bp://asset@revision',
+                'blueprint-sha', 'fixture', 'v2',
+                '2026-07-31T00:00:00+00:00', 'FRESH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                3, 'ontology', ?, 'ontology-sha', ?, 'v1',
+                '2026-07-31T00:00:00+00:00', 'FRESH'
+            )
+            """,
+            (f"ontology://{ontology.version}", ontology.version),
+        )
+        fact_rows = (
+            (1, "Rate", 7, "fact://fixture/rate"),
+            (2, "RequiredEngramPoints", 0, "fact://fixture/engram-points"),
+        )
+        core.executemany(
+            """
+            INSERT INTO facts(
+                fact_id, subject_entity_id, fact_type, fact_name,
+                scope_kind, declared_on_entity_id, value_kind,
+                value_integer, status, confidence, ontology_version,
+                current, canonical_fact_key
+            ) VALUES (
+                ?, 1, 'DECLARED_DEFAULT', ?, 'DECLARED', 1,
+                'INTEGER', ?, 'CONFIRMED', 'HIGH', ?, 1, ?
+            )
+            """,
+            [
+                (fact_id, name, value, ontology.version, key)
+                for fact_id, name, value, key in fact_rows
+            ],
+        )
+        core.executemany(
+            "INSERT INTO fact_evidence VALUES (?, 2, ?, 'DEFAULT_VALUE_ACTUAL')",
+            (
+                (1, "bp://asset@revision/default/Rate"),
+                (2, "bp://asset@revision/default/RequiredEngramPoints"),
+            ),
+        )
+        materialize_discovery_roles(
+            discovery,
+            core,
+            source_revision_id=1,
+        )
+        role_revision_id = (
+            update.materialize_incremental_role_classifier_revision(
+                core,
+                generated_at="2026-07-31T00:00:00+00:00",
+            )
+        )
+        role_ids, role_proof = update.compute_additive_role_dependency_scope(
+            discovery,
+            core,
+            changed_entity_ids=(1,),
+            source_revision_id=role_revision_id,
+            trigger_source_revision_ids=(2,),
+        )
+        assert role_ids == (1,)
+        core.execute(
+            """
+            INSERT INTO invalidation_dependencies VALUES (
+                2, 'ROLE_ENTITY', 1, 'ADDITIVE_ROLE_INPUT'
+            )
+            """
+        )
+        plan = update.InvalidationPlan(
+            event_kind="ASSET",
+            upstream_revision_id=None,
+            downstream={
+                "FACT": (1, 2),
+                "EFFECTIVE_ENTITY": (1,),
+                "ROLE_ENTITY": role_ids,
+                "DOMAIN_ENTITY": (1,),
+                "PROJECTION": tuple(range(1, 7)),
+                "QUERY_SNAPSHOT": (2,),
+            },
+            reasons={
+                "FACT": "ADDED_BLUEPRINT_FACT_EVIDENCE",
+                "EFFECTIVE_ENTITY": "ADDED_DECLARED_DEFAULT_OR_PARENT",
+                "ROLE_ENTITY": "ADDITIVE_ROLE_INPUT",
+                "DOMAIN_ENTITY": "ADDITIVE_DOMAIN_INPUT",
+                "PROJECTION": "ADDITIVE_FACT_PROJECTION",
+                "QUERY_SNAPSHOT": "ADDITIVE_QUERY_CACHE",
+            },
+            role_scope_proof=role_proof,
+        )
+        update.apply_invalidation_plan(
+            core,
+            plan,
+            created_at="2026-07-31T00:00:01+00:00",
+        )
+    finally:
+        core.close()
+        discovery.close()
+
+    report = update.drain_production_rebuilds(workspace, 12)
+
+    assert report.attempted == 12
+    assert report.succeeded == 12
+    assert report.blocked_gap == 0
+    assert report.failed == 0
+    assert report.remaining_pending == 0
+    assert report.remaining_running == 0
+    assert report.drained is True
+    assert [outcome.task.downstream_kind for outcome in report.outcomes] == [
+        "FACT",
+        "FACT",
+        "EFFECTIVE_ENTITY",
+        "ROLE_ENTITY",
+        "DOMAIN_ENTITY",
+        *("PROJECTION" for _ in range(6)),
+        "QUERY_SNAPSHOT",
+    ]
+    core = sqlite3.connect(workspace.core_path)
+    try:
+        assert core.execute(
+            """
+            SELECT DISTINCT revision.source_kind
+            FROM knowledge_roles AS role
+            JOIN source_revisions AS revision
+              ON revision.revision_id=role.source_revision_id
+            WHERE role.entity_id=1
+            """
+        ).fetchall() == [("role_classifier",)]
+    finally:
+        core.close()
 
 
 def test_default_unchanged_manifest_is_cache_hit_without_write(

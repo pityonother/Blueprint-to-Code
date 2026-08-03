@@ -55,7 +55,11 @@ from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
     apply_invalidation_plan,
     plan_additive_asset_invalidation,
 )
-from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
+from blueprint_translator.kb_vnext.ontology import (  # noqa: E402
+    OntologyBundle,
+    load_ontology,
+    materialize_domain_entity_memberships,
+)
 from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
     CurrentSnapshotBaseline,
     PointerCASError,
@@ -65,9 +69,16 @@ from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     _snapshot_semantic_input_hashes,
     resolve_current_snapshot,
+    snapshot_build_id,
 )
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
     DOMAIN_PROJECTIONS,
+    build_domain_projection,
+)
+from blueprint_translator.kb_vnext.roles import (  # noqa: E402
+    compute_additive_role_dependency_scope,
+    materialize_discovery_role_entities,
+    materialize_incremental_role_classifier_revision,
 )
 from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     SNAPSHOT_SEMANTIC_INPUT_KEYS as SNAPSHOT_SEMANTIC_INPUT_KEYS,
@@ -186,6 +197,7 @@ class UpdateWorkspace:
     core_path: Path
     cache_path: Path
     projection_dir: Path
+    discovery_path: Path | None = None
     invalidation_events: list[dict[str, object]] = field(
         default_factory=list
     )
@@ -198,6 +210,9 @@ class UpdateWorkspace:
     verified_additive_delta: AddOnlyBlueprintDelta | None = None
     invalidation_plan: InvalidationPlan | None = None
     backend_event_id: str = ""
+    candidate_build_id: str = ""
+    candidate_source_fingerprint: str = ""
+    candidate_generated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -500,16 +515,27 @@ def stage_current_snapshot(
             ),
             residual_identifier=exc.residual_identifier,
         ) from exc
+    candidate_generated_at = datetime.now(UTC).isoformat(timespec="seconds")
+    candidate_source_fingerprint = (
+        baseline.candidate_source_manifest.fingerprint
+    )
     return UpdateWorkspace(
         temporary_root=staged.temporary_root,
         snapshot_dir=staged.snapshot_dir,
         core_path=staged.snapshot_dir / "core.sqlite",
         cache_path=staged.snapshot_dir / "cache.sqlite",
         projection_dir=staged.snapshot_dir / "domain_exports",
+        discovery_path=paths.discovery_database,
         base_build_id=staged.base_build_id,
         staging_receipt=staged.receipt,
         staged_baseline=staged,
         update_baseline=baseline,
+        candidate_build_id=snapshot_build_id(
+            candidate_generated_at,
+            candidate_source_fingerprint,
+        ),
+        candidate_source_fingerprint=candidate_source_fingerprint,
+        candidate_generated_at=candidate_generated_at,
     )
 
 
@@ -779,6 +805,8 @@ def materialize_additive_asset_dependency_scope(
     entity_ids: Iterable[int],
     fact_ids: Iterable[int],
     actual_write_tables: Iterable[str],
+    role_entity_ids: Iterable[int] | None = None,
+    role_scope_proof: Mapping[str, object] | None = None,
 ) -> InvalidationPlan:
     """Materialize and strictly validate one verified additive scope.
 
@@ -790,11 +818,15 @@ def materialize_additive_asset_dependency_scope(
     revisions = tuple(source_revision_ids)
     entities = tuple(entity_ids)
     facts = tuple(fact_ids)
+    role_entities = tuple(
+        entities if role_entity_ids is None else role_entity_ids
+    )
     tables = tuple(actual_write_tables)
     for label, values in (
         ("source revision", revisions),
         ("entity", entities),
         ("fact", facts),
+        ("role entity", role_entities),
     ):
         if (
             not values
@@ -822,7 +854,7 @@ def materialize_additive_asset_dependency_scope(
             "ADDITIVE_ROLE_INPUT",
         )
         for revision_id in revisions
-        for entity_id in entities
+        for entity_id in role_entities
     }
     expected_rows.update(
         (
@@ -950,6 +982,8 @@ def materialize_additive_asset_dependency_scope(
             entity_ids=entities,
             source_revision_ids=revisions,
             actual_write_tables=tables,
+            role_entity_ids=role_entities,
+            role_scope_proof=role_scope_proof,
         )
         connection.execute(f"RELEASE SAVEPOINT {savepoint}")
         savepoint_open = False
@@ -1066,12 +1100,36 @@ def ingest_additive_blueprint_changes(
                 "The staged Core changed after verified delta scope capture.",
                 full_rebuild_required=True,
             )
+        if len(delta.source_revision_ids) != 1:
+            raise UpdateBlocked(
+                "ADDITIVE_ROLE_DEPENDENCY_SCOPE_INVALID",
+                "The v1 role dependency proof requires one source revision.",
+                full_rebuild_required=True,
+            )
+        role_revision_id = materialize_incremental_role_classifier_revision(
+            core,
+            generated_at=(
+                workspace.candidate_generated_at
+                or datetime.now(UTC).isoformat(timespec="seconds")
+            ),
+        )
+        role_entity_ids, role_scope_proof = (
+            compute_additive_role_dependency_scope(
+                discovery,
+                core,
+                changed_entity_ids=delta.entity_ids,
+                source_revision_id=role_revision_id,
+                trigger_source_revision_ids=delta.source_revision_ids,
+            )
+        )
         plan = materialize_additive_asset_dependency_scope(
             core,
             source_revision_ids=delta.source_revision_ids,
             entity_ids=delta.entity_ids,
             fact_ids=delta.fact_ids,
             actual_write_tables=delta.changed_tables,
+            role_entity_ids=role_entity_ids,
+            role_scope_proof=role_scope_proof,
         )
         if not plan.downstream:
             raise UpdateBlocked(
@@ -1158,6 +1216,117 @@ def _unavailable_drain(
 
 class ProductionIncrementalRebuildBackend(CoreMaterializerRebuildBackend):
     """Implemented production materializers for one add-only Blueprint."""
+
+    def __init__(
+        self,
+        *,
+        discovery: sqlite3.Connection | None,
+        ontology: OntologyBundle,
+        projection_dir: Path,
+        cache_connection: sqlite3.Connection,
+        candidate_build_id: str,
+        candidate_source_fingerprint: str,
+        candidate_generated_at: str,
+    ) -> None:
+        super().__init__(
+            projection_dir=projection_dir,
+            cache_connection=cache_connection,
+        )
+        self._discovery = discovery
+        self._ontology = ontology
+        self._candidate_build_id = candidate_build_id
+        self._candidate_source_fingerprint = candidate_source_fingerprint
+        self._candidate_generated_at = candidate_generated_at
+
+    @staticmethod
+    def _role_source_revision(scope: RebuildScope) -> int:
+        row = scope.core.execute(
+            "SELECT payload_json FROM invalidation_events WHERE event_id=?",
+            (scope.task.event_id,),
+        ).fetchone()
+        if row is None:
+            raise RebuildBlockedGap(
+                "ADDITIVE_ROLE_DEPENDENCY_PROOF_MISSING",
+                "The queued role task has no durable event payload.",
+            )
+        try:
+            payload = json.loads(str(row[0]))
+        except json.JSONDecodeError as exc:
+            raise RebuildBlockedGap(
+                "ADDITIVE_ROLE_DEPENDENCY_PROOF_INVALID",
+                "The queued role task event payload is not canonical JSON.",
+            ) from exc
+        proof = payload.get("_roleScopeProof")
+        if (
+            not isinstance(proof, dict)
+            or proof.get("schema")
+            != "ark-kb-additive-role-dependency-scope/v1"
+            or type(proof.get("sourceRevisionId")) is not int
+            or not isinstance(proof.get("roleEntityIds"), list)
+            or scope.task.downstream_id not in proof["roleEntityIds"]
+        ):
+            raise RebuildBlockedGap(
+                "ADDITIVE_ROLE_DEPENDENCY_PROOF_INVALID",
+                "The queued role task is outside its durable dependency proof.",
+            )
+        return int(proof["sourceRevisionId"])
+
+    def rebuild_role_entity(self, scope: RebuildScope) -> None:
+        if self._discovery is None:
+            raise RebuildBlockedGap(
+                "STAGED_DISCOVERY_NOT_AVAILABLE",
+                "Role rebuild requires the base-bound Discovery input.",
+            )
+        materialize_discovery_role_entities(
+            self._discovery,
+            scope.core,  # type: ignore[arg-type]
+            entity_ids=(scope.task.downstream_id,),
+            source_revision_id=self._role_source_revision(scope),
+        )
+
+    def rebuild_domain_entity(self, scope: RebuildScope) -> None:
+        try:
+            materialize_domain_entity_memberships(
+                scope.core,  # type: ignore[arg-type]
+                ontology=self._ontology,
+                entity_id=scope.task.downstream_id,
+            )
+        except ValueError as exc:
+            raise RebuildBlockedGap(
+                "DOMAIN_ONTOLOGY_SOURCE_NOT_AVAILABLE",
+                "Domain rebuild requires one fresh bound ontology revision.",
+            ) from exc
+
+    def rebuild_projection(self, scope: RebuildScope) -> None:
+        if scope.projection_dir is None:
+            raise RebuildBlockedGap(
+                "PROJECTION_STAGING_NOT_AVAILABLE",
+                "The worker did not supply a projection staging directory.",
+            )
+        if not (
+            self._candidate_build_id
+            and self._candidate_source_fingerprint
+            and self._candidate_generated_at
+        ):
+            raise RebuildBlockedGap(
+                "CANDIDATE_SNAPSHOT_IDENTITY_MISSING",
+                "Projection rebuild requires the candidate Snapshot identity.",
+            )
+        projection_name = tuple(DOMAIN_PROJECTIONS)[
+            scope.task.downstream_id - 1
+        ]
+        build_domain_projection(
+            core=scope.core,  # type: ignore[arg-type]
+            projection_name=projection_name,
+            output_path=(
+                scope.projection_dir / f"{projection_name}.sqlite"
+            ),
+            generated_at=self._candidate_generated_at,
+            ontology_version=self._ontology.version,
+            review_path=(PROJECT_ROOT / "ontology" / "projection_review.v1.json"),
+            snapshot_build_id=self._candidate_build_id,
+            snapshot_source_fingerprint=self._candidate_source_fingerprint,
+        )
 
     def rebuild_query_snapshot(self, scope: RebuildScope) -> None:
         if scope.cache is None:
@@ -1317,12 +1486,27 @@ def drain_production_rebuilds(
     """Drain with only the production materializers currently implemented."""
 
     cache = _open_staged_query_cache(workspace)
+    discovery: sqlite3.Connection | None = None
+    discovery_path = workspace.discovery_path
+    if discovery_path is not None and discovery_path.is_file():
+        discovery = sqlite3.connect(
+            f"file:{discovery_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        )
     try:
         return drain_with_rebuild_backend(
             workspace,
             max_items,
             backend=ProductionIncrementalRebuildBackend(
-                cache_connection=cache
+                discovery=discovery,
+                ontology=load_ontology(PROJECT_ROOT / "ontology"),
+                projection_dir=workspace.projection_dir,
+                cache_connection=cache,
+                candidate_build_id=workspace.candidate_build_id,
+                candidate_source_fingerprint=(
+                    workspace.candidate_source_fingerprint
+                ),
+                candidate_generated_at=workspace.candidate_generated_at,
             ),
         )
     except UpdateBlocked:
@@ -1335,6 +1519,8 @@ def drain_production_rebuilds(
             full_rebuild_required=True,
         ) from exc
     finally:
+        if discovery is not None:
+            discovery.close()
         cache.close()
 
 
