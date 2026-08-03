@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/blueprint-trace-response/v1",
+  "title": "Blueprint statement trace response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "schema", "identity", "filters", "items", "page"],
+  "properties": {
+    "ok": {"const": true},
+    "schema": {"const": "blueprint-to-code.blueprint-trace-response/v1"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statementId", "evidenceRef", "pseudocodeLine"],
+      "properties": {
+        "statementId": {"type": "string", "maxLength": 1024, "pattern": "^(?:$|statement://)"},
+        "evidenceRef": {"type": "string", "maxLength": 1024, "pattern": "^(?:$|bp://)"},
+        "pseudocodeLine": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "items": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/traceItem"}},
+    "page": {"$ref": "#/$defs/page"}
+  },
+  "$defs": {
+    "identity": {
+      "type": "object", "additionalProperties": false, "required": ["asset", "evidence", "interpretation"],
+      "properties": {
+        "asset": {"type": "object", "additionalProperties": false, "required": ["name", "assetId", "objectPath"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 255}, "assetId": {"type": "string", "pattern": "^[0-9a-f]{24}$"}, "objectPath": {"type": "string", "minLength": 1, "maxLength": 4096}}},
+        "evidence": {"type": "object", "additionalProperties": false, "required": ["revisionId", "manifestSha256"], "properties": {"revisionId": {"type": "string", "pattern": "^[0-9a-f]{24}$"}, "manifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "interpretation": {"type": "object", "additionalProperties": false, "required": ["revisionId", "manifestSha256", "pointerSha256", "semanticDigest", "interpreterVersion", "schemaVersion", "generatedAt"], "properties": {"revisionId": {"type": "string", "pattern": "^[0-9a-f]{24}$"}, "manifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "pointerSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "semanticDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "interpreterVersion": {"type": "string", "minLength": 1, "maxLength": 128}, "schemaVersion": {"type": "string", "minLength": 1, "maxLength": 128}, "generatedAt": {"type": "string", "minLength": 1, "maxLength": 128}}}
+      }
+    },
+    "traceItem": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["traceKind", "statementId", "graphRef", "nodeRef", "evidenceRefs", "gapRefs"], "properties": {"traceKind": {"const": "STATEMENT"}, "statementId": {"type": "string", "maxLength": 256, "pattern": "^statement://"}, "graphRef": {"type": "string", "maxLength": 1024, "pattern": "^(?:$|bp://)"}, "nodeRef": {"type": "string", "maxLength": 1024, "pattern": "^(?:$|bp://)"}, "evidenceRefs": {"type": "array", "maxItems": 4096, "uniqueItems": true, "items": {"type": "string", "maxLength": 1024, "pattern": "^bp://"}}, "gapRefs": {"type": "array", "maxItems": 4096, "uniqueItems": true, "items": {"type": "string", "maxLength": 256, "pattern": "^gap://"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["traceKind", "statementId", "evidenceRefs", "pseudocodeLine", "line", "startByte", "endByte", "executable"], "properties": {"traceKind": {"const": "PSEUDOCODE_LINE"}, "statementId": {"type": "string", "maxLength": 256, "pattern": "^(?:$|statement://)"}, "evidenceRefs": {"type": "array", "maxItems": 4096, "uniqueItems": true, "items": {"type": "string", "maxLength": 1024, "pattern": "^bp://"}}, "pseudocodeLine": {"type": "integer", "minimum": 1}, "line": {"type": "integer", "minimum": 1}, "startByte": {"type": "integer", "minimum": 0}, "endByte": {"type": "integer", "minimum": 0}, "executable": {"type": "boolean"}}}
+      ]
+    },
+    "page": {"type": "object", "additionalProperties": false, "required": ["limit", "returned", "total", "nextCursor"], "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}, "returned": {"type": "integer", "minimum": 0, "maximum": 100}, "total": {"type": "integer", "minimum": 0}, "nextCursor": {"type": ["string", "null"], "maxLength": 4096}}}
+  }
+}

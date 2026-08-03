@@ -110,6 +110,7 @@ class CiContractTests(unittest.TestCase):
             "npm ci",
             "npm run build",
             "node tests/api_frontend_contract.mjs",
+            "node tests/blueprint_frontend_contract.mjs",
             "node tests/frontend_core_contract.mjs",
             "node tests/harvest_frontend_contract.mjs",
             "python scripts/validate_report_claims.py",

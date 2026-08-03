@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import sys
 import tempfile
@@ -42,6 +41,13 @@ from validate_report_claims import validate_claim_manifests  # noqa: E402
 
 
 SCHEMA_FILES = {
+    "blueprint_api_error": "blueprint_api_error_v1.schema.json",
+    "blueprint_asset_list_response": "blueprint_asset_list_response_v1.schema.json",
+    "blueprint_evidence_health_response": "blueprint_evidence_health_response_v1.schema.json",
+    "blueprint_gaps_response": "blueprint_gaps_response_v1.schema.json",
+    "blueprint_interpretation_response": "blueprint_interpretation_response_v1.schema.json",
+    "blueprint_statement_response": "blueprint_statement_response_v1.schema.json",
+    "blueprint_trace_response": "blueprint_trace_response_v1.schema.json",
     "native_request": "native_query_request_v1.schema.json",
     "native_response": "native_query_response_v1.schema.json",
     "hybrid_request": "hybrid_context_request_v1.schema.json",
@@ -139,7 +145,7 @@ def assert_matches_schema(
 
 
 class HttpApiContractTests(unittest.TestCase):
-    def test_contract_directory_has_six_versioned_json_schemas(self):
+    def test_contract_directory_has_only_registered_versioned_json_schemas(self):
         self.assertEqual(
             {path.name for path in SCHEMAS.glob("*.schema.json")},
             set(SCHEMA_FILES.values()),
