@@ -78,6 +78,29 @@ jobs:
           printf 'base=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
           printf 'Resolved changed-file base: %s\n' "$base_sha"
 
+      - name: Resolve exact release candidate ref
+        id: release-ref
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          candidate="$EVENT_SHA"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            candidate="$PR_HEAD_SHA"
+          fi
+          if [[ -z "$candidate" ]] \
+            || ! git cat-file -e "$candidate^{commit}" 2>/dev/null; then
+            echo "Exact release candidate commit is unavailable: $candidate" >&2
+            exit 1
+          fi
+
+          printf 'ref=%s\n' "$candidate" >> "$GITHUB_OUTPUT"
+          printf 'Resolved exact release candidate ref: %s\n' "$candidate"
+
       - name: Check changed lines for whitespace errors
         shell: bash
         env:
@@ -103,6 +126,9 @@ jobs:
               "${#python_files[@]}"
             python -m ruff check -- "${python_files[@]}"
           fi
+
+      - name: Lint full Python tree
+        run: python -m ruff check scripts tests
 
       - name: Run full Python suite
         run: python -m pytest -q
@@ -279,24 +305,24 @@ jobs:
                   or lowered_name.endswith(generated_suffixes)
                   or lowered_name in {".coverage", ".ds_store"}
               ):
-                  findings.append(f"generated artifact path: {name!r}")
+                  findings.append("generated artifact path: <redacted-changed-path>")
 
               path = Path(name)
               if not path.exists() and not path.is_symlink():
-                  findings.append(f"changed path missing from checkout: {name!r}")
+                  findings.append("changed path missing from checkout: <redacted-changed-path>")
                   continue
               if path.is_symlink():
-                  findings.append(f"changed symbolic link is forbidden: {name!r}")
+                  findings.append("changed symbolic link is forbidden: <redacted-changed-path>")
                   continue
               if not path.is_file():
-                  findings.append(f"changed path is not a regular file: {name!r}")
+                  findings.append("changed path is not a regular file: <redacted-changed-path>")
                   continue
               if path.stat().st_size > 5 * 1024 * 1024:
-                  findings.append(f"changed file exceeds 5 MiB scan limit: {name!r}")
+                  findings.append("changed file exceeds 5 MiB scan limit: <redacted-changed-path>")
                   continue
               current_data = path.read_bytes()
               if b"\0" in current_data:
-                  findings.append(f"changed binary file is forbidden: {name!r}")
+                  findings.append("changed binary file is forbidden: <redacted-changed-path>")
                   continue
               numstat = subprocess.run(
                   [
@@ -316,7 +342,7 @@ jobs:
                   line.startswith(b"-\t-\t")
                   for line in numstat.splitlines()
               ):
-                  findings.append(f"binary diff is forbidden: {name!r}")
+                  findings.append("binary diff is forbidden: <redacted-changed-path>")
                   continue
 
               base_blob = subprocess.run(
@@ -331,13 +357,13 @@ jobs:
                   current_matches = Counter(pattern.findall(current_data))
                   base_matches = Counter(pattern.findall(base_data))
                   if current_matches - base_matches:
-                      findings.append(f"local absolute path content: {name!r}")
+                      findings.append("local absolute path content: <redacted-changed-path>")
                       break
               for pattern in known_secret_patterns:
                   current_matches = Counter(pattern.findall(current_data))
                   base_matches = Counter(pattern.findall(base_data))
                   if current_matches - base_matches:
-                      findings.append(f"known secret signature: {name!r}")
+                      findings.append("known secret signature: <redacted-changed-path>")
                       break
               base_assignments = Counter(
                   match.group(0)
@@ -350,7 +376,7 @@ jobs:
                       continue
                   value = (match.group(1) or match.group(2)).strip().lower()
                   if not value.startswith(placeholder_prefixes):
-                      findings.append(f"hard-coded secret assignment: {name!r}")
+                      findings.append("hard-coded secret assignment: <redacted-changed-path>")
                       break
 
           if findings:
@@ -364,6 +390,14 @@ jobs:
               f"{len(changed)} file(s)."
           )
           PY
+
+      - name: Scan exact source archive
+        env:
+          RELEASE_GIT_REF: ${{ steps.release-ref.outputs.ref }}
+        run: python scripts/check_release_content.py --git-ref "$RELEASE_GIT_REF"
+
+      - name: Validate governed formal report registry
+        run: python scripts/validate_report_registry.py
 
       - name: Validate committed claim fixture
         run: >-

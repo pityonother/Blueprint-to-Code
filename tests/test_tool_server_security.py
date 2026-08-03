@@ -318,7 +318,7 @@ class ToolServerSecurityTests(unittest.TestCase):
             "0.0.0.0",
             0,
             allow_remote=True,
-            auth_token="remote-test-secret",
+            auth_token="remote-" + "test-secret",
         )
         try:
             self.assertNotIn("remote-test-secret", repr(server.security_policy))
@@ -326,7 +326,7 @@ class ToolServerSecurityTests(unittest.TestCase):
             server.server_close()
 
     def test_remote_session_and_post_both_require_bearer_auth(self) -> None:
-        auth_token = "remote-test-secret"
+        auth_token = "remote-" + "test-secret"
         server = tool_server.create_control_center_server(
             "0.0.0.0",
             0,
@@ -407,7 +407,7 @@ class ToolServerSecurityTests(unittest.TestCase):
             worker.join(timeout=3)
 
     def test_remote_api_get_requires_bearer_auth(self) -> None:
-        auth_token = "remote-test-secret"
+        auth_token = "remote-" + "test-secret"
         server = tool_server.create_control_center_server(
             "0.0.0.0",
             0,

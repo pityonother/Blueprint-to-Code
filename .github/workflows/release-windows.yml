@@ -1,0 +1,87 @@
+name: Release Windows gates
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-only-release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install focused release dependencies
+        run: >-
+          python -m pip install pytest==9.0.3 cryptography==49.0.0
+          jsonschema==4.26.0
+
+      - name: Verify the exact source archive
+        run: |
+          python scripts/check_release_content.py --git-ref HEAD
+          python -m pytest -q tests/test_release_source_archive.py
+
+      - name: Verify Evidence v3 publication and Windows rollback
+        run: >-
+          python -m pytest -q
+          tests/test_evidence_publication_v3.py
+          tests/test_evidence_publication_v3_adversarial.py::EvidencePublicationV3AdversarialTests::test_prune_rename_failure_rolls_back_all_canonical_v2_artifacts
+
+      - name: Verify Windows reparse and junction defenses
+        run: >-
+          python -m pytest -q
+          tests/test_evidence_publication_v3_failures.py::EvidencePathFailureTests::test_publisher_rejects_a_windows_junction_asset_directory
+          tests/test_evidence_publication_v3_failures.py::EvidencePathFailureTests::test_v2_prune_rejects_an_output_junction_without_external_delete
+          tests/test_kb_safe_staging.py::test_windows_source_junction_is_blocked
+
+      - name: Smoke test the local HTTP server and Harvest contracts
+        run: >-
+          python -m pytest -q
+          tests/test_tool_server_security.py
+          tests/test_harvest_http.py
+
+      - name: Run Blueprint Interpretation without DevKit inputs
+        run: |
+          Remove-Item Env:BLUEPRINT_TO_CODE_ROOT -ErrorAction SilentlyContinue
+          Remove-Item Env:ARK_DEVKIT_ROOT -ErrorAction SilentlyContinue
+          Remove-Item Env:DEVKIT_CONTENT_ROOT -ErrorAction SilentlyContinue
+          python -m pytest -q `
+            tests/test_blueprint_interpretation_cli.py `
+            tests/test_diagnose_blueprint_tool.py
+
+      - name: Assert the checkout remained source-clean
+        run: |
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dirty = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($dirty.Count -ne 0) {
+            throw "Release checks modified the source checkout."
+          }

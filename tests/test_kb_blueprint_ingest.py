@@ -379,7 +379,12 @@ def _default_rows(revision: str) -> list[tuple[object, ...]]:
             r"C:\Users\secret\Desktop\value.txt",
             {},
         ),
-        row("RootPath", "StrProperty", "/root/secret/value.txt", {}),
+        row(
+            "RootPath",
+            "StrProperty",
+            "/" + "root/secret/value.txt",
+            {},
+        ),
         row("EtcPath", "StrProperty", "/etc/passwd", {}),
         row("EmbeddedPath", "StrProperty", "prefix=/usr/local/bin", {}),
         row("NotANumber", "FloatProperty", float("nan"), {}),

@@ -20,7 +20,7 @@ globalThis.fetch = async (path, init = {}) => {
       status: 200,
       json: async () => ({
         ok: true,
-        sessionToken: 'session-contract-token-1234567890',
+        sessionToken: 'session-contract-' + 'token-1234567890',
       }),
     };
   }

@@ -25,8 +25,16 @@ The plugin writes these files under:
 - `graph_pages_cpp.json` - structured graph metadata.
 - `cpp_export_report.md` - human-readable export report.
 
-Set the `BLUEPRINT_TO_CODE_ROOT` environment variable if your local repository
-is somewhere else:
+The exporter resolves its project/output root in this order:
+
+1. `BLUEPRINT_TO_CODE_ROOT` when explicitly configured;
+2. an ancestor of the plugin base containing
+   `scripts/bp_clipboard_to_prompt.py`;
+3. the current user's `Documents/Blueprint to Code` folder.
+
+All three paths are normalized with Unreal's platform path APIs, so no
+machine-specific user directory or path separator is compiled into the plugin.
+Set `BLUEPRINT_TO_CODE_ROOT` when your local repository is somewhere else:
 
 ```powershell
 [Environment]::SetEnvironmentVariable(

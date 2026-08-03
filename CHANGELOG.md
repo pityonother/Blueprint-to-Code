@@ -6,7 +6,45 @@ match it.
 
 ## [Unreleased]
 
-### Added
+## [0.3.0] - 2026-08-03
+
+### Blueprint
+
+- Added immutable Evidence Publication v3 with atomic current-pointer updates,
+  manifest-bound validated readers, stable evidence identity, and bounded
+  Evidence queries.
+- Added Interpretation Contract v1 with deterministic control/data-flow
+  projections, statement trace, explicit gaps, and source-bound review links.
+- Downgraded heuristic behavior hints so names, comments, defaults, and other
+  non-confirmed observations cannot become confirmed behavior.
+- Kept a clear legacy/experimental pseudocode boundary: pseudocode is an
+  Evidence-derived review aid, not recovered source code.
+- Split the Blueprint workspace into bounded frontend, route, publication, and
+  interpretation modules.
+
+### Harvest
+
+- Added a dominance audit and separate confirmed/conditional ranking views.
+- Added canonical variant selection, metric-specific units, and separate
+  static total/static cycle/observed result semantics.
+- Added runtime profile isolation so observations from different profiles are
+  never compared as one population.
+- Added relative-first specialties and an explicit Effectiveness gap where
+  evidence cannot support a stronger claim.
+- Split Harvest build, ranking, HTTP, and frontend responsibilities into
+  explicit module boundaries.
+
+### Engineering
+
+- Added a source archive policy, release-content scanner, and
+  path/credential/generated-artifact scan contracts for exact release refs.
+- Removed the DevKit exporter machine-specific project root; resolution now
+  follows environment variable, plugin-ancestor search, then current-user
+  Documents fallback using Unreal's cross-platform path APIs.
+- Kept the ARK KB in shadow/legacy mode. This release does not change the live
+  pointer, default query source, or cutover eligibility.
+
+### Knowledge base foundations
 
 - Immutable-v2 ARK KB snapshots with an atomic root `current.json`, sealed
   quality reports, previous-snapshot identity binding, rollback checks, and
@@ -19,7 +57,7 @@ match it.
   `context_packs`, `answer_plans`, `materialized_neighborhoods`, and
   `query_snapshots` cache tables, with external markers and crash recovery.
 
-### Changed
+### Knowledge base changes
 
 - Production KB updates now use reparse-safe whole-tree staging, explicit
   staging quarantine, current-pointer compare-and-swap, and source-manifest
@@ -32,7 +70,7 @@ match it.
 - GitHub-facing status documentation now separates current `main` behavior from
   dated GPT Pro handoff/audit records.
 
-### Fixed
+### Knowledge base fixes
 
 - Reparse points cannot escape staging or additive quarantine boundaries.
 - A stale or mismatched delta receipt cannot be treated as evidence for the
