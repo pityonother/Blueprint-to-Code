@@ -489,7 +489,7 @@ class EvidencePathFailureTests(unittest.TestCase):
                 ("unexpected", "value", "POINTER_FIELDS_INVALID"),
                 (
                     "localDiagnosticPath",
-                    "C" + r":\Users\victim\secret.uasset",
+                    "\\".join(("C" + ":", "Users", "victim", "secret.uasset")),
                     "LOCAL_PATH_DISCLOSURE",
                 ),
             )

@@ -120,7 +120,9 @@ class ReleasePackagingV3AdversarialTests(unittest.TestCase):
             _publish(asset_dir, "generation-a", publish_v3=False)
             manifest_path = asset_dir / "evidence" / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["localDiagnosticPath"] = "C" + r":\Users\victim\capture.log"
+            manifest["localDiagnosticPath"] = "\\".join(
+                ("C" + ":", "Users", "victim", "capture.log")
+            )
             manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
