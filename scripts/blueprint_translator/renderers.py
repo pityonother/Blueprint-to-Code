@@ -8,12 +8,12 @@ import datetime as _dt
 from collections import defaultdict
 from typing import Iterable
 
-from .config import ARK_GLOSSARY, KEYWORD_GROUPS, NODE_SEMANTICS, PROFILE_CONFIG
+from .config import ARK_GLOSSARY, KEYWORD_GROUPS, PROFILE_CONFIG
 from .context import render_context_section
 from .diagnostics import render_diagnostics
-from .flow import control_kind, exec_pin_sort_key, ordered_nodes_by_exec, source_expression_for_pin
+from .flow import control_kind, exec_pin_sort_key, ordered_nodes_by_exec
 from .models import NodeInfo
-from .utils import is_exec_pin, is_output_pin, label_for, table_row, truncate_lines
+from .utils import is_exec_pin, is_output_pin, table_row, truncate_lines
 
 def collect_keyword_contexts(text: str, keywords: Iterable[str], limit: int = 80) -> list[tuple[int, str, str]]:
     contexts: list[tuple[int, str, str]] = []

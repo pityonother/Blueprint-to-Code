@@ -18,8 +18,8 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from benchmark_blueprint_evidence import benchmark_database
-from blueprint_translator.evidence_query import EvidenceQueryService
+from benchmark_blueprint_evidence import benchmark_database  # noqa: E402
+from blueprint_translator.evidence_query import EvidenceQueryService  # noqa: E402
 
 
 CHAINS = (

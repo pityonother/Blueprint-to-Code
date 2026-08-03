@@ -20,7 +20,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.harvest_ranking import (
+from blueprint_translator.harvest_ranking import (  # noqa: E402
     NORMALIZED_HARVEST_AMOUNT_SCALE,
     YIELD_MODEL_VERSION,
     YIELD_SCORE_BASIS,
@@ -30,12 +30,12 @@ from blueprint_translator.harvest_ranking import (
     extract_resource_damage_overrides,
     rank_harvest_rows,
 )
-from blueprint_translator.harvest_report_validation import (
+from blueprint_translator.harvest_report_validation import (  # noqa: E402
     COMPACT_SCHEMA,
     build_canonical_ai_view,
     build_ranking_revision_fields,
 )
-from blueprint_translator.uasset_graphs import (
+from blueprint_translator.uasset_graphs import (  # noqa: E402
     normalize_blueprint_object_path,
     object_path_to_uasset_path,
     object_ref_name,

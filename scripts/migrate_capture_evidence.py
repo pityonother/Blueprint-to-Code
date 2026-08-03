@@ -11,8 +11,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.artifact_modes import DEFAULT_ARTIFACT_MODE
-from blueprint_translator.evidence_writer import migrate_asset_capture
+from blueprint_translator.artifact_modes import DEFAULT_ARTIFACT_MODE  # noqa: E402
+from blueprint_translator.evidence_writer import migrate_asset_capture  # noqa: E402
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

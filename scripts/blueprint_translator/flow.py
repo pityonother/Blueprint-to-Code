@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 
 from .config import NODE_SEMANTICS
 from .models import NodeInfo, PinInfo
-from .utils import is_exec_pin, is_input_pin, is_output_pin, label_for, node_key
+from .utils import is_exec_pin, is_input_pin, is_output_pin, node_key
 
 OPTIONAL_UNCONNECTED_PINS = {
     "bispurefunc",
