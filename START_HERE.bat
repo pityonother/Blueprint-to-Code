@@ -21,6 +21,10 @@ echo Closing old Blueprint Tool servers for this project...
 set "BLUEPRINT_TO_CODE_LAUNCH_ROOT=%~dp0"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$root=(Resolve-Path -LiteralPath $env:BLUEPRINT_TO_CODE_LAUNCH_ROOT).Path.TrimEnd('\'); Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -like '*blueprint_tool_server.py*' -and $_.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }"
 set "BLUEPRINT_TO_CODE_LAUNCH_ROOT="
-"%PYTHON_EXE%" "%~dp0scripts\blueprint_tool_server.py" --port 8765 --open
+if defined BLUEPRINT_TO_CODE_NO_OPEN (
+  "%PYTHON_EXE%" "%~dp0scripts\blueprint_tool_server.py" --port 8765
+) else (
+  "%PYTHON_EXE%" "%~dp0scripts\blueprint_tool_server.py" --port 8765 --open
+)
 if errorlevel 1 pause
 endlocal

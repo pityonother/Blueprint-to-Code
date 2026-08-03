@@ -30,6 +30,7 @@ ARK DevKit。工具会优先自动发现 Epic Games Launcher 安装的 DevKit。
 数据与隐私
 ----------
 
-服务只监听本机 127.0.0.1。公开便携包不包含 ARK 游戏资产、DevKit、DLL/PDB、开发者
-本机的 Capture/Evidence、分析数据库、Knowledge Base 或 Native Evidence。你的输出会写入
-解压目录内的 captures、analysis 和 logs 目录。
+服务只监听本机 127.0.0.1。公开便携包不包含 ARK 游戏资产、DevKit、ARK/ShooterGame
+DLL/PDB、开发者本机的 Capture/Evidence、分析数据库、Knowledge Base 或 Native Evidence。
+为实现免安装启动，包内包含经来源核验的 Python runtime DLL/PYD。你的输出会写入解压
+目录内的 captures、analysis 和 logs 目录。

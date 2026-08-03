@@ -147,6 +147,19 @@ class ReleaseReadinessTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(process.stdout.splitlines(), ["True", "False"])
 
+    def test_start_here_has_a_noninteractive_browser_suppression_for_smoke_tests(self):
+        launcher = (ROOT / "START_HERE.bat").read_text(encoding="utf-8")
+
+        self.assertIn("if defined BLUEPRINT_TO_CODE_NO_OPEN", launcher)
+        self.assertIn(
+            '"%PYTHON_EXE%" "%~dp0scripts\\blueprint_tool_server.py" --port 8765',
+            launcher,
+        )
+        self.assertIn(
+            '"%PYTHON_EXE%" "%~dp0scripts\\blueprint_tool_server.py" --port 8765 --open',
+            launcher,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

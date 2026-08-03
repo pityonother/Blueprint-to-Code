@@ -129,35 +129,52 @@ def is_built_homepage(content: bytes) -> bool:
     return b"<html" in lowered and b"</html>" in lowered
 
 
-def _free_loopback_port() -> int:
+def _require_default_loopback_port(port: int) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+        listener.bind(("127.0.0.1", port))
+
+
+def _system_root(environment: dict[str, str]) -> Path:
+    system_drive = environment.get("SystemDrive") or "C" + ":"
+    return Path(
+        environment.get("SystemRoot") or str(Path(system_drive + os.sep) / "Windows")
+    )
 
 
 def _portable_environment() -> dict[str, str]:
     environment = dict(os.environ)
     environment.pop("PYTHONHOME", None)
     environment.pop("PYTHONPATH", None)
-    system_drive = environment.get("SystemDrive") or "C" + ":"
-    system_root = Path(
-        environment.get("SystemRoot") or str(Path(system_drive + os.sep) / "Windows")
-    )
+    system_root = _system_root(environment)
     environment["PATH"] = os.pathsep.join(
-        (str(system_root / "System32"), str(system_root))
+        (
+            str(system_root / "System32"),
+            str(system_root / "System32" / "WindowsPowerShell" / "v1.0"),
+            str(system_root),
+        )
     )
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONUTF8"] = "1"
     return environment
 
 
-def _stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+def _stop_process_tree(
+    process: subprocess.Popen[str], environment: dict[str, str]
+) -> tuple[str, str]:
     if process.poll() is None:
-        process.terminate()
+        system_root = _system_root(environment)
+        taskkill = system_root / "System32" / "taskkill.exe"
+        subprocess.run(
+            [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            process.kill()
+            process.terminate()
             process.wait(timeout=5)
     stdout, stderr = process.communicate(timeout=5)
     return stdout, stderr
@@ -181,19 +198,25 @@ def smoke_archive(archive_path: Path, *, timeout_seconds: float = 30.0) -> dict[
         if missing:
             raise ValueError(f"portable extraction is missing required files: {missing}")
 
-        python = package_root / "runtime" / "python" / "python.exe"
-        port = _free_loopback_port()
+        launcher = package_root / "START_HERE.bat"
+        port = 8765
+        try:
+            _require_default_loopback_port(port)
+        except OSError as exc:
+            raise RuntimeError(
+                "portable launcher smoke requires its default loopback port 8765 "
+                "to be available"
+            ) from exc
+        environment = _portable_environment()
+        environment["BLUEPRINT_TO_CODE_NO_OPEN"] = "1"
+        system_root = _system_root(environment)
+        command_processor = Path(
+            environment.get("ComSpec") or system_root / "System32" / "cmd.exe"
+        )
         process = subprocess.Popen(
-            [
-                str(python),
-                "scripts/blueprint_tool_server.py",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-            ],
+            [str(command_processor), "/d", "/c", str(launcher)],
             cwd=package_root,
-            env=_portable_environment(),
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -238,7 +261,7 @@ def smoke_archive(archive_path: Path, *, timeout_seconds: float = 30.0) -> dict[
         except Exception as exc:
             caught = exc
         finally:
-            stdout, stderr = _stop_process(process)
+            stdout, stderr = _stop_process_tree(process, environment)
         if caught is not None:
             raise RuntimeError(
                 f"{caught}; server stdout={stdout[-2000:]!r}; "
@@ -253,6 +276,7 @@ def smoke_archive(archive_path: Path, *, timeout_seconds: float = 30.0) -> dict[
         "sessionOk": bool(session and session.get("ok")),
         "host": "127.0.0.1",
         "usedBundledPython": True,
+        "usedStartHereLauncher": True,
         "systemPythonAndNodeRemovedFromPath": True,
         "processExited": process.poll() is not None,
     }

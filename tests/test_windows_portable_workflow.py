@@ -102,6 +102,19 @@ class WindowsPortableWorkflowTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, workflow)
 
+    def test_clean_extract_smoke_runs_the_same_batch_launcher_as_users(self):
+        smoke = (ROOT / "scripts" / "smoke_test_windows_portable.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('launcher = package_root / "START_HERE.bat"', smoke)
+        self.assertIn('environment["BLUEPRINT_TO_CODE_NO_OPEN"] = "1"', smoke)
+        self.assertIn('"usedStartHereLauncher": True', smoke)
+        self.assertNotIn(
+            'python = package_root / "runtime" / "python" / "python.exe"',
+            smoke,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
