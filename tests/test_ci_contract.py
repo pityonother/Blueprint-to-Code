@@ -98,6 +98,10 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", workflow)
         self.assertNotIn("runs-on: ubuntu-latest", workflow)
         self.assertIn("defaults:\n      run:\n        shell: bash", workflow)
+        self.assertIn("timeout-minutes: 45", workflow)
+        for variable in ("TEMP", "TMP", "TMPDIR"):
+            with self.subTest(variable=variable):
+                self.assertIn(f"{variable}: ${{{{ runner.temp }}}}", workflow)
         self.assertIn("actions/checkout@v5", workflow)
         self.assertIn("actions/setup-python@v6", workflow)
         self.assertIn("actions/setup-node@v6", workflow)
