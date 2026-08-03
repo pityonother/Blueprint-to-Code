@@ -25,14 +25,20 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUTF8: "1"
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
-      TMPDIR: ${{ runner.temp }}
     steps:
       - name: Check out source
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: Configure canonical Windows temp directory
+        shell: pwsh
+        run: |
+          $tempPath = Join-Path $env:RUNNER_TEMP "blueprint-to-code"
+          New-Item -ItemType Directory -Force -Path $tempPath | Out-Null
+          "TEMP=$tempPath" >> $env:GITHUB_ENV
+          "TMP=$tempPath" >> $env:GITHUB_ENV
+          "TMPDIR=$tempPath" >> $env:GITHUB_ENV
 
       - name: Set up Python
         uses: actions/setup-python@v6
