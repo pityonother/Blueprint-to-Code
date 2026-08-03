@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/blueprint-interpretation-response/v1",
+  "title": "Blueprint interpretation response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "schema", "identity", "summary", "heuristicReviewHints", "filters", "items", "page"],
+  "properties": {
+    "ok": {"const": true},
+    "schema": {"const": "blueprint-to-code.blueprint-interpretation-response/v1"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "summary": {"$ref": "#/$defs/summary"},
+    "heuristicReviewHints": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {"$ref": "#/$defs/hint"}
+    },
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statuses", "kinds", "graphRef"],
+      "properties": {
+        "statuses": {"type": "array", "uniqueItems": true, "items": {"enum": ["CONFIRMED", "HEURISTIC", "SOURCE_NOT_AVAILABLE", "NOT_RECOVERED", "AMBIGUOUS"]}},
+        "kinds": {"type": "array", "uniqueItems": true, "items": {"enum": ["EVENT", "CALL", "BRANCH", "SET", "RETURN", "DELEGATE", "LOOP", "GAP"]}},
+        "graphRef": {"type": "string", "maxLength": 1024, "pattern": "^(?:$|bp://)"}
+      }
+    },
+    "items": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/statement"}},
+    "page": {"$ref": "#/$defs/page"}
+  },
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset", "evidence", "interpretation"],
+      "properties": {
+        "asset": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "assetId", "objectPath"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 255},
+            "assetId": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+            "objectPath": {"type": "string", "minLength": 1, "maxLength": 4096}
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["revisionId", "manifestSha256"],
+          "properties": {
+            "revisionId": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+            "manifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "interpretation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["revisionId", "manifestSha256", "pointerSha256", "semanticDigest", "interpreterVersion", "schemaVersion", "generatedAt"],
+          "properties": {
+            "revisionId": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+            "manifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "pointerSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "semanticDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "interpreterVersion": {"type": "string", "minLength": 1, "maxLength": 128},
+            "schemaVersion": {"type": "string", "minLength": 1, "maxLength": 128},
+            "generatedAt": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assetName", "graphCount", "nodeCount", "pinCount", "edgeCount", "diagnosticGapCount", "statementCount", "confirmedStatementCount", "heuristicReviewHintCount", "heuristicReviewHintsTruncated", "graphStatusCounts"],
+      "properties": {
+        "assetName": {"type": "string", "maxLength": 255},
+        "graphCount": {"type": "integer", "minimum": 0},
+        "nodeCount": {"type": "integer", "minimum": 0},
+        "pinCount": {"type": "integer", "minimum": 0},
+        "edgeCount": {"type": "integer", "minimum": 0},
+        "diagnosticGapCount": {"type": "integer", "minimum": 0},
+        "statementCount": {"type": "integer", "minimum": 0},
+        "confirmedStatementCount": {"type": "integer", "minimum": 0},
+        "heuristicReviewHintCount": {"type": "integer", "minimum": 0},
+        "heuristicReviewHintsTruncated": {"type": "boolean"},
+        "graphStatusCounts": {"type": "object", "maxProperties": 32, "propertyNames": {"maxLength": 64}, "additionalProperties": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "hint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "topic", "text", "basis", "confidence", "notEvidence", "reviewRef"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 256, "pattern": "^hint://"},
+        "topic": {"type": "string", "minLength": 1, "maxLength": 128},
+        "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "basis": {"const": "KEYWORD_AND_NAME_HEURISTIC"},
+        "confidence": {"const": "HEURISTIC"},
+        "notEvidence": {"const": true},
+        "reviewRef": {"type": "string", "maxLength": 1024, "pattern": "^bp://"}
+      }
+    },
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "text", "status", "evidenceRefs", "gapRefs", "graphRef", "nodeRef", "sourceOrder"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 256, "pattern": "^statement://"},
+        "kind": {"enum": ["EVENT", "CALL", "BRANCH", "SET", "RETURN", "DELEGATE", "LOOP", "GAP"]},
+        "text": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "status": {"enum": ["CONFIRMED", "HEURISTIC", "SOURCE_NOT_AVAILABLE", "NOT_RECOVERED", "AMBIGUOUS"]},
+        "evidenceRefs": {"type": "array", "maxItems": 4096, "uniqueItems": true, "items": {"type": "string", "maxLength": 1024, "pattern": "^bp://"}},
+        "gapRefs": {"type": "array", "maxItems": 4096, "uniqueItems": true, "items": {"type": "string", "maxLength": 256, "pattern": "^gap://"}},
+        "graphRef": {"type": "string", "maxLength": 1024, "pattern": "^(?:$|bp://)"},
+        "nodeRef": {"type": "string", "maxLength": 1024, "pattern": "^(?:$|bp://)"},
+        "sourceOrder": {"type": "integer", "minimum": 0}
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limit", "returned", "total", "nextCursor"],
+      "properties": {
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "returned": {"type": "integer", "minimum": 0, "maximum": 100},
+        "total": {"type": "integer", "minimum": 0},
+        "nextCursor": {"type": ["string", "null"], "maxLength": 4096}
+      }
+    }
+  }
+}

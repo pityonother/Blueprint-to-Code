@@ -110,6 +110,7 @@ from blueprint_server.jobs import (
 from blueprint_server.request import (
     ApiProblem,
     discard_bounded_body,
+    problem,
     read_json_object,
 )
 from blueprint_server.responses import (
@@ -119,6 +120,7 @@ from blueprint_server.responses import (
     static_content_type,
 )
 from blueprint_server.routes_state import StateRoute, state_route_payload
+from blueprint_server.routes_blueprint import blueprint_get_payload
 from blueprint_server.security import SecurityPolicy, redact_sensitive_text
 from package_full_env import read_project_version
 
@@ -2063,6 +2065,23 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                         "sessionToken": policy.session_token,
                     }
                 )
+                return
+            try:
+                blueprint_payload = blueprint_get_payload(
+                    parsed.path,
+                    parsed.query,
+                    capture_root=CAPTURE_ROOT,
+                )
+            except ApiProblem:
+                raise
+            except Exception as exc:
+                raise problem(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "BLUEPRINT_INTERNAL_ERROR",
+                    "Blueprint request failed.",
+                ) from exc
+            if blueprint_payload is not None:
+                self.send_json(blueprint_payload.payload, blueprint_payload.status)
                 return
             kb_payload = kb_get_payload(parsed.path, parsed.query)
             if kb_payload is not None:

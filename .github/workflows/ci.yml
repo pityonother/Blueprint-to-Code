@@ -114,6 +114,7 @@ jobs:
       - name: Run frontend contracts
         run: |
           node tests/api_frontend_contract.mjs
+          node tests/blueprint_frontend_contract.mjs
           node tests/frontend_core_contract.mjs
           node tests/harvest_frontend_contract.mjs
           node tests/knowledge_frontend_contract.mjs

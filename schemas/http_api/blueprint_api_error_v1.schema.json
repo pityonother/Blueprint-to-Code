@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/blueprint-api-error/v1",
+  "title": "Blueprint API error response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "code", "error"],
+  "properties": {
+    "ok": {"const": false},
+    "code": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Z0-9_]+$"},
+    "error": {"type": "string", "minLength": 1, "maxLength": 512}
+  }
+}

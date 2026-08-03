@@ -119,7 +119,15 @@ runtime\python\python.exe scripts\query_blueprint_evidence.py `
 
 runtime\python\python.exe scripts\query_blueprint_evidence.py `
   --asset-dir "captures\<AssetName>" gaps --page-size 10 --budget 1000
+
+runtime\python\python.exe scripts\interpret_blueprint_evidence.py `
+  --asset-dir "captures\<AssetName>" --format all
 ```
+
+最后一条命令从当前、fresh、release-authority Evidence v3 发布独立的 immutable
+Interpretation revision。它不会修改 Evidence；manifest 单向绑定 Evidence revision 和
+manifest SHA-256。CLI/API、statement/trace/gap 结构和发布门禁见
+[Blueprint Interpretation Contract v1](BLUEPRINT_INTERPRETATION_CONTRACT_V1_zh.md)。
 
 一个问题涉及多处相关证据时，生成问题专用 Context Pack：
 

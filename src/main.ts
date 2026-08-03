@@ -4,6 +4,7 @@ import {
   workspaceViewFromSearch,
   type WorkspaceView,
 } from './app/router';
+import { BlueprintController } from './blueprint/controller';
 import { HarvestExplorer } from './harvest/explorer';
 import { KnowledgeWorkspace } from './kb/workspace';
 import { ApiFailure, api, type ApiResult } from './shared/api';
@@ -186,6 +187,10 @@ if (!app) {
 }
 const root = app;
 let workspaceView = workspaceViewFromSearch(window.location.search);
+const blueprintController = new BlueprintController(
+  () => render(),
+  (assetName) => selectBlueprintAssetByName(assetName),
+);
 const harvestExplorer = new HarvestExplorer(() => render());
 const knowledgeWorkspace = new KnowledgeWorkspace(() => render());
 
@@ -299,6 +304,22 @@ function selectedAsset(): AssetSummary | undefined {
   const byPath = state?.assets.find((asset) => asset.path === selectedPath);
   const ready = state?.assets.find((asset) => asset.graphs > 0 && asset.hasOutput);
   return byPath || ready || state?.assets[0];
+}
+
+function selectBlueprintAssetByName(assetName: string): void {
+  const asset = state?.assets.find((candidate) => candidate.name === assetName);
+  if (!asset || asset.path === selectedPath) return;
+  selectedPath = asset.path;
+  devkitInput = asset.path;
+  captureAssetName = asset.name;
+  selectedReport = preferredReportForAsset(asset);
+  reportContent = '';
+  reportPath = '';
+  missingFunctions = [];
+  selectedMissingFunctions.clear();
+  window.localStorage.setItem('blueprint-tool.selected', selectedPath);
+  void loadReport(selectedReport);
+  void loadMissingFunctions();
 }
 
 function normalizeObjectPathInput(rawText: string): string {
@@ -1245,20 +1266,26 @@ function renderMain(): void {
     <div class="shell">
       ${renderTopbar()}
       <main class="workspace">
-        ${renderStepPath(asset)}
-        ${renderStepActions(asset)}
-        ${renderStepResult(asset)}
-        ${renderStepReports(asset)}
-        ${renderKnowledgeBaseSection()}
-        ${renderRecaptureSection(asset)}
-        ${renderAdvancedSection(asset)}
-        <p class="footnote">日志最近一条：${escapeHtml(logs[0] || '无')}</p>
+        ${blueprintController.render({
+          legacy: renderStepReports(asset),
+          experimental: `
+            ${renderStepPath(asset)}
+            ${renderStepActions(asset)}
+            ${renderStepResult(asset)}
+            ${renderKnowledgeBaseSection()}
+            ${renderRecaptureSection(asset)}
+            ${renderAdvancedSection(asset)}
+            <p class="footnote">日志最近一条：${escapeHtml(logs[0] || '无')}</p>
+          `,
+        })}
       </main>
       ${renderVersionFooter()}
     </div>
   `;
 
   bindEvents();
+  blueprintController.bind();
+  blueprintController.ensureLoaded(asset?.name || '');
 }
 
 function renderLoading(): void {

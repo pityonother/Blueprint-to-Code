@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/http-api/blueprint-evidence-health-response/v1",
+  "title": "Blueprint Evidence and Interpretation health response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "schema", "asset", "health"],
+  "properties": {
+    "ok": {"const": true},
+    "schema": {"const": "blueprint-to-code.blueprint-evidence-health-response/v1"},
+    "asset": {"type": "string", "minLength": 1, "maxLength": 255},
+    "health": {"$ref": "#/$defs/health"}
+  },
+  "$defs": {
+    "maybeRevision": {"type": "string", "pattern": "^(?:$|[0-9a-f]{24})$"},
+    "maybeHash": {"type": "string", "pattern": "^(?:$|[0-9a-f]{64})$"},
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasonCode", "asset", "evidence", "interpretation"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1, "maxLength": 64},
+        "reasonCode": {"type": "string", "maxLength": 128},
+        "asset": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "assetId", "objectPath"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 255},
+            "assetId": {"type": "string", "pattern": "^(?:$|[0-9a-f]{24})$"},
+            "objectPath": {"type": "string", "maxLength": 4096}
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["revisionId", "manifestSha256", "pointerSha256", "freshnessStatus", "releaseAuthority", "migrationRequired"],
+          "properties": {
+            "revisionId": {"$ref": "#/$defs/maybeRevision"},
+            "manifestSha256": {"$ref": "#/$defs/maybeHash"},
+            "pointerSha256": {"$ref": "#/$defs/maybeHash"},
+            "freshnessStatus": {"type": "string", "maxLength": 64},
+            "releaseAuthority": {"type": "boolean"},
+            "migrationRequired": {"type": "boolean"}
+          }
+        },
+        "interpretation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "revisionId", "manifestSha256", "pointerSha256", "semanticDigest", "interpreterVersion", "schemaVersion", "generatedAt"],
+          "properties": {
+            "status": {"type": "string", "maxLength": 64},
+            "revisionId": {"$ref": "#/$defs/maybeRevision"},
+            "manifestSha256": {"$ref": "#/$defs/maybeHash"},
+            "pointerSha256": {"$ref": "#/$defs/maybeHash"},
+            "semanticDigest": {"$ref": "#/$defs/maybeHash"},
+            "interpreterVersion": {"type": "string", "maxLength": 128},
+            "schemaVersion": {"type": "string", "maxLength": 128},
+            "generatedAt": {"type": "string", "maxLength": 128}
+          }
+        }
+      }
+    }
+  }
+}

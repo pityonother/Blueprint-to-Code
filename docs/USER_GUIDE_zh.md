@@ -205,6 +205,16 @@ Ctrl+C
 
 ## 7. 常用按钮说明
 
+### Interpretation / Evidence / Gaps / Legacy / Experimental
+
+资产工作区默认先看 **Interpretation**：它把当前 Evidence v3 转成带逐句
+`bp://` 引用的说明。点 statement 可以看对应 Evidence，再打开
+neighborhood/trace；**Gaps** 单独列出没有恢复或来源不在本资产中的部分。
+关键词推断和旧人类报告只在 heuristic 提示或 **Legacy / Experimental** 中显示，
+不能当作确认事实。如果顶部出现 stale 提示，先重新读取并发布 Evidence，再生成
+Interpretation；不要用旧报告掩盖 revision 不一致。完整合同见
+[Blueprint Interpretation Contract v1](BLUEPRINT_INTERPRETATION_CONTRACT_V1_zh.md)。
+
 ### 从 .uasset 读取图内容
 
 最常用按钮。直接读取资产文件里的蓝图图内容，默认生成 Evidence Store 和 AI 证据索引，不自动生成整套 legacy 长报告。

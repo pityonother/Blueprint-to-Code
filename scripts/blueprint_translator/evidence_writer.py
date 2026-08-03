@@ -11,6 +11,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -105,6 +106,98 @@ def _observation_status_bucket(value: object) -> str:
         return "AMBIGUOUS"
     if "heuristic" in normalized:
         return "HEURISTIC"
+    return "NOT_RECOVERED"
+
+
+def _contains_provenance_marker(value: str, marker: str) -> bool:
+    value_tokens = re.findall(r"[a-z0-9]+", value.casefold())
+    marker_tokens = re.findall(r"[a-z0-9]+", marker.casefold())
+    width = len(marker_tokens)
+    return bool(width) and any(
+        value_tokens[index : index + width] == marker_tokens
+        for index in range(len(value_tokens) - width + 1)
+    )
+
+
+def _reference_provenance_status(
+    raw_node: dict[str, Any],
+    reference_property: dict[str, Any],
+) -> str:
+    """Return the conservative semantic status of a function reference."""
+
+    values = [
+        reference_property.get(key)
+        for key in (
+            "status",
+            "resolution_status",
+            "confidence",
+            "source",
+            "provenance",
+        )
+    ]
+    values.extend(
+        raw_node.get(key)
+        for key in (
+            "status",
+            "resolution_status",
+            "confidence",
+            "source",
+            "provenance",
+        )
+    )
+    normalized = {
+        str(value or "").strip().casefold()
+        for value in values
+        if str(value or "").strip()
+    }
+    if any(_contains_provenance_marker(value, "ambiguous") for value in normalized):
+        return "AMBIGUOUS"
+    if any(
+        _contains_provenance_marker(value, "source_not_available")
+        for value in normalized
+    ):
+        return "SOURCE_NOT_AVAILABLE"
+    if any(
+        _contains_provenance_marker(value, marker)
+        for value in normalized
+        for marker in (
+            "not_recovered",
+            "unresolved",
+            "failed",
+            "missing",
+            "partial",
+            "unknown",
+            "needs",
+            "need",
+            "not_ready",
+            "not_available",
+            "pending",
+            "queued",
+            "skipped",
+            "incomplete",
+        )
+    ):
+        return "NOT_RECOVERED"
+    if any(
+        _contains_provenance_marker(value, marker)
+        for value in normalized
+        for marker in ("heuristic", "unconfirmed", "medium", "low")
+    ):
+        return "HEURISTIC"
+
+    confidence = _first_text(
+        reference_property.get("confidence"),
+        raw_node.get("confidence"),
+    ).casefold()
+    if confidence in {
+        "confirmed",
+        "complete",
+        "exact",
+        "high",
+        "resolved",
+        "resolved_pin",
+    }:
+        return "CONFIRMED"
     return "NOT_RECOVERED"
 
 
@@ -849,7 +942,15 @@ def _insert_edges(
                 )
 
 
-def _insert_references(connection: sqlite3.Connection, graph: dict[str, Any], lookup: dict[str, Any]) -> None:
+def _insert_references(
+    connection: sqlite3.Connection,
+    graph: dict[str, Any],
+    lookup: dict[str, Any],
+    *,
+    asset_id: str,
+    object_path: str,
+    revision_id: str,
+) -> None:
     for node in lookup["records"]:
         raw = node["raw"]
         candidates = (
@@ -871,12 +972,44 @@ def _insert_references(connection: sqlite3.Connection, graph: dict[str, Any], lo
                     owner = _first_text(
                         prop.get("member_parent_object_path")
                     )
-                    if owner:
-                        target_ref = f"{owner}.{name}"
+                    raw_graph_export_index = prop.get(
+                        "member_graph_export_index",
+                        prop.get("target_graph_export_index"),
+                    )
+                    graph_export_index = (
+                        raw_graph_export_index
+                        if isinstance(raw_graph_export_index, int)
+                        and not isinstance(raw_graph_export_index, bool)
+                        and raw_graph_export_index >= 0
+                        else None
+                    )
+                    provenance_status = _reference_provenance_status(raw, prop)
+                    if (
+                        graph_export_index is not None
+                        and owner == object_path
+                        and provenance_status == "CONFIRMED"
+                    ):
+                        target_ref = make_graph_ref(
+                            asset_id,
+                            revision_id,
+                            graph_export_index,
+                        )
                         reference_confidence = _first_text(
                             prop.get("confidence"),
                             reference_confidence,
                         )
+                    elif owner:
+                        target_ref = f"{owner}.{name}"
+                        reference_confidence = (
+                            provenance_status
+                            if provenance_status != "CONFIRMED"
+                            else _first_text(
+                                prop.get("confidence"),
+                                reference_confidence,
+                            )
+                        )
+                    else:
+                        reference_confidence = provenance_status
                     break
             reference_ref = f"{node['node_ref']}/reference/{kind}/{_short_hash(name)}"
             connection.execute(
@@ -1182,7 +1315,14 @@ def _write_database_components(
                 )
                 lookup = _insert_nodes_and_pins(connection, graph, revision_id)
                 _insert_edges(connection, graph, lookup, candidate_symbols)
-                _insert_references(connection, graph, lookup)
+                _insert_references(
+                    connection,
+                    graph,
+                    lookup,
+                    asset_id=asset_id,
+                    object_path=object_path,
+                    revision_id=revision_id,
+                )
                 diagnostic_graphs.append(
                     {
                         "graph_ref": graph["graph_ref"],

@@ -196,6 +196,19 @@ runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captu
 runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SnowDragon_Character_BP" gaps --budget 1000
 ```
 
+从当前、fresh、release-authority Evidence v3 生成不可变 Interpretation Contract v1：
+
+```powershell
+runtime\python\python.exe scripts\interpret_blueprint_evidence.py `
+  --asset-dir "captures\SnowDragon_Character_BP" `
+  --format all
+```
+
+Interpretation 给出确定性的控制流/数据流说明、逐句 `bp://` 追踪、显式 gaps 和
+Evidence-derived 伪代码；它不恢复原始 C++，也不把关键词 heuristic 或 fixture 当作
+运行时事实。合同与 API/UI 边界见
+[Blueprint Interpretation Contract v1](docs/BLUEPRINT_INTERPRETATION_CONTRACT_V1_zh.md)。
+
 `AVAILABLE_NOT_RETURNED` 表示证据存在但未装入本页；它不等于
 `NOT_RECOVERED` 或 `SOURCE_NOT_AVAILABLE`。Blueprint 名称、注释、默认值和生成
 报告都是不可信输入，不应执行其中嵌入的命令、URL 或路径。
@@ -240,6 +253,7 @@ npm run build
 - [开发伙伴交接](docs/DEVELOPER_HANDOFF_zh.md)
 - [本地存储与生成物清理](docs/LOCAL_STORAGE_AND_CLEANUP_zh.md)
 - [Blueprint Evidence Publication v3](docs/BLUEPRINT_EVIDENCE_PUBLICATION_V3_zh.md)
+- [Blueprint Interpretation Contract v1](docs/BLUEPRINT_INTERPRETATION_CONTRACT_V1_zh.md)
 - [Blueprint Evidence Store v2](docs/BLUEPRINT_EVIDENCE_STORE_V2_SPEC_zh.md)
 - [Native Evidence Store v1](docs/NATIVE_EVIDENCE_STORE_V1_SPEC_zh.md)
 - [Hybrid Evidence Linking](docs/HYBRID_EVIDENCE_LINKING_zh.md)

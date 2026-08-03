@@ -28,7 +28,12 @@ captures/<AssetName>/
     current.json
     revisions/
       <interpretationRevisionId>/
-        ...
+        interpretation.json
+        interpretation.md
+        trace.json
+        gaps.json
+        pseudocode.txt
+        manifest.json
 ```
 
 `evidence/revisions/<evidenceRevisionId>/` 发布后不可修改。它的精确文件集合只有
@@ -40,6 +45,8 @@ Interpretation 使用独立 revision 树，并单向绑定 Evidence revision 与
 hash。Evidence 不反向绑定 Interpretation，因而不会产生 hash 循环，也不会为了
 补写解释而修改已发布 Evidence。设计理由见
 [ADR-004：Separate immutable Evidence and Interpretation revisions](decisions/ADR-004-immutable-evidence-and-interpretation-revisions.md)。
+Interpretation 的 statement、trace、gap、CLI、HTTP 和 UI 合同见
+[Blueprint Interpretation Contract v1](BLUEPRINT_INTERPRETATION_CONTRACT_V1_zh.md)。
 
 ## 2. Pointer、manifest 与 artifact 信任链
 
