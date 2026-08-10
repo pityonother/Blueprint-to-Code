@@ -62,12 +62,24 @@ class VersionConsistencyTests(unittest.TestCase):
         self.assertEqual(state["version"], read_project_version(ROOT))
 
     def test_both_frontend_workspaces_render_the_state_version_footer(self):
-        source = (ROOT / "src" / "main.ts").read_text(encoding="utf-8")
+        main_source = (ROOT / "src" / "main.ts").read_text(encoding="utf-8")
+        shell_source = (ROOT / "src" / "app" / "shell.ts").read_text(
+            encoding="utf-8"
+        )
+        types_source = (
+            ROOT / "src" / "control-center" / "types.ts"
+        ).read_text(encoding="utf-8")
+        workspace_source = (
+            ROOT / "src" / "control-center" / "workspace.ts"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("version: string;", source)
-        self.assertIn("appVersion = payload.version;", source)
+        self.assertIn("version: string;", types_source)
+        self.assertIn("this.appVersion = payload.version;", workspace_source)
+        self.assertIn("${renderVersionFooter(appVersion)}", shell_source)
         self.assertGreaterEqual(
-            source.count("${renderVersionFooter()}"),
+            main_source.count(
+                "renderWorkspaceShell(workspaceView, legacyWorkspace.version(), content)"
+            ),
             2,
         )
 

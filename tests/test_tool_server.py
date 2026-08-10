@@ -214,13 +214,18 @@ class ToolServerTests(unittest.TestCase):
         self.assertIsNone(summary["pointerSha256"])
 
     def test_frontend_requests_indexed_artifacts_without_hardcoded_dual_mode(self):
-        source = (ROOT / "src" / "main.ts").read_text(encoding="utf-8")
+        workspace_source = (
+            ROOT / "src" / "control-center" / "workspace.ts"
+        ).read_text(encoding="utf-8")
+        workflow_source = (
+            ROOT / "src" / "control-center" / "views" / "workflow.ts"
+        ).read_text(encoding="utf-8")
 
-        self.assertNotIn("artifactMode: 'dual'", source)
-        self.assertIn("const DEFAULT_ARTIFACT_MODE = 'indexed'", source)
-        self.assertIn("artifactMode: DEFAULT_ARTIFACT_MODE", source)
-        self.assertIn("if (payload.graphReportPath)", source)
-        self.assertIn("历史/按需报告", source)
+        self.assertNotIn("artifactMode: 'dual'", workspace_source)
+        self.assertIn("const DEFAULT_ARTIFACT_MODE = 'indexed'", workspace_source)
+        self.assertIn("artifactMode: DEFAULT_ARTIFACT_MODE", workspace_source)
+        self.assertIn("if (payload.graphReportPath)", workspace_source)
+        self.assertIn("历史/按需报告", workflow_source)
 
     def test_backend_omitted_mode_uses_indexed_and_skips_legacy_analyzer(self):
         fake_paths = {

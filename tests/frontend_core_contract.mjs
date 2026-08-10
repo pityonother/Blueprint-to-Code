@@ -70,11 +70,29 @@ try {
     new URL('../src/main.ts', import.meta.url),
     'utf8',
   );
-  assert.match(mainSource, /from '.\/shared\/errors'/);
-  assert.match(mainSource, /from '.\/shared\/html'/);
+  const workspaceSource = await readFile(
+    new URL('../src/control-center/workspace.ts', import.meta.url),
+    'utf8',
+  );
+  const commonViewSource = await readFile(
+    new URL('../src/control-center/views/common.ts', import.meta.url),
+    'utf8',
+  );
+  const shellSource = await readFile(
+    new URL('../src/app/shell.ts', import.meta.url),
+    'utf8',
+  );
   assert.match(mainSource, /from '.\/app\/router'/);
+  assert.doesNotMatch(mainSource, /from '.\/shared\/errors'/);
+  assert.doesNotMatch(mainSource, /from '.\/shared\/html'/);
   assert.doesNotMatch(mainSource, /function escapeHtml\(/);
   assert.doesNotMatch(mainSource, /function readableError\(/);
+  assert.match(workspaceSource, /from '..\/shared\/errors'/);
+  assert.doesNotMatch(workspaceSource, /function readableError\(/);
+  assert.match(commonViewSource, /from '..\/..\/shared\/html'/);
+  assert.doesNotMatch(commonViewSource, /function escapeHtml\(/);
+  assert.match(shellSource, /from '.\/router'/);
+  assert.match(shellSource, /from '..\/shared\/html'/);
 } finally {
   await server.close();
 }

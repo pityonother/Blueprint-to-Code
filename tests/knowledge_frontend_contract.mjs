@@ -36,7 +36,12 @@ try {
     new URL('../src/main.ts', import.meta.url),
     'utf8',
   );
-  assert.match(main, /data-workspace="knowledge"/);
+  const shell = await readFile(
+    new URL('../src/app/shell.ts', import.meta.url),
+    'utf8',
+  );
+  assert.match(shell, /data-workspace="knowledge"/);
+  assert.match(main, /renderWorkspaceShell/);
   assert.match(main, /knowledgeWorkspace\.ensureLoaded\(\)/);
 } finally {
   await server.close();
