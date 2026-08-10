@@ -569,7 +569,16 @@ try {
   assert.match(main, /new BlueprintController/);
   assert.match(main, /blueprintController\.render/);
   assert.match(main, /blueprintController\.ensureLoaded/);
-  assert.match(main, /legacy: renderStepReports/);
+  assert.match(main, /legacy: legacyWorkspace\.renderLegacy\(\)/);
+  assert.match(main, /experimental: legacyWorkspace\.renderExperimental\(\)/);
+  const legacyWorkspaceSource = await readFile(
+    new URL('../src/control-center/workspace.ts', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    legacyWorkspaceSource,
+    /renderLegacy\(\): string \{[\s\S]*return renderStepReports\(/,
+  );
 
   const css = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
   assert.match(css, /\.blueprint-primary-layout/);
