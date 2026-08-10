@@ -1,23 +1,19 @@
 """Local web control center for the Blueprint translator.
 
-The server intentionally uses only Python's standard library. The UI is built
-with Vite into dist/ and calls these JSON endpoints to run the existing
-Blueprint translator, open reports, and prepare ARK DevKit export requests.
+This module is the process composition root and compatibility facade. Domain
+logic lives in ``blueprint_server`` modules; the standard-library HTTP handler,
+server factory, and CLI remain here so existing launchers and imports keep
+working.
 """
 
-# ruff: noqa: E402 - local package imports follow the SCRIPT_ROOT bootstrap.
+# ruff: noqa: E402, F401 - bootstrap imports and compatibility re-exports.
 
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
-import json
 import mimetypes
-import os
-import re
 import subprocess
 import sys
-import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +24,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
+from blueprint_translator.artifact_modes import normalize_artifact_mode
 from blueprint_translator.capture import (
     CAPTURE_GRAPH_TYPES,
     graph_capture_path,
@@ -39,19 +36,22 @@ from blueprint_translator.capture import (
     upsert_graph_record,
     write_capture_manifest,
 )
-from blueprint_translator.artifact_modes import normalize_artifact_mode
 from blueprint_translator.devkit_paths import first_existing_devkit_content_root
-from blueprint_translator.graph_queue import graph_queue_summary, graph_queue_text_for_mode
 from blueprint_translator.evidence_publication import (
     _lexical_absolute,
     _require_plain_directory,
     _require_plain_path_chain,
 )
 from blueprint_translator.evidence_repository import open_asset_repository
-from blueprint_translator.harvest_node_repository import (
-    HarvestDatasetInvalid,
-    HarvestDatasetNotBuilt,
-    HarvestNodeRepository,
+from blueprint_translator.graph_queue import (
+    graph_queue_summary,
+    graph_queue_text_for_mode,
+)
+from blueprint_translator.harvest_build_jobs import (
+    HarvestBuildAlreadyRunning,
+    HarvestBuildArgumentError,
+    HarvestBuildJobManager,
+    HarvestBuildJobNotFound,
 )
 from blueprint_translator.harvest_evaluation_catalog import (
     AVAILABILITY_GLOBAL_TRANSFER_ALLOWED,
@@ -65,16 +65,19 @@ from blueprint_translator.harvest_evaluation_catalog import (
     VARIANT_BEST_DISCOVERED_EXPLORATORY,
     VARIANT_CANONICAL,
 )
+from blueprint_translator.harvest_node_repository import (
+    HarvestDatasetInvalid,
+    HarvestDatasetNotBuilt,
+    HarvestNodeRepository,
+)
 from blueprint_translator.harvest_runtime_observations import (
     HarvestRuntimeProfileError,
 )
-from blueprint_translator.harvest_build_jobs import (
-    HarvestBuildAlreadyRunning,
-    HarvestBuildArgumentError,
-    HarvestBuildJobManager,
-    HarvestBuildJobNotFound,
+from blueprint_translator.kb_vnext.kb_api import (
+    KnowledgeApiError,
+    VNextKnowledgeService,
 )
-from blueprint_translator.resource_nodes import NODE_PAGE_MAX_LIMIT
+from blueprint_translator.kb_vnext.shadow_compare import LegacyVNextComparator
 from blueprint_translator.report_query import (
     DEFAULT_REPORT_QUERY_BUDGET,
     MAX_REPORT_CONTEXT_LINES,
@@ -84,7 +87,7 @@ from blueprint_translator.report_query import (
     read_report_source,
     resolve_report_source,
 )
-from blueprint_translator.utils import read_clipboard, safe_filename
+from blueprint_translator.resource_nodes import NODE_PAGE_MAX_LIMIT
 from blueprint_translator.uasset_graphs import (
     current_uasset_graph_payload_files,
     mine_graph_candidates,
@@ -94,18 +97,67 @@ from blueprint_translator.uasset_graphs import (
     write_graph_candidate_files,
     write_uasset_graph_read_files,
 )
-from blueprint_translator.kb_vnext.kb_api import (
-    KnowledgeApiError,
-    VNextKnowledgeService,
+from blueprint_translator.utils import read_clipboard, safe_filename
+
+from blueprint_server import assets as _assets
+from blueprint_server import captures as _captures
+from blueprint_server import devkit as _devkit
+from blueprint_server import harvest as _harvest
+from blueprint_server import kb_routes as _kb_routes
+from blueprint_server import knowledge as _knowledge
+from blueprint_server import reports as _reports
+from blueprint_server.assets import (
+    _evidence_public_metadata,
+    _indexed_evidence_declared,
+    captured_graph_keys,
+    collection_size,
+    component_source_counts,
+    count_components,
+    count_defaults,
+    devkit_export_quality,
+    export_quality_summary,
+    graph_candidate_count,
+    graph_count,
+    graph_name_key,
+    graph_queue_count,
+    graph_queue_counts,
+    iso_time,
+    newest_mtime,
+    normalize_asset_path,
+    parse_devkit_report_counts,
+    read_json_file,
+    uasset_structure_counts,
 )
-from blueprint_translator.kb_vnext.shadow_compare import (
-    LegacyVNextComparator,
+from blueprint_server.captures import (
+    append_notes_for_functions,
+    existing_note_function_names,
+    markdown_table_cells,
+    missing_functions_from_context_json,
+    missing_functions_from_report,
+    normalize_note_function_name,
+)
+from blueprint_server.harvest import (
+    _harvest_build_problem,
+    _harvest_dataset_problem,
+    _harvest_runtime_profile_problem,
+    _harvest_runtime_ranking_options,
 )
 from blueprint_server.jobs import (
     JOB_TIMEOUT_SECONDS,
     cancel_job,
     create_background_job,
     get_job,
+)
+from blueprint_server.kb_routes import _kb_api_problem, _kb_query_value
+from blueprint_server.knowledge import KNOWLEDGE_TARGETS
+from blueprint_server.reports import (
+    OPEN_TARGETS,
+    REPORT_TARGETS,
+    is_within,
+    open_path,
+    parse_report_query_int,
+    query_report_for_request,
+    resolve_target,
 )
 from blueprint_server.request import (
     ApiProblem,
@@ -114,13 +166,13 @@ from blueprint_server.request import (
     read_json_object,
 )
 from blueprint_server.responses import (
-    encode_json_response,  # noqa: F401 - compatibility re-export for callers/tests
+    encode_json_response,
     error_payload,
     prepare_json_response,
     static_content_type,
 )
-from blueprint_server.routes_state import StateRoute, state_route_payload
 from blueprint_server.routes_blueprint import blueprint_get_payload
+from blueprint_server.routes_state import StateRoute, state_route_payload
 from blueprint_server.security import SecurityPolicy, redact_sensitive_text
 from package_full_env import read_project_version
 
@@ -135,7 +187,12 @@ KB_SHADOW_COMPARATOR = LegacyVNextComparator(
     vnext=KB_VNEXT_SERVICE,
     legacy_root=KNOWLEDGE_ROOT / "db",
 )
-EXPORT_SCRIPT = PROJECT_ROOT / "scripts" / "devkit_exporters" / "export_current_blueprint_defaults.py"
+EXPORT_SCRIPT = (
+    PROJECT_ROOT
+    / "scripts"
+    / "devkit_exporters"
+    / "export_current_blueprint_defaults.py"
+)
 DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
 HARVEST_CATALOG_PATH = (
@@ -172,572 +229,82 @@ HARVEST_REPOSITORY = HarvestNodeRepository(
     runtime_observation_root=HARVEST_RUNTIME_OBSERVATION_ROOT,
 )
 HARVEST_BUILD_MANAGER = HarvestBuildJobManager(project_root=PROJECT_ROOT)
-
-def resolve_harvest_image_path(image_identity: str, image_root: Path = HARVEST_IMAGE_ROOT) -> Path:
-    """Resolve one immutable image by lowercase SHA-256 identity only."""
-
-    if re.fullmatch(r"[0-9a-f]{64}", str(image_identity or "")) is None:
-        raise ValueError("Invalid harvest image identity.")
-    resolved_root = Path(image_root).resolve()
-    candidate = (resolved_root / f"{image_identity}.jpg").resolve()
-    try:
-        candidate.relative_to(resolved_root)
-    except ValueError as exc:
-        raise ValueError("Harvest image resolves outside the cache root.") from exc
-    if not candidate.is_file():
-        raise FileNotFoundError("Harvest image was not found.")
-    return candidate
-
-
-def configured_devkit_content_root() -> Path | None:
-    return first_existing_devkit_content_root(config_file=DEVKIT_CONTENT_ROOT_FILE)
-
-
-REPORT_TARGETS = {
-    **REPORT_FILES,
-    "formula_candidates_json": ("output", "formula_candidates.json"),
-    "unresolved_formulas": ("output", "formula_candidates.md"),
-    "notes": ("notes.md",),
-    "defaults": ("defaults.json",),
-    "components": ("components.json",),
-    "devkit_report": ("devkit_export_report.md",),
-}
-
-OPEN_TARGETS = {
-    **REPORT_TARGETS,
-    "asset_folder": (),
-    "output_folder": ("output",),
-    "graph_reports": ("output", "graph_reports"),
-}
-
-KNOWLEDGE_TARGETS = {
-    "folder": (),
-    "index": ("index.json",),
-    "report": ("reports", "gigantoraptor_knowledge_base.md"),
-    "global_report": ("global", "asset_index_report.md"),
-    "global_index": ("global", "asset_index.sqlite"),
-    "global_summary": ("global", "asset_index_summary.json"),
-    "priority_report": ("priorities", "priority_targets.md"),
-    "priority_results": ("priorities", "priority_read_results.md"),
-    "priority_queue": ("priorities", "deep_read_queue.txt"),
-    "system": ("systems", "gigantoraptor.json"),
-    "native_functions": ("native_functions.json",),
-    "evidence": ("evidence.json",),
-}
-
 DEFAULT_COMPARE_ROOT = CAPTURE_ROOT / "_compare_reports"
 
 
-def is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.resolve().relative_to(parent.resolve())
-        return True
-    except ValueError:
-        return False
+# Compatibility facade. Wrappers resolve patchable process dependencies at call
+# time so existing tests and external callers can keep monkeypatching this module.
 
 
-def read_json_file(path: Path) -> object | None:
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception:
-        return None
+def resolve_harvest_image_path(
+    image_identity: str,
+    image_root: Path = HARVEST_IMAGE_ROOT,
+) -> Path:
+    return _harvest.resolve_harvest_image_path(image_identity, image_root)
 
 
-def collection_size(value: object) -> int:
-    if isinstance(value, (list, tuple, set)):
-        return len(value)
-    if isinstance(value, dict):
-        return len(value)
-    return 0
-
-
-def count_defaults(data: object | None) -> int:
-    if isinstance(data, list):
-        return len(data)
-    if not isinstance(data, dict):
-        return 0
-    for key in ("defaults", "class_defaults", "properties", "values", "variables"):
-        count = collection_size(data.get(key))
-        if count:
-            return count
-    return collection_size(data)
-
-
-def count_components(data: object | None) -> int:
-    if isinstance(data, list):
-        return len(data)
-    if not isinstance(data, dict):
-        return 0
-    for key in ("components", "component_candidates", "templates", "items"):
-        count = collection_size(data.get(key))
-        if count:
-            return count
-    return collection_size(data)
-
-
-def component_source_counts(data: object | None) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    components = data if isinstance(data, list) else data.get("components", []) if isinstance(data, dict) else []
-    if not isinstance(components, list):
-        return counts
-    for component in components:
-        if not isinstance(component, dict):
-            continue
-        source = str(component.get("source") or "manual_or_unknown")
-        counts[source] = counts.get(source, 0) + 1
-    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:12])
-
-
-def parse_devkit_report_counts(text: str) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for label, key in [
-        ("Blueprint variables exported", "blueprintVariables"),
-        ("Class defaults exported", "classDefaults"),
-        ("Components exported", "componentsExported"),
-        ("Warnings", "warnings"),
-        ("Errors", "errors"),
-        ("Skipped properties", "skipped"),
-    ]:
-        match = re.search(rf"-\s*{re.escape(label)}:\s*(\d+)", text)
-        if match:
-            counts[key] = int(match.group(1))
-    return counts
-
-
-def devkit_export_quality(asset_dir: Path, components_data: object | None) -> dict[str, object]:
-    log_path = asset_dir / "devkit_export_log.json"
-    report_path = asset_dir / "devkit_export_report.md"
-    log_data = read_json_file(log_path)
-    warnings: list[object] = []
-    errors: list[object] = []
-    skipped: list[object] = []
-    debug: list[object] = []
-    if isinstance(log_data, dict):
-        warnings = list(log_data.get("warnings", [])) if isinstance(log_data.get("warnings", []), list) else []
-        errors = list(log_data.get("errors", [])) if isinstance(log_data.get("errors", []), list) else []
-        skipped = list(log_data.get("skipped", [])) if isinstance(log_data.get("skipped", []), list) else []
-        debug = list(log_data.get("debug", [])) if isinstance(log_data.get("debug", []), list) else []
-    skipped_attempts = int(log_data.get("skipped_attempts", len(skipped)) or len(skipped)) if isinstance(log_data, dict) else len(skipped)
-    report_text = report_path.read_text(encoding="utf-8-sig", errors="replace") if report_path.is_file() else ""
-    report_counts = parse_devkit_report_counts(report_text)
-    sources = component_source_counts(components_data)
-    safe_scs_hits = sum(
-        count
-        for source, count in sources.items()
-        if "scs" in source.lower() or "simple_construction" in source.lower() or "componenttemplate" in source.lower()
-    )
-    restored_or_manual = sum(
-        count
-        for source, count in sources.items()
-        if "manual" in source.lower() or "restored" in source.lower() or "unknown" in source.lower()
-    )
-    status = "missing"
-    if log_path.is_file() or report_path.is_file():
-        status = "ok"
-        if errors:
-            status = "error"
-        elif warnings or skipped:
-            status = "warning"
-    return {
-        "status": status,
-        "hasLog": log_path.is_file(),
-        "hasReport": report_path.is_file(),
-        "logPath": str(log_path) if log_path.is_file() else "",
-        "reportPath": str(report_path) if report_path.is_file() else "",
-        "warnings": len(warnings),
-        "errors": len(errors),
-        "skipped": len(skipped),
-        "skippedAttempts": skipped_attempts,
-        "debugMessages": len(debug),
-        "reportCounts": report_counts,
-        "componentSourceCounts": sources,
-        "safeScsComponentCount": safe_scs_hits,
-        "manualOrRestoredComponentCount": restored_or_manual,
-        "summary": export_quality_summary(status, report_counts, len(warnings), len(errors), len(skipped), safe_scs_hits, restored_or_manual),
-    }
-
-
-def export_quality_summary(
-    status: str,
-    report_counts: dict[str, int],
-    warning_count: int,
-    error_count: int,
-    skipped_count: int,
-    safe_scs_hits: int,
-    restored_or_manual: int,
-) -> str:
-    if status == "missing":
-        return "还没有 DevKit 导出日志。请先保存资产路径，然后在 ARK DevKit 里运行导出器。"
-    if error_count:
-        return f"DevKit 导出出现 {error_count} 个错误，请先查看 devkit_export_report.md。"
-    exported_components = report_counts.get("componentsExported", 0)
-    if safe_scs_hits:
-        return f"组件上下文里有 {safe_scs_hits} 个疑似 SCS/component-template 来源，下一步可以补安全默认值字段白名单。"
-    if exported_components == 0 and restored_or_manual:
-        return "这次 DevKit 没有直接导出组件；当前 components.json 更像是分析器恢复或手工整理的候选。"
-    if skipped_count:
-        return f"导出成功，但跳过了 {skipped_count} 个属性；建议按报告复查关键默认值。"
-    if warning_count:
-        return f"导出成功，但有 {warning_count} 个警告。"
-    return "DevKit 导出状态正常。"
-
-
-def newest_mtime(path: Path) -> float | None:
-    if not path.exists():
-        return None
-    newest: float | None = None
-    for item in path.rglob("*") if path.is_dir() else [path]:
-        try:
-            mtime = item.stat().st_mtime
-        except OSError:
-            continue
-        newest = mtime if newest is None else max(newest, mtime)
-    return newest
-
-
-def iso_time(timestamp: float | None) -> str:
-    if timestamp is None:
-        return ""
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-
-
-def graph_name_key(value: str) -> str:
-    lowered = value.lower().strip()
-    for prefix in ("function_", "func_", "macro_", "event_", "graph_"):
-        if lowered.startswith(prefix):
-            lowered = lowered[len(prefix) :]
-    return re.sub(r"[^a-z0-9_]+", "", lowered)
-
-
-def captured_graph_keys(asset_dir: Path) -> set[str]:
-    keys: set[str] = set()
-    manifest = read_json_file(asset_dir / "manifest.json")
-    if isinstance(manifest, dict):
-        graphs = manifest.get("graphs")
-        if isinstance(graphs, dict):
-            items = [{"name": name, **value} if isinstance(value, dict) else {"name": name, "path": value} for name, value in graphs.items()]
-        elif isinstance(graphs, list):
-            items = graphs
-        else:
-            items = []
-        for item in items:
-            if isinstance(item, dict):
-                path_text = str(item.get("path") or item.get("file") or "")
-                keys.add(graph_name_key(str(item.get("name") or item.get("graph_name") or Path(path_text).stem)))
-            elif isinstance(item, str):
-                keys.add(graph_name_key(Path(item).stem))
-    graphs_dir = asset_dir / "graphs"
-    if graphs_dir.is_dir():
-        keys.update(graph_name_key(path.stem) for path in graphs_dir.glob("*.txt"))
-    return {key for key in keys if key}
-
-
-def graph_count(asset_dir: Path) -> int:
-    keys = captured_graph_keys(asset_dir)
-    keys.update(graph_name_key(path.stem.rsplit("_", 1)[0]) for path in current_uasset_graph_payload_files(asset_dir))
-    return len({key for key in keys if key})
-
-
-def graph_queue_count(asset_dir: Path) -> int:
-    queue_path = asset_dir / "graph_queue.txt"
-    if not queue_path.is_file():
-        queue_text = ""
-    else:
-        queue_text = queue_path.read_text(encoding="utf-8-sig", errors="replace")
-    return int(graph_queue_summary(queue_text).get("total") or 0)
-
-
-def graph_queue_counts(asset_dir: Path) -> dict[str, int]:
-    queue_path = asset_dir / "graph_queue.txt"
-    queue_text = queue_path.read_text(encoding="utf-8-sig", errors="replace") if queue_path.is_file() else ""
-    summary = graph_queue_summary(queue_text)
-    return {
-        "total": int(summary.get("total") or 0),
-        "compact": int(summary.get("compact") or summary.get("recommended") or 0),
-        "recommended": int(summary.get("recommended") or 0),
-        "optional": int(summary.get("optional") or 0),
-        "deferred": int(summary.get("deferred") or 0),
-        "focused": int(summary.get("focused") or 0),
-    }
-
-
-def graph_candidate_count(asset_dir: Path) -> int:
-    payload = read_json_file(asset_dir / "graph_candidates_uasset.json")
-    if not isinstance(payload, dict):
-        return 0
-    try:
-        return int(payload.get("candidate_count") or len(payload.get("candidates", [])))
-    except Exception:
-        return 0
-
-
-def uasset_structure_counts(asset_dir: Path) -> dict[str, int]:
-    payload = read_json_file(asset_dir / "uasset_structure.json")
-    if not isinstance(payload, dict):
-        return {
-            "edgraph": 0,
-            "function_graph": 0,
-            "collapsed": 0,
-            "standalone": 0,
-            "function": 0,
-        }
-    return {
-        "edgraph": int(payload.get("graph_exports_count") or 0),
-        "function_graph": int(payload.get("function_graph_exports_count") or 0),
-        "collapsed": int(payload.get("collapsed_graph_exports_count") or 0),
-        "standalone": int(payload.get("standalone_graph_exports_count") or 0),
-        "function": int(payload.get("function_exports_count") or 0),
-    }
-
-
-def _indexed_evidence_declared(asset_dir: Path) -> bool:
-    for candidate in (
-        asset_dir / "evidence" / "current.json",
-        asset_dir / "evidence" / "evidence.sqlite",
-    ):
-        try:
-            candidate.lstat()
-        except FileNotFoundError:
-            continue
-        return True
-    return False
-
-
-def _evidence_public_metadata(repository: object) -> dict[str, object]:
-    """Return the bounded, path-free evidence identity exposed by HTTP."""
-
-    return {
-        "sourceKind": str(getattr(repository, "source_kind")),
-        "freshnessStatus": str(getattr(repository, "freshness_status")),
-        "releaseAuthority": bool(getattr(repository, "release_authority")),
-        "migrationRequired": bool(getattr(repository, "migration_required")),
-        "manifestSha256": getattr(repository, "manifest_sha256"),
-        "pointerSha256": getattr(repository, "pointer_sha256"),
-    }
+def configured_devkit_content_root() -> Path | None:
+    return _devkit.configured_devkit_content_root(DEVKIT_CONTENT_ROOT_FILE)
 
 
 def indexed_asset_metrics(
     asset_dir: Path,
 ) -> tuple[dict[str, int], int, str, dict[str, object]]:
-    with open_asset_repository(asset_dir) as repository:
-        overview = repository.query({"operation": "overview", "budgetTokens": 800})
-        graph_rows = repository.graph_summaries()
-        evidence_metadata = _evidence_public_metadata(repository)
-    summary = overview.get("summary", {})
-    status_rows = [
-        (str(row.get("status") or "").casefold(), graph_name_key(str(row.get("name") or "")))
-        for row in graph_rows
-    ]
-    captured_keys = captured_graph_keys(asset_dir)
-    graph_counts = {
-        "graphs": len(graph_rows),
-        "nodes": int(summary.get("nodeCount") or 0),
-        "pins": int(summary.get("pinCount") or 0),
-        "links": int(summary.get("linkObservationCount") or 0),
-        "complete": sum(status in {"complete", "complete_empty", "confirmed"} for status, _ in status_rows),
-        "partial": sum(status in {"partial", "heuristic", "ambiguous"} for status, _ in status_rows),
-        "needs": sum(
-            status in {"needs_clipboard", "failed", "not_recovered"} and graph_key not in captured_keys
-            for status, graph_key in status_rows
-        ),
-    }
-    default_count = int(summary.get("defaultCount") or 0)
-    revision = str(overview.get("asset", {}).get("revisionId") or "")
-    return graph_counts, default_count, revision, evidence_metadata
+    return _assets.indexed_asset_metrics(
+        asset_dir,
+        repository_opener=open_asset_repository,
+    )
 
 
 def uasset_graph_read_counts(asset_dir: Path) -> dict[str, int]:
-    if _indexed_evidence_declared(asset_dir):
-        graph_counts, _, _, _ = indexed_asset_metrics(asset_dir)
-        return graph_counts
-    payload = read_json_file(asset_dir / "uasset_graph_nodes.json")
-    if not isinstance(payload, dict):
-        return {"graphs": 0, "nodes": 0, "pins": 0, "links": 0, "complete": 0, "partial": 0, "needs": 0}
-    status_counts = payload.get("status_counts", {})
-    if not isinstance(status_counts, dict):
-        status_counts = {}
-    failed_queue = read_json_file(asset_dir / "uasset_failed_graph_queue.json")
-    captured_keys = captured_graph_keys(asset_dir)
-    pending_manual = 0
-    if isinstance(failed_queue, dict) and isinstance(failed_queue.get("graphs"), list):
-        for item in failed_queue.get("graphs", []):
-            if isinstance(item, dict) and graph_name_key(str(item.get("graph") or "")) not in captured_keys:
-                pending_manual += 1
-    else:
-        pending_manual = int(status_counts.get("needs_clipboard") or 0) + int(status_counts.get("failed") or 0)
-    return {
-        "graphs": int(payload.get("graph_count") or 0),
-        "nodes": int(payload.get("node_count") or 0),
-        "pins": int(payload.get("pin_count") or 0),
-        "links": int(payload.get("link_count") or 0),
-        "complete": int(status_counts.get("complete") or 0),
-        "partial": int(status_counts.get("partial") or 0) + int(status_counts.get("heuristic") or 0),
-        "needs": pending_manual,
-    }
+    return _assets.uasset_graph_read_counts(
+        asset_dir,
+        repository_opener=open_asset_repository,
+    )
 
 
 def asset_summary(asset_dir: Path) -> dict[str, object]:
-    defaults_path = asset_dir / "defaults.json"
-    uasset_defaults_path = asset_dir / "uasset_class_defaults.json"
-    components_path = asset_dir / "components.json"
-    output_dir = asset_dir / "output"
-    graph_queue_path = asset_dir / "graph_queue.txt"
-    graph_candidates_path = asset_dir / "graph_candidates_uasset.json"
-    uasset_structure_path = asset_dir / "uasset_structure.json"
-    uasset_graph_read_path = asset_dir / "uasset_graph_nodes.json"
-    formula_candidates_path = output_dir / "formula_candidates.json"
-    asset_memory_card_path = output_dir / "asset_memory_card.json"
-    context_pack_path = output_dir / "context_pack.json"
-    queue_counts = graph_queue_counts(asset_dir)
-    structure_counts = uasset_structure_counts(asset_dir)
-    has_indexed_evidence = _indexed_evidence_declared(asset_dir)
-    evidence_metadata: dict[str, object] = {}
-    if has_indexed_evidence:
-        (
-            graph_read_counts,
-            evidence_default_count,
-            evidence_revision,
-            evidence_metadata,
-        ) = indexed_asset_metrics(asset_dir)
-    else:
-        graph_read_counts = uasset_graph_read_counts(asset_dir)
-        evidence_default_count = 0
-        evidence_revision = ""
-    defaults_data = read_json_file(defaults_path)
-    uasset_defaults_data = read_json_file(uasset_defaults_path)
-    defaults_count = count_defaults(defaults_data)
-    if not defaults_count:
-        defaults_count = count_defaults(uasset_defaults_data) or evidence_default_count
-    components_data = read_json_file(components_path)
-    formula_data = read_json_file(formula_candidates_path)
-    formula_summary = formula_data.get("summary", {}) if isinstance(formula_data, dict) and isinstance(formula_data.get("summary", {}), dict) else {}
-    reports = {
-        key: (asset_dir / Path(*parts)).is_file()
-        for key, parts in REPORT_TARGETS.items()
-    }
-    if has_indexed_evidence:
-        # The repository open above already validated the manifest-bound index.
-        reports["agent_index"] = True
-    preserved_legacy_reports = bool(
-        has_indexed_evidence
-        and any(
-            reports.get(key, False)
-            for key in ("behavior_summary", "asset_report", "diagnostics_report", "call_graph_summary")
-        )
+    return _assets.asset_summary(
+        asset_dir,
+        report_targets=REPORT_TARGETS,
+        repository_opener=open_asset_repository,
     )
-    report_mtime = newest_mtime(output_dir)
-    return {
-        "name": asset_dir.name,
-        "path": str(asset_dir),
-        "graphs": graph_read_counts["graphs"] if has_indexed_evidence else graph_count(asset_dir),
-        "hasGraphQueue": graph_queue_path.is_file(),
-        "graphQueueCount": queue_counts["total"],
-        "graphQueueCompactCount": queue_counts["compact"],
-        "graphQueueRecommendedCount": queue_counts["recommended"],
-        "graphQueueOptionalCount": queue_counts["optional"],
-        "graphQueueDeferredCount": queue_counts["deferred"],
-        "graphQueueFocusedCount": queue_counts["focused"],
-        "hasGraphCandidates": graph_candidates_path.is_file(),
-        "graphCandidateCount": graph_candidate_count(asset_dir),
-        "hasUassetStructure": uasset_structure_path.is_file(),
-        "uassetEdGraphCount": structure_counts["edgraph"],
-        "uassetFunctionGraphCount": structure_counts["function_graph"],
-        "uassetCollapsedGraphCount": structure_counts["collapsed"],
-        "uassetStandaloneGraphCount": structure_counts["standalone"],
-        "uassetFunctionCount": structure_counts["function"],
-        "hasUassetGraphRead": uasset_graph_read_path.is_file() or has_indexed_evidence,
-        "hasEvidenceStore": has_indexed_evidence,
-        "evidenceRevision": evidence_revision,
-        "uassetReadGraphCount": graph_read_counts["graphs"],
-        "uassetReadNodeCount": graph_read_counts["nodes"],
-        "uassetReadPinCount": graph_read_counts["pins"],
-        "uassetReadLinkCount": graph_read_counts["links"],
-        "uassetReadCompleteCount": graph_read_counts["complete"],
-        "uassetReadPartialCount": graph_read_counts["partial"],
-        "uassetReadNeedsClipboardCount": graph_read_counts["needs"],
-        "hasDefaults": defaults_path.is_file() or uasset_defaults_path.is_file() or evidence_default_count > 0,
-        "defaultsCount": defaults_count,
-        "hasComponents": components_path.is_file(),
-        "componentsCount": count_components(components_data),
-        "hasNotes": (asset_dir / "notes.md").is_file() or (asset_dir / "notes.txt").is_file(),
-        "hasOutput": output_dir.is_dir(),
-        "lastOutputAt": iso_time(report_mtime),
-        "reports": reports,
-        "preservedLegacyReports": preserved_legacy_reports,
-        "formulaCandidateCount": int(formula_summary.get("candidate_count") or 0),
-        "unresolvedFormulaCount": int(formula_summary.get("unresolved_count") or 0),
-        "assetMemoryCardExists": asset_memory_card_path.is_file(),
-        "contextPackExists": context_pack_path.is_file(),
-        "exportQuality": devkit_export_quality(asset_dir, components_data),
-        **evidence_metadata,
-    }
 
 
 def list_assets() -> list[dict[str, object]]:
-    if not CAPTURE_ROOT.is_dir():
-        return []
-    assets = []
-    for path in sorted(CAPTURE_ROOT.iterdir(), key=lambda item: item.name.lower()):
-        if not path.is_dir() or path.name.startswith("_"):
-            continue
-        if (
-            (path / "graphs").is_dir()
-            or (path / "manifest.json").is_file()
-            or (path / "defaults.json").is_file()
-            or (path / "uasset_class_defaults.json").is_file()
-            or (path / "graph_candidates_uasset.json").is_file()
-            or (path / "uasset_graph_nodes.json").is_file()
-            or _indexed_evidence_declared(path)
-        ):
-            assets.append(asset_summary(path))
-    return assets
-
-
-def normalize_asset_path(raw_text: str) -> str:
-    return normalize_blueprint_object_path(raw_text)
+    return _assets.list_assets(
+        CAPTURE_ROOT,
+        report_targets=REPORT_TARGETS,
+        repository_opener=open_asset_repository,
+    )
 
 
 def read_devkit_request() -> str:
-    data = read_json_file(DEVKIT_REQUEST_PATH)
-    if isinstance(data, dict):
-        return str(data.get("asset_path") or "")
-    return ""
+    return _devkit.read_devkit_request(DEVKIT_REQUEST_PATH)
 
 
 def write_devkit_request(asset_path: str) -> None:
-    CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema": "blueprint-translator.devkit-export-request.v1",
-        "asset_path": asset_path,
-    }
-    DEVKIT_REQUEST_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _devkit.write_devkit_request(
+        asset_path,
+        capture_root=CAPTURE_ROOT,
+        request_path=DEVKIT_REQUEST_PATH,
+    )
 
 
-def mine_uasset_graph_candidates_for_request(asset_path: str, max_candidates: int = 1600) -> dict[str, object]:
-    normalized = normalize_asset_path(asset_path)
-    if not normalized:
-        raise ValueError("Paste an ARK DevKit Object Path that starts with /Game/.")
-    payload, attempted = mine_graph_candidates(normalized, max_candidates=max_candidates)
-    paths = write_graph_candidate_files(normalized, CAPTURE_ROOT, payload)
-    write_devkit_request(normalized)
-    return {
-        "assetPath": normalized,
-        "assetDir": paths.get("asset_dir", ""),
-        "jsonPath": paths.get("json", ""),
-        "textPath": paths.get("text", ""),
-        "reportPath": paths.get("report", ""),
-        "structureJsonPath": paths.get("structure_json", ""),
-        "structureReportPath": paths.get("structure_report", ""),
-        "uassetPath": str(payload.get("uasset_path") or ""),
-        "candidateCount": int(payload.get("candidate_count") or 0),
-        "rawStringCount": int(payload.get("raw_string_count") or 0),
-        "structure": payload.get("structure", {}),
-        "attemptedPaths": attempted,
-        "pythonCommand": devkit_python_command(),
-        "outputLogCommand": devkit_output_log_command(),
-    }
+def mine_uasset_graph_candidates_for_request(
+    asset_path: str,
+    max_candidates: int = 1600,
+) -> dict[str, object]:
+    return _devkit.mine_uasset_graph_candidates_for_request(
+        asset_path,
+        max_candidates=max_candidates,
+        capture_root=CAPTURE_ROOT,
+        write_request=write_devkit_request,
+        python_command=devkit_python_command,
+        output_log_command=devkit_output_log_command,
+        mine_candidates=mine_graph_candidates,
+        write_candidate_files=write_graph_candidate_files,
+    )
 
 
 def read_uasset_graphs_for_request(
@@ -747,227 +314,32 @@ def read_uasset_graphs_for_request(
     analyze_after: bool = True,
     artifact_mode: str | None = None,
 ) -> dict[str, object]:
-    normalized = normalize_asset_path(asset_path)
-    if not normalized:
-        raise ValueError("Paste an ARK DevKit Object Path that starts with /Game/.")
-    uasset_path, attempted = object_path_to_uasset_path(normalized)
-    if uasset_path is None:
-        raise ApiProblem(
-            HTTPStatus.NOT_FOUND,
-            {
-                "ok": False,
-                "code": "uasset_not_found",
-                "error": "本地 .uasset 没有找到，请检查 DevKit Content root、devkit_path_mappings.txt 或对象路径。",
-                "attemptedPaths": attempted,
-            },
-        )
-    mode = normalize_artifact_mode(artifact_mode)
-    payload = read_uasset_graph_content(normalized, uasset_path, max_graphs=max_graphs)
-    paths = write_uasset_graph_read_files(normalized, CAPTURE_ROOT, payload, artifact_mode=mode)
-    write_devkit_request(normalized)
-    result: dict[str, object] = {
-        "assetPath": normalized,
-        "assetDir": paths.get("asset_dir", ""),
-        "uassetPath": str(uasset_path),
-        "uexpPath": str(payload.get("uexp_path") or ""),
-        "graphReportPath": paths.get("graph_report", ""),
-        "graphNodesPath": paths.get("graph_nodes_json", ""),
-        "propertyReportPath": paths.get("property_report", ""),
-        "pinLinkReportPath": paths.get("pin_link_report", ""),
-        "partialTriageReportPath": paths.get("partial_triage_report", ""),
-        "qualityGatesReportPath": paths.get("quality_gates_report", ""),
-        "compareReportPath": paths.get("compare_report", ""),
-        "failedQueuePath": paths.get("failed_queue", ""),
-        "failedQueueJsonPath": paths.get("failed_queue_json", ""),
-        "graphsDir": paths.get("graphs_dir", ""),
-        "artifactMode": mode,
-        "evidenceDatabasePath": paths.get("evidence_database", ""),
-        "evidenceManifestPath": paths.get("evidence_manifest", ""),
-        "agentIndexPath": paths.get("agent_index", ""),
-        "revisionId": paths.get("revision_id", ""),
-        "graphCount": int(payload.get("graph_count") or 0),
-        "nodeCount": int(payload.get("node_count") or 0),
-        "pinCount": int(payload.get("pin_count") or 0),
-        "linkCount": int(payload.get("link_count") or 0),
-        "statusCounts": payload.get("status_counts", {}),
-        "attemptedPaths": attempted,
-        "asset": asset_summary(Path(paths.get("asset_dir", ""))),
-    }
-    if analyze_after and mode != "indexed":
-        result["analysisJob"] = start_analyzer_job(Path(paths["asset_dir"]), report_level, keep_stale_output=True)
-    elif analyze_after:
-        result["analysisSkipped"] = "indexed mode already produced bounded evidence; legacy report analysis was not run"
-    return result
-
-
-def markdown_table_cells(line: str) -> list[str]:
-    stripped = line.strip()
-    if not stripped.startswith("|") or not stripped.endswith("|"):
-        return []
-    return [cell.strip().replace("\\|", "|") for cell in stripped.strip("|").split("|")]
-
-
-def normalize_note_function_name(name: str) -> str:
-    return re.sub(r"[^a-z0-9_]+", "", name.lower())
-
-
-def missing_functions_from_context_json(asset_dir: Path, existing: set[str]) -> list[dict[str, object]] | None:
-    report_path = asset_dir / "output" / "context_review.json"
-    review = read_json_file(report_path)
-    if not isinstance(review, dict):
-        return None
-    rows: list[dict[str, object]] = []
-    for item in review.get("missing_functions", []):
-        if not isinstance(item, dict):
-            continue
-        function = str(item.get("function") or "").strip()
-        if not function or normalize_note_function_name(function) in existing:
-            continue
-        source_graphs = item.get("source_graphs", item.get("sourceGraphs", []))
-        areas = item.get("areas", [])
-        rows.append(
-            {
-                "function": function,
-                "sourceGraphs": [str(value) for value in source_graphs if str(value)] if isinstance(source_graphs, list) else [],
-                "areas": [str(value) for value in areas if str(value)] if isinstance(areas, list) else [],
-                "suggested": str(item.get("notes_inherited") or item.get("suggested") or f"inherited: {function}"),
-            }
-        )
-    return rows
-
-
-def missing_functions_from_report(asset_dir: Path) -> list[dict[str, object]]:
-    existing = existing_note_function_names(asset_dir)
-    json_rows = missing_functions_from_context_json(asset_dir, existing)
-    if json_rows is not None:
-        return json_rows
-    report_path = asset_dir / "output" / "context_review.md"
-    if not report_path.is_file():
-        report_path = asset_dir / "output" / "notes_todo.md"
-    if not report_path.is_file():
-        return []
-    rows: list[dict[str, object]] = []
-    in_table = False
-    for line in report_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        cells = markdown_table_cells(line)
-        if not cells:
-            if in_table:
-                break
-            continue
-        normalized = [cell.lower() for cell in cells]
-        if normalized[:4] in (["function", "source graphs", "areas", "notes line"], ["function", "source graphs", "behavior areas", "suggested notes.md entry"]):
-            in_table = True
-            continue
-        if in_table and set(cells) == {"---"}:
-            continue
-        if not in_table or len(cells) < 4:
-            continue
-        function = cells[0].strip()
-        if not function or function == "---":
-            continue
-        function_key = normalize_note_function_name(function)
-        if function_key in existing:
-            continue
-        rows.append(
-            {
-                "function": function,
-                "sourceGraphs": [item.strip() for item in cells[1].split(",") if item.strip()],
-                "areas": [item.strip() for item in cells[2].split(",") if item.strip()],
-                "suggested": cells[3].strip(),
-            }
-        )
-    return rows
-
-
-def existing_note_function_names(asset_dir: Path) -> set[str]:
-    notes_path = asset_dir / "notes.md"
-    if not notes_path.is_file():
-        notes_path = asset_dir / "notes.txt"
-    if not notes_path.is_file():
-        return set()
-    text = notes_path.read_text(encoding="utf-8-sig", errors="replace").lower()
-    names: set[str] = set()
-    for line in text.splitlines():
-        if ":" not in line:
-            continue
-        prefix, values = line.split(":", 1)
-        prefix_key = prefix.strip().lower()
-        value_text = values.strip().lower()
-        if prefix_key in {"inherited", "native", "parent", "external", "ignore missing graph", "ignore_missing"}:
-            names.update(normalize_note_function_name(item) for item in re.split(r"[,;]", values) if item.strip())
-        elif any(marker in value_text for marker in ("parent", "native", "inherited", "external", "ignore")):
-            names.add(normalize_note_function_name(prefix_key))
-    return names
-
-
-def append_notes_for_functions(asset_dir: Path, kind: str, functions: list[object], reason: str = "") -> dict[str, object]:
-    valid_kinds = {
-        "inherited": "inherited",
-        "native": "inherited",
-        "parent": "inherited",
-        "ignore": "ignore missing graph",
-        "ignore_missing": "ignore missing graph",
-    }
-    note_prefix = valid_kinds.get(kind)
-    if not note_prefix:
-        raise ValueError("Unknown notes kind.")
-    names = [str(item).strip() for item in functions if str(item).strip()]
-    if not names:
-        raise ValueError("No functions selected.")
-    existing = existing_note_function_names(asset_dir)
-    added: list[str] = []
-    skipped: list[str] = []
-    for name in names:
-        key = normalize_note_function_name(name)
-        if key in existing:
-            skipped.append(name)
-            continue
-        existing.add(key)
-        added.append(name)
-    notes_path = asset_dir / "notes.md"
-    if not notes_path.exists():
-        notes_path.write_text("# Capture Notes\n\n", encoding="utf-8")
-    if added:
-        stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        lines = ["", f"## Web Review {stamp}", "", f"{note_prefix}: {', '.join(added)}"]
-        if reason.strip():
-            lines.append(f"reason: {reason.strip()}")
-        notes_path.write_text(notes_path.read_text(encoding="utf-8-sig", errors="replace").rstrip() + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
-    return {"notesPath": str(notes_path), "added": added, "skipped": skipped}
+    return _devkit.read_uasset_graphs_for_request(
+        asset_path,
+        max_graphs=max_graphs,
+        report_level=report_level,
+        analyze_after=analyze_after,
+        artifact_mode=artifact_mode,
+        capture_root=CAPTURE_ROOT,
+        write_request=write_devkit_request,
+        summarize_asset=asset_summary,
+        start_analysis_job=start_analyzer_job,
+        object_path_resolver=object_path_to_uasset_path,
+        read_graph_content=read_uasset_graph_content,
+        write_graph_files=write_uasset_graph_read_files,
+    )
 
 
 def devkit_python_command() -> str:
-    return 'BLUEPRINT_TO_CODE_PROJECT_ROOT = r"{}"; exec(open(r"{}", encoding="utf-8").read())'.format(PROJECT_ROOT, EXPORT_SCRIPT)
+    return _devkit.devkit_python_command(PROJECT_ROOT, EXPORT_SCRIPT)
 
 
 def devkit_output_log_command() -> str:
-    return 'py BLUEPRINT_TO_CODE_PROJECT_ROOT = r"{}"; exec(open(r"{}", encoding="utf-8").read())'.format(PROJECT_ROOT, EXPORT_SCRIPT)
+    return _devkit.devkit_output_log_command(PROJECT_ROOT, EXPORT_SCRIPT)
 
 
 def resolve_asset_dir(raw_path: str) -> Path:
-    if not raw_path:
-        raise ValueError("Missing asset path.")
-    asset_dir = Path(unquote(raw_path))
-    if not asset_dir.is_absolute():
-        asset_dir = PROJECT_ROOT / asset_dir
-    asset_dir = _lexical_absolute(asset_dir)
-    _require_plain_path_chain(asset_dir, label="asset directory")
-    _require_plain_directory(asset_dir, label="asset directory")
-    if os.path.normcase(os.path.commonpath((asset_dir, PROJECT_ROOT))) != os.path.normcase(
-        os.fspath(PROJECT_ROOT)
-    ):
-        raise ValueError("Asset directory must be inside the project.")
-    return asset_dir
-
-
-def resolve_target(asset_dir: Path, target: str, mapping: dict[str, tuple[str, ...]]) -> Path:
-    if target not in mapping:
-        raise ValueError("Unknown target.")
-    parts = mapping[target]
-    path = asset_dir if not parts else asset_dir.joinpath(*parts)
-    if not is_within(path, asset_dir):
-        raise ValueError("Target must stay inside the asset directory.")
-    return path
+    return _reports.resolve_asset_dir(raw_path, project_root=PROJECT_ROOT)
 
 
 def query_asset_evidence(
@@ -975,103 +347,27 @@ def query_asset_evidence(
     asset_identifier: str,
     request: dict[str, object],
 ) -> dict[str, object]:
-    """Run a bounded evidence query without accepting a caller-supplied DB path."""
-
-    identifier = str(asset_identifier or "").strip()
-    candidate_part = Path(identifier)
-    if (
-        not identifier
-        or candidate_part.is_absolute()
-        or candidate_part.name != identifier
-        or identifier in {".", ".."}
-        or "/" in identifier
-        or "\\" in identifier
-        or ":" in identifier
-    ):
-        raise ValueError("asset identifier must be one directory name inside the capture root")
-    root = _lexical_absolute(capture_root)
-    _require_plain_path_chain(root, label="capture root")
-    _require_plain_directory(root, label="capture root")
-    asset_dir = _lexical_absolute(root / identifier)
-    _require_plain_path_chain(asset_dir, label="asset directory")
-    if (
-        os.path.normcase(os.path.commonpath((asset_dir, root)))
-        != os.path.normcase(os.fspath(root))
-        or not asset_dir.is_dir()
-    ):
-        raise ValueError("asset identifier does not resolve to a capture directory")
-    if not isinstance(request, dict):
-        raise ValueError("evidence query request must be an object")
-    with open_asset_repository(asset_dir) as repository:
-        result = repository.query(request)
-        return {**result, **_evidence_public_metadata(repository)}
+    return _reports.query_asset_evidence(
+        capture_root,
+        asset_identifier,
+        request,
+        repository_opener=open_asset_repository,
+    )
 
 
-def query_report_for_request(
+def analyzer_command(
     asset_dir: Path,
-    target: str,
+    report_level: str,
     *,
-    mode: str = "outline",
-    query: str = "",
-    section: str = "",
-    section_start_line: int | None = None,
-    cursor: int = 0,
-    budget: int = DEFAULT_REPORT_QUERY_BUDGET,
-    context_lines: int = 2,
-) -> dict[str, object]:
-    report_path, report_text, evidence_metadata = read_report_source(
+    keep_stale_output: bool = False,
+) -> list[str]:
+    return _reports.analyzer_command(
         asset_dir,
-        target,
-    )
-    result = build_report_view(
-        report_text,
-        mode=mode,
-        query=query,
-        section=section,
-        section_start_line=section_start_line,
-        cursor=max(int(cursor or 0), 0),
-        token_budget=min(max(int(budget or 0), 1), MAX_REPORT_QUERY_BUDGET),
-        context_lines=min(max(int(context_lines or 0), 0), MAX_REPORT_CONTEXT_LINES),
-    )
-    return {"path": str(report_path), **result, **evidence_metadata}
-
-
-def parse_report_query_int(raw_value: str, name: str, default: int) -> int:
-    if not str(raw_value or "").strip():
-        return default
-    try:
-        return int(raw_value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
-
-
-def open_path(path: Path) -> None:
-    if not path.exists():
-        raise FileNotFoundError(str(path))
-    if os.name == "nt":
-        os.startfile(str(path))  # type: ignore[attr-defined]
-        return
-    opener = "open" if sys.platform == "darwin" else "xdg-open"
-    subprocess.Popen([opener, str(path)])
-
-
-def analyzer_command(asset_dir: Path, report_level: str, *, keep_stale_output: bool = False) -> list[str]:
-    if report_level not in {"compact", "standard", "debug"}:
-        raise ValueError("Invalid report level.")
-    output_dir = asset_dir / "output"
-    command = [
-        sys.executable,
-        str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
-        "--asset-dir",
-        str(asset_dir),
-        "--output-dir",
-        str(output_dir),
-        "--report-level",
         report_level,
-    ]
-    if keep_stale_output:
-        command.append("--keep-stale-output")
-    return command
+        project_root=PROJECT_ROOT,
+        keep_stale_output=keep_stale_output,
+        python_executable=sys.executable,
+    )
 
 
 def report_generation_command(
@@ -1080,71 +376,44 @@ def report_generation_command(
     *,
     keep_stale_output: bool = False,
 ) -> list[str]:
-    """Build current human reports, refreshing indexed sources in dual mode first."""
-
-    root = asset_dir.expanduser().resolve()
-    if not _indexed_evidence_declared(root):
-        return analyzer_command(root, report_level, keep_stale_output=keep_stale_output)
-    if report_level not in {"compact", "standard", "debug"}:
-        raise ValueError("Invalid report level.")
-    with open_asset_repository(root) as repository:
-        overview = repository.query({"operation": "overview", "budgetTokens": 800})
-    asset = overview.get("asset", {})
-    object_path = normalize_asset_path(str(asset.get("objectPath") or "")) if isinstance(asset, dict) else ""
-    if not object_path:
-        raise ValueError("Indexed evidence does not contain a valid /Game Object Path for report refresh.")
-    target_name = safe_filename(object_path.rsplit(".", 1)[-1], "BlueprintAsset")
-    if (root.parent / target_name).resolve() != root:
-        raise ValueError("Indexed Object Path does not map back to the selected capture directory.")
-    command = [
-        sys.executable,
-        str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
-        "--asset-binary",
-        object_path,
-        "--capture-root",
-        str(root.parent),
-        "--artifact-mode",
-        "dual",
-        "--report-level",
+    return _reports.report_generation_command(
+        asset_dir,
         report_level,
-    ]
-    if keep_stale_output:
-        command.append("--keep-stale-output")
-    return command
+        project_root=PROJECT_ROOT,
+        keep_stale_output=keep_stale_output,
+        analyzer_command_builder=analyzer_command,
+        repository_opener=open_asset_repository,
+        indexed_evidence_declared=_indexed_evidence_declared,
+        normalize_path=normalize_asset_path,
+        python_executable=sys.executable,
+    )
 
 
 def run_analyzer(asset_dir: Path, report_level: str) -> dict[str, object]:
-    command = analyzer_command(asset_dir, report_level)
-    started = time.time()
-    completed = subprocess.run(
-        command,
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=JOB_TIMEOUT_SECONDS,
+    return _reports.run_analyzer(
+        asset_dir,
+        report_level,
+        project_root=PROJECT_ROOT,
+        command_builder=analyzer_command,
+        summarize_asset=asset_summary,
+        timeout_seconds=JOB_TIMEOUT_SECONDS,
     )
-    return {
-        "command": " ".join(command),
-        "returnCode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-        "durationSeconds": round(time.time() - started, 2),
-        "asset": asset_summary(asset_dir),
-    }
 
 
-def start_analyzer_job(asset_dir: Path, report_level: str, *, keep_stale_output: bool = False) -> dict[str, object]:
-    command = analyzer_command(asset_dir, report_level, keep_stale_output=keep_stale_output)
-
-    def complete(_return_code: int) -> dict[str, object]:
-        return {
-            "asset": asset_summary(asset_dir),
-            "outputDir": str(asset_dir / "output"),
-        }
-
-    return create_background_job("analyze", f"{asset_dir.name} {report_level} 分析", command, complete)
+def start_analyzer_job(
+    asset_dir: Path,
+    report_level: str,
+    *,
+    keep_stale_output: bool = False,
+) -> dict[str, object]:
+    return _reports.start_analyzer_job(
+        asset_dir,
+        report_level,
+        keep_stale_output=keep_stale_output,
+        command_builder=analyzer_command,
+        summarize_asset=asset_summary,
+        create_job=create_background_job,
+    )
 
 
 def start_report_generation_job(
@@ -1153,686 +422,198 @@ def start_report_generation_job(
     *,
     keep_stale_output: bool = False,
 ) -> dict[str, object]:
-    command = report_generation_command(
+    return _reports.start_report_generation_job(
         asset_dir,
         report_level,
         keep_stale_output=keep_stale_output,
-    )
-
-    def complete(_return_code: int) -> dict[str, object]:
-        return {
-            "asset": asset_summary(asset_dir),
-            "outputDir": str(asset_dir / "output"),
-        }
-
-    return create_background_job(
-        "report_generation",
-        f"{asset_dir.name} {report_level} 当前 revision 人类报告",
-        command,
-        complete,
+        command_builder=report_generation_command,
+        summarize_asset=asset_summary,
+        create_job=create_background_job,
     )
 
 
 def resolve_capture_target(body: dict[str, object]) -> tuple[Path, str]:
-    asset_path = str(body.get("assetPath") or "").strip()
-    asset_name = str(body.get("assetName") or "").strip()
-    if asset_path:
-        asset_dir = resolve_asset_dir(asset_path)
-        manifest = load_capture_manifest(asset_dir)
-        return asset_dir, str(manifest.get("asset_name") or asset_dir.name)
-    if not asset_name:
-        raise ValueError("Asset name is required for a new capture.")
-    asset_dir = (CAPTURE_ROOT / safe_filename(asset_name, "BlueprintAsset")).resolve()
-    if not is_within(asset_dir, PROJECT_ROOT):
-        raise ValueError("Capture asset must stay inside the project.")
-    return asset_dir, safe_filename(asset_name, "BlueprintAsset")
+    return _captures.resolve_capture_target(
+        body,
+        capture_root=CAPTURE_ROOT,
+        project_root=PROJECT_ROOT,
+        resolve_asset=resolve_asset_dir,
+    )
 
 
 def capture_graph_from_request(body: dict[str, object]) -> dict[str, object]:
-    asset_dir, asset_name = resolve_capture_target(body)
-    graph_name = str(body.get("graphName") or "").strip()
-    if not graph_name:
-        raise ValueError("Graph name is required.")
-    graph_type = str(body.get("graphType") or infer_graph_type(graph_name))
-    if graph_type not in CAPTURE_GRAPH_TYPES:
-        graph_type = "Unknown"
-    text = str(body.get("text") or "")
-    source = "request body"
-    if not text.strip():
-        text = read_clipboard().lstrip("\ufeff")
-        source = "Windows clipboard"
-    manifest = load_capture_manifest(asset_dir)
-    records = manifest_graph_records(manifest)
-    allow_overwrite = bool(body.get("allowOverwrite"))
-    existing_path = graph_capture_path(asset_dir, graph_name)
-    if existing_path.exists() and not allow_overwrite:
-        raise ApiProblem(
-            HTTPStatus.CONFLICT,
-            {
-                "ok": False,
-                "code": "overwrite_required",
-                "error": f"图页已存在：{existing_path.name}",
-                "existingPath": str(existing_path),
-            },
-        )
-    record = save_captured_graph(asset_dir, graph_name, graph_type, text, allow_overwrite=allow_overwrite)
-    records = upsert_graph_record(records, record)
-    write_capture_manifest(
-        asset_dir,
-        asset_name,
-        records,
-        parent_class=str(manifest.get("parent_class") or ""),
-        interfaces=manifest.get("interfaces", []) if isinstance(manifest.get("interfaces", []), list) else [],
-        tags=manifest.get("tags", []) if isinstance(manifest.get("tags", []), list) else [],
+    return _captures.capture_graph_from_request(
+        body,
+        resolve_capture=resolve_capture_target,
+        summarize_asset=asset_summary,
+        start_analysis_job=start_analyzer_job,
     )
-    maybe_write_capture_sidecars(asset_dir)
-    result: dict[str, object] = {
-        "source": source,
-        "record": record,
-        "asset": asset_summary(asset_dir),
-        "manifest": str(asset_dir / "manifest.json"),
-        "graphPath": str(asset_dir / str(record.get("path", ""))),
-    }
-    if bool(body.get("analyzeAfter")):
-        result["analysisJob"] = start_analyzer_job(asset_dir, str(body.get("reportLevel") or "standard"))
-    return result
 
 
-def asset_compare_command(old_asset_dir: Path, new_asset_dir: Path) -> tuple[list[str], Path]:
-    DEFAULT_COMPARE_ROOT.mkdir(parents=True, exist_ok=True)
-    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    compare_dir = DEFAULT_COMPARE_ROOT / f"{safe_filename(old_asset_dir.name, 'old')}_to_{safe_filename(new_asset_dir.name, 'new')}_{stamp}"
-    return [
-        sys.executable,
-        str(PROJECT_ROOT / "scripts" / "bp_clipboard_to_prompt.py"),
-        "--compare-asset",
-        str(old_asset_dir),
-        str(new_asset_dir),
-        "--output-dir",
-        str(compare_dir),
-    ], compare_dir
-
-
-def run_asset_compare_for_gui(old_asset_dir: Path, new_asset_dir: Path) -> dict[str, object]:
-    command, compare_dir = asset_compare_command(old_asset_dir, new_asset_dir)
-    started = time.time()
-    completed = subprocess.run(
-        command,
-        cwd=str(PROJECT_ROOT),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=JOB_TIMEOUT_SECONDS,
+def asset_compare_command(
+    old_asset_dir: Path,
+    new_asset_dir: Path,
+) -> tuple[list[str], Path]:
+    return _captures.asset_compare_command(
+        old_asset_dir,
+        new_asset_dir,
+        compare_root=DEFAULT_COMPARE_ROOT,
+        project_root=PROJECT_ROOT,
+        python_executable=sys.executable,
     )
-    behavior_report = compare_dir / "behavior_impact_report.md"
-    summary = compare_dir / "compare_summary.md"
-    return {
-        "command": " ".join(command),
-        "returnCode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-        "durationSeconds": round(time.time() - started, 2),
-        "outputDir": str(compare_dir),
-        "behaviorImpactPath": str(behavior_report) if behavior_report.is_file() else "",
-        "summaryPath": str(summary) if summary.is_file() else "",
-        "behaviorImpact": behavior_report.read_text(encoding="utf-8-sig", errors="replace") if behavior_report.is_file() else "",
-    }
 
 
-def start_asset_compare_job(old_asset_dir: Path, new_asset_dir: Path) -> dict[str, object]:
-    command, compare_dir = asset_compare_command(old_asset_dir, new_asset_dir)
+def run_asset_compare_for_gui(
+    old_asset_dir: Path,
+    new_asset_dir: Path,
+) -> dict[str, object]:
+    return _captures.run_asset_compare_for_gui(
+        old_asset_dir,
+        new_asset_dir,
+        project_root=PROJECT_ROOT,
+        command_builder=asset_compare_command,
+        timeout_seconds=JOB_TIMEOUT_SECONDS,
+    )
 
-    def complete(_return_code: int) -> dict[str, object]:
-        behavior_report = compare_dir / "behavior_impact_report.md"
-        summary = compare_dir / "compare_summary.md"
-        return {
-            "outputDir": str(compare_dir),
-            "behaviorImpactPath": str(behavior_report) if behavior_report.is_file() else "",
-            "summaryPath": str(summary) if summary.is_file() else "",
-            "behaviorImpact": behavior_report.read_text(encoding="utf-8-sig", errors="replace") if behavior_report.is_file() else "",
-        }
 
-    title = f"{old_asset_dir.name} → {new_asset_dir.name} 行为对比"
-    return create_background_job("compare_asset", title, command, complete)
+def start_asset_compare_job(
+    old_asset_dir: Path,
+    new_asset_dir: Path,
+) -> dict[str, object]:
+    return _captures.start_asset_compare_job(
+        old_asset_dir,
+        new_asset_dir,
+        command_builder=asset_compare_command,
+        create_job=create_background_job,
+    )
 
 
 def knowledge_base_summary() -> dict[str, object]:
-    index_path = KNOWLEDGE_ROOT / "index.json"
-    report_path = KNOWLEDGE_ROOT / "reports" / "gigantoraptor_knowledge_base.md"
-    global_report_path = KNOWLEDGE_ROOT / "global" / "asset_index_report.md"
-    priority_report_path = KNOWLEDGE_ROOT / "priorities" / "priority_targets.md"
-    priority_results_path = KNOWLEDGE_ROOT / "priorities" / "priority_read_results.md"
-    priority_queue_path = KNOWLEDGE_ROOT / "priorities" / "deep_read_queue.txt"
-    index = read_json_file(index_path)
-    assets = index.get("assets", []) if isinstance(index, dict) else []
-    systems = index.get("systems", []) if isinstance(index, dict) else []
-    global_data = index.get("global", {}) if isinstance(index, dict) else {}
-    generated = str(index.get("generated") or "") if isinstance(index, dict) else ""
-    focus = str(index.get("focus") or "gigantoraptor") if isinstance(index, dict) else "gigantoraptor"
-    return {
-        "exists": index_path.is_file(),
-        "root": str(KNOWLEDGE_ROOT),
-        "indexPath": str(index_path),
-        "reportPath": str(report_path),
-        "reportExists": report_path.is_file(),
-        "globalReportPath": str(global_report_path),
-        "globalReportExists": global_report_path.is_file(),
-        "priorityReportPath": str(priority_report_path),
-        "priorityReportExists": priority_report_path.is_file(),
-        "priorityResultsPath": str(priority_results_path),
-        "priorityResultsExists": priority_results_path.is_file(),
-        "priorityQueuePath": str(priority_queue_path),
-        "priorityQueueExists": priority_queue_path.is_file(),
-        "generated": generated,
-        "focus": focus,
-        "assetCount": len(assets) if isinstance(assets, list) else 0,
-        "systemCount": len(systems) if isinstance(systems, list) else 0,
-        "globalAssetCount": int(global_data.get("asset_count") or 0) if isinstance(global_data, dict) else 0,
-        "capturedAssetCount": int(global_data.get("captured_asset_count") or 0) if isinstance(global_data, dict) else 0,
-    }
+    return _knowledge.knowledge_base_summary(KNOWLEDGE_ROOT)
 
 
-def knowledge_command(focus: str = "gigantoraptor", assets: list[str] | None = None) -> list[str]:
-    command = [
-        sys.executable,
-        str(PROJECT_ROOT / "scripts" / "build_ark_knowledge_base.py"),
-        "--focus",
-        focus or "gigantoraptor",
-    ]
-    content_root = configured_devkit_content_root()
-    if content_root:
-        command.extend(["--content-root", str(content_root)])
-    for asset in assets or []:
-        if str(asset).strip():
-            command.extend(["--asset", str(asset).strip()])
-    return command
+def knowledge_command(
+    focus: str = "gigantoraptor",
+    assets: list[str] | None = None,
+) -> list[str]:
+    return _knowledge.knowledge_command(
+        focus,
+        assets,
+        project_root=PROJECT_ROOT,
+        configured_content_root=configured_devkit_content_root,
+        python_executable=sys.executable,
+    )
 
 
-def start_knowledge_base_job(focus: str = "gigantoraptor", assets: list[str] | None = None) -> dict[str, object]:
-    command = knowledge_command(focus, assets)
-
-    def complete(_return_code: int) -> dict[str, object]:
-        return {
-            "knowledgeBase": knowledge_base_summary(),
-        }
-
-    return create_background_job("knowledge_base", f"{focus or 'gigantoraptor'} 背景知识库", command, complete)
-
-
-def priority_read_command(limit: int = 25, *, analyze: bool = True, rebuild_knowledge: bool = True) -> list[str]:
-    command = [
-        sys.executable,
-        str(PROJECT_ROOT / "scripts" / "read_priority_assets.py"),
-        "--limit",
-        str(max(limit, 0)),
-    ]
-    if not analyze:
-        command.append("--no-analyze")
-    if rebuild_knowledge:
-        command.append("--rebuild-knowledge")
-    return command
+def start_knowledge_base_job(
+    focus: str = "gigantoraptor",
+    assets: list[str] | None = None,
+) -> dict[str, object]:
+    return _knowledge.start_knowledge_base_job(
+        focus,
+        assets,
+        command_builder=knowledge_command,
+        summarize_knowledge=knowledge_base_summary,
+        create_job=create_background_job,
+    )
 
 
-def start_priority_read_job(limit: int = 25, *, analyze: bool = True) -> dict[str, object]:
-    command = priority_read_command(limit, analyze=analyze)
+def priority_read_command(
+    limit: int = 25,
+    *,
+    analyze: bool = True,
+    rebuild_knowledge: bool = True,
+) -> list[str]:
+    return _knowledge.priority_read_command(
+        limit,
+        analyze=analyze,
+        rebuild_knowledge=rebuild_knowledge,
+        project_root=PROJECT_ROOT,
+        python_executable=sys.executable,
+    )
 
-    def complete(_return_code: int) -> dict[str, object]:
-        return {
-            "knowledgeBase": knowledge_base_summary(),
-        }
 
-    return create_background_job("priority_read", f"自动解析重点资产前 {limit} 个", command, complete)
+def start_priority_read_job(
+    limit: int = 25,
+    *,
+    analyze: bool = True,
+) -> dict[str, object]:
+    return _knowledge.start_priority_read_job(
+        limit,
+        analyze=analyze,
+        command_builder=priority_read_command,
+        summarize_knowledge=knowledge_base_summary,
+        create_job=create_background_job,
+    )
 
 
 def resolve_knowledge_target(target: str) -> Path:
-    if target not in KNOWLEDGE_TARGETS:
-        raise ValueError("Unknown knowledge base target.")
-    parts = KNOWLEDGE_TARGETS[target]
-    path = KNOWLEDGE_ROOT if not parts else KNOWLEDGE_ROOT.joinpath(*parts)
-    if not is_within(path, KNOWLEDGE_ROOT):
-        raise ValueError("Target must stay inside the knowledge base directory.")
-    return path
-
-
-def _harvest_dataset_problem(exc: Exception) -> ApiProblem:
-    if isinstance(exc, HarvestDatasetNotBuilt):
-        return ApiProblem(
-            HTTPStatus.SERVICE_UNAVAILABLE,
-            {
-                "ok": False,
-                "code": exc.code,
-                "error": "资源节点索引尚未生成，请先运行 build_ark_resource_node_catalog.py。",
-            },
-        )
-    if isinstance(exc, HarvestDatasetInvalid):
-        return ApiProblem(
-            HTTPStatus.SERVICE_UNAVAILABLE,
-            {
-                "ok": False,
-                "code": exc.code,
-                "error": "资源节点索引无效，请重新生成。",
-            },
-        )
-    raise exc
+    return _knowledge.resolve_knowledge_target(
+        target,
+        knowledge_root=KNOWLEDGE_ROOT,
+    )
 
 
 def query_harvest_nodes_for_request(query: str) -> dict[str, object]:
-    values = parse_qs(query)
-    try:
-        offset = max(
-            0,
-            parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
-        )
-        limit = min(
-            NODE_PAGE_MAX_LIMIT,
-            max(
-                1,
-                parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
-            ),
-        )
-        return HARVEST_REPOSITORY.list_nodes(
-            q=values.get("q", [""])[0],
-            map_name=values.get("map", [""])[0],
-            only_map_family=values.get("onlyMapFamily", [""])[0],
-            resource=values.get("resource", [""])[0],
-            offset=offset,
-            limit=limit,
-        )
-    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
-        raise _harvest_dataset_problem(exc) from exc
-    except ValueError as exc:
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "INVALID_HARVEST_NODE_FILTER",
-                "error": "Invalid resource-node filter.",
-            },
-        ) from exc
+    return _harvest.query_harvest_nodes_for_request(
+        query,
+        repository=HARVEST_REPOSITORY,
+    )
 
 
 def query_harvest_node_for_request(node_id: str) -> dict[str, object]:
-    if not node_id:
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {"ok": False, "code": "RESOURCE_NODE_ID_REQUIRED", "error": "缺少资源节点 ID。"},
-        )
-    try:
-        return HARVEST_REPOSITORY.get_node(node_id)
-    except KeyError as exc:
-        raise ApiProblem(
-            HTTPStatus.NOT_FOUND,
-            {"ok": False, "code": "RESOURCE_NODE_NOT_FOUND", "error": "资源节点不存在。"},
-        ) from exc
-    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
-        raise _harvest_dataset_problem(exc) from exc
-
-
-def _harvest_runtime_ranking_options(
-    values: dict[str, list[str]],
-    metric: str,
-) -> dict[str, object]:
-    raw_preliminary_values = values.get("includePreliminary", [])
-    if len(raw_preliminary_values) > 1:
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "INVALID_HARVEST_INCLUDE_PRELIMINARY",
-                "error": "includePreliminary must be exactly true or false.",
-            },
-        )
-    include_preliminary = False
-    if raw_preliminary_values:
-        raw_preliminary = raw_preliminary_values[0].strip()
-        if raw_preliminary not in {"true", "false"}:
-            raise ApiProblem(
-                HTTPStatus.BAD_REQUEST,
-                {
-                    "ok": False,
-                    "code": "INVALID_HARVEST_INCLUDE_PRELIMINARY",
-                    "error": "includePreliminary must be exactly true or false.",
-                },
-            )
-        include_preliminary = raw_preliminary == "true"
-
-    raw_profile_values = values.get("runtimeProfileId", [])
-    if len(raw_profile_values) > 1:
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "INVALID_HARVEST_RUNTIME_PROFILE",
-                "error": "runtimeProfileId must identify exactly one runtime profile.",
-            },
-        )
-    runtime_profile_id = (
-        raw_profile_values[0].strip() if raw_profile_values else ""
-    )
-
-    options: dict[str, object] = {}
-    if runtime_profile_id:
-        options["runtime_profile_id"] = runtime_profile_id
-    if metric in {METRIC_OBSERVED_PER_NODE, METRIC_OBSERVED_PER_SECOND}:
-        options["include_preliminary"] = include_preliminary
-    elif raw_preliminary_values:
-        options["include_preliminary"] = include_preliminary
-    return options
-
-
-def _harvest_runtime_profile_problem(exc: ValueError) -> ApiProblem | None:
-    detail = str(exc).strip()
-    normalized = detail.casefold()
-    code = str(getattr(exc, "code", "")).strip()
-    if not code.startswith("HARVEST_RUNTIME_PROFILE_"):
-        if "runtimeprofileid" not in normalized:
-            return None
-        if "multiple runtime profiles" in normalized:
-            code = "HARVEST_RUNTIME_PROFILE_REQUIRED"
-        elif "not found" in normalized or "unknown" in normalized:
-            code = "HARVEST_RUNTIME_PROFILE_NOT_FOUND"
-        else:
-            return None
-
-    if code == "HARVEST_RUNTIME_PROFILE_NOT_FOUND":
-        error = "The requested runtimeProfileId was not found."
-    else:
-        error = (
-            "Observed ranking requires runtimeProfileId when multiple "
-            "comparable runtime profiles are available."
-        )
-    return ApiProblem(
-        HTTPStatus.BAD_REQUEST,
-        {"ok": False, "code": code, "error": error},
+    return _harvest.query_harvest_node_for_request(
+        node_id,
+        repository=HARVEST_REPOSITORY,
     )
 
 
 def query_harvest_ranking_for_request(query: str) -> dict[str, object]:
-    values = parse_qs(query, keep_blank_values=True)
-    node_id = values.get("nodeId", [""])[0].strip()
-    node_resource_id = values.get("nodeResourceId", [""])[0].strip()
-    if not node_id or not node_resource_id:
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "NODE_RESOURCE_ID_REQUIRED",
-                "error": "排名查询必须同时提供 nodeId 和 nodeResourceId。",
-            },
-        )
-    limit = min(
-        10,
-        max(
-            1,
-            parse_report_query_int(values.get("limit", [""])[0], "limit", 10),
-        ),
+    return _harvest.query_harvest_ranking_for_request(
+        query,
+        repository=HARVEST_REPOSITORY,
     )
-    evidence_policy = values.get("policy", [POLICY_CONFIRMED])[0].strip()
-    variant_policy = values.get("variantPolicy", [VARIANT_CANONICAL])[0].strip()
-    metric = values.get("metric", [METRIC_STATIC_TOTAL])[0].strip()
-    availability_policy = values.get(
-        "availabilityPolicy", [AVAILABILITY_GLOBAL_TRANSFER_ALLOWED]
-    )[0].strip()
-    allowed_values = {
-        "policy": {POLICY_CONFIRMED, POLICY_INCLUDE_CONDITIONAL},
-        "variantPolicy": {
-            VARIANT_CANONICAL,
-            VARIANT_ALL,
-            VARIANT_BEST_DISCOVERED_EXPLORATORY,
-        },
-        "metric": {
-            METRIC_STATIC_TOTAL,
-            METRIC_STATIC_CYCLE_SPEED,
-            METRIC_OBSERVED_PER_NODE,
-            METRIC_OBSERVED_PER_SECOND,
-        },
-        "availabilityPolicy": {AVAILABILITY_GLOBAL_TRANSFER_ALLOWED},
-    }
-    requested_values = {
-        "policy": evidence_policy,
-        "variantPolicy": variant_policy,
-        "metric": metric,
-        "availabilityPolicy": availability_policy,
-    }
-    if any(
-        requested_values[name] not in allowed
-        for name, allowed in allowed_values.items()
-    ):
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "INVALID_HARVEST_RANKING_POLICY",
-                "error": "Invalid harvest ranking policy.",
-            },
-        )
-    runtime_options = _harvest_runtime_ranking_options(values, metric)
-    try:
-        return HARVEST_REPOSITORY.rankings(
-            node_id,
-            node_resource_id,
-            limit=limit,
-            evidence_policy=evidence_policy,
-            variant_policy=variant_policy,
-            metric=metric,
-            availability_policy=availability_policy,
-            **runtime_options,
-        )
-    except KeyError as exc:
-        code = str(exc).strip("'")
-        raise ApiProblem(
-            HTTPStatus.NOT_FOUND,
-            {"ok": False, "code": code, "error": "资源节点或资源条目不存在。"},
-        ) from exc
-    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
-        raise _harvest_dataset_problem(exc) from exc
-    except HarvestRuntimeProfileError as exc:
-        runtime_problem = _harvest_runtime_profile_problem(exc)
-        if runtime_problem is not None:
-            raise runtime_problem from exc
-        raise
-    except ValueError as exc:
-        runtime_problem = _harvest_runtime_profile_problem(exc)
-        if runtime_problem is not None:
-            raise runtime_problem from exc
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "INVALID_HARVEST_RANKING_POLICY",
-                "error": "Invalid harvest ranking policy.",
-            },
-        ) from exc
 
 
 def query_harvest_creatures_for_request(query: str) -> dict[str, object]:
-    values = parse_qs(query)
-    offset = max(
-        0,
-        parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
+    return _harvest.query_harvest_creatures_for_request(
+        query,
+        repository=HARVEST_REPOSITORY,
     )
-    limit = min(
-        100,
-        max(
-            1,
-            parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
-        ),
-    )
-    try:
-        return HARVEST_REPOSITORY.list_creatures(
-            q=values.get("q", [""])[0],
-            offset=offset,
-            limit=limit,
-        )
-    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
-        raise _harvest_dataset_problem(exc) from exc
 
 
 def query_harvest_creature_specialties_for_request(
     species_key: str,
     query: str,
 ) -> dict[str, object]:
-    if not species_key:
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "HARVEST_SPECIES_KEY_REQUIRED",
-                "error": "A creature species key is required.",
-            },
-        )
-    values = parse_qs(query, keep_blank_values=True)
-    offset = max(
-        0,
-        parse_report_query_int(values.get("offset", [""])[0], "offset", 0),
+    return _harvest.query_harvest_creature_specialties_for_request(
+        species_key,
+        query,
+        repository=HARVEST_REPOSITORY,
     )
-    limit = min(
-        100,
-        max(
-            1,
-            parse_report_query_int(values.get("limit", [""])[0], "limit", 24),
-        ),
-    )
-    evidence_policy = values.get("policy", [POLICY_CONFIRMED])[0].strip()
-    variant_policy = values.get("variantPolicy", [VARIANT_CANONICAL])[0].strip()
-    metric = values.get("metric", [METRIC_STATIC_TOTAL])[0].strip()
-    availability_policy = values.get(
-        "availabilityPolicy", [AVAILABILITY_GLOBAL_TRANSFER_ALLOWED]
-    )[0].strip()
-    runtime_options = _harvest_runtime_ranking_options(values, metric)
-    try:
-        return HARVEST_REPOSITORY.creature_specialties(
-            species_key,
-            offset=offset,
-            limit=limit,
-            evidence_policy=evidence_policy,
-            variant_policy=variant_policy,
-            metric=metric,
-            availability_policy=availability_policy,
-            **runtime_options,
-        )
-    except KeyError as exc:
-        raise ApiProblem(
-            HTTPStatus.NOT_FOUND,
-            {
-                "ok": False,
-                "code": "HARVEST_SPECIES_NOT_FOUND",
-                "error": "The requested creature species was not found.",
-            },
-        ) from exc
-    except (HarvestDatasetNotBuilt, HarvestDatasetInvalid) as exc:
-        raise _harvest_dataset_problem(exc) from exc
-    except HarvestRuntimeProfileError as exc:
-        runtime_problem = _harvest_runtime_profile_problem(exc)
-        if runtime_problem is not None:
-            raise runtime_problem from exc
-        raise
-    except ValueError as exc:
-        runtime_problem = _harvest_runtime_profile_problem(exc)
-        if runtime_problem is not None:
-            raise runtime_problem from exc
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "INVALID_HARVEST_RANKING_POLICY",
-                "error": "Invalid harvest ranking policy.",
-            },
-        ) from exc
-
-
-def _harvest_build_problem(exc: Exception) -> ApiProblem:
-    if isinstance(exc, HarvestBuildArgumentError):
-        status = HTTPStatus.BAD_REQUEST
-        message = "Invalid harvest build request."
-    elif isinstance(exc, HarvestBuildAlreadyRunning):
-        status = HTTPStatus.CONFLICT
-        message = "A harvest build is already running."
-    elif isinstance(exc, HarvestBuildJobNotFound):
-        status = HTTPStatus.NOT_FOUND
-        message = "The harvest build job was not found."
-    else:
-        raise exc
-    payload: dict[str, object] = {
-        "ok": False,
-        "code": exc.code,
-        "error": message,
-    }
-    job_id = getattr(exc, "job_id", None)
-    if job_id:
-        payload["jobId"] = job_id
-    return ApiProblem(status, payload)
 
 
 def query_harvest_build_for_request(query: str) -> dict[str, object] | None:
-    values = parse_qs(query)
-    job_id = values.get("jobId", [""])[0].strip() or None
-    try:
-        return HARVEST_BUILD_MANAGER.get(job_id)
-    except HarvestBuildJobNotFound as exc:
-        if job_id is None and exc.job_id is None:
-            return None
-        raise _harvest_build_problem(exc) from exc
-    except (
-        HarvestBuildArgumentError,
-        HarvestBuildAlreadyRunning,
-    ) as exc:
-        raise _harvest_build_problem(exc) from exc
+    return _harvest.query_harvest_build_for_request(
+        query,
+        build_manager=HARVEST_BUILD_MANAGER,
+    )
 
 
-def start_harvest_build_for_request(body: dict[str, object]) -> dict[str, object]:
-    if set(body) != {"options"}:
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "HARVEST_BUILD_REQUEST_INVALID",
-                "error": "The harvest build request must contain only an options object.",
-            },
-        )
-    options = body.get("options")
-    if not isinstance(options, dict):
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "HARVEST_BUILD_REQUEST_INVALID",
-                "error": "The harvest build options value must be an object.",
-            },
-        )
-    if options:
-        raise ApiProblem(
-            HTTPStatus.BAD_REQUEST,
-            {
-                "ok": False,
-                "code": "HARVEST_BUILD_OPTIONS_FORBIDDEN",
-                "error": "Public harvest builds do not accept configuration overrides.",
-            },
-        )
-    try:
-        return HARVEST_BUILD_MANAGER.start(options)
-    except (
-        HarvestBuildArgumentError,
-        HarvestBuildAlreadyRunning,
-        HarvestBuildJobNotFound,
-    ) as exc:
-        raise _harvest_build_problem(exc) from exc
+def start_harvest_build_for_request(
+    body: dict[str, object],
+) -> dict[str, object]:
+    return _harvest.start_harvest_build_for_request(
+        body,
+        build_manager=HARVEST_BUILD_MANAGER,
+    )
 
 
 def cancel_harvest_build_for_request(job_id: str) -> dict[str, object]:
-    if not job_id:
-        raise _harvest_build_problem(
-            HarvestBuildArgumentError("A harvest build job id is required.")
-        )
-    try:
-        return HARVEST_BUILD_MANAGER.cancel(job_id)
-    except (
-        HarvestBuildArgumentError,
-        HarvestBuildAlreadyRunning,
-        HarvestBuildJobNotFound,
-    ) as exc:
-        raise _harvest_build_problem(exc) from exc
+    return _harvest.cancel_harvest_build_for_request(
+        job_id,
+        build_manager=HARVEST_BUILD_MANAGER,
+    )
 
 
 STATE_ROUTE = StateRoute(
@@ -1854,79 +635,13 @@ def api_state() -> dict[str, object]:
     return STATE_ROUTE.state()
 
 
-def _kb_api_problem(exc: KnowledgeApiError) -> ApiProblem:
-    return ApiProblem(
-        exc.status,
-        {
-            "ok": False,
-            "code": exc.code,
-            "error": exc.message,
-        },
-    )
-
-
-def _kb_query_value(
-    values: dict[str, list[str]], key: str, default: str = ""
-) -> str:
-    raw = values.get(key, [default])
-    return raw[0] if raw else default
-
-
 def kb_get_payload(path: str, query: str) -> dict[str, object] | None:
-    try:
-        values = parse_qs(query, keep_blank_values=True)
-        if path == "/api/kb/health":
-            return KB_VNEXT_SERVICE.health()
-        if path == "/api/kb/entities/search":
-            return KB_VNEXT_SERVICE.search_entities(
-                query=_kb_query_value(values, "q"),
-                limit=_kb_query_value(values, "limit", "25"),
-                cursor=_kb_query_value(values, "cursor", "0"),
-            )
-        prefix = "/api/kb/entities/"
-        if path.startswith(prefix):
-            remainder = unquote(path.removeprefix(prefix)).strip("/")
-            parts = remainder.split("/")
-            if not parts[0].isdigit() or int(parts[0]) <= 0:
-                raise KnowledgeApiError(
-                    HTTPStatus.BAD_REQUEST,
-                    "REQUEST_INVALID",
-                    "Entity id must be a positive integer.",
-                )
-            entity_id = int(parts[0])
-            if len(parts) == 1:
-                return KB_VNEXT_SERVICE.entity(entity_id)
-            if len(parts) == 2 and parts[1] in {
-                "facts",
-                "relationships",
-                "coverage",
-                "effective-defaults",
-            }:
-                return KB_VNEXT_SERVICE.entity_collection(
-                    entity_id,
-                    kind=parts[1],
-                    limit=_kb_query_value(values, "limit", "50"),
-                    cursor=_kb_query_value(values, "cursor", "0"),
-                )
-            raise KnowledgeApiError(
-                HTTPStatus.NOT_FOUND,
-                "API_ENDPOINT_NOT_FOUND",
-                "Unknown knowledge endpoint.",
-            )
-        if path.startswith("/api/kb/jobs/"):
-            job_id = unquote(path.removeprefix("/api/kb/jobs/")).strip("/")
-            return {
-                "job": get_job(job_id),
-                "returned": 1,
-                "omitted": 0,
-                "nextQuery": "",
-                "freshness": "FRESH",
-                "evidence": [],
-                "gap": [],
-            }
-        return None
-    except KnowledgeApiError as exc:
-        raise _kb_api_problem(exc) from exc
+    return _kb_routes.kb_get_payload(
+        path,
+        query,
+        service=KB_VNEXT_SERVICE,
+        get_job=get_job,
+    )
 
 
 _UNREAD_BODY_PROBLEM_CODES = frozenset(
