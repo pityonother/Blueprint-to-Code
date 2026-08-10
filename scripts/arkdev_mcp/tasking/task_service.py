@@ -7,11 +7,12 @@ import uuid
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 
+from blueprint_translator.context_pack import estimate_tokens
+
 from ..blueprint_service import BlueprintService
 from ..contracts import McpExecutionError, assert_path_free
-from .canonical import canonical_sha256, semantic_digest
+from .canonical import canonical_json, canonical_sha256, semantic_digest
 from .contracts import (
-    MAX_GRAPH_TARGETS,
     MAX_SUPPORTING_ASSETS,
     TASK_CONTEXT_SCHEMA,
     TASK_MODES,
@@ -151,7 +152,6 @@ class TaskService:
                     "graphRef is not an exact graph in the current Evidence revision.",
                 )
 
-        primary_name = str(primary_authority["name"])
         supporting_context: list[dict[str, object]] = []
         seen_asset_ids = {str(primary_authority["assetId"])}
         for supporting_asset in supporting:
@@ -224,8 +224,16 @@ class TaskService:
         self.store.create_task(task_id, context, session)
         return copy.deepcopy(context)
 
-    def resume(self, task_id: str) -> dict[str, object]:
-        context, session = self.verified_task(task_id)
+    def resume(
+        self,
+        task_id: str,
+        *,
+        persist_verification: bool = True,
+    ) -> dict[str, object]:
+        context, session = self.verified_task(
+            task_id,
+            persist_verification=persist_verification,
+        )
         plan_status = ""
         if session.get("patchPlanId"):
             try:
@@ -254,9 +262,33 @@ class TaskService:
                 for item in context["confirmedFacts"]
             ],
             "assumptionsCount": len(context["assumptions"]),
-            "blockingQuestions": copy.deepcopy(context["blockingQuestions"]),
-            "nonBlockingUnknowns": copy.deepcopy(context["nonBlockingUnknowns"]),
-            "storedSliceSummaries": copy.deepcopy(context["graphSlices"]),
+            "blockingQuestions": self._resume_metadata(
+                context["blockingQuestions"],
+                text_limit=160,
+            ),
+            "nonBlockingUnknowns": self._resume_metadata(
+                context["nonBlockingUnknowns"],
+                text_limit=120,
+            ),
+            "storedSliceSummaries": [
+                {
+                    "sliceId": item.get("sliceId", ""),
+                    "querySignature": item.get("querySignature", ""),
+                    "question": str(item.get("question") or "")[:120],
+                    "graphRefs": list(item.get("graphRefs") or []),
+                    "nodeCount": item.get("nodeCount", 0),
+                    "pinCount": item.get("pinCount", 0),
+                    "edgeCount": item.get("edgeCount", 0),
+                    "semanticDigest": item.get("semanticDigest", ""),
+                }
+                for item in context["graphSlices"]
+            ],
+            "summaryCounts": {
+                "confirmedFacts": len(context["confirmedFacts"]),
+                "blockingQuestions": len(context["blockingQuestions"]),
+                "nonBlockingUnknowns": len(context["nonBlockingUnknowns"]),
+                "storedSlices": len(context["graphSlices"]),
+            },
             "queryLedger": copy.deepcopy(context["queryLedger"]),
             "plan": {
                 "planId": session.get("patchPlanId", ""),
@@ -265,15 +297,76 @@ class TaskService:
             },
             "nextRecommendedAction": self._next_action(str(session["phase"])),
             "humanSummary": self._human_summary(context, session, plan_status),
+            "estimatedTokens": 0,
         }
+        for _attempt in range(2):
+            self._fit_resume_budget(result)
+            result["estimatedTokens"] = estimate_tokens(canonical_json(result))
         assert_path_free(result)
         return result
+
+    @staticmethod
+    def _resume_metadata(
+        items: Sequence[dict[str, object]],
+        *,
+        text_limit: int,
+    ) -> list[dict[str, object]]:
+        summaries: list[dict[str, object]] = []
+        for item in items:
+            summary = {
+                str(key): value
+                for key, value in item.items()
+                if str(key).endswith("Id")
+            }
+            summary["text"] = str(item.get("text") or "")[:text_limit]
+            summaries.append(summary)
+        return summaries
+
+    @staticmethod
+    def _fit_resume_budget(result: dict[str, object], max_tokens: int = 1600) -> None:
+        """Compact optional resume detail while retaining counts and all blocker IDs."""
+
+        def over_budget() -> bool:
+            return estimate_tokens(canonical_json(result)) > max_tokens
+
+        optional_lists = (
+            result["nonBlockingUnknowns"],
+            result["confirmedFactSummaries"],
+            result["storedSliceSummaries"],
+        )
+        for items in optional_lists:
+            while items and over_budget():
+                items.pop()
+
+        blockers = result["blockingQuestions"]
+        if over_budget():
+            for blocker in blockers:
+                if isinstance(blocker, dict):
+                    blocker["text"] = str(blocker.get("text") or "")[:64]
+        if over_budget():
+            for blocker in blockers:
+                if isinstance(blocker, dict):
+                    blocker.pop("text", None)
+
+        graph_targets = result["graphTargets"]
+        while graph_targets and over_budget():
+            graph_targets.pop()
+
+        if over_budget():
+            result["goal"] = str(result["goal"])[:240]
+            result["humanSummary"] = str(result["humanSummary"])[:320]
+        if over_budget():
+            raise McpExecutionError(
+                "RESULT_BUDGET_EXCEEDED",
+                "Task resume metadata cannot fit the 1600-token public response budget.",
+            )
 
     def verified_task(
         self,
         task_id: str,
         *,
         allowed_phases: Iterable[str] | None = None,
+        persist_verification: bool = True,
     ) -> tuple[dict[str, object], dict[str, object]]:
         context = self.store.load_context(task_id)
         session = self.store.load_session(task_id)
@@ -299,7 +392,8 @@ class TaskService:
                 "EVIDENCE_NOT_FOUND",
                 "ASSET_NOT_FOUND",
             }:
-                self._block_revision_change(task_id, context, session)
+                if persist_verification:
+                    self._block_revision_change(task_id, context, session)
                 if exc.code == "EVIDENCE_REVISION_CHANGED":
                     raise
                 raise McpExecutionError(
@@ -315,8 +409,9 @@ class TaskService:
                 "Task phase does not allow this operation.",
                 details={"phase": str(session.get("phase") or "")},
             )
-        session["lastVerifiedAt"] = self.clock()
-        self.sync_and_save(context, session)
+        if persist_verification:
+            session["lastVerifiedAt"] = self.clock()
+            self.sync_and_save(context, session)
         return context, session
 
     def sync_and_save(

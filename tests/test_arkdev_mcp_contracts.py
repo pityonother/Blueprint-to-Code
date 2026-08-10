@@ -5,6 +5,8 @@ import sys
 import unittest
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -27,7 +29,7 @@ from arkdev_mcp.editor_bridge import (  # noqa: E402
 
 
 class ArkdevMcpContractTests(unittest.TestCase):
-    def test_tool_allowlist_is_exactly_the_phase_one_surface(self) -> None:
+    def test_tool_allowlist_preserves_phase_one_and_adds_exact_phase_two_surface(self) -> None:
         self.assertEqual(
             TOOL_NAMES,
             (
@@ -36,6 +38,12 @@ class ArkdevMcpContractTests(unittest.TestCase):
                 "blueprint_list_assets",
                 "blueprint_get_context",
                 "blueprint_get_node",
+                "blueprint_task_create",
+                "blueprint_task_resume",
+                "blueprint_task_research",
+                "blueprint_patch_plan_draft",
+                "blueprint_patch_plan_validate",
+                "blueprint_patch_plan_confirm",
             ),
         )
 
@@ -56,6 +64,17 @@ class ArkdevMcpContractTests(unittest.TestCase):
                     "RESULT_BUDGET_EXCEEDED",
                     "EDITOR_BRIDGE_NOT_INSTALLED",
                     "EDITOR_BRIDGE_UNAVAILABLE",
+                    "TASK_NOT_FOUND",
+                    "TASK_PHASE_INVALID",
+                    "TASK_BLOCKED",
+                    "TASK_SLICE_LIMIT_REACHED",
+                    "EVIDENCE_REVISION_CHANGED",
+                    "PATCH_PLAN_NOT_FOUND",
+                    "PATCH_PLAN_INVALID",
+                    "PATCH_PLAN_LIMIT_EXCEEDED",
+                    "PATCH_PLAN_NOT_CONFIRMABLE",
+                    "PATCH_PLAN_DIGEST_MISMATCH",
+                    "PLAN_CONFIRMATION_REQUIRED",
                     "INTERNAL_CONTRACT_ERROR",
                 }
             ),
@@ -99,6 +118,21 @@ class ArkdevMcpContractTests(unittest.TestCase):
                 )
         with self.assertRaises(McpExecutionError):
             assert_path_free({"path": Path("private/evidence.sqlite")})
+
+    def test_phase_two_json_schemas_are_valid_and_use_exact_contract_ids(self) -> None:
+        expected = {
+            "blueprint_task_context.v1.schema.json": "blueprint-to-code.task-context/v1",
+            "blueprint_task_session.v1.schema.json": "blueprint-to-code.task-session/v1",
+            "blueprint_graph_slice.v1.schema.json": "blueprint-to-code.graph-slice/v1",
+            "blueprint_patch_plan.v1.schema.json": "blueprint-to-code.blueprint-patch-plan/v1",
+        }
+        for name, schema_id in expected.items():
+            with self.subTest(schema=name):
+                payload = json.loads(
+                    (ROOT / "schemas" / name).read_text(encoding="utf-8")
+                )
+                Draft202012Validator.check_schema(payload)
+                self.assertEqual(payload["$id"], schema_id)
 
 
 class ArkdevEditorBridgeContractTests(unittest.TestCase):

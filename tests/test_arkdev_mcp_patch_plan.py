@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -270,6 +271,8 @@ class PatchPlanTests(unittest.TestCase):
         self.assertFalse(validation["executionReady"])
         self.assertEqual(validation["reason"], "EDITOR_BRIDGE_NOT_INSTALLED")
         self.assertIn("Pin type compatibility is not validated", validation["humanSummary"])
+        self.assertIn("目标: Insert an exact guarded execution step", validation["humanSummary"])
+        self.assertIn("Connections:", validation["humanSummary"])
         encoded = json.dumps(validation, ensure_ascii=False)
         self.assertNotIn(str(self.root), encoded)
 
@@ -295,6 +298,165 @@ class PatchPlanTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "PATCH_PLAN_INVALID")
                 self.assertIn(expected, raised.exception.details["errorCodes"])
 
+    def test_operation_nodes_must_belong_to_the_declared_target_graph(self) -> None:
+        graph_refs = [
+            item["ref"]
+            for item in self.blueprint.get_task_authority(
+                asset="InterpretationFixture"
+            )["graphTargets"]
+        ]
+        second_graph = next(ref for ref in graph_refs if ref != self.graph_ref)
+        self.research.research(
+            task_id=self.task["taskId"],
+            question="Inspect the second exact graph",
+            graph_ref=second_graph,
+        )
+        arguments = self.plan_input()
+        arguments["operations"][1]["graphRef"] = second_graph
+
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**arguments)
+
+        self.assertEqual(raised.exception.code, "PATCH_PLAN_INVALID")
+        self.assertIn("GRAPH_SCOPE_INVALID", raised.exception.details["errorCodes"])
+
+    def test_disconnect_requires_an_existing_edge_and_exact_preconditions(self) -> None:
+        common = {
+            "operationId": "op://disconnect-entry",
+            "kind": "DISCONNECT",
+            "graphRef": self.graph_ref,
+            "dependsOn": [],
+            "payload": {},
+            "postconditions": [],
+            "checkpoint": "checkpoint://disconnect",
+            "from": {
+                "node": self.event["ref"],
+                "pin": {
+                    "pinRef": self.event_output["ref"],
+                    "name": self.event_output["name"],
+                    "direction": "OUTPUT",
+                    "ordinal": _ordinal(str(self.event_output["ref"])),
+                },
+            },
+            "to": {
+                "node": self.sequence["ref"],
+                "pin": {
+                    "pinRef": self.sequence_input["ref"],
+                    "name": self.sequence_input["name"],
+                    "direction": "INPUT",
+                    "ordinal": _ordinal(str(self.sequence_input["ref"])),
+                },
+            },
+        }
+        arguments = self.plan_input()
+        arguments.update(
+            {
+                "nodes": arguments["nodes"][:2],
+                "operations": [{**common, "preconditions": []}],
+                "capability_requirements": ["BREAK_PIN_LINKS"],
+                "checkpoints": [
+                    {
+                        "checkpointId": "checkpoint://disconnect",
+                        "description": "The exact current edge is disconnected",
+                    }
+                ],
+            }
+        )
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**arguments)
+        self.assertIn(
+            "DISCONNECT_PRECONDITION_INVALID",
+            raised.exception.details["errorCodes"],
+        )
+
+        arguments["operations"][0]["preconditions"] = [
+            {
+                "sourcePinRef": self.event_output["ref"],
+                "targetPinRef": self.sequence_input["ref"],
+            }
+        ]
+        draft = self.plans.draft(**arguments)
+        self.assertTrue(draft["valid"])
+
+    def test_delete_requires_the_current_exact_node_precondition(self) -> None:
+        arguments = self.plan_input()
+        operation = {
+            "operationId": "op://delete-entry",
+            "kind": "DELETE_NODE",
+            "graphRef": self.graph_ref,
+            "dependsOn": [],
+            "preconditions": [],
+            "payload": {"nodeRef": self.event["ref"]},
+            "postconditions": [],
+            "checkpoint": "checkpoint://delete",
+        }
+        arguments.update(
+            {
+                "nodes": [arguments["nodes"][0]],
+                "operations": [operation],
+                "capability_requirements": ["DELETE_NODE"],
+                "checkpoints": [
+                    {
+                        "checkpointId": "checkpoint://delete",
+                        "description": "The exact current node is absent",
+                    }
+                ],
+            }
+        )
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**arguments)
+        self.assertIn(
+            "DELETE_PRECONDITION_INVALID",
+            raised.exception.details["errorCodes"],
+        )
+
+        operation["preconditions"] = [{"nodeRef": self.event["ref"]}]
+        draft = self.plans.draft(**arguments)
+        self.assertTrue(draft["valid"])
+
+    def test_set_default_requires_exact_old_value_and_value_encoding(self) -> None:
+        arguments = self.plan_input()
+        operation = {
+            "operationId": "op://set-sequence-default",
+            "kind": "SET_DEFAULT",
+            "graphRef": self.graph_ref,
+            "dependsOn": [],
+            "preconditions": [
+                {
+                    "nodeRef": self.sequence["ref"],
+                    "pinRef": self.sequence_input["ref"],
+                    "oldValue": self.sequence_input.get("default"),
+                }
+            ],
+            "payload": {
+                "nodeRef": self.sequence["ref"],
+                "pinRef": self.sequence_input["ref"],
+                "newValue": "diagnostic",
+            },
+            "postconditions": [],
+            "checkpoint": "checkpoint://default",
+        }
+        arguments.update(
+            {
+                "nodes": [arguments["nodes"][1]],
+                "operations": [operation],
+                "capability_requirements": ["SET_PIN_DEFAULT"],
+                "checkpoints": [
+                    {
+                        "checkpointId": "checkpoint://default",
+                        "description": "The exact Pin receives the planned default",
+                    }
+                ],
+            }
+        )
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**arguments)
+        self.assertIn("SET_DEFAULT_INVALID", raised.exception.details["errorCodes"])
+
+        operation["payload"]["valueEncoding"] = "STRING"
+        draft = self.plans.draft(**arguments)
+        self.assertTrue(draft["valid"])
+
     def test_operation_limit_uses_dedicated_error(self) -> None:
         arguments = self.plan_input()
         template = arguments["operations"][0]
@@ -305,6 +467,29 @@ class PatchPlanTests(unittest.TestCase):
         with self.assertRaises(McpExecutionError) as raised:
             self.plans.draft(**arguments)
         self.assertEqual(raised.exception.code, "PATCH_PLAN_LIMIT_EXCEEDED")
+
+    def test_duplicate_nodes_operations_and_missing_capability_are_rejected(self) -> None:
+        cases: list[tuple[str, dict[str, object]]] = []
+        duplicate_node = self.plan_input()
+        duplicate_node["nodes"].append(copy.deepcopy(duplicate_node["nodes"][0]))
+        cases.append(("PLAN_NODE_DUPLICATE", duplicate_node))
+
+        duplicate_operation = self.plan_input()
+        duplicate_operation["operations"][2]["operationId"] = duplicate_operation[
+            "operations"
+        ][1]["operationId"]
+        cases.append(("OPERATION_ID_DUPLICATE", duplicate_operation))
+
+        missing_capability = self.plan_input()
+        missing_capability["capability_requirements"] = ["CREATE_NODE"]
+        cases.append(("CAPABILITY_REQUIRED", missing_capability))
+
+        for expected, arguments in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaises(McpExecutionError) as raised:
+                    self.plans.draft(**arguments)
+                self.assertEqual(raised.exception.code, "PATCH_PLAN_INVALID")
+                self.assertIn(expected, raised.exception.details["errorCodes"])
 
     def test_blocked_draft_cannot_confirm(self) -> None:
         draft = self.draft(blocking_questions=["Need runtime authority proof"])
@@ -381,11 +566,30 @@ class PatchPlanTests(unittest.TestCase):
         self.assertIn(str(self.sequence_input["ref"]), markdown)
         self.assertIn("executionReady: false", markdown)
 
+        process = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "render_blueprint_patch_plan.py"),
+                "--task",
+                self.task["taskId"],
+                "--plan",
+                first["planId"],
+                "--task-root",
+                str(self.store.root),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn(str(self.event_output["ref"]), process.stdout)
+        self.assertNotIn(str(self.store.root), process.stdout)
+
     def test_plan_metadata_does_not_mutate_evidence_or_interpretation(self) -> None:
-        protected = [
-            self.asset_dir / "evidence" / "current.json",
-            self.asset_dir / "interpretation" / "current.json",
-        ]
+        protected = sorted(path for path in self.asset_dir.rglob("*") if path.is_file())
         before = {path: _sha256(path) for path in protected}
         draft = self.draft()
         self.plans.validate(self.task["taskId"], draft["planId"])

@@ -55,6 +55,26 @@ class ResearchService:
             task_id,
             allowed_phases={"DISCOVERY", "READY_TO_PLAN"},
         )
+        if task_update is not None and not isinstance(task_update, Mapping):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "taskUpdate must be an object.",
+            )
+        update = task_update or {}
+        preview_context = copy.deepcopy(context)
+        self._apply_task_update(preview_context, update)
+        current_graph_refs = {
+            str(item.get("ref") or "") for item in context["graphTargets"]
+        }
+        if (
+            graph_ref
+            and graph_ref not in current_graph_refs
+            and len(current_graph_refs) >= MAX_GRAPH_TARGETS
+        ):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "A Task may target at most two Blueprint graphs.",
+            )
         primary = context["primaryAsset"]
         signature = canonical_sha256(
             {
@@ -90,7 +110,7 @@ class ResearchService:
         if existing is not None:
             payload = self.store.load_slice(task_id, signature)
             ledger["cacheHits"] = int(ledger.get("cacheHits") or 0) + 1
-            self._apply_task_update(context, task_update or {})
+            self._apply_task_update(context, update)
             self._refresh_readiness(context, session)
             self.tasks.sync_and_save(context, session)
             return self._response(payload, context, cached=True)
@@ -165,7 +185,7 @@ class ResearchService:
         )
         ledger["uniqueQueries"] = int(ledger.get("uniqueQueries") or 0) + 1
         ledger["contextPages"] = int(ledger.get("contextPages") or 0) + 1
-        self._apply_task_update(context, task_update or {})
+        self._apply_task_update(context, update)
         self._refresh_readiness(context, session)
         self.tasks.sync_and_save(context, session)
         return self._response(payload, context, cached=False)

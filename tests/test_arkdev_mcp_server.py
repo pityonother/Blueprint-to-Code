@@ -53,12 +53,20 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             {template.uri_template for template in templates},
-            {"blueprint://assets/{asset}/health"},
+            {
+                "blueprint://assets/{asset}/health",
+                "arkdev://tasks/{task_id}",
+                "arkdev://plans/{plan_id}",
+            },
         )
-        self.assertLessEqual(len(resources) + len(templates), 3)
+        self.assertLessEqual(len(resources) + len(templates), 5)
         self.assertEqual(
             {prompt.name for prompt in prompts},
-            {"analyze_blueprint_task", "inspect_blueprint_node"},
+            {
+                "analyze_blueprint_task",
+                "inspect_blueprint_node",
+                "design_blueprint_patch",
+            },
         )
         by_name = {tool.name: tool for tool in tools}
         context_schema = by_name["blueprint_get_context"].input_schema
@@ -82,7 +90,7 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
             ]["maximum"],
             100,
         )
-        for tool in tools:
+        for tool in tools[:5]:
             with self.subTest(tool=tool.name):
                 self.assertIsNotNone(tool.output_schema)
                 self.assertIsNotNone(tool.annotations)
@@ -91,6 +99,15 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(tool.annotations.open_world_hint)
                 self.assertIn("READ-ONLY", tool.description or "")
                 self.assertIn("NO ARK DEVKIT MUTATION", tool.description or "")
+        for tool in tools[5:]:
+            with self.subTest(tool=tool.name):
+                self.assertIsNotNone(tool.output_schema)
+                self.assertIsNotNone(tool.annotations)
+                self.assertFalse(tool.annotations.read_only_hint)
+                self.assertFalse(tool.annotations.destructive_hint)
+                self.assertFalse(tool.annotations.open_world_hint)
+                self.assertIn("WRITES LOCAL TASK METADATA ONLY", tool.description or "")
+                self.assertIn("DOES NOT MODIFY ARK DEVKIT", tool.description or "")
 
     async def test_tools_return_structured_content_and_stable_execution_errors(
         self,
@@ -123,6 +140,8 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
             "blueprint-to-code.arkdev-mcp-status/v1",
         )
         self.assertTrue(status.structured_content["readOnly"])
+        self.assertTrue(status.structured_content["taskMetadataWrite"])
+        self.assertTrue(status.structured_content["capabilities"]["patchPlan"])
         self.assertEqual(status.structured_content["transport"], "stdio")
         self.assertNotIn(str(ROOT), json.dumps(status.structured_content))
         self.assertFalse(editor.structured_content["connected"])
@@ -184,6 +203,10 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
                 "inspect_blueprint_node",
                 {"asset": "InterpretationFixture", "nodeRef": node_ref},
             )
+            patch_prompt = await client.get_prompt(
+                "design_blueprint_patch",
+                {"asset": "InterpretationFixture", "goal": "Prepare a plan"},
+            )
 
         self.assertFalse(node.is_error)
         self.assertEqual(node.structured_content["node"]["ref"], node_ref)
@@ -204,6 +227,11 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(node_ref, node_text)
         self.assertIn("直接邻域", node_text)
         self.assertNotIn("Patch Plan", node_text)
+        patch_text = patch_prompt.messages[0].content.text
+        self.assertIn("blueprint_patch_plan_validate", patch_text)
+        self.assertIn("explicitly approves", patch_text)
+        self.assertIn("current conversation", patch_text)
+        self.assertIn("不得执行蓝图", patch_text)
 
     async def test_connected_fixture_status_has_no_disconnected_reason(self) -> None:
         bridge = FixtureEditorBridge(

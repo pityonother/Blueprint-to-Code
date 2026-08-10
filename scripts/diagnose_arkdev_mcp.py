@@ -1,4 +1,4 @@
-"""Run bounded, non-mutating ARK Dev MCP diagnostics."""
+"""Run bounded ARK Dev MCP diagnostics with disposable local Task metadata."""
 
 from __future__ import annotations
 
@@ -26,6 +26,12 @@ CHECK_ORDER = (
     "TOOLS_DISCOVERED",
     "STATUS_CALL_OK",
     "BLUEPRINT_FIXTURE_CALL_OK",
+    "TASK_CREATE_OK",
+    "TASK_RESUME_OK",
+    "TASK_RESEARCH_OK",
+    "TASK_CACHE_HIT_OK",
+    "PATCH_PLAN_DRAFT_OK",
+    "PATCH_PLAN_VALIDATE_OK",
     "CODEX_CONFIG_RENDER_OK",
     "CODEX_CLI_AVAILABLE",
     "CODEX_SERVER_LISTED",
@@ -47,48 +53,208 @@ async def _stdio_checks(
         "TOOLS_DISCOVERED": False,
         "STATUS_CALL_OK": False,
         "BLUEPRINT_FIXTURE_CALL_OK": False,
+        "TASK_CREATE_OK": False,
+        "TASK_RESUME_OK": False,
+        "TASK_RESEARCH_OK": False,
+        "TASK_CACHE_HIT_OK": False,
+        "PATCH_PLAN_DRAFT_OK": False,
+        "PATCH_PLAN_VALIDATE_OK": False,
     }
-    parameters = StdioServerParameters(
-        command=sys.executable,
-        args=[
-            str(SCRIPTS / "run_arkdev_mcp.py"),
-            "--capture-root",
-            str(capture_root),
-        ],
-        cwd=PROJECT_ROOT,
-        encoding="utf-8",
-    )
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errlog:
-        try:
-            async with Client(stdio_client(parameters, errlog=errlog)) as client:
-                checks["STDIO_HANDSHAKE_OK"] = True
-                tools = (await client.list_tools()).tools
-                checks["TOOLS_DISCOVERED"] = tuple(
-                    tool.name for tool in tools
-                ) == TOOL_NAMES
-                status = await client.call_tool("arkdev_status", {})
-                checks["STATUS_CALL_OK"] = bool(
-                    not status.is_error
-                    and status.structured_content
-                    and status.structured_content.get("readOnly") is True
-                    and status.structured_content.get("transport") == "stdio"
-                )
-                context = await client.call_tool(
-                    "blueprint_get_context",
-                    {
-                        "asset": fixture_asset,
-                        "goal": "ReceiveBeginPlay",
-                        "maxHops": 0,
-                        "budgetTokens": 2400,
-                    },
-                )
-                checks["BLUEPRINT_FIXTURE_CALL_OK"] = bool(
-                    not context.is_error
-                    and context.structured_content
-                    and context.structured_content.get("nodes")
-                )
-        except Exception:
-            pass
+    with tempfile.TemporaryDirectory(prefix="arkdev-mcp-diagnose-") as temporary:
+        task_root = str(Path(temporary) / ".blueprint-tasks")
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=[
+                str(SCRIPTS / "run_arkdev_mcp.py"),
+                "--capture-root",
+                str(capture_root),
+            ],
+            env={"ARKDEV_MCP_TASK_ROOT": task_root},
+            cwd=PROJECT_ROOT,
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errlog:
+            try:
+                async with Client(stdio_client(parameters, errlog=errlog)) as client:
+                    checks["STDIO_HANDSHAKE_OK"] = True
+                    tools = (await client.list_tools()).tools
+                    checks["TOOLS_DISCOVERED"] = tuple(
+                        tool.name for tool in tools
+                    ) == TOOL_NAMES
+                    status = await client.call_tool("arkdev_status", {})
+                    checks["STATUS_CALL_OK"] = bool(
+                        not status.is_error
+                        and status.structured_content
+                        and status.structured_content.get("readOnly") is True
+                        and status.structured_content.get("taskMetadataWrite") is True
+                        and status.structured_content.get("transport") == "stdio"
+                    )
+                    context = await client.call_tool(
+                        "blueprint_get_context",
+                        {
+                            "asset": fixture_asset,
+                            "goal": "ReceiveBeginPlay",
+                            "maxHops": 0,
+                            "budgetTokens": 2400,
+                        },
+                    )
+                    checks["BLUEPRINT_FIXTURE_CALL_OK"] = bool(
+                        not context.is_error
+                        and context.structured_content
+                        and context.structured_content.get("nodes")
+                    )
+                    created = await client.call_tool(
+                        "blueprint_task_create",
+                        {
+                            "mode": "IMPLEMENTATION_PREP",
+                            "asset": fixture_asset,
+                            "goal": "Diagnose the local Task and Patch Plan workflow",
+                            "completionCriteria": ["Exact Evidence refs remain valid"],
+                            "allowedChanges": ["Selected Blueprint graph"],
+                            "forbiddenChanges": ["Other assets"],
+                        },
+                    )
+                    checks["TASK_CREATE_OK"] = bool(
+                        not created.is_error
+                        and created.structured_content
+                        and created.structured_content.get("taskId")
+                    )
+                    if checks["TASK_CREATE_OK"]:
+                        task_id = created.structured_content["taskId"]
+                        resumed = await client.call_tool(
+                            "blueprint_task_resume", {"taskId": task_id}
+                        )
+                        checks["TASK_RESUME_OK"] = bool(
+                            not resumed.is_error
+                            and resumed.structured_content
+                            and resumed.structured_content.get("phase") == "DISCOVERY"
+                        )
+                        first = await client.call_tool(
+                            "blueprint_task_research",
+                            {
+                                "taskId": task_id,
+                                "question": "ReceiveBeginPlay execution flow",
+                                "maxHops": 0,
+                            },
+                        )
+                        checks["TASK_RESEARCH_OK"] = bool(
+                            not first.is_error
+                            and first.structured_content
+                            and first.structured_content.get("nodes")
+                            and first.structured_content.get("cached") is False
+                        )
+                        second = await client.call_tool(
+                            "blueprint_task_research",
+                            {
+                                "taskId": task_id,
+                                "question": "ReceiveBeginPlay execution flow",
+                                "maxHops": 0,
+                            },
+                        )
+                        checks["TASK_CACHE_HIT_OK"] = bool(
+                            not second.is_error
+                            and second.structured_content
+                            and second.structured_content.get("cached") is True
+                            and second.structured_content.get("querySignature")
+                            == first.structured_content.get("querySignature")
+                        )
+                        if checks["TASK_RESEARCH_OK"]:
+                            node = first.structured_content["nodes"][0]
+                            pins = [
+                                pin
+                                for pin in first.structured_content.get("pins", [])
+                                if pin.get("nodeRef") == node.get("ref")
+                            ]
+                            signatures = [
+                                {
+                                    "name": pin.get("name", ""),
+                                    "direction": (
+                                        "OUTPUT"
+                                        if pin.get("direction") == "EGPD_Output"
+                                        else "INPUT"
+                                    ),
+                                    "category": pin.get("category", ""),
+                                    "subcategory": pin.get("subcategory", ""),
+                                    "ordinal": int(
+                                        str(pin.get("ref", "")).rsplit("/", 1)[-1]
+                                    ),
+                                    "containerType": pin.get("containerType", "None"),
+                                }
+                                for pin in pins
+                            ]
+                            graph_ref = node.get("graphRef")
+                            draft = await client.call_tool(
+                                "blueprint_patch_plan_draft",
+                                {
+                                    "taskId": task_id,
+                                    "nodes": [
+                                        {
+                                            "nodeRef": node.get("ref"),
+                                            "graphRef": graph_ref,
+                                            "signature": {
+                                                "nodeFamily": "EXISTING",
+                                                "className": node.get("className"),
+                                                "functionOwner": "",
+                                                "functionName": "",
+                                                "variableName": "",
+                                                "eventName": str(
+                                                    node.get("signals", {}).get(
+                                                        "event", ""
+                                                    )
+                                                ),
+                                                "pure": False,
+                                                "pinSignatures": signatures,
+                                            },
+                                        }
+                                    ],
+                                    "operations": [
+                                        {
+                                            "operationId": "op://preserve-diagnostic",
+                                            "kind": "PRESERVE",
+                                            "graphRef": graph_ref,
+                                            "dependsOn": [],
+                                            "preconditions": [
+                                                {"nodeRef": node.get("ref")}
+                                            ],
+                                            "payload": {"nodeRef": node.get("ref")},
+                                            "postconditions": [{"unchanged": True}],
+                                            "checkpoint": "checkpoint://diagnostic",
+                                        }
+                                    ],
+                                    "capabilityRequirements": [],
+                                    "checkpoints": [
+                                        {
+                                            "checkpointId": "checkpoint://diagnostic",
+                                            "description": "Diagnostic preserve check",
+                                        }
+                                    ],
+                                    "blockingQuestions": [],
+                                },
+                            )
+                            checks["PATCH_PLAN_DRAFT_OK"] = bool(
+                                not draft.is_error
+                                and draft.structured_content
+                                and draft.structured_content.get("status") == "DRAFT"
+                            )
+                            if checks["PATCH_PLAN_DRAFT_OK"]:
+                                validation = await client.call_tool(
+                                    "blueprint_patch_plan_validate",
+                                    {
+                                        "taskId": task_id,
+                                        "planId": draft.structured_content["planId"],
+                                    },
+                                )
+                                checks["PATCH_PLAN_VALIDATE_OK"] = bool(
+                                    not validation.is_error
+                                    and validation.structured_content
+                                    and validation.structured_content.get("valid") is True
+                                    and validation.structured_content.get(
+                                        "executionReady"
+                                    )
+                                    is False
+                                )
+            except Exception:
+                pass
     return checks
 
 
@@ -179,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in CHECK_ORDER:
         print(f"{name}={_render(checks[name])}")
 
-    required = CHECK_ORDER[:7]
+    required = CHECK_ORDER[:-2]
     return 0 if all(checks[name] is True for name in required) else 1
 
 

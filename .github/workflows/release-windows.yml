@@ -79,8 +79,11 @@ jobs:
             tests/test_blueprint_interpretation_cli.py `
             tests/test_diagnose_blueprint_tool.py
 
-      - name: Smoke test read-only MCP stdio fixture
-        run: python -m pytest -q tests/test_arkdev_mcp_stdio.py
+      - name: Smoke test MCP stdio and local task workflow fixtures
+        run: >-
+          python -m pytest -q
+          tests/test_arkdev_mcp_stdio.py
+          tests/test_arkdev_mcp_task_stdio.py
 
       - name: Assert the checkout remained source-clean
         run: |

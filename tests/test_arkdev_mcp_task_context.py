@@ -16,9 +16,10 @@ if str(SCRIPTS) not in sys.path:
 
 from arkdev_mcp.blueprint_service import BlueprintService  # noqa: E402
 from arkdev_mcp.contracts import McpExecutionError  # noqa: E402
-from arkdev_mcp.tasking.canonical import semantic_digest  # noqa: E402
+from arkdev_mcp.tasking.canonical import canonical_json, semantic_digest  # noqa: E402
 from arkdev_mcp.tasking.store import TaskStore  # noqa: E402
 from arkdev_mcp.tasking.task_service import TaskService  # noqa: E402
+from blueprint_translator.context_pack import estimate_tokens  # noqa: E402
 from blueprint_translator.interpretation_publication import (  # noqa: E402
     publish_interpretation,
 )
@@ -104,7 +105,53 @@ class TaskContextTests(unittest.TestCase):
                     self.tasks.resume(invalid)
                 self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
 
+    def test_task_store_rejects_metadata_roots_outside_named_boundary(self) -> None:
+        with self.assertRaises(McpExecutionError) as raised:
+            TaskStore(self.root / "task-metadata")
+        self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+
+    def test_resume_keeps_large_persistent_context_within_default_token_budget(self) -> None:
+        context = self.create()
+        session = self.store.load_session(context["taskId"])
+        context["confirmedFacts"] = [
+            {"id": f"fact://{index}", "text": "confirmed " + "x" * 500}
+            for index in range(40)
+        ]
+        context["blockingQuestions"] = [
+            {"questionId": f"question://{index}", "text": "blocking " + "y" * 900}
+            for index in range(20)
+        ]
+        context["nonBlockingUnknowns"] = [
+            {"unknownId": f"unknown://{index}", "text": "unknown " + "z" * 900}
+            for index in range(20)
+        ]
+        context["graphSlices"] = [
+            {
+                "sliceId": f"slice://{index:032x}",
+                "querySignature": f"query-{index}",
+                "question": "slice " + "q" * 220,
+                "graphRefs": [],
+                "nodeCount": 100,
+                "pinCount": 400,
+                "edgeCount": 400,
+                "semanticDigest": f"{index:064x}",
+            }
+            for index in range(8)
+        ]
+        self.tasks.sync_and_save(context, session)
+
+        resumed = self.tasks.resume(context["taskId"])
+
+        self.assertLessEqual(estimate_tokens(canonical_json(resumed)), 1600)
+        self.assertEqual(resumed["summaryCounts"]["blockingQuestions"], 20)
+        self.assertEqual(len(resumed["blockingQuestions"]), 20)
+        self.assertLessEqual(resumed["estimatedTokens"], 1600)
+
     def test_create_enforces_freshness_primary_supporting_and_input_limits(self) -> None:
+        with self.assertRaises(McpExecutionError) as raised:
+            self.create(asset="MissingFixture")
+        self.assertEqual(raised.exception.code, "ASSET_NOT_FOUND")
+
         with self.assertRaises(McpExecutionError) as raised:
             self.create(completion_criteria=[])
         self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
@@ -152,7 +199,7 @@ class TaskContextTests(unittest.TestCase):
 
     def test_generated_handles_are_hex_only_and_never_derive_from_goal(self) -> None:
         with self.assertRaises(McpExecutionError) as raised:
-            self.create(goal="../../Users/ac/private")
+            self.create(goal="../../private/restore-objective")
         self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
 
         context = self.create(goal="private restore objective")

@@ -21,7 +21,10 @@ from arkdev_mcp.tasking.task_service import TaskService  # noqa: E402
 from blueprint_translator.interpretation_publication import (  # noqa: E402
     publish_interpretation,
 )
-from interpretation_fixture import publish_interpretation_fixture  # noqa: E402
+from interpretation_fixture import (  # noqa: E402
+    interpretation_payload,
+    publish_interpretation_fixture,
+)
 
 
 class CountingBlueprintService(BlueprintService):
@@ -137,10 +140,7 @@ class TaskResearchTests(unittest.TestCase):
         self.assertEqual(self.blueprint.context_calls, 1)
 
     def test_research_is_path_free_and_does_not_mutate_evidence_or_interpretation(self) -> None:
-        protected = [
-            self.asset_dir / "evidence" / "current.json",
-            self.asset_dir / "interpretation" / "current.json",
-        ]
+        protected = sorted(path for path in self.asset_dir.rglob("*") if path.is_file())
         before = {path: _sha256(path) for path in protected}
 
         result = self.call()
@@ -168,6 +168,41 @@ class TaskResearchTests(unittest.TestCase):
                 with self.assertRaises(McpExecutionError) as raised:
                     self.call(**overrides)
                 self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+
+    def test_revision_change_blocks_before_old_cache_can_be_reused(self) -> None:
+        first = self.call()
+        self.assertFalse(first["cached"])
+        changed = interpretation_payload()
+        changed["graphs"][0]["payload"]["metadata"]["confidence"] = "medium"
+        publish_interpretation_fixture(self.capture_root, payload=changed)
+        publish_interpretation(self.asset_dir, budget=32_000)
+
+        with self.assertRaises(McpExecutionError) as raised:
+            self.call()
+
+        self.assertEqual(raised.exception.code, "EVIDENCE_REVISION_CHANGED")
+        self.assertEqual(self.blueprint.context_calls, 1)
+        self.assertEqual(
+            self.store.load_session(self.context["taskId"])["phase"], "BLOCKED"
+        )
+
+    def test_research_refuses_a_third_distinct_target_graph(self) -> None:
+        graph_refs = [
+            item["ref"]
+            for item in self.blueprint.get_task_authority(
+                asset="InterpretationFixture"
+            )["graphTargets"]
+        ]
+        self.assertGreaterEqual(len(graph_refs), 3)
+        self.call(question="first graph", graph_ref=graph_refs[0])
+        self.call(question="second graph", graph_ref=graph_refs[1])
+
+        with self.assertRaises(McpExecutionError) as raised:
+            self.call(question="third graph", graph_ref=graph_refs[2])
+
+        self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+        saved = self.store.load_context(self.context["taskId"])
+        self.assertEqual(len(saved["graphTargets"]), 2)
 
 
 if __name__ == "__main__":

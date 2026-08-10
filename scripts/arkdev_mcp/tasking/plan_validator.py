@@ -21,10 +21,13 @@ from .plan_contracts import (
 
 
 _PLAN_NODE_ID = re.compile(r"^plan-node://[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_PLAN_ID = re.compile(r"^patch-plan://[0-9a-f]{32}$")
 _OPERATION_ID = re.compile(r"^op://[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CHECKPOINT_ID = re.compile(
     r"^checkpoint://[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 )
+_QUESTION_ID = re.compile(r"^question://[0-9a-f]{24}$")
+_MISSING = object()
 _NODE_SIGNATURE_KEYS = frozenset(
     {
         "nodeFamily",
@@ -101,8 +104,12 @@ class PlanValidator:
 
         if plan.get("schema") != PATCH_PLAN_SCHEMA:
             add_error("SCHEMA_INVALID", "Patch Plan schema is invalid.")
+        if _PLAN_ID.fullmatch(str(plan.get("planId") or "")) is None:
+            add_error("PLAN_IDENTITY_INVALID", "Patch Plan ID is invalid.")
         if plan.get("taskId") != context.get("taskId"):
             add_error("TASK_IDENTITY_MISMATCH", "Patch Plan task identity is invalid.")
+        if plan.get("status") not in {"DRAFT", "CONFIRMED"}:
+            add_error("PLAN_STATUS_INVALID", "Patch Plan status is invalid.")
 
         graph_scope = [str(item.get("ref") or "") for item in context["graphTargets"]]
         primary = context["primaryAsset"]
@@ -141,6 +148,20 @@ class PlanValidator:
             add_error("PLAN_OPERATION_LIMIT_EXCEEDED", "Patch Plan exceeds 128 operations.")
         if len(checkpoints) > MAX_PLAN_CHECKPOINTS:
             add_error("PLAN_CHECKPOINT_LIMIT_EXCEEDED", "Patch Plan exceeds 32 checkpoints.")
+        if len(blockers) > 20:
+            add_error("PLAN_BLOCKER_LIMIT_EXCEEDED", "Patch Plan exceeds 20 blockers.")
+        for blocker in blockers:
+            if not isinstance(blocker, Mapping):
+                add_error("BLOCKER_INVALID", "A blocking question is not an object.")
+                continue
+            question_id = str(blocker.get("questionId") or "")
+            text = str(blocker.get("text") or "")
+            if (
+                _QUESTION_ID.fullmatch(question_id) is None
+                or not text
+                or len(text) > 1000
+            ):
+                add_error("BLOCKER_INVALID", "A blocking question is invalid.", question_id)
 
         checkpoint_ids: set[str] = set()
         for checkpoint in checkpoints:
@@ -153,6 +174,13 @@ class PlanValidator:
             elif checkpoint_id in checkpoint_ids:
                 add_error("CHECKPOINT_DUPLICATE", "Checkpoint ID is duplicated.", checkpoint_id)
             checkpoint_ids.add(checkpoint_id)
+            description = str(checkpoint.get("description") or "")
+            if not description or len(description) > 1000:
+                add_error(
+                    "CHECKPOINT_INVALID",
+                    "Checkpoint description is invalid.",
+                    checkpoint_id,
+                )
 
         existing_nodes: dict[str, dict[str, object]] = {}
         proposed_nodes: dict[str, dict[str, object]] = {}
@@ -207,6 +235,14 @@ class PlanValidator:
                         str(pin.get("ref") or ""): dict(pin)
                         for pin in current.get("pins", [])
                     },
+                    "edges": frozenset(
+                        (
+                            str(edge.get("sourcePinRef") or ""),
+                            str(edge.get("targetPinRef") or ""),
+                        )
+                        for edge in current.get("edges", [])
+                        if edge.get("sourcePinRef") and edge.get("targetPinRef")
+                    ),
                     "graphRef": graph_ref,
                 }
             else:
@@ -256,11 +292,19 @@ class PlanValidator:
             else:
                 dependencies[operation_id] = [str(item) for item in raw_dependencies]
             checkpoint = str(operation.get("checkpoint") or "")
-            if checkpoint and checkpoint not in checkpoint_ids:
+            if not checkpoint or checkpoint not in checkpoint_ids:
                 add_error("CHECKPOINT_NOT_FOUND", "Operation checkpoint was not declared.", operation_id)
             for required in ("preconditions", "payload", "postconditions"):
                 if required not in operation:
                     add_error("OPERATION_FIELD_MISSING", f"Operation is missing {required}.", operation_id)
+            for sequence_field in ("preconditions", "postconditions"):
+                value = operation.get(sequence_field)
+                if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+                    add_error(
+                        "OPERATION_FIELD_INVALID",
+                        f"Operation {sequence_field} must be an array.",
+                        operation_id,
+                    )
 
             required_capability = OPERATION_CAPABILITY.get(kind)
             if required_capability and required_capability not in capability_names:
@@ -271,6 +315,7 @@ class PlanValidator:
                 )
             self._validate_operation(
                 operation,
+                graph_ref=graph_ref,
                 existing_nodes=existing_nodes,
                 proposed_nodes=proposed_nodes,
                 add_error=add_error,
@@ -313,7 +358,12 @@ class PlanValidator:
             "executionReady": False,
             "reason": "EDITOR_BRIDGE_NOT_INSTALLED",
             "semanticDigest": str(plan.get("semanticDigest") or ""),
-            "humanSummary": self.human_summary(plan, valid=valid, confirmable=confirmable),
+            "humanSummary": self.human_summary(
+                plan,
+                goal=str(context.get("goal") or ""),
+                valid=valid,
+                confirmable=confirmable,
+            ),
         }
         assert_path_free(result)
         return result
@@ -389,6 +439,7 @@ class PlanValidator:
         self,
         operation: Mapping[str, object],
         *,
+        graph_ref: str,
         existing_nodes: Mapping[str, dict[str, object]],
         proposed_nodes: Mapping[str, dict[str, object]],
         add_error: object,
@@ -399,15 +450,56 @@ class PlanValidator:
         if not isinstance(payload, Mapping):
             add_error("OPERATION_PAYLOAD_INVALID", "Operation payload must be an object.", operation_id)
             payload = {}
+        preconditions = operation.get("preconditions")
+        if isinstance(preconditions, (str, bytes)) or not isinstance(
+            preconditions, Sequence
+        ):
+            preconditions = ()
         if kind == "CREATE_NODE":
             local_id = str(payload.get("localPlanNodeId") or "")
             if local_id not in proposed_nodes:
                 add_error("PROPOSED_NODE_NOT_FOUND", "CREATE_NODE target was not declared.", operation_id)
+            self._validate_operation_graph(
+                local_id,
+                graph_ref,
+                operation_id,
+                existing_nodes,
+                proposed_nodes,
+                add_error,
+            )
         elif kind == "DELETE_NODE":
             node_ref = str(payload.get("nodeRef") or operation.get("nodeRef") or "")
             if node_ref not in existing_nodes:
                 add_error("EXISTING_NODE_REF_INVALID", "DELETE_NODE requires an exact existing nodeRef.", operation_id)
+            self._validate_operation_graph(
+                node_ref,
+                graph_ref,
+                operation_id,
+                existing_nodes,
+                proposed_nodes,
+                add_error,
+            )
+            if not self._contains_exact(preconditions, node_ref):
+                add_error(
+                    "DELETE_PRECONDITION_INVALID",
+                    "DELETE_NODE preconditions must contain its current exact nodeRef.",
+                    operation_id,
+                )
         elif kind in {"CONNECT", "DISCONNECT"}:
+            for endpoint in (operation.get("from"), operation.get("to")):
+                identity = (
+                    str(endpoint.get("node") or "")
+                    if isinstance(endpoint, Mapping)
+                    else ""
+                )
+                self._validate_operation_graph(
+                    identity,
+                    graph_ref,
+                    operation_id,
+                    existing_nodes,
+                    proposed_nodes,
+                    add_error,
+                )
             from_direction = self._validate_endpoint(
                 operation.get("from"),
                 role="from",
@@ -432,30 +524,267 @@ class PlanValidator:
                     "CONNECT/DISCONNECT endpoints must be OUTPUT to INPUT.",
                     operation_id,
                 )
+            if kind == "DISCONNECT":
+                source_pin_ref = self._endpoint_pin_ref(operation.get("from"))
+                target_pin_ref = self._endpoint_pin_ref(operation.get("to"))
+                if (
+                    not source_pin_ref
+                    or not target_pin_ref
+                    or not self._contains_exact(preconditions, source_pin_ref)
+                    or not self._contains_exact(preconditions, target_pin_ref)
+                    or not self._edge_exists(
+                        existing_nodes,
+                        source_pin_ref,
+                        target_pin_ref,
+                    )
+                ):
+                    add_error(
+                        "DISCONNECT_PRECONDITION_INVALID",
+                        "DISCONNECT requires an exact current Evidence edge precondition.",
+                        operation_id,
+                    )
         elif kind == "SET_DEFAULT":
             node_ref = str(payload.get("nodeRef") or "")
             local_id = str(payload.get("localPlanNodeId") or "")
-            if bool(node_ref) == bool(local_id) or "newValue" not in payload:
+            identity = node_ref or local_id
+            self._validate_operation_graph(
+                identity,
+                graph_ref,
+                operation_id,
+                existing_nodes,
+                proposed_nodes,
+                add_error,
+            )
+            if (
+                bool(node_ref) == bool(local_id)
+                or "newValue" not in payload
+                or not str(payload.get("valueEncoding") or "")
+            ):
                 add_error("SET_DEFAULT_INVALID", "SET_DEFAULT target or newValue is invalid.", operation_id)
             elif node_ref:
                 pin_ref = str(payload.get("pinRef") or "")
                 node = existing_nodes.get(node_ref)
-                if node is None or pin_ref not in node["pins"] or "oldValue" not in payload:
+                pin = node["pins"].get(pin_ref) if node is not None else None
+                old_value = self._default_precondition(
+                    preconditions,
+                    node_ref=node_ref,
+                    pin_ref=pin_ref,
+                )
+                if (
+                    pin is None
+                    or old_value is _MISSING
+                    or old_value != pin.get("default")
+                ):
                     add_error(
                         "SET_DEFAULT_PRECONDITION_INVALID",
-                        "Existing SET_DEFAULT requires exact nodeRef, pinRef, and oldValue.",
+                        "Existing SET_DEFAULT requires the exact current Pin default precondition.",
                         operation_id,
                     )
-            elif local_id not in proposed_nodes or not isinstance(payload.get("pinSignature"), Mapping):
-                add_error("SET_DEFAULT_INVALID", "Proposed SET_DEFAULT target is invalid.", operation_id)
+            elif local_id not in proposed_nodes or not self._proposed_pin_matches(
+                proposed_nodes[local_id],
+                payload.get("pinSignature"),
+            ):
+                add_error(
+                    "SET_DEFAULT_INVALID",
+                    "Proposed SET_DEFAULT target or PinSignature is invalid.",
+                    operation_id,
+                )
         elif kind == "MOVE_NODE":
             identity = str(payload.get("nodeRef") or payload.get("localPlanNodeId") or "")
+            self._validate_operation_graph(
+                identity,
+                graph_ref,
+                operation_id,
+                existing_nodes,
+                proposed_nodes,
+                add_error,
+            )
             if identity not in existing_nodes and identity not in proposed_nodes:
                 add_error("MOVE_NODE_TARGET_INVALID", "MOVE_NODE target is invalid.", operation_id)
             if not isinstance(payload.get("x"), (int, float)) or not isinstance(
                 payload.get("y"), (int, float)
             ):
                 add_error("MOVE_NODE_COORDINATES_INVALID", "MOVE_NODE requires graph-space x/y.", operation_id)
+        elif kind == "ADD_COMMENT":
+            text = str(payload.get("text") or "")
+            if not text or len(text) > 4000:
+                add_error(
+                    "COMMENT_PAYLOAD_INVALID",
+                    "ADD_COMMENT requires bounded non-empty text.",
+                    operation_id,
+                )
+        elif kind == "PRESERVE":
+            node_ref = str(payload.get("nodeRef") or "")
+            pin_ref = str(payload.get("pinRef") or "")
+            if node_ref:
+                self._validate_operation_graph(
+                    node_ref,
+                    graph_ref,
+                    operation_id,
+                    existing_nodes,
+                    proposed_nodes,
+                    add_error,
+                )
+                current = existing_nodes.get(node_ref)
+                if current is None:
+                    add_error(
+                        "PRESERVE_PRECONDITION_INVALID",
+                        "PRESERVE nodeRef is not an exact declared existing node.",
+                        operation_id,
+                    )
+                elif pin_ref and pin_ref not in current["pins"]:
+                    add_error(
+                        "PIN_OWNERSHIP_MISMATCH",
+                        "PRESERVE pinRef does not belong to its nodeRef.",
+                        operation_id,
+                    )
+                if not self._contains_exact(preconditions, node_ref) or (
+                    pin_ref and not self._contains_exact(preconditions, pin_ref)
+                ):
+                    add_error(
+                        "PRESERVE_PRECONDITION_INVALID",
+                        "PRESERVE preconditions must contain its exact Evidence refs.",
+                        operation_id,
+                    )
+            elif operation.get("from") and operation.get("to"):
+                for endpoint in (operation.get("from"), operation.get("to")):
+                    identity = (
+                        str(endpoint.get("node") or "")
+                        if isinstance(endpoint, Mapping)
+                        else ""
+                    )
+                    self._validate_operation_graph(
+                        identity,
+                        graph_ref,
+                        operation_id,
+                        existing_nodes,
+                        proposed_nodes,
+                        add_error,
+                    )
+                self._validate_endpoint(
+                    operation.get("from"),
+                    role="from",
+                    operation_id=operation_id,
+                    existing_nodes=existing_nodes,
+                    proposed_nodes=proposed_nodes,
+                    add_error=add_error,
+                    require_existing=True,
+                )
+                source_pin_ref = self._endpoint_pin_ref(operation.get("from"))
+                target_pin_ref = self._endpoint_pin_ref(operation.get("to"))
+                if (
+                    not self._contains_exact(preconditions, source_pin_ref)
+                    or not self._contains_exact(preconditions, target_pin_ref)
+                    or not self._edge_exists(
+                        existing_nodes,
+                        source_pin_ref,
+                        target_pin_ref,
+                    )
+                ):
+                    add_error(
+                        "PRESERVE_PRECONDITION_INVALID",
+                        "PRESERVE edge preconditions must identify a current exact Evidence edge.",
+                        operation_id,
+                    )
+                self._validate_endpoint(
+                    operation.get("to"),
+                    role="to",
+                    operation_id=operation_id,
+                    existing_nodes=existing_nodes,
+                    proposed_nodes=proposed_nodes,
+                    add_error=add_error,
+                    require_existing=True,
+                )
+            else:
+                add_error(
+                    "PRESERVE_PRECONDITION_INVALID",
+                    "PRESERVE requires an exact node/pin or edge endpoint precondition.",
+                    operation_id,
+                )
+
+    @staticmethod
+    def _validate_operation_graph(
+        identity: str,
+        graph_ref: str,
+        operation_id: str,
+        existing_nodes: Mapping[str, dict[str, object]],
+        proposed_nodes: Mapping[str, dict[str, object]],
+        add_error: object,
+    ) -> None:
+        node = existing_nodes.get(identity) or proposed_nodes.get(identity)
+        if node is not None and node.get("graphRef") != graph_ref:
+            add_error(
+                "GRAPH_SCOPE_INVALID",
+                "Operation node does not belong to its declared graphRef.",
+                operation_id,
+            )
+
+    @staticmethod
+    def _contains_exact(value: object, expected: str) -> bool:
+        if not expected:
+            return False
+        if isinstance(value, Mapping):
+            return any(
+                PlanValidator._contains_exact(item, expected)
+                for item in (*value.keys(), *value.values())
+            )
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            return any(PlanValidator._contains_exact(item, expected) for item in value)
+        return value == expected
+
+    @staticmethod
+    def _endpoint_pin_ref(endpoint: object) -> str:
+        if not isinstance(endpoint, Mapping) or not isinstance(endpoint.get("pin"), Mapping):
+            return ""
+        return str(endpoint["pin"].get("pinRef") or "")
+
+    @staticmethod
+    def _edge_exists(
+        existing_nodes: Mapping[str, dict[str, object]],
+        source_pin_ref: str,
+        target_pin_ref: str,
+    ) -> bool:
+        edge = (source_pin_ref, target_pin_ref)
+        return any(edge in node.get("edges", ()) for node in existing_nodes.values())
+
+    @staticmethod
+    def _default_precondition(
+        preconditions: Sequence[object],
+        *,
+        node_ref: str,
+        pin_ref: str,
+    ) -> object:
+        for item in preconditions:
+            if (
+                isinstance(item, Mapping)
+                and item.get("nodeRef") == node_ref
+                and item.get("pinRef") == pin_ref
+                and "oldValue" in item
+            ):
+                return item["oldValue"]
+        return _MISSING
+
+    @staticmethod
+    def _proposed_pin_matches(
+        proposed_node: Mapping[str, object],
+        pin_signature: object,
+    ) -> bool:
+        if not isinstance(pin_signature, Mapping) or not _PIN_SIGNATURE_KEYS.issubset(
+            pin_signature
+        ):
+            return False
+        signature = proposed_node.get("signature")
+        candidates = (
+            signature.get("pinSignatures", [])
+            if isinstance(signature, Mapping)
+            else []
+        )
+        return sum(
+            1
+            for candidate in candidates
+            if isinstance(candidate, Mapping)
+            and all(candidate.get(key) == pin_signature.get(key) for key in _PIN_SIGNATURE_KEYS)
+        ) == 1
 
     @staticmethod
     def _validate_endpoint(
@@ -558,6 +887,7 @@ class PlanValidator:
     def human_summary(
         plan: Mapping[str, object],
         *,
+        goal: str,
         valid: bool,
         confirmable: bool,
     ) -> str:
@@ -568,17 +898,44 @@ class PlanValidator:
         deletes = [item for item in operations if item.get("kind") == "DELETE_NODE"]
         proposed = [item for item in nodes if item.get("localPlanNodeId")]
         target = plan.get("target") if isinstance(plan.get("target"), Mapping) else {}
+        connection_lines: list[str] = []
+        for operation in connections[:8]:
+            from_endpoint = PlanValidator._summary_endpoint(operation.get("from"))
+            to_endpoint = PlanValidator._summary_endpoint(operation.get("to"))
+            connection_lines.append(
+                f"{operation.get('operationId', '')}: {from_endpoint} -> {to_endpoint}"
+            )
+        if len(connections) > len(connection_lines):
+            connection_lines.append(
+                f"... {len(connections) - len(connection_lines)} additional connections"
+            )
+        connection_summary = "\n".join(connection_lines) or "(none)"
         return (
-            f"目标 Evidence revision: {target.get('evidenceRevisionId', '')}\n"
+            f"目标: {goal}\n"
+            f"Evidence revision: {target.get('evidenceRevisionId', '')}\n"
             f"Target graphs: {len(target.get('graphRefs', []))}\n"
             f"新增节点: {len(proposed)}; 删除节点: {len(deletes)}\n"
             f"SET_DEFAULT: {len(defaults)}; 精确 Pin-to-Pin connections: {len(connections)}\n"
+            f"Connections:\n{connection_summary}\n"
             f"Capabilities: {', '.join(str(item) for item in plan.get('capabilityRequirements', []))}\n"
             f"Blockers: {len(plan.get('blockingQuestions', []))}\n"
             f"Status: {plan.get('status', '')}; valid={str(valid).lower()}; confirmable={str(confirmable).lower()}\n"
             "executionReady=false; reason=EDITOR_BRIDGE_NOT_INSTALLED\n"
             "Pin type compatibility is not validated."
         )
+
+    @staticmethod
+    def _summary_endpoint(endpoint: object) -> str:
+        if not isinstance(endpoint, Mapping) or not isinstance(endpoint.get("pin"), Mapping):
+            return "<invalid>"
+        pin = endpoint["pin"]
+        pin_identity = str(pin.get("pinRef") or "")
+        if not pin_identity:
+            pin_identity = (
+                f"{pin.get('name', '')}/{pin.get('direction', '')}/"
+                f"{pin.get('ordinal', '')}"
+            )
+        return f"{endpoint.get('node', '')}::{pin_identity}"
 
 
 __all__ = ["PlanValidator", "plan_semantic_digest"]

@@ -1,4 +1,4 @@
-"""Stable public contracts shared by the Phase 1 MCP adapters."""
+"""Stable public contracts shared by the ARK Dev MCP adapters."""
 
 from __future__ import annotations
 
@@ -15,6 +15,12 @@ TOOL_NAMES = (
     "blueprint_list_assets",
     "blueprint_get_context",
     "blueprint_get_node",
+    "blueprint_task_create",
+    "blueprint_task_resume",
+    "blueprint_task_research",
+    "blueprint_patch_plan_draft",
+    "blueprint_patch_plan_validate",
+    "blueprint_patch_plan_confirm",
 )
 ERROR_CODES = frozenset(
     {

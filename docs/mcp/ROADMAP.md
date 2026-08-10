@@ -2,9 +2,9 @@
 
 本文件只记录后续方向，不授权或实现任何下一阶段能力。
 
-## Phase 2：Task Context + Patch Plan
+## Phase 2：Task Context + Patch Plan（当前）
 
-显式 task handle、resume、bounded graph slice、draft/validate patch plan。不得依赖长对话隐式状态。
+显式 task handle、resume、revision-bound bounded graph slice cache，以及 exact Node/Pin draft/validate/explicit-confirm Patch Plan。CONFIRMED 仍为本地 metadata，`executionReady=false`。
 
 ## Phase 3：Read-only Editor Bridge
 
@@ -18,4 +18,4 @@
 
 视觉仅作为节点外观模板、Computer Use fallback 或人类展示，不取代编辑器内部权威状态。
 
-Phase 1 明确不包含以上内容，也不包含真实 DevKit plugin、Named Pipe、Graph mutation、HTTP/SSE/OAuth、远程服务或 portable runtime 内置 MCP。
+Phase 2 明确不包含 Phase 3 及之后内容，也不包含真实 DevKit plugin、Named Pipe、Graph mutation、HTTP/SSE/OAuth、远程服务或 portable runtime 内置 MCP。

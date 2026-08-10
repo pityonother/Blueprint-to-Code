@@ -16,11 +16,18 @@ from .canonical import canonical_json
 _TASK_ID = re.compile(r"^task://(?P<opaque>[0-9a-f]{32})$")
 _PLAN_ID = re.compile(r"^patch-plan://(?P<opaque>[0-9a-f]{32})$")
 _SIGNATURE = re.compile(r"^[0-9a-f]{64}$")
+_OPAQUE = re.compile(r"^[0-9a-f]{32}$")
+_MAX_TASK_DIRECTORIES = 1024
 
 
 class TaskStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
+        if self.root.name != ".blueprint-tasks":
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "Task metadata root must be a dedicated .blueprint-tasks directory.",
+            )
 
     @staticmethod
     def task_opaque_id(task_id: str) -> str:
@@ -136,6 +143,40 @@ class TaskStore:
         opaque = self.plan_opaque_id(plan_id)
         return self._read_json(
             self._task_dir(task_id) / "plans" / f"{opaque}.json",
+            code="PATCH_PLAN_NOT_FOUND",
+            message="Blueprint Patch Plan metadata was not found.",
+        )
+
+    def find_plan(self, plan_id: str) -> tuple[str, dict[str, object]]:
+        opaque = self.plan_opaque_id(plan_id)
+        matches: list[tuple[str, Path]] = []
+        scanned = 0
+        if self.root.is_dir():
+            for task_dir in sorted(self.root.iterdir(), key=lambda item: item.name):
+                if not task_dir.is_dir() or _OPAQUE.fullmatch(task_dir.name) is None:
+                    continue
+                scanned += 1
+                if scanned > _MAX_TASK_DIRECTORIES:
+                    raise McpExecutionError(
+                        "RESULT_BUDGET_EXCEEDED",
+                        "Local Patch Plan lookup exceeded its bounded Task directory budget.",
+                    )
+                plan_path = task_dir / "plans" / f"{opaque}.json"
+                if plan_path.is_file():
+                    matches.append((f"task://{task_dir.name}", plan_path))
+        if not matches:
+            raise McpExecutionError(
+                "PATCH_PLAN_NOT_FOUND",
+                "Blueprint Patch Plan metadata was not found.",
+            )
+        if len(matches) != 1:
+            raise McpExecutionError(
+                "INTERNAL_CONTRACT_ERROR",
+                "Blueprint Patch Plan handle is not unique in local metadata.",
+            )
+        task_id, path = matches[0]
+        return task_id, self._read_json(
+            path,
             code="PATCH_PLAN_NOT_FOUND",
             message="Blueprint Patch Plan metadata was not found.",
         )

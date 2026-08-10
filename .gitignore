@@ -13,6 +13,7 @@ __pycache__/
 *$py.class
 .claude/
 /.runtime/arkdev-mcp/
+/.blueprint-tasks/
 
 # Generated Blueprint captures and reports
 captures/

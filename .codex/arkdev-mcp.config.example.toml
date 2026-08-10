@@ -17,5 +17,11 @@ enabled_tools = [
   "blueprint_list_assets",
   "blueprint_get_context",
   "blueprint_get_node",
+  "blueprint_task_create",
+  "blueprint_task_resume",
+  "blueprint_task_research",
+  "blueprint_patch_plan_draft",
+  "blueprint_patch_plan_validate",
+  "blueprint_patch_plan_confirm",
 ]
 default_tools_approval_mode = "auto"

@@ -116,10 +116,17 @@ class PlanService:
         assert_path_free(result)
         return result
 
-    def validate(self, task_id: str, plan_id: str) -> dict[str, object]:
+    def validate(
+        self,
+        task_id: str,
+        plan_id: str,
+        *,
+        persist_verification: bool = True,
+    ) -> dict[str, object]:
         context, _session = self.tasks.verified_task(
             task_id,
             allowed_phases={"PLAN_DRAFT", "PLAN_CONFIRMED"},
+            persist_verification=persist_verification,
         )
         plan = self.store.load_plan(task_id, plan_id)
         if plan.get("taskId") != task_id or plan.get("planId") != plan_id:

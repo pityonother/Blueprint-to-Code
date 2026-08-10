@@ -1,13 +1,13 @@
 # Deferred Follow-ups
 
-以下项目有意延期，不属于 Phase 1 修复范围：
+以下项目有意延期，不属于 Phase 2 范围：
 
-- Task Context / Task Session 与显式 task handle。
-- Blueprint Patch Plan、验证器、Patch Executor、批准/回滚 receipt。
-- 真实 ARK DevKit read-only Editor Bridge 与任何 mutation capability。
+- 真实 ARK DevKit read-only Editor Bridge、build fingerprint、active graph/selection/positions/dirty/compile state。
+- Patch Executor、Graph Diff 执行、compile/save、rollback receipt 与 runtime correctness 验证。
 - HTTP/SSE transport、OAuth、远程服务和 plugin packaging。
 - portable runtime 内置 MCP 依赖。
 - Computer Use、截图识别、视觉模板和蓝图施工图。
-- 更丰富的 Resource/Prompt 体验；Phase 1 数量保持冻结。
+- `blueprint_service.py` 拆分与 query planner 优化；Phase 2 有意只复用现有领域函数。
+- Pin type compatibility、`TryCreateConnection` 与当前 DevKit build 的 node creation availability 验证。
 
-任何未来 mutation 工具必须使用新名称和独立权限边界，不能改变本轮五个只读工具的语义。
+任何未来 mutation 工具必须使用新名称、独立审批和可验证 rollback，不能改变五个 Evidence 只读工具或六个本地 metadata 工具的语义。

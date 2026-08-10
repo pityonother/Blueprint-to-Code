@@ -148,7 +148,7 @@ jobs:
       - name: Run full Python suite
         run: python -m pytest -q
 
-      - name: Run focused read-only ARK Dev MCP contracts
+      - name: Run focused ARK Dev MCP task and plan contracts
         run: python -m pytest -q tests/test_arkdev_mcp*.py
 
       - name: Run targeted Harvest Python suite

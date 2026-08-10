@@ -1,4 +1,4 @@
-"""Pydantic output contracts advertised by the Phase 1 MCP tools."""
+"""Pydantic output contracts advertised by the ARK Dev MCP tools."""
 
 from __future__ import annotations
 
@@ -27,6 +27,17 @@ class ErrorOutput(PublicOutput):
         "RESULT_BUDGET_EXCEEDED",
         "EDITOR_BRIDGE_NOT_INSTALLED",
         "EDITOR_BRIDGE_UNAVAILABLE",
+        "TASK_NOT_FOUND",
+        "TASK_PHASE_INVALID",
+        "TASK_BLOCKED",
+        "TASK_SLICE_LIMIT_REACHED",
+        "EVIDENCE_REVISION_CHANGED",
+        "PATCH_PLAN_NOT_FOUND",
+        "PATCH_PLAN_INVALID",
+        "PATCH_PLAN_LIMIT_EXCEEDED",
+        "PATCH_PLAN_NOT_CONFIRMABLE",
+        "PATCH_PLAN_DIGEST_MISMATCH",
+        "PLAN_CONFIRMATION_REQUIRED",
         "INTERNAL_CONTRACT_ERROR",
     ]
     message: str
@@ -39,7 +50,9 @@ class StatusCapabilities(PublicOutput):
     blueprintInterpretation: bool
     boundedGraphContext: bool
     editorBridge: bool
-    patchPlan: Literal[False]
+    taskContext: bool
+    patchPlan: bool
+    localTaskMetadataWrite: bool
     mutation: Literal[False]
 
 
@@ -58,6 +71,7 @@ class StatusOutput(PublicOutput):
     platform: Literal["windows-x64"]
     transport: Literal["stdio"]
     readOnly: Literal[True]
+    taskMetadataWrite: bool
     capabilities: StatusCapabilities
     editorBridge: StatusEditorBridge
 
@@ -120,6 +134,85 @@ class BlueprintNodeOutput(PublicOutput):
     truncated: bool
 
 
+class TaskContextOutput(PublicOutput):
+    schema_: Literal["blueprint-to-code.task-context/v1"] = Field(alias="schema")
+    taskId: str
+    mode: str
+    goal: str
+    primaryAsset: dict[str, Any]
+    graphTargets: list[dict[str, Any]]
+    readiness: str
+    semanticDigest: str
+
+
+class TaskResumeOutput(PublicOutput):
+    schema_: Literal["blueprint-to-code.task-resume/v1"] = Field(alias="schema")
+    taskId: str
+    phase: str
+    goal: str
+    evidenceIdentity: dict[str, Any]
+    queryLedger: dict[str, Any]
+    plan: dict[str, Any]
+
+
+class GraphSliceOutput(PublicOutput):
+    schema_: Literal["blueprint-to-code.graph-slice/v1"] = Field(alias="schema")
+    sliceId: str
+    querySignature: str
+    question: str
+    graphTargets: list[dict[str, Any]]
+    nodes: list[dict[str, Any]]
+    pins: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    cached: bool
+    queryLedger: dict[str, Any]
+    taskReadiness: str
+    semanticDigest: str
+
+
+class PatchPlanOutput(PublicOutput):
+    schema_: Literal["blueprint-to-code.blueprint-patch-plan/v1"] = Field(
+        alias="schema"
+    )
+    planId: str
+    taskId: str
+    status: Literal["DRAFT", "CONFIRMED"]
+    target: dict[str, Any]
+    capabilityRequirements: list[str]
+    nodes: list[dict[str, Any]]
+    operations: list[dict[str, Any]]
+    blockingQuestions: list[dict[str, Any]]
+    semanticDigest: str
+    executionReady: Literal[False]
+
+
+class PatchPlanValidationOutput(PublicOutput):
+    schema_: Literal["blueprint-to-code.patch-plan-validation/v1"] = Field(
+        alias="schema"
+    )
+    taskId: str
+    planId: str
+    valid: bool
+    confirmable: bool
+    errors: list[dict[str, Any]]
+    warnings: list[dict[str, Any]]
+    executionReady: Literal[False]
+    semanticDigest: str
+    humanSummary: str
+
+
+class PatchPlanConfirmationOutput(PublicOutput):
+    schema_: Literal["blueprint-to-code.patch-plan-confirmation/v1"] = Field(
+        alias="schema"
+    )
+    confirmed: Literal[True]
+    planId: str
+    semanticDigest: str
+    capabilityRequirements: list[str]
+    executionReady: Literal[False]
+    nextPhase: Literal["READ_ONLY_EDITOR_BRIDGE"]
+
+
 class StatusToolOutput(RootModel[StatusOutput | ErrorOutput]):
     pass
 
@@ -140,6 +233,34 @@ class NodeToolOutput(RootModel[BlueprintNodeOutput | ErrorOutput]):
     pass
 
 
+class TaskCreateToolOutput(RootModel[TaskContextOutput | ErrorOutput]):
+    pass
+
+
+class TaskResumeToolOutput(RootModel[TaskResumeOutput | ErrorOutput]):
+    pass
+
+
+class TaskResearchToolOutput(RootModel[GraphSliceOutput | ErrorOutput]):
+    pass
+
+
+class PatchPlanDraftToolOutput(RootModel[PatchPlanOutput | ErrorOutput]):
+    pass
+
+
+class PatchPlanValidateToolOutput(
+    RootModel[PatchPlanValidationOutput | ErrorOutput]
+):
+    pass
+
+
+class PatchPlanConfirmToolOutput(
+    RootModel[PatchPlanConfirmationOutput | ErrorOutput]
+):
+    pass
+
+
 __all__ = [
     "AssetListOutput",
     "AssetListToolOutput",
@@ -150,6 +271,12 @@ __all__ = [
     "EditorToolOutput",
     "ErrorOutput",
     "NodeToolOutput",
+    "PatchPlanConfirmToolOutput",
+    "PatchPlanDraftToolOutput",
+    "PatchPlanValidateToolOutput",
     "StatusOutput",
     "StatusToolOutput",
+    "TaskCreateToolOutput",
+    "TaskResearchToolOutput",
+    "TaskResumeToolOutput",
 ]
