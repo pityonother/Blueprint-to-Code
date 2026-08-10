@@ -1,0 +1,21 @@
+[mcp_servers.arkdev_blueprint]
+command = "powershell.exe"
+args = [
+  "-NoProfile",
+  "-ExecutionPolicy",
+  "Bypass",
+  "-File",
+  '<ABS_PROJECT_ROOT>\scripts\run_arkdev_mcp.ps1'
+]
+cwd = '<ABS_PROJECT_ROOT>'
+required = true
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+enabled_tools = [
+  "arkdev_status",
+  "arkdev_editor_state",
+  "blueprint_list_assets",
+  "blueprint_get_context",
+  "blueprint_get_node",
+]
+default_tools_approval_mode = "auto"

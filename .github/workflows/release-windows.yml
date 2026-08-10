@@ -43,6 +43,9 @@ jobs:
           python -m pip install pytest==9.0.3 cryptography==49.0.0
           jsonschema==4.26.0
 
+      - name: Install official MCP Python SDK
+        run: python -m pip install -r requirements-mcp.txt
+
       - name: Verify the exact source archive
         run: |
           python scripts/check_release_content.py --git-ref HEAD
@@ -75,6 +78,9 @@ jobs:
           python -m pytest -q `
             tests/test_blueprint_interpretation_cli.py `
             tests/test_diagnose_blueprint_tool.py
+
+      - name: Smoke test read-only MCP stdio fixture
+        run: python -m pytest -q tests/test_arkdev_mcp_stdio.py
 
       - name: Assert the checkout remained source-clean
         run: |
