@@ -12,6 +12,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .claude/
+/.runtime/arkdev-mcp/
 
 # Generated Blueprint captures and reports
 captures/
