@@ -330,6 +330,12 @@ class PlanValidator:
                         "dependsOn references an unknown operation.",
                         operation_id,
                     )
+        self._validate_proposed_node_creation_closure(
+            operations,
+            proposed_nodes=proposed_nodes,
+            dependencies=dependencies,
+            add_error=add_error,
+        )
         if self._has_cycle(dependencies):
             add_error(
                 "OPERATION_DEPENDENCY_CYCLE",
@@ -434,6 +440,110 @@ class PlanValidator:
                     f"Existing node {signature_key} does not match current Evidence.",
                     node_ref,
                 )
+
+    @classmethod
+    def _validate_proposed_node_creation_closure(
+        cls,
+        operations: Sequence[object],
+        *,
+        proposed_nodes: Mapping[str, dict[str, object]],
+        dependencies: Mapping[str, Sequence[str]],
+        add_error: object,
+    ) -> None:
+        create_operations: dict[str, list[str]] = {
+            local_id: [] for local_id in proposed_nodes
+        }
+        for operation in operations:
+            if not isinstance(operation, Mapping):
+                continue
+            payload = operation.get("payload")
+            if operation.get("kind") != "CREATE_NODE" or not isinstance(
+                payload,
+                Mapping,
+            ):
+                continue
+            local_id = str(payload.get("localPlanNodeId") or "")
+            if local_id in create_operations:
+                create_operations[local_id].append(
+                    str(operation.get("operationId") or "")
+                )
+
+        for local_id, operation_ids in create_operations.items():
+            if not operation_ids:
+                add_error(
+                    "PROPOSED_NODE_CREATE_MISSING",
+                    "Every proposed node requires exactly one CREATE_NODE operation.",
+                    local_id,
+                )
+            elif len(operation_ids) > 1:
+                add_error(
+                    "PROPOSED_NODE_CREATE_DUPLICATE",
+                    "A proposed node has more than one CREATE_NODE operation.",
+                    local_id,
+                )
+
+        for operation in operations:
+            if not isinstance(operation, Mapping):
+                continue
+            operation_id = str(operation.get("operationId") or "")
+            referenced = cls._referenced_proposed_nodes(
+                operation,
+                proposed_nodes,
+            )
+            if not referenced:
+                continue
+            dependency_closure = cls._dependency_closure(
+                operation_id,
+                dependencies,
+            )
+            for local_id in sorted(referenced):
+                create_ids = create_operations.get(local_id, [])
+                if len(create_ids) != 1:
+                    continue
+                create_id = create_ids[0]
+                if operation_id == create_id:
+                    continue
+                if create_id not in dependency_closure:
+                    add_error(
+                        "PROPOSED_NODE_CREATE_DEPENDENCY_MISSING",
+                        "An operation references a proposed node before its CREATE_NODE dependency.",
+                        operation_id,
+                    )
+
+    @staticmethod
+    def _referenced_proposed_nodes(
+        operation: Mapping[str, object],
+        proposed_nodes: Mapping[str, dict[str, object]],
+    ) -> set[str]:
+        kind = str(operation.get("kind") or "")
+        candidates: set[str] = set()
+        payload = operation.get("payload")
+        if not isinstance(payload, Mapping):
+            payload = {}
+        if kind == "CREATE_NODE":
+            candidates.add(str(payload.get("localPlanNodeId") or ""))
+        elif kind in {"CONNECT", "DISCONNECT"}:
+            for endpoint in (operation.get("from"), operation.get("to")):
+                if isinstance(endpoint, Mapping):
+                    candidates.add(str(endpoint.get("node") or ""))
+        elif kind in {"SET_DEFAULT", "MOVE_NODE"}:
+            candidates.add(str(payload.get("localPlanNodeId") or ""))
+        return {candidate for candidate in candidates if candidate in proposed_nodes}
+
+    @staticmethod
+    def _dependency_closure(
+        operation_id: str,
+        dependencies: Mapping[str, Sequence[str]],
+    ) -> set[str]:
+        closure: set[str] = set()
+        pending = list(dependencies.get(operation_id, ()))
+        while pending:
+            dependency = pending.pop()
+            if dependency in closure:
+                continue
+            closure.add(dependency)
+            pending.extend(dependencies.get(dependency, ()))
+        return closure
 
     def _validate_operation(
         self,
@@ -590,7 +700,9 @@ class PlanValidator:
                     operation_id,
                 )
         elif kind == "MOVE_NODE":
-            identity = str(payload.get("nodeRef") or payload.get("localPlanNodeId") or "")
+            node_ref = str(payload.get("nodeRef") or "")
+            local_id = str(payload.get("localPlanNodeId") or "")
+            identity = node_ref or local_id
             self._validate_operation_graph(
                 identity,
                 graph_ref,
@@ -599,7 +711,13 @@ class PlanValidator:
                 proposed_nodes,
                 add_error,
             )
-            if identity not in existing_nodes and identity not in proposed_nodes:
+            if bool(node_ref) == bool(local_id):
+                add_error(
+                    "MOVE_NODE_TARGET_INVALID",
+                    "MOVE_NODE requires exactly one nodeRef or localPlanNodeId.",
+                    operation_id,
+                )
+            elif identity not in existing_nodes and identity not in proposed_nodes:
                 add_error("MOVE_NODE_TARGET_INVALID", "MOVE_NODE target is invalid.", operation_id)
             if not isinstance(payload.get("x"), (int, float)) or not isinstance(
                 payload.get("y"), (int, float)

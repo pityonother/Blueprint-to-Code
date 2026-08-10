@@ -58,7 +58,23 @@
       "items": { "type": "object" }
     },
     "confirmedFacts": { "type": "array", "items": { "type": "object" } },
-    "assumptions": { "type": "array", "items": { "type": "object" } },
+    "assumptions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assumptionId", "type", "text"],
+        "properties": {
+          "assumptionId": {
+            "type": "string",
+            "pattern": "^assumption://[0-9a-f]{24}$"
+          },
+          "type": { "const": "ASSUMPTION" },
+          "text": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
     "blockingQuestions": {
       "type": "array",
       "maxItems": 20,

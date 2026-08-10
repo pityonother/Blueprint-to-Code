@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ if str(SCRIPTS) not in sys.path:
 from arkdev_mcp.blueprint_service import BlueprintService  # noqa: E402
 from arkdev_mcp.contracts import McpExecutionError  # noqa: E402
 from arkdev_mcp.tasking.plan_service import PlanService  # noqa: E402
+from arkdev_mcp.tasking.plan_validator import plan_semantic_digest  # noqa: E402
 from arkdev_mcp.tasking.renderer import render_patch_plan  # noqa: E402
 from arkdev_mcp.tasking.research_service import ResearchService  # noqa: E402
 from arkdev_mcp.tasking.store import TaskStore  # noqa: E402
@@ -258,6 +260,37 @@ class PatchPlanTests(unittest.TestCase):
         arguments.update(overrides)
         return self.plans.draft(**arguments)
 
+    def validate_input(self, arguments: dict[str, object]) -> dict[str, object]:
+        context = self.store.load_context(self.task["taskId"])
+        primary = context["primaryAsset"]
+        plan: dict[str, object] = {
+            "schema": "blueprint-to-code.blueprint-patch-plan/v1",
+            "planId": "patch-plan://" + "0" * 32,
+            "taskId": self.task["taskId"],
+            "status": "DRAFT",
+            "target": {
+                "assetId": primary["assetId"],
+                "objectPath": primary["objectPath"],
+                "evidenceRevisionId": primary["evidenceRevisionId"],
+                "evidenceManifestSha256": primary["evidenceManifestSha256"],
+                "graphRefs": [
+                    str(item.get("ref") or "")
+                    for item in context["graphTargets"]
+                ],
+            },
+            "capabilityRequirements": copy.deepcopy(
+                arguments["capability_requirements"]
+            ),
+            "nodes": copy.deepcopy(arguments["nodes"]),
+            "operations": copy.deepcopy(arguments["operations"]),
+            "checkpoints": copy.deepcopy(arguments["checkpoints"]),
+            "blockingQuestions": [],
+            "createdAt": "2026-08-11T00:00:00Z",
+            "updatedAt": "2026-08-11T00:00:00Z",
+        }
+        plan["semanticDigest"] = plan_semantic_digest(plan)
+        return self.plans.validator.validate(context, plan)
+
     def test_valid_draft_is_exact_revision_bound_and_not_execution_ready(self) -> None:
         draft = self.draft()
         validation = self.plans.validate(self.task["taskId"], draft["planId"])
@@ -275,6 +308,198 @@ class PatchPlanTests(unittest.TestCase):
         self.assertIn("Connections:", validation["humanSummary"])
         encoded = json.dumps(validation, ensure_ascii=False)
         self.assertNotIn(str(self.root), encoded)
+
+    def test_every_proposed_node_requires_exactly_one_create_operation(self) -> None:
+        missing = self.plan_input()
+        missing["operations"] = missing["operations"][1:]
+        missing["operations"][0]["dependsOn"] = []
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**missing)
+        self.assertIn(
+            "PROPOSED_NODE_CREATE_MISSING",
+            raised.exception.details["errorCodes"],
+        )
+
+        duplicate = self.plan_input()
+        second_create = copy.deepcopy(duplicate["operations"][0])
+        second_create["operationId"] = "op://create-branch-again"
+        duplicate["operations"].insert(1, second_create)
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**duplicate)
+        self.assertIn(
+            "PROPOSED_NODE_CREATE_DUPLICATE",
+            raised.exception.details["errorCodes"],
+        )
+
+    def test_create_node_graph_must_match_proposed_node_graph(self) -> None:
+        graph_refs = [
+            item["ref"]
+            for item in self.blueprint.get_task_authority(
+                asset="InterpretationFixture"
+            )["graphTargets"]
+        ]
+        second_graph = next(ref for ref in graph_refs if ref != self.graph_ref)
+        self.research.research(
+            task_id=self.task["taskId"],
+            question="Inspect a second exact graph",
+            graph_ref=second_graph,
+        )
+        arguments = self.plan_input()
+        arguments["operations"][0]["graphRef"] = second_graph
+
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**arguments)
+
+        self.assertIn("GRAPH_SCOPE_INVALID", raised.exception.details["errorCodes"])
+
+    def test_proposed_node_references_require_create_dependency_closure(self) -> None:
+        arguments = self.plan_input()
+        arguments["operations"][1]["dependsOn"] = []
+
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**arguments)
+
+        self.assertIn(
+            "PROPOSED_NODE_CREATE_DEPENDENCY_MISSING",
+            raised.exception.details["errorCodes"],
+        )
+
+    def test_transitive_create_dependency_is_accepted(self) -> None:
+        arguments = self.plan_input()
+        create = arguments["operations"][0]
+        connect = arguments["operations"][1]
+        helper = {
+            "operationId": "op://preserve-after-create",
+            "kind": "PRESERVE",
+            "graphRef": self.graph_ref,
+            "dependsOn": [create["operationId"]],
+            "preconditions": [{"nodeRef": self.event["ref"]}],
+            "payload": {"nodeRef": self.event["ref"]},
+            "postconditions": [{"unchanged": True}],
+            "checkpoint": "checkpoint://graph-structure",
+        }
+        connect["dependsOn"] = [helper["operationId"]]
+        arguments["operations"] = [create, helper, connect]
+
+        draft = self.plans.draft(**arguments)
+
+        self.assertTrue(draft["valid"])
+
+    def test_set_default_and_move_require_proposed_create_dependency(self) -> None:
+        for kind, payload, capability in (
+            (
+                "SET_DEFAULT",
+                {
+                    "localPlanNodeId": "plan-node://branch-guard",
+                    "pinSignature": copy.deepcopy(
+                        self.plan_input()["nodes"][2]["signature"][
+                            "pinSignatures"
+                        ][0]
+                    ),
+                    "newValue": "true",
+                    "valueEncoding": "STRING",
+                },
+                "SET_PIN_DEFAULT",
+            ),
+            (
+                "MOVE_NODE",
+                {
+                    "localPlanNodeId": "plan-node://branch-guard",
+                    "x": 100,
+                    "y": 200,
+                },
+                "MOVE_NODE",
+            ),
+        ):
+            with self.subTest(kind=kind):
+                arguments = self.plan_input()
+                operation = {
+                    "operationId": f"op://{kind.casefold().replace('_', '-')}",
+                    "kind": kind,
+                    "graphRef": self.graph_ref,
+                    "dependsOn": [],
+                    "preconditions": [],
+                    "payload": payload,
+                    "postconditions": [],
+                    "checkpoint": "checkpoint://graph-structure",
+                }
+                arguments["operations"] = [arguments["operations"][0], operation]
+                arguments["capability_requirements"] = ["CREATE_NODE", capability]
+
+                with self.assertRaises(McpExecutionError) as raised:
+                    self.plans.draft(**arguments)
+
+                self.assertIn(
+                    "PROPOSED_NODE_CREATE_DEPENDENCY_MISSING",
+                    raised.exception.details["errorCodes"],
+                )
+
+    def test_move_node_requires_exactly_one_target(self) -> None:
+        arguments = self.plan_input()
+        move = {
+            "operationId": "op://move-ambiguous",
+            "kind": "MOVE_NODE",
+            "graphRef": self.graph_ref,
+            "dependsOn": ["op://create-branch"],
+            "preconditions": [],
+            "payload": {
+                "nodeRef": self.event["ref"],
+                "localPlanNodeId": "plan-node://branch-guard",
+                "x": 100,
+                "y": 200,
+            },
+            "postconditions": [],
+            "checkpoint": "checkpoint://graph-structure",
+        }
+        arguments["operations"] = [arguments["operations"][0], move]
+        arguments["capability_requirements"] = ["CREATE_NODE", "MOVE_NODE"]
+
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.draft(**arguments)
+
+        self.assertIn(
+            "MOVE_NODE_TARGET_INVALID",
+            raised.exception.details["errorCodes"],
+        )
+
+    def test_two_uncreated_proposed_nodes_cannot_form_confirmable_connection(self) -> None:
+        arguments = self.plan_input()
+        first = copy.deepcopy(arguments["nodes"][2])
+        second = copy.deepcopy(first)
+        second["localPlanNodeId"] = "plan-node://branch-guard-second"
+        connect = copy.deepcopy(arguments["operations"][1])
+        connect["operationId"] = "op://connect-uncreated-nodes"
+        connect["dependsOn"] = []
+        connect["from"] = {
+            "node": first["localPlanNodeId"],
+            "pin": {
+                "pinRef": "",
+                "name": "then",
+                "direction": "OUTPUT",
+                "ordinal": 1,
+            },
+        }
+        connect["to"] = {
+            "node": second["localPlanNodeId"],
+            "pin": {
+                "pinRef": "",
+                "name": "execute",
+                "direction": "INPUT",
+                "ordinal": 0,
+            },
+        }
+        arguments["nodes"] = [first, second]
+        arguments["operations"] = [connect]
+        arguments["capability_requirements"] = ["CREATE_CONNECTION"]
+
+        validation = self.validate_input(arguments)
+
+        self.assertFalse(validation["valid"])
+        self.assertFalse(validation["confirmable"])
+        self.assertIn(
+            "PROPOSED_NODE_CREATE_MISSING",
+            [item["code"] for item in validation["errors"]],
+        )
 
     def test_validator_rejects_wrong_pin_ownership_direction_and_dependency_cycle(self) -> None:
         cases: list[tuple[str, dict[str, object]]] = []
@@ -538,6 +763,32 @@ class PatchPlanTests(unittest.TestCase):
         self.assertEqual(confirmed["nextPhase"], "READ_ONLY_EDITOR_BRIDGE")
         self.assertEqual(self.store.load_session(self.task["taskId"])["phase"], "PLAN_CONFIRMED")
 
+    def test_confirm_revalidates_a_stored_draft_against_create_closure(self) -> None:
+        draft = self.draft()
+        plan = self.store.load_plan(self.task["taskId"], draft["planId"])
+        plan["operations"] = [
+            operation
+            for operation in plan["operations"]
+            if operation.get("kind") != "CREATE_NODE"
+        ]
+        plan["operations"][0]["dependsOn"] = []
+        plan["semanticDigest"] = plan_semantic_digest(plan)
+        self.store.save_plan(self.task["taskId"], draft["planId"], plan)
+
+        with self.assertRaises(McpExecutionError) as raised:
+            self.plans.confirm(
+                task_id=self.task["taskId"],
+                plan_id=draft["planId"],
+                expected_semantic_digest=plan["semanticDigest"],
+                confirm=True,
+            )
+
+        self.assertEqual(raised.exception.code, "PATCH_PLAN_NOT_CONFIRMABLE")
+        self.assertIn(
+            "PROPOSED_NODE_CREATE_MISSING",
+            raised.exception.details["errorCodes"],
+        )
+
     def test_confirm_fails_closed_after_revision_change(self) -> None:
         draft = self.draft()
         changed = interpretation_payload()
@@ -578,6 +829,7 @@ class PatchPlanTests(unittest.TestCase):
                 str(self.store.root),
             ],
             cwd=ROOT,
+            env={**os.environ, "PYTHONUTF8": "1"},
             check=False,
             capture_output=True,
             text=True,

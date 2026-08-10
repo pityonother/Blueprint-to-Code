@@ -85,6 +85,13 @@ class TaskResearchTests(unittest.TestCase):
         arguments.update(overrides)
         return self.research.research(**arguments)
 
+    def metadata_snapshot(self) -> dict[Path, bytes]:
+        task_root = self.store.root / self.context["taskId"].removeprefix("task://")
+        return {
+            path.relative_to(task_root): path.read_bytes()
+            for path in task_root.rglob("*.json")
+        }
+
     def test_identical_signature_hits_cache_without_a_second_context_query(self) -> None:
         first = self.call()
         second = self.call()
@@ -120,17 +127,18 @@ class TaskResearchTests(unittest.TestCase):
         self.assertEqual(len(saved["graphSlices"]), 8)
         self.assertEqual(len(list(self.store.iter_slices(self.context["taskId"]))), 8)
 
-    def test_task_update_tracks_and_resolves_blockers_without_fact_injection(self) -> None:
+    def test_task_update_tracks_resolves_blockers_and_types_assumptions(self) -> None:
         blocked = self.call(
             task_update={
                 "addBlockingQuestions": ["Which restore guard is authoritative?"],
-                "confirmedFacts": [{"text": "caller supplied"}],
+                "addAssumptions": ["The existing restore guard remains authoritative"],
             }
         )
         saved = self.store.load_context(self.context["taskId"])
         question_id = saved["blockingQuestions"][0]["questionId"]
         self.assertEqual(blocked["taskReadiness"], "DISCOVERY")
         self.assertEqual(saved["confirmedFacts"], [])
+        self.assertEqual(saved["assumptions"][0]["type"], "ASSUMPTION")
 
         ready = self.call(
             task_update={"resolveBlockingQuestionIds": [question_id]}
@@ -138,6 +146,60 @@ class TaskResearchTests(unittest.TestCase):
         self.assertTrue(ready["cached"])
         self.assertEqual(ready["taskReadiness"], "READY_TO_PLAN")
         self.assertEqual(self.blueprint.context_calls, 1)
+
+    def test_unknown_blocker_ids_reject_atomically_before_research_side_effects(self) -> None:
+        self.call(
+            task_update={
+                "addBlockingQuestions": ["Which restore guard is authoritative?"]
+            }
+        )
+        saved = self.store.load_context(self.context["taskId"])
+        known_id = saved["blockingQuestions"][0]["questionId"]
+        unknown_id = "question://" + "f" * 24
+
+        for resolve_ids in ([unknown_id], [known_id, unknown_id]):
+            with self.subTest(resolve_ids=resolve_ids):
+                before = self.metadata_snapshot()
+                calls_before = self.blueprint.context_calls
+
+                with self.assertRaises(McpExecutionError) as raised:
+                    self.call(
+                        task_update={"resolveBlockingQuestionIds": resolve_ids}
+                    )
+
+                self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+                self.assertEqual(self.metadata_snapshot(), before)
+                self.assertEqual(self.blueprint.context_calls, calls_before)
+
+    def test_task_update_rejects_unknown_fields_and_confirmed_fact_injection(self) -> None:
+        for update in (
+            {"phase": ["READY_TO_PLAN"]},
+            {"confirmedFacts": ["caller supplied"]},
+        ):
+            with self.subTest(update=update):
+                before = self.metadata_snapshot()
+                calls_before = self.blueprint.context_calls
+
+                with self.assertRaises(McpExecutionError) as raised:
+                    self.call(task_update=update)
+
+                self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+                self.assertEqual(self.metadata_snapshot(), before)
+                self.assertEqual(self.blueprint.context_calls, calls_before)
+
+    def test_path_like_task_update_is_rejected_before_any_side_effect(self) -> None:
+        before = self.metadata_snapshot()
+
+        with self.assertRaises(McpExecutionError) as raised:
+            self.call(
+                task_update={
+                    "addAssumptions": ["../../private/restore-objective"]
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+        self.assertEqual(self.metadata_snapshot(), before)
+        self.assertEqual(self.blueprint.context_calls, 0)
 
     def test_research_is_path_free_and_does_not_mutate_evidence_or_interpretation(self) -> None:
         protected = sorted(path for path in self.asset_dir.rglob("*") if path.is_file())

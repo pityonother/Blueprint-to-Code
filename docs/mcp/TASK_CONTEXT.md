@@ -22,11 +22,15 @@ create 从当前 authoritative Evidence 读取 `assetId`、Unreal `objectPath`�
 - 任一 identity/freshness 改变：写入 `BLOCKED/EVIDENCE_REVISION_CHANGED` 并停止；
 - 不自动 refresh、不复用旧 cache、不 remap 旧 NodeRef。
 
+`EVIDENCE_REVISION_CHANGED`、`EVIDENCE_REVISION_MISMATCH`、`EVIDENCE_STALE`、`EVIDENCE_NOT_FOUND`、`EVIDENCE_NOT_AUTHORITATIVE` 与 `ASSET_NOT_FOUND` 都视为 identity-invalidating。Task/Plan tool 会持久化 `BLOCKED/EVIDENCE_REVISION_CHANGED`，并统一返回 public `EVIDENCE_REVISION_CHANGED`；`details.sourceCode` 保留 path-free 的原始分类。
+
 ## Research cache
 
 Graph Slice signature 绑定 Evidence revision/manifest、规范化 question、graph/seed refs、hop/node/pin/edge/token budgets。同 Task 同 signature 的第二次调用直接读取 stored slice，并增加 `cacheHits`，不会再次调用 `BlueprintService.get_context()`。
 
-每 Task 最多八个不同 slices；第九个返回 `TASK_SLICE_LIMIT_REACHED`，不静默淘汰旧 slice。`taskUpdate` 只能维护 assumptions/questions/unknowns；confirmed facts 只能由带 exact Evidence refs 的 `CONFIRMED` Evidence fact 产生。
+每 Task 最多八个不同 slices；第九个返回 `TASK_SLICE_LIMIT_REACHED`，不静默淘汰旧 slice。`taskUpdate` 只允许 resolve/add blocking questions、add non-blocking unknowns 与 add assumptions；unknown field、caller-supplied confirmed fact、未知 blocker ID 或 machine-local path 会在 research ledger、Evidence query 和 slice/task 写入前原子拒绝。新增 assumption 固定带 `type=ASSUMPTION`；confirmed facts 只能由带 exact Evidence refs 的 `CONFIRMED` Evidence fact 产生。
+
+成功 create 的 public result 额外返回 `phase=DISCOVERY` 与 `nextRecommendedTool=blueprint_task_research`。这两个导航字段不写入 Task Context，也不参与 semantic digest。
 
 ## PLAN_READINESS
 

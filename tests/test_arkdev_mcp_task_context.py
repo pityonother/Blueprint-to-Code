@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +81,11 @@ class TaskContextTests(unittest.TestCase):
         )
         self.assertEqual(context["graphTargets"][0]["ref"], graph_ref)
         self.assertEqual(context["readiness"], "DISCOVERY")
+        self.assertEqual(context["phase"], "DISCOVERY")
+        self.assertEqual(
+            context["nextRecommendedTool"],
+            "blueprint_task_research",
+        )
         self.assertEqual(session["phase"], "DISCOVERY")
         self.assertEqual(session["schema"], "blueprint-to-code.task-session/v1")
         self.assertEqual(len(context["semanticDigest"]), 64)
@@ -87,6 +93,42 @@ class TaskContextTests(unittest.TestCase):
         encoded = json.dumps(context, ensure_ascii=False)
         self.assertNotIn(str(self.store.root), encoded)
         self.assertNotRegex(encoded, r"(?i)(?<![A-Za-z0-9_])[a-z]:[\\/]")
+
+    def test_identity_invalidating_errors_are_normalized_and_persist_blocked(self) -> None:
+        source_codes = (
+            "EVIDENCE_NOT_AUTHORITATIVE",
+            "EVIDENCE_REVISION_MISMATCH",
+            "EVIDENCE_REVISION_CHANGED",
+            "EVIDENCE_STALE",
+            "EVIDENCE_NOT_FOUND",
+            "ASSET_NOT_FOUND",
+        )
+        for source_code in source_codes:
+            with self.subTest(source_code=source_code):
+                context = self.create(goal=f"Verify authority failure {source_code}")
+                with patch.object(
+                    self.blueprint,
+                    "get_task_authority",
+                    side_effect=McpExecutionError(source_code, "authority unavailable"),
+                ):
+                    with self.assertRaises(McpExecutionError) as raised:
+                        self.tasks.resume(context["taskId"])
+
+                self.assertEqual(raised.exception.code, "EVIDENCE_REVISION_CHANGED")
+                self.assertEqual(
+                    raised.exception.details.get("sourceCode"),
+                    source_code,
+                )
+                session = self.store.load_session(context["taskId"])
+                self.assertEqual(session["phase"], "BLOCKED")
+                self.assertEqual(
+                    session["reasonCode"],
+                    "EVIDENCE_REVISION_CHANGED",
+                )
+
+                with self.assertRaises(McpExecutionError) as blocked:
+                    self.tasks.resume(context["taskId"])
+                self.assertEqual(blocked.exception.code, "TASK_BLOCKED")
 
     def test_resume_is_compact_and_rejects_non_opaque_or_traversal_handles(self) -> None:
         context = self.create()

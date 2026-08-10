@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 
 from ..blueprint_service import BlueprintService
@@ -12,6 +13,15 @@ from .canonical import canonical_sha256, semantic_digest
 from .contracts import GRAPH_SLICE_SCHEMA, MAX_GRAPH_SLICES, MAX_GRAPH_TARGETS
 from .store import TaskStore
 from .task_service import TaskService
+
+
+_QUESTION_ID = re.compile(r"^question://[0-9a-f]{24}$")
+_TASK_UPDATE_FIELDS = (
+    "resolveBlockingQuestionIds",
+    "addBlockingQuestions",
+    "addNonBlockingUnknowns",
+    "addAssumptions",
+)
 
 
 class ResearchService:
@@ -51,18 +61,19 @@ class ResearchService:
             max_edges=max_edges,
             budget_tokens=budget_tokens,
         )
-        context, session = self.tasks.verified_task(
-            task_id,
-            allowed_phases={"DISCOVERY", "READY_TO_PLAN"},
-        )
         if task_update is not None and not isinstance(task_update, Mapping):
             raise McpExecutionError(
                 "INVALID_ARGUMENT",
                 "taskUpdate must be an object.",
             )
-        update = task_update or {}
-        preview_context = copy.deepcopy(context)
-        self._apply_task_update(preview_context, update)
+        update = self._validated_task_update(
+            self.store.load_context(task_id),
+            task_update or {},
+        )
+        context, session = self.tasks.verified_task(
+            task_id,
+            allowed_phases={"DISCOVERY", "READY_TO_PLAN"},
+        )
         current_graph_refs = {
             str(item.get("ref") or "") for item in context["graphTargets"]
         }
@@ -253,7 +264,52 @@ class ResearchService:
             id_key="assumptionId",
             prefix="assumption",
             maximum=20,
+            item_type="ASSUMPTION",
         )
+
+    def _validated_task_update(
+        self,
+        context: dict[str, object],
+        update: Mapping[str, object],
+    ) -> dict[str, list[str]]:
+        unsupported = [str(key) for key in update if key not in _TASK_UPDATE_FIELDS]
+        if unsupported:
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "taskUpdate contains unsupported fields.",
+            )
+        normalized: dict[str, list[str]] = {
+            field: self._string_sequence(update.get(field, []))
+            for field in _TASK_UPDATE_FIELDS
+        }
+        resolve_ids = list(
+            dict.fromkeys(normalized["resolveBlockingQuestionIds"])
+        )
+        normalized["resolveBlockingQuestionIds"] = resolve_ids
+        current_question_ids = {
+            str(item.get("questionId") or "")
+            for item in context.get("blockingQuestions", [])
+            if isinstance(item, Mapping)
+        }
+        if any(
+            _QUESTION_ID.fullmatch(question_id) is None
+            or question_id not in current_question_ids
+            for question_id in resolve_ids
+        ):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "resolveBlockingQuestionIds must reference existing blockers.",
+            )
+        try:
+            assert_path_free(normalized)
+        except McpExecutionError as exc:
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "taskUpdate must not contain machine-local path data.",
+            ) from exc
+        preview = copy.deepcopy(context)
+        self._apply_task_update(preview, normalized)
+        return normalized
 
     @staticmethod
     def _string_sequence(value: object) -> list[str]:
@@ -264,7 +320,12 @@ class ResearchService:
                 "INVALID_ARGUMENT",
                 "taskUpdate fields must be bounded string arrays.",
             )
-        result = [" ".join(str(item).split()) for item in value]
+        if any(not isinstance(item, str) for item in value):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "taskUpdate fields must be bounded string arrays.",
+            )
+        result = [" ".join(item.split()) for item in value]
         if len(result) > 20 or any(not item or len(item) > 1000 for item in result):
             raise McpExecutionError(
                 "INVALID_ARGUMENT",
@@ -280,17 +341,19 @@ class ResearchService:
         id_key: str,
         prefix: str,
         maximum: int,
+        item_type: str = "",
     ) -> None:
         existing = {str(item.get("text") or "").casefold() for item in target}
         for text in texts:
             if text.casefold() in existing:
                 continue
-            target.append(
-                {
-                    id_key: f"{prefix}://{hashlib.sha256(text.casefold().encode('utf-8')).hexdigest()[:24]}",
-                    "text": text,
-                }
-            )
+            item: dict[str, object] = {
+                id_key: f"{prefix}://{hashlib.sha256(text.casefold().encode('utf-8')).hexdigest()[:24]}",
+                "text": text,
+            }
+            if item_type:
+                item["type"] = item_type
+            target.append(item)
             existing.add(text.casefold())
         if len(target) > maximum:
             raise McpExecutionError(

@@ -25,6 +25,18 @@ def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+IDENTITY_INVALIDATING_CODES = frozenset(
+    {
+        "EVIDENCE_REVISION_CHANGED",
+        "EVIDENCE_REVISION_MISMATCH",
+        "EVIDENCE_STALE",
+        "EVIDENCE_NOT_FOUND",
+        "EVIDENCE_NOT_AUTHORITATIVE",
+        "ASSET_NOT_FOUND",
+    }
+)
+
+
 def _bounded_strings(
     value: Sequence[str],
     *,
@@ -222,7 +234,15 @@ class TaskService:
         assert_path_free(context)
         assert_path_free(session)
         self.store.create_task(task_id, context, session)
-        return copy.deepcopy(context)
+        result = copy.deepcopy(context)
+        result.update(
+            {
+                "phase": session["phase"],
+                "nextRecommendedTool": "blueprint_task_research",
+            }
+        )
+        assert_path_free(result)
+        return result
 
     def resume(
         self,
@@ -386,19 +406,13 @@ class TaskService:
             for supporting in context.get("supportingAssets", []):
                 self._verify_asset(supporting)
         except McpExecutionError as exc:
-            if exc.code in {
-                "EVIDENCE_REVISION_CHANGED",
-                "EVIDENCE_STALE",
-                "EVIDENCE_NOT_FOUND",
-                "ASSET_NOT_FOUND",
-            }:
+            if exc.code in IDENTITY_INVALIDATING_CODES:
                 if persist_verification:
                     self._block_revision_change(task_id, context, session)
-                if exc.code == "EVIDENCE_REVISION_CHANGED":
-                    raise
                 raise McpExecutionError(
                     "EVIDENCE_REVISION_CHANGED",
                     "Task Evidence identity is no longer current.",
+                    details={"sourceCode": exc.code},
                 ) from exc
             raise
         if allowed_phases is not None and str(session.get("phase")) not in set(

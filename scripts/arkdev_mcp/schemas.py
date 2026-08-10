@@ -142,6 +142,8 @@ class TaskContextOutput(PublicOutput):
     primaryAsset: dict[str, Any]
     graphTargets: list[dict[str, Any]]
     readiness: str
+    phase: Literal["DISCOVERY"]
+    nextRecommendedTool: Literal["blueprint_task_research"]
     semanticDigest: str
 
 
