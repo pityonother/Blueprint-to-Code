@@ -25,6 +25,14 @@ CHECK_ORDER = (
     "STDIO_HANDSHAKE_OK",
     "TOOLS_DISCOVERED",
     "STATUS_CALL_OK",
+    "EDITOR_BRIDGE_STATE_FOUND",
+    "EDITOR_BRIDGE_STATE_FRESH",
+    "EDITOR_BRIDGE_CONNECTED",
+    "EDITOR_ACTIVE_ASSET_AVAILABLE",
+    "EDITOR_ACTIVE_GRAPH_AVAILABLE",
+    "EDITOR_GRAPH_POSITIONS_AVAILABLE",
+    "EDITOR_SELECTION_AVAILABLE",
+    "EDITOR_EVIDENCE_BINDING_AVAILABLE",
     "BLUEPRINT_FIXTURE_CALL_OK",
     "TASK_CREATE_OK",
     "TASK_RESUME_OK",
@@ -37,12 +45,30 @@ CHECK_ORDER = (
     "CODEX_SERVER_LISTED",
 )
 
+EDITOR_CHECKS = (
+    "EDITOR_BRIDGE_STATE_FOUND",
+    "EDITOR_BRIDGE_STATE_FRESH",
+    "EDITOR_BRIDGE_CONNECTED",
+    "EDITOR_ACTIVE_ASSET_AVAILABLE",
+    "EDITOR_ACTIVE_GRAPH_AVAILABLE",
+    "EDITOR_GRAPH_POSITIONS_AVAILABLE",
+    "EDITOR_SELECTION_AVAILABLE",
+    "EDITOR_EVIDENCE_BINDING_AVAILABLE",
+)
+
+CORE_REQUIRED = tuple(
+    name
+    for name in CHECK_ORDER
+    if name not in {*EDITOR_CHECKS, "CODEX_CLI_AVAILABLE", "CODEX_SERVER_LISTED"}
+)
+
 
 async def _stdio_checks(
     *,
     capture_root: Path,
     fixture_asset: str,
-) -> dict[str, bool]:
+    editor_state_file: Path,
+) -> dict[str, bool | str]:
     from mcp import Client
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
@@ -52,6 +78,14 @@ async def _stdio_checks(
         "STDIO_HANDSHAKE_OK": False,
         "TOOLS_DISCOVERED": False,
         "STATUS_CALL_OK": False,
+        "EDITOR_BRIDGE_STATE_FOUND": editor_state_file.is_file(),
+        "EDITOR_BRIDGE_STATE_FRESH": False,
+        "EDITOR_BRIDGE_CONNECTED": False,
+        "EDITOR_ACTIVE_ASSET_AVAILABLE": False,
+        "EDITOR_ACTIVE_GRAPH_AVAILABLE": False,
+        "EDITOR_GRAPH_POSITIONS_AVAILABLE": False,
+        "EDITOR_SELECTION_AVAILABLE": False,
+        "EDITOR_EVIDENCE_BINDING_AVAILABLE": False,
         "BLUEPRINT_FIXTURE_CALL_OK": False,
         "TASK_CREATE_OK": False,
         "TASK_RESUME_OK": False,
@@ -62,6 +96,10 @@ async def _stdio_checks(
     }
     with tempfile.TemporaryDirectory(prefix="arkdev-mcp-diagnose-") as temporary:
         task_root = str(Path(temporary) / ".blueprint-tasks")
+        child_env = {
+            "ARKDEV_MCP_TASK_ROOT": task_root,
+            "ARKDEV_EDITOR_BRIDGE_STATE_FILE": str(editor_state_file),
+        }
         parameters = StdioServerParameters(
             command=sys.executable,
             args=[
@@ -69,7 +107,7 @@ async def _stdio_checks(
                 "--capture-root",
                 str(capture_root),
             ],
-            env={"ARKDEV_MCP_TASK_ROOT": task_root},
+            env=child_env,
             cwd=PROJECT_ROOT,
             encoding="utf-8",
         )
@@ -88,6 +126,54 @@ async def _stdio_checks(
                         and status.structured_content.get("readOnly") is True
                         and status.structured_content.get("taskMetadataWrite") is True
                         and status.structured_content.get("transport") == "stdio"
+                    )
+                    editor = await client.call_tool(
+                        "arkdev_editor_state",
+                        {
+                            "includeSelection": True,
+                            "includeGraphNodes": True,
+                            "maxGraphNodes": 1,
+                        },
+                    )
+                    editor_payload = editor.structured_content or {}
+                    snapshot = editor_payload.get("snapshot") or {}
+                    checks["EDITOR_BRIDGE_CONNECTED"] = bool(
+                        not editor.is_error and editor_payload.get("connected")
+                    )
+                    checks["EDITOR_BRIDGE_STATE_FRESH"] = bool(
+                        checks["EDITOR_BRIDGE_CONNECTED"]
+                        and isinstance(snapshot.get("ageMs"), int)
+                    )
+                    checks["EDITOR_ACTIVE_ASSET_AVAILABLE"] = bool(
+                        editor_payload.get("activeAsset")
+                    )
+                    checks["EDITOR_ACTIVE_GRAPH_AVAILABLE"] = bool(
+                        editor_payload.get("activeGraph")
+                    )
+                    checks["EDITOR_GRAPH_POSITIONS_AVAILABLE"] = bool(
+                        "READ_GRAPH_POSITIONS"
+                        in editor_payload.get("capabilities", [])
+                        and editor_payload.get("graphNodes")
+                    )
+                    selection_status = editor_payload.get("selectionStatus")
+                    checks["EDITOR_SELECTION_AVAILABLE"] = (
+                        True
+                        if selection_status == "AVAILABLE"
+                        else (
+                            "SKIPPED_WITH_REASON:unsupported_by_devkit_build"
+                            if selection_status == "UNSUPPORTED_BY_DEVKIT_BUILD"
+                            else False
+                        )
+                    )
+                    checks["EDITOR_EVIDENCE_BINDING_AVAILABLE"] = bool(
+                        (editor_payload.get("activeAssetBinding") or {}).get(
+                            "status"
+                        )
+                        == "EXACT"
+                        and (editor_payload.get("activeGraphBinding") or {}).get(
+                            "status"
+                        )
+                        == "EXACT"
                     )
                     context = await client.call_tool(
                         "blueprint_get_context",
@@ -310,7 +396,14 @@ def main(argv: list[str] | None = None) -> int:
         default=PROJECT_ROOT / "captures",
     )
     parser.add_argument("--fixture-asset", default="InterpretationFixture")
+    parser.add_argument("--editor-state-file", type=Path)
+    parser.add_argument("--editor-fixture-state-file", type=Path)
     options = parser.parse_args(argv)
+
+    editor_state_file = (
+        options.editor_state_file
+        or PROJECT_ROOT / ".arkdev-bridge" / "editor_state.json"
+    )
 
     checks: dict[str, bool | str] = {name: False for name in CHECK_ORDER}
     try:
@@ -333,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
                 _stdio_checks(
                     capture_root=options.capture_root,
                     fixture_asset=options.fixture_asset,
+                    editor_state_file=editor_state_file,
                 )
             )
         )
@@ -345,8 +439,18 @@ def main(argv: list[str] | None = None) -> int:
     for name in CHECK_ORDER:
         print(f"{name}={_render(checks[name])}")
 
-    required = CHECK_ORDER[:-2]
-    return 0 if all(checks[name] is True for name in required) else 1
+    if options.editor_fixture_state_file is not None:
+        fixture_checks = asyncio.run(
+            _stdio_checks(
+                capture_root=options.capture_root,
+                fixture_asset=options.fixture_asset,
+                editor_state_file=options.editor_fixture_state_file,
+            )
+        )
+        for name in EDITOR_CHECKS:
+            print(f"FIXTURE_{name}={_render(fixture_checks[name])}")
+
+    return 0 if all(checks[name] is True for name in CORE_REQUIRED) else 1
 
 
 if __name__ == "__main__":

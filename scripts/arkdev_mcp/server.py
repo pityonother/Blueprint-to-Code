@@ -16,9 +16,10 @@ from .blueprint_service import BlueprintService
 from .contracts import McpExecutionError, assert_path_free
 from .editor_bridge import (
     MUTATION_CAPABILITIES,
-    DisconnectedEditorBridge,
     EditorBridge,
 )
+from .editor_binding import EditorBindingService
+from .editor_bridge_file import FileEditorBridge
 from .prompts import register_prompts
 from .resources import register_resources
 from .schemas import (
@@ -145,7 +146,11 @@ def create_server(
     """Build a stdio MCP server whose only writes are local Task metadata."""
 
     blueprint = BlueprintService(capture_root)
-    bridge = editor_bridge or DisconnectedEditorBridge()
+    bridge = (
+        editor_bridge
+        if editor_bridge is not None
+        else FileEditorBridge.for_project_root(Path(capture_root).resolve().parent)
+    )
     configured_task_root = task_root or os.environ.get("ARKDEV_MCP_TASK_ROOT")
     resolved_task_root = (
         Path(configured_task_root)
@@ -156,6 +161,7 @@ def create_server(
     tasks = TaskService(blueprint, store)
     research = ResearchService(blueprint, tasks, store)
     plans = PlanService(blueprint, tasks, store)
+    editor_binding = EditorBindingService(blueprint, tasks)
     server = MCPServer(
         name="arkdev-blueprint",
         title="ARK Dev Blueprint Task Planning MCP",
@@ -172,16 +178,31 @@ def create_server(
         log_level="ERROR",
     )
 
-    def editor_state_payload(*, include_selection: bool) -> dict[str, object]:
+    def editor_state_payload(
+        *,
+        include_selection: bool,
+        include_graph_nodes: bool = False,
+        max_graph_nodes: int = 200,
+        task_id: str = "",
+    ) -> dict[str, object]:
         try:
-            capabilities = set(bridge.get_capabilities())
+            state = dict(
+                bridge.get_state(
+                    include_selection=include_selection,
+                    include_graph_nodes=include_graph_nodes,
+                    max_graph_nodes=max_graph_nodes,
+                )
+            )
+            capabilities = {
+                str(item) for item in state.get("capabilities", [])
+            }
             if capabilities & MUTATION_CAPABILITIES:
                 raise McpExecutionError(
                     "INTERNAL_CONTRACT_ERROR",
                     "The editor bridge advertised a forbidden mutation capability.",
                 )
-            state = dict(bridge.get_state(include_selection=include_selection))
             state["capabilities"] = sorted(capabilities)
+            state = editor_binding.enrich(state, task_id=task_id)
             assert_path_free(state)
             return state
         except McpExecutionError:
@@ -223,6 +244,10 @@ def create_server(
             },
             "editorBridge": {
                 "status": str(health.get("status") or "DISCONNECTED"),
+                "stateStatus": str(
+                    health.get("stateStatus")
+                    or ("CONNECTED" if health.get("connected") else "DISCONNECTED")
+                ),
                 "reasonCode": str(
                     health.get("reasonCode")
                     or (
@@ -259,9 +284,23 @@ def create_server(
     )
     def arkdev_editor_state(  # noqa: N803
         includeSelection: bool = True,
+        includeGraphNodes: bool = False,
+        maxGraphNodes: Annotated[int, Field(ge=1, le=1000)] = 200,
+        taskId: Annotated[
+            str,
+            Field(
+                max_length=39,
+                pattern=r"^(?:|task://[0-9a-f]{32})$",
+            ),
+        ] = "",
     ) -> EditorToolResult:
         return _invoke(
-            lambda: editor_state_payload(include_selection=includeSelection),
+            lambda: editor_state_payload(
+                include_selection=includeSelection,
+                include_graph_nodes=includeGraphNodes,
+                max_graph_nodes=maxGraphNodes,
+                task_id=taskId,
+            ),
             lambda payload: (
                 "Editor bridge state: "
                 + ("CONNECTED" if payload.get("connected") else "DISCONNECTED")
@@ -546,7 +585,12 @@ def create_server(
         server,
         status_provider=lambda: safe_resource(status_payload),
         editor_state_provider=lambda: safe_resource(
-            lambda: editor_state_payload(include_selection=True)
+            lambda: editor_state_payload(
+                include_selection=True,
+                include_graph_nodes=False,
+                max_graph_nodes=200,
+                task_id="",
+            )
         ),
         asset_health_provider=lambda asset: safe_resource(
             lambda: blueprint.health(asset=asset)
