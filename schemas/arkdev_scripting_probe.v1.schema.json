@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/arkdev_scripting_probe.v1.schema.json",
+  "title": "ARK DevKit Official Scripting Probe v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "probeVersion",
+    "generatedAt",
+    "devkit",
+    "python",
+    "classes",
+    "methods",
+    "visibleMethods",
+    "explicitTarget",
+    "activeEditor",
+    "editorUtility",
+    "mutationApisObserved",
+    "gaps",
+    "semanticDigest"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code.arkdev-scripting-probe/v1"
+    },
+    "probeVersion": {
+      "const": "arkdev-official-scripting-probe/v1"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "devkit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engineVersion", "buildVersion"],
+      "properties": {
+        "engineVersion": {"type": "string", "maxLength": 128},
+        "buildVersion": {"type": "string", "maxLength": 128}
+      }
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available",
+        "unrealImport",
+        "pythonVersion",
+        "pluginDetected"
+      ],
+      "properties": {
+        "available": {"type": "boolean"},
+        "unrealImport": {"type": "boolean"},
+        "pythonVersion": {"type": "string", "maxLength": 64},
+        "pluginDetected": {"type": "boolean"}
+      }
+    },
+    "classes": {"$ref": "#/$defs/statusMap"},
+    "methods": {"$ref": "#/$defs/statusMap"},
+    "visibleMethods": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "maxItems": 64,
+        "uniqueItems": true,
+        "items": {"type": "string", "maxLength": 128}
+      }
+    },
+    "explicitTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "objectPath",
+        "graphName",
+        "capabilities",
+        "gaps"
+      ],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "objectPath": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^(|/(Game|Engine)/)"
+        },
+        "graphName": {"type": "string", "maxLength": 256},
+        "capabilities": {"$ref": "#/$defs/statusMap"},
+        "gaps": {"$ref": "#/$defs/gaps"}
+      }
+    },
+    "activeEditor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "openEditedAssets",
+        "activeAsset",
+        "focusedGraph",
+        "selection",
+        "dirtyState",
+        "compileState"
+      ],
+      "properties": {
+        "openEditedAssets": {"$ref": "#/$defs/status"},
+        "activeAsset": {"$ref": "#/$defs/status"},
+        "focusedGraph": {"$ref": "#/$defs/status"},
+        "selection": {"$ref": "#/$defs/status"},
+        "dirtyState": {"$ref": "#/$defs/status"},
+        "compileState": {"$ref": "#/$defs/status"}
+      }
+    },
+    "editorUtility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subsystem",
+        "blueprintClass",
+        "widgetClass",
+        "startupObjectCapability"
+      ],
+      "properties": {
+        "subsystem": {"$ref": "#/$defs/status"},
+        "blueprintClass": {"$ref": "#/$defs/status"},
+        "widgetClass": {"$ref": "#/$defs/status"},
+        "startupObjectCapability": {"$ref": "#/$defs/status"}
+      }
+    },
+    "mutationApisObserved": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["owner", "method", "status"],
+        "properties": {
+          "owner": {"type": "string", "maxLength": 128},
+          "method": {"type": "string", "maxLength": 128},
+          "status": {"const": "PRESENT_BUT_NOT_USED"}
+        }
+      }
+    },
+    "gaps": {"$ref": "#/$defs/gaps"},
+    "semanticDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "status": {
+      "enum": [
+        "AVAILABLE",
+        "MISSING",
+        "ERROR",
+        "NOT_TESTED",
+        "PRESENT_BUT_NOT_USED"
+      ]
+    },
+    "statusMap": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/status"}
+    },
+    "gaps": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_]+$",
+        "maxLength": 128
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/arkdev_explicit_graph_snapshot.v1.schema.json",
+  "title": "ARK DevKit Explicit Graph Snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "objectPath",
+    "graphName",
+    "graphPath",
+    "graphClass",
+    "nodeCount",
+    "nodesReturned",
+    "nodesOmitted",
+    "nodes",
+    "capabilities",
+    "gaps",
+    "semanticDigest"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code.arkdev-explicit-graph-snapshot/v1"
+    },
+    "objectPath": {
+      "type": "string",
+      "pattern": "^/(Game|Engine)/",
+      "maxLength": 4096
+    },
+    "graphName": {"type": "string", "minLength": 1, "maxLength": 256},
+    "graphPath": {"type": "string", "maxLength": 4096},
+    "graphClass": {"type": "string", "maxLength": 256},
+    "nodeCount": {"type": "integer", "minimum": 0},
+    "nodesReturned": {"type": "integer", "minimum": 0, "maximum": 200},
+    "nodesOmitted": {"type": "integer", "minimum": 0},
+    "nodes": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "className"],
+        "properties": {
+          "nodeGuid": {
+            "type": "string",
+            "pattern": "^(?!0{32}$)[0-9A-F]{32}$"
+          },
+          "name": {"type": "string", "maxLength": 256},
+          "className": {"type": "string", "maxLength": 256},
+          "x": {"type": "integer"},
+          "y": {"type": "integer"}
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/status"}
+    },
+    "gaps": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_]+$",
+        "maxLength": 128
+      }
+    },
+    "semanticDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "$defs": {
+    "status": {
+      "enum": [
+        "AVAILABLE",
+        "MISSING",
+        "ERROR",
+        "NOT_TESTED",
+        "PRESENT_BUT_NOT_USED"
+      ]
+    }
+  }
+}
