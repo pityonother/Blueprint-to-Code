@@ -184,6 +184,21 @@ class FileEditorBridgeTests(unittest.TestCase):
         self.write(invalid_node)
         self.assertEqual(self.bridge().health()["stateStatus"], "STATE_INVALID")
 
+    def test_zero_node_guid_is_rejected_as_invalid_snapshot(self) -> None:
+        payload = self.payload()
+        payload["focusedGraph"]["nodes"][0]["nodeGuid"] = "0" * 32
+        self.write(payload)
+
+        state = self.bridge().get_state(
+            include_selection=True,
+            include_graph_nodes=True,
+            max_graph_nodes=200,
+        )
+
+        self.assertFalse(state["connected"])
+        self.assertEqual(state["reasonCode"], "EDITOR_BRIDGE_STATE_INVALID")
+        self.assertEqual(state["graphNodes"], [])
+
     def test_oversized_file_is_rejected_before_json_decode(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_bytes(b"{" + b" " * MAX_SNAPSHOT_BYTES)

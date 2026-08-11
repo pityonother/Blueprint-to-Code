@@ -140,6 +140,20 @@ class EditorBindingTests(unittest.TestCase):
         self.assertEqual(node["bindingStatus"], "UNBOUND")
         self.assertEqual(node["evidenceNodeRef"], "")
 
+    def test_zero_guid_snapshot_is_rejected_before_binding(self) -> None:
+        snapshot = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        snapshot["writtenAtUtc"] = self.now.isoformat().replace("+00:00", "Z")
+        snapshot["focusedGraph"]["nodes"][0]["nodeGuid"] = "0" * 32
+        self.state_file.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        state = self.live_state()
+        bound = self.enrich(state=state)
+
+        self.assertFalse(state["connected"])
+        self.assertEqual(state["reasonCode"], "EDITOR_BRIDGE_STATE_INVALID")
+        self.assertEqual(bound["graphNodes"], [])
+        self.assertNotEqual(bound["activeAssetBinding"]["status"], "EXACT")
+
     def test_duplicate_live_node_guids_are_ambiguous(self) -> None:
         state = self.live_state()
         duplicate = copy.deepcopy(state["graphNodes"][0])

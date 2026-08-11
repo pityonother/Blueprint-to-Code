@@ -9,11 +9,11 @@
 3. 如果脚本提示当前 DevKit 缺少 C++ source-plugin build 环境，停止安装并记录：
 
    ```text
-   DEVKIT_PLUGIN_COMPILE=NOT_RUN_REQUIRES_USER
-   LIVE_EDITOR_BRIDGE=NOT_RUN_REQUIRES_USER
+   DEVKIT_PLUGIN_COMPILE=UNAVAILABLE_IN_CURRENT_INSTALL
+   LIVE_EDITOR_BRIDGE=NOT_RUN
    ```
 
-   不要使用 `-ForceSourceInstall` 绕过一个已知不能编译插件的环境，也不要复制私有 DLL 或使用内存 offset。
+   不要使用 `-ForceSourceInstall` 绕过一个已知不能编译插件的环境，也不要复制私有 DLL 或使用内存 offset。将探测结果记录到 `EDITOR_BRIDGE_FEASIBILITY_RESULT.md` 后停止，不得把 fixture/source-contract PASS 当作真实运行 PASS。
 
 ## 验收步骤
 
@@ -38,7 +38,7 @@
    }
    ```
 
-6. 核对 `graphNodes` 的 NodeGuid 与 graph-space `x/y`。返回顺序应为 `y, x, nodeGuid, name`，调用最多 1000 项，插件 snapshot 最多 2000 项。
+6. 核对 `graphNodes` 的 NodeGuid 与 graph-space `x/y`。NodeGuid 必须为 32 位 hex digits 且不能是全零 GUID；无有效 NodeGuid 的节点不得写入 `nodes`。返回顺序应为 `y, x, nodeGuid, name`，调用最多 1000 项，插件 snapshot 最多 2000 项。`nodeCount` 表示 Graph 中实际非空节点总数，`nodesOmitted` 可能同时包含容量截断和无有效 NodeGuid 的节点。
 7. 移动一个节点但不要保存，仅用于确认位置与 `dirty=true` 在两秒内更新；随后立刻在 DevKit 中撤销该移动。
 8. 核对 `compileStatus` 只读返回 `UP_TO_DATE`、`DIRTY`、`ERROR` 或 `UNKNOWN`；插件不得触发 compile。
 9. 关闭 Blueprint。DevKit 应保持 connected，但 `activeAsset=null`、`activityStatus=NO_OPEN_BLUEPRINT`、`graphStatus=NO_ACTIVE_BLUEPRINT`。
@@ -53,6 +53,10 @@
 - `graphStatus=BLUEPRINT_EDITOR_INTERFACE_UNAVAILABLE` 与 `graphStatus=NO_FOCUSED_GRAPH` 是不同的只读降级结果，不得通过聚焦或打开编辑器来消除。
 - `activeAssetBinding`、`activeGraphBinding`、node binding 只能在 exact current Evidence 下为 `EXACT`。
 - 带 `taskId` 的调用前后，`.blueprint-tasks` 文件 bytes 与时间戳不变，并且 `mutationReady=false`。
+
+## 单实例边界
+
+Phase 3 只承诺同一个 Blueprint-to-Code root 对应一个正在运行的 ARK DevKit 实例。多个 DevKit 实例共享同一 `editor_state.json` 暂不支持；一个实例退出可能影响共享 snapshot。多实例命名与仲裁后移，不在本轮实现。
 
 ## 通过记录
 

@@ -27,6 +27,7 @@ DEFAULT_MAX_AGE_SEC = 6.0
 MAX_FUTURE_SKEW_SEC = 2.0
 
 _GUID = re.compile(r"^[0-9A-Fa-f]{32}$")
+_ZERO_GUID = "0" * 32
 _READ_CAPABILITIES = frozenset(
     capability.value
     for capability in EditorCapability
@@ -115,7 +116,7 @@ def _object_or_none(value: object) -> Mapping[str, object] | None:
 
 def _guid(value: object) -> str:
     candidate = _text(value, field="nodeGuid", maximum=32)
-    if _GUID.fullmatch(candidate) is None:
+    if _GUID.fullmatch(candidate) is None or candidate == _ZERO_GUID:
         raise _SnapshotIssue("STATE_INVALID", "EDITOR_BRIDGE_STATE_INVALID")
     return candidate.upper()
 

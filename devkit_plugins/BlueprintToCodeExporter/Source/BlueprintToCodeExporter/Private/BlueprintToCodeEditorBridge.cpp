@@ -216,7 +216,10 @@ bool FBlueprintToCodeExporterModule::BuildEditorStateSnapshot(
     Snapshot->SetStringField(TEXT("schema"), SnapshotSchema);
     Snapshot->SetStringField(TEXT("protocolVersion"), SnapshotProtocol);
     Snapshot->SetStringField(TEXT("bridgeVersion"), EditorBridgeVersion);
-    Snapshot->SetStringField(TEXT("bridgeInstanceId"), EditorBridgeInstanceId.ToString());
+    Snapshot->SetStringField(
+        TEXT("bridgeInstanceId"),
+        EditorBridgeInstanceId.ToString(EGuidFormats::Digits)
+    );
     const FString EngineVersion = FEngineVersion::Current().ToString();
     const FString AppBuildVersion = FApp::GetBuildVersion();
     Snapshot->SetStringField(TEXT("engineVersion"), EngineVersion);
@@ -290,15 +293,21 @@ bool FBlueprintToCodeExporterModule::BuildEditorStateSnapshot(
 
     TArray<FEditorNodeSnapshot> SortedNodes;
     SortedNodes.Reserve(FocusedGraph->Nodes.Num());
+    int32 GraphNodeCount = 0;
     for (UEdGraphNode* Node : FocusedGraph->Nodes)
     {
         if (!Node)
         {
             continue;
         }
+        ++GraphNodeCount;
+        if (!Node->NodeGuid.IsValid())
+        {
+            continue;
+        }
         FEditorNodeSnapshot& NodeSnapshot = SortedNodes.AddDefaulted_GetRef();
         NodeSnapshot.Node = Node;
-        NodeSnapshot.NodeGuid = Node->NodeGuid.ToString();
+        NodeSnapshot.NodeGuid = Node->NodeGuid.ToString(EGuidFormats::Digits);
     }
     SortedNodes.Sort([](const FEditorNodeSnapshot& Left, const FEditorNodeSnapshot& Right)
     {
@@ -341,9 +350,9 @@ bool FBlueprintToCodeExporterModule::BuildEditorStateSnapshot(
         Schema ? Schema->GetClass()->GetName() : TEXT("UNKNOWN")
     );
     Graph->SetStringField(TEXT("graphType"), ClassifyGraph(Blueprint, FocusedGraph));
-    Graph->SetNumberField(TEXT("nodeCount"), SortedNodes.Num());
-    Graph->SetBoolField(TEXT("nodesTruncated"), SortedNodes.Num() > ReturnedNodes);
-    Graph->SetNumberField(TEXT("nodesOmitted"), SortedNodes.Num() - ReturnedNodes);
+    Graph->SetNumberField(TEXT("nodeCount"), GraphNodeCount);
+    Graph->SetBoolField(TEXT("nodesTruncated"), GraphNodeCount > ReturnedNodes);
+    Graph->SetNumberField(TEXT("nodesOmitted"), GraphNodeCount - ReturnedNodes);
     Graph->SetArrayField(TEXT("nodes"), NodeValues);
     Snapshot->SetStringField(TEXT("graphStatus"), TEXT("FOCUSED_GRAPH"));
     Snapshot->SetObjectField(TEXT("focusedGraph"), Graph);

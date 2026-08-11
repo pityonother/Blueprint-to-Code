@@ -94,7 +94,16 @@ class DevkitEditorBridgeSourceContractTests(unittest.TestCase):
         self.assertNotIn("OpenEditorForAsset", self.bridge)
         self.assertNotIn("OpenGraphAndBringToFront", self.bridge)
         self.assertIn("GetOutermost()->IsDirty()", self.bridge)
-        self.assertIn("NodeGuid.ToString()", self.bridge)
+        self.assertIn('"Misc/Guid.h"', self.bridge)
+        self.assertIn(
+            "EditorBridgeInstanceId.ToString(EGuidFormats::Digits)",
+            self.bridge,
+        )
+        self.assertIn("Node->NodeGuid.IsValid()", self.bridge)
+        self.assertIn(
+            "Node->NodeGuid.ToString(EGuidFormats::Digits)",
+            self.bridge,
+        )
         self.assertIn("Left.Node->NodePosY < Right.Node->NodePosY", self.bridge)
         self.assertIn("Left.Node->NodePosX < Right.Node->NodePosX", self.bridge)
         for status in (
