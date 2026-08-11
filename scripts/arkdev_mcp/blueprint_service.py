@@ -260,6 +260,43 @@ class BlueprintService:
         except Exception as exc:
             raise _error_from_exception(exc) from exc
 
+    def get_task_authority(self, *, asset: str) -> dict[str, object]:
+        """Return current path-free authority and graph identities for Task metadata."""
+
+        try:
+            asset_name, asset_dir = self._asset_dir(asset)
+            evidence_state, interpretation = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(evidence_state) as repository:
+                identity = self._identity(
+                    asset_name,
+                    evidence_state,
+                    interpretation,
+                    repository,
+                )
+                if evidence_state.freshness_status != "FRESH":
+                    raise McpExecutionError(
+                        "EVIDENCE_STALE",
+                        "Current Blueprint evidence is stale.",
+                    )
+                evidence = dict(identity["evidence"])
+                asset_identity = dict(identity["asset"])
+                payload: dict[str, object] = {
+                    "name": asset_identity["name"],
+                    "assetId": asset_identity["assetId"],
+                    "objectPath": asset_identity["objectPath"],
+                    "evidenceRevisionId": evidence["revisionId"],
+                    "evidenceManifestSha256": evidence["manifestSha256"],
+                    "freshness": evidence_state.freshness_status,
+                    "graphTargets": [
+                        self._graph_projection(item)
+                        for item in repository.graph_summaries()
+                    ],
+                }
+                assert_path_free(payload)
+                return payload
+        except Exception as exc:
+            raise _error_from_exception(exc) from exc
+
     def get_context(
         self,
         *,

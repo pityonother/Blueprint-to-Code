@@ -18,6 +18,8 @@ class EditorCapability(StrEnum):
     READ_DIRTY_STATE = "READ_DIRTY_STATE"
     READ_COMPILE_STATE = "READ_COMPILE_STATE"
     IMPORT_NODES_FROM_TEXT = "IMPORT_NODES_FROM_TEXT"
+    CREATE_NODE = "CREATE_NODE"
+    DELETE_NODE = "DELETE_NODE"
     BREAK_PIN_LINKS = "BREAK_PIN_LINKS"
     CREATE_CONNECTION = "CREATE_CONNECTION"
     SET_PIN_DEFAULT = "SET_PIN_DEFAULT"
@@ -31,6 +33,8 @@ class EditorCapability(StrEnum):
 MUTATION_CAPABILITIES = frozenset(
     {
         EditorCapability.IMPORT_NODES_FROM_TEXT.value,
+        EditorCapability.CREATE_NODE.value,
+        EditorCapability.DELETE_NODE.value,
         EditorCapability.BREAK_PIN_LINKS.value,
         EditorCapability.CREATE_CONNECTION.value,
         EditorCapability.SET_PIN_DEFAULT.value,

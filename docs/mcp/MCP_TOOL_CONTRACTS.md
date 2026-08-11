@@ -1,70 +1,68 @@
-# Phase 1 MCP Tool Contracts
+# Phase 2 MCP Tool Contracts
 
-所有工具描述都明确包含 `READ-ONLY` 和 `NO ARK DEVKIT MUTATION`。工具不写文件/数据库，不触发 Capture、重分析、shell、进程、外部网络或编辑器 mutation。
-
-## Tools（恰好五个）
-
-| Tool | 主要输入 | 成功 schema | 关键约束 |
-|---|---|---|---|
-| `arkdev_status` | `{}` | `blueprint-to-code.arkdev-mcp-status/v1` | deterministic；不扫描全部资产；不含时间戳或本机信息 |
-| `arkdev_editor_state` | `includeSelection` | `blueprint-to-code.arkdev-editor-state/v1` | Phase 1 默认明确返回 `DISCONNECTED`；不得声明 mutation capability |
-| `blueprint_list_assets` | `query`, `limit<=100`, `cursor` | `blueprint-to-code.mcp-blueprint-assets/v1` | 复用公开 asset list；不触发分析；cursor deterministic |
-| `blueprint_get_context` | `asset`, `goal`, graph/seed refs、caps、budget、continuation | `blueprint-to-code.mcp-blueprint-context/v1` | `maxHops<=2`；nodes/pins/edges 上限 100/400/400；budget 800..6000；fail closed |
-| `blueprint_get_node` | `asset`, exact `nodeRef`, direct neighborhood | `blueprint-to-code.mcp-blueprint-node/v1` | 不模糊搜索；`maxHops<=1`；revision-bound |
-
-每次成功返回简短文本摘要和经 `outputSchema` 校验的 `structuredContent`。业务执行错误使用 `isError=true`，并返回：
-
-```json
-{
-  "schema": "blueprint-to-code.arkdev-mcp-error/v1",
-  "code": "EVIDENCE_STALE",
-  "message": "Current Blueprint evidence is stale.",
-  "retryable": false,
-  "details": {}
-}
-```
-
-稳定 error codes：
+五个 Phase 1 工具保持名称、参数和只读行为兼容。六个 Phase 2 工具只写 `.blueprint-tasks/**`，annotation 固定为 `readOnly=false`、`destructive=false`、`openWorld=false`，description 明确写出：
 
 ```text
-INVALID_ARGUMENT
-ASSET_NOT_FOUND
-EVIDENCE_NOT_FOUND
-EVIDENCE_STALE
-EVIDENCE_NOT_AUTHORITATIVE
-EVIDENCE_REVISION_MISMATCH
-GRAPH_SELECTION_REQUIRED
-NODE_NOT_FOUND
-RESULT_BUDGET_EXCEEDED
-EDITOR_BRIDGE_NOT_INSTALLED
-EDITOR_BRIDGE_UNAVAILABLE
-INTERNAL_CONTRACT_ERROR
+WRITES LOCAL TASK METADATA ONLY.
+DOES NOT MODIFY ARK DEVKIT OR BLUEPRINT EVIDENCE.
 ```
 
-协议级参数 schema 错误由 MCP SDK 处理；业务错误不得包含 stack trace、raw exception、本机路径或秘密。
+## Tools（恰好 11 个）
 
-## Evidence 绑定和预算
+| Tool | 写入 | 成功合同 | 关键约束 |
+|---|---|---|---|
+| `arkdev_status` | 无 | MCP status v1 | stdio/windows-x64；ARK mutation=false |
+| `arkdev_editor_state` | 无 | editor state v1 | 默认 DISCONNECTED |
+| `blueprint_list_assets` | 无 | asset list v1 | bounded/path-free |
+| `blueprint_get_context` | 无 | context v1 | 一发式语义不变；maxHops<=2 |
+| `blueprint_get_node` | 无 | node v1 | exact current `bp://` nodeRef |
+| `blueprint_task_create` | Task metadata | Task Context v1 | authoritative FRESH identity；opaque handle；不自动 research |
+| `blueprint_task_resume` | verification timestamp / BLOCKED state | compact resume v1 | 默认小于 1600 estimated tokens；不返回 raw slices/operations |
+| `blueprint_task_research` | Task metadata + Graph Slice | Graph Slice v1 | 同 revision/signature cache；最多 8 slices；不接受 caller confirmedFacts |
+| `blueprint_patch_plan_draft` | Plan metadata | Patch Plan v1 DRAFT | exact refs、DAG、caps、limits；blockers 可保存 |
+| `blueprint_patch_plan_validate` | verification metadata | validation v1 | 每次重验 Evidence/Node/Pin ownership/graph scope/DAG/blockers/capabilities |
+| `blueprint_patch_plan_confirm` | Plan status metadata | confirmation v1 | 仅 explicit `confirm=true` + exact digest + confirmable DRAFT |
 
-- Context 只接受当前 authoritative、FRESH Evidence 与其精确绑定的当前 Interpretation。
-- `querySignature` 绑定 Evidence revision、规范化 goal、graph/seed refs 和 budgets。
-- continuation 是 opaque、bounded、revision-bound、query-bound 的显式 token；没有跨调用隐式 session。
-- 无法唯一选图时返回最多五个候选和 `GRAPH_SELECTION_REQUIRED`，不会退化为全图扫描。
-- Node 查询只接受当前 revision 的 exact `bp://` node reference。
-- 所有公开结构递归执行 path-free 检查；Unreal `/Game/`、`/Engine/`、`/Script/` object path 不是本机文件路径。
+## Error 合同
 
-## Resources（最多三个）
+所有业务失败继续使用 `blueprint-to-code.arkdev-mcp-error/v1`、`isError=true`，不得返回 stack trace、raw exception、本机路径或秘密。Phase 2 新增：
+
+```text
+TASK_NOT_FOUND
+TASK_PHASE_INVALID
+TASK_BLOCKED
+TASK_SLICE_LIMIT_REACHED
+EVIDENCE_REVISION_CHANGED
+PATCH_PLAN_NOT_FOUND
+PATCH_PLAN_INVALID
+PATCH_PLAN_LIMIT_EXCEEDED
+PATCH_PLAN_NOT_CONFIRMABLE
+PATCH_PLAN_DIGEST_MISMATCH
+PLAN_CONFIRMATION_REQUIRED
+```
+
+Evidence identity 改变时，Task 写入 `phase=BLOCKED` 与 `reasonCode=EVIDENCE_REVISION_CHANGED` 后 fail closed；绝不自动把旧 refs 映射到新 revision。
+
+## Resources（最多五个）
 
 ```text
 arkdev://status
 arkdev://editor/state
 blueprint://assets/{asset}/health
+arkdev://tasks/{task_id}
+arkdev://plans/{plan_id}
 ```
 
-它们只是已有只读能力的轻量 JSON 投影，不暴露全 Graph、Evidence DB 或报告。客户端不支持 Resources 时，五个 Tools 仍可独立使用。
+Task/Plan Resource 参数只接受 opaque ID；投影会重新执行 revision gate，不暴露本机路径。
 
-## Prompts（恰好两个）
+## Prompts（恰好三个）
 
-- `analyze_blueprint_task`：status -> context -> 最多五次 exact node，输出事实/假设/未知/建议后停止。
-- `inspect_blueprint_node`：只分析一个 exact nodeRef 和直接邻域。
+- `analyze_blueprint_task`
+- `inspect_blueprint_node`
+- `design_blueprint_patch`
 
-Prompts 不启动 shell 或 Computer Use，也不声称生成 Patch Plan。
+`design_blueprint_patch` 必须先展示 validate 的 `humanSummary`。在当前对话中用户明确批准前，绝不能调用 `blueprint_patch_plan_confirm`。
+
+## 验证边界
+
+Validator 检查 current revision、existing Node/Pin ownership、proposed signatures、CONNECT OUTPUT→INPUT、operation DAG、limits、blockers 与 capability requirements。它明确不声称 Pin type 兼容、runtime 正确、DevKit 可创建该节点、compile/save 正确或 `TryCreateConnection` 会成功。

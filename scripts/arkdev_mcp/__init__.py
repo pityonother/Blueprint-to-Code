@@ -1,4 +1,4 @@
-"""Read-only ARK Dev MCP adapters for Blueprint-to-Code."""
+"""ARK Dev Evidence readers and local Task planning adapters."""
 
 from .contracts import TOOL_NAMES
 

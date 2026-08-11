@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blueprint-to-code.graph-slice/v1",
+  "title": "Blueprint Graph Slice v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "sliceId",
+    "querySignature",
+    "question",
+    "evidenceIdentity",
+    "graphTargets",
+    "nodes",
+    "pins",
+    "edges",
+    "facts",
+    "gaps",
+    "truncated",
+    "continuation",
+    "semanticDigest"
+  ],
+  "properties": {
+    "schema": { "const": "blueprint-to-code.graph-slice/v1" },
+    "sliceId": { "type": "string", "pattern": "^slice://[0-9a-f]{32}$" },
+    "querySignature": { "$ref": "#/$defs/sha256" },
+    "question": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "evidenceIdentity": { "type": "object" },
+    "graphTargets": { "type": "array", "maxItems": 2 },
+    "nodes": { "type": "array", "maxItems": 100 },
+    "pins": { "type": "array", "maxItems": 400 },
+    "edges": { "type": "array", "maxItems": 400 },
+    "facts": { "type": "array" },
+    "gaps": { "type": "array" },
+    "truncated": { "type": "boolean" },
+    "continuation": { "type": "string", "maxLength": 4096 },
+    "semanticDigest": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

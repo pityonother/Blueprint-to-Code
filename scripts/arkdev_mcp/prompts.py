@@ -13,7 +13,7 @@ def register_prompts(server: MCPServer) -> None:
         description="Analyze one Blueprint task through the bounded read-only tools.",
     )
     def analyze_blueprint_task(asset: str, goal: str) -> str:
-        assert_path_free({"asset": asset})
+        assert_path_free({"asset": asset, "goal": goal})
         return f"""分析资产 {asset} 的目标：{goal}
 
 严格按以下顺序执行：
@@ -35,6 +35,25 @@ def register_prompts(server: MCPServer) -> None:
 
 仅调用 blueprint_get_node，并只分析该节点、Pin、默认值、gap 与直接邻域。
 明确区分已确认事实和未知；不得模糊搜索，不得使用 shell 或 Computer Use，不得修改 ARK DevKit。"""
+
+    @server.prompt(
+        name="design_blueprint_patch",
+        description="Build a revision-bound local Blueprint Patch Plan and stop before execution.",
+    )
+    def design_blueprint_patch(asset: str, goal: str) -> str:
+        assert_path_free({"asset": asset, "goal": goal})
+        return f"""为资产 {asset} 的目标设计精确 Blueprint Patch Plan：{goal}
+
+严格按以下顺序执行：
+1. 调用 blueprint_task_create。
+2. 调用 blueprint_task_research；若存在 blockers，停止并询问用户。
+3. 只有 Task 到达 READY_TO_PLAN 后才调用 blueprint_patch_plan_draft。
+4. 调用 blueprint_patch_plan_validate。
+5. 展示 humanSummary，并等待当前对话中的用户明确批准。
+6. Never call blueprint_patch_plan_confirm until the user explicitly approves the displayed plan in the current conversation.
+7. 获得明确批准后才以 exact semantic digest 调用 confirm，然后停止。
+
+不得使用 shell 或 Computer Use；不得修改 Evidence；不得执行蓝图、编译或保存；CONFIRMED 仍不是 ARK mutation 授权。"""
 
 
 __all__ = ["register_prompts"]

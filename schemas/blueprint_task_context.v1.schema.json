@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blueprint-to-code.task-context/v1",
+  "title": "Blueprint Task Context v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "taskId",
+    "mode",
+    "goal",
+    "completionCriteria",
+    "allowedChanges",
+    "forbiddenChanges",
+    "primaryAsset",
+    "supportingAssets",
+    "graphTargets",
+    "confirmedFacts",
+    "assumptions",
+    "blockingQuestions",
+    "nonBlockingUnknowns",
+    "graphSlices",
+    "queryLedger",
+    "readiness",
+    "semanticDigest"
+  ],
+  "properties": {
+    "schema": { "const": "blueprint-to-code.task-context/v1" },
+    "taskId": { "type": "string", "pattern": "^task://[0-9a-f]{32}$" },
+    "mode": {
+      "enum": ["KNOWLEDGE_QUERY", "BLUEPRINT_DESIGN", "IMPLEMENTATION_PREP"]
+    },
+    "goal": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "completionCriteria": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "allowedChanges": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "forbiddenChanges": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "primaryAsset": { "$ref": "#/$defs/assetIdentity" },
+    "supportingAssets": {
+      "type": "array",
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/assetIdentity" }
+    },
+    "graphTargets": {
+      "type": "array",
+      "maxItems": 2,
+      "items": { "type": "object" }
+    },
+    "confirmedFacts": { "type": "array", "items": { "type": "object" } },
+    "assumptions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assumptionId", "type", "text"],
+        "properties": {
+          "assumptionId": {
+            "type": "string",
+            "pattern": "^assumption://[0-9a-f]{24}$"
+          },
+          "type": { "const": "ASSUMPTION" },
+          "text": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "blockingQuestions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "object" }
+    },
+    "nonBlockingUnknowns": { "type": "array", "items": { "type": "object" } },
+    "graphSlices": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "type": "object" }
+    },
+    "queryLedger": { "type": "object" },
+    "readiness": { "enum": ["DISCOVERY", "READY_TO_PLAN"] },
+    "semanticDigest": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "assetIdentity": {
+      "type": "object",
+      "required": [
+        "name",
+        "assetId",
+        "objectPath",
+        "evidenceRevisionId",
+        "evidenceManifestSha256",
+        "freshness",
+        "readOnly"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "assetId": { "type": "string", "minLength": 1 },
+        "objectPath": { "type": "string", "pattern": "^/(Game|Engine|Script)/" },
+        "evidenceRevisionId": { "type": "string", "minLength": 1 },
+        "evidenceManifestSha256": { "$ref": "#/$defs/sha256" },
+        "freshness": { "const": "FRESH" },
+        "readOnly": { "type": "boolean" }
+      }
+    }
+  }
+}

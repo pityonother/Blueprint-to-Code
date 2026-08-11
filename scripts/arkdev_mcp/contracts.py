@@ -1,4 +1,4 @@
-"""Stable public contracts shared by the Phase 1 MCP adapters."""
+"""Stable public contracts shared by the ARK Dev MCP adapters."""
 
 from __future__ import annotations
 
@@ -15,6 +15,12 @@ TOOL_NAMES = (
     "blueprint_list_assets",
     "blueprint_get_context",
     "blueprint_get_node",
+    "blueprint_task_create",
+    "blueprint_task_resume",
+    "blueprint_task_research",
+    "blueprint_patch_plan_draft",
+    "blueprint_patch_plan_validate",
+    "blueprint_patch_plan_confirm",
 )
 ERROR_CODES = frozenset(
     {
@@ -29,6 +35,17 @@ ERROR_CODES = frozenset(
         "RESULT_BUDGET_EXCEEDED",
         "EDITOR_BRIDGE_NOT_INSTALLED",
         "EDITOR_BRIDGE_UNAVAILABLE",
+        "TASK_NOT_FOUND",
+        "TASK_PHASE_INVALID",
+        "TASK_BLOCKED",
+        "TASK_SLICE_LIMIT_REACHED",
+        "EVIDENCE_REVISION_CHANGED",
+        "PATCH_PLAN_NOT_FOUND",
+        "PATCH_PLAN_INVALID",
+        "PATCH_PLAN_LIMIT_EXCEEDED",
+        "PATCH_PLAN_NOT_CONFIRMABLE",
+        "PATCH_PLAN_DIGEST_MISMATCH",
+        "PLAN_CONFIRMATION_REQUIRED",
         "INTERNAL_CONTRACT_ERROR",
     }
 )

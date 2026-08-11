@@ -24,8 +24,10 @@
 - `required = true`
 - `startup_timeout_sec = 20`
 - `tool_timeout_sec = 60`
-- 五工具精确 allowlist
-- `default_tools_approval_mode = "auto"`，只因这五个工具全部为只读
+- 11 工具精确 allowlist
+- `default_tools_approval_mode = "auto"`，只覆盖 Evidence 读取与 `.blueprint-tasks/**` 本地 metadata 写入
+
+Phase 2 auto approval 不授权 ARK DevKit mutation。任何未来 create/connect/default/compile/save 工具必须使用不同审批策略，不能继承当前配置。
 
 ## 3. 诊断
 
@@ -33,7 +35,7 @@
 .\.runtime\arkdev-mcp\Scripts\python.exe scripts\diagnose_arkdev_mcp.py
 ```
 
-当指定 capture root 中存在所选 FRESH fixture 时，核心七项应为 `true`：
+当指定 capture root 中存在所选 FRESH fixture 时，核心项应为 `true`：
 
 ```text
 DEPENDENCY_INSTALLED
@@ -42,6 +44,12 @@ STDIO_HANDSHAKE_OK
 TOOLS_DISCOVERED
 STATUS_CALL_OK
 BLUEPRINT_FIXTURE_CALL_OK
+TASK_CREATE_OK
+TASK_RESUME_OK
+TASK_RESEARCH_OK
+TASK_CACHE_HIT_OK
+PATCH_PLAN_DRAFT_OK
+PATCH_PLAN_VALIDATE_OK
 CODEX_CONFIG_RENDER_OK
 ```
 
@@ -54,4 +62,4 @@ CODEX_CONFIG_RENDER_OK
 - handshake 失败：直接运行诊断；不要在 `run_arkdev_mcp.ps1` 中加入 `Write-Host` 或 banner。
 - Codex server 未列出：先确认个人配置本身可解析，再粘贴渲染出的配置并重启 Codex。
 
-服务 stdout 专用于 MCP framing；安全错误和启动失败仅写 stderr，且不输出 Evidence 内容、秘密或本机路径。
+服务 stdout 专用于 MCP framing；安全错误和启动失败仅写 stderr，且不输出 Evidence 内容、秘密或本机路径。Task handle 只能使用 opaque `task://` ID；不可把 `.blueprint-tasks` 文件路径放入 prompt 或公开 payload。

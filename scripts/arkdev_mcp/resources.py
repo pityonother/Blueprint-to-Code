@@ -10,6 +10,8 @@ from mcp.server import MCPServer
 
 PayloadProvider = Callable[[], dict[str, object]]
 AssetPayloadProvider = Callable[[str], dict[str, object]]
+TaskPayloadProvider = Callable[[str], dict[str, object]]
+PlanPayloadProvider = Callable[[str], dict[str, object]]
 
 
 def _json(value: dict[str, object]) -> str:
@@ -28,6 +30,8 @@ def register_resources(
     status_provider: PayloadProvider,
     editor_state_provider: PayloadProvider,
     asset_health_provider: AssetPayloadProvider,
+    task_provider: TaskPayloadProvider,
+    plan_provider: PlanPayloadProvider,
 ) -> None:
     @server.resource(
         "arkdev://status",
@@ -55,6 +59,24 @@ def register_resources(
     )
     def blueprint_asset_health_resource(asset: str) -> str:
         return _json(asset_health_provider(asset))
+
+    @server.resource(
+        "arkdev://tasks/{task_id}",
+        name="blueprint_task_state",
+        description="Compact revision-verified projection of local Task metadata.",
+        mime_type="application/json",
+    )
+    def blueprint_task_state_resource(task_id: str) -> str:
+        return _json(task_provider(task_id))
+
+    @server.resource(
+        "arkdev://plans/{plan_id}",
+        name="blueprint_patch_plan_state",
+        description="Compact validated projection of local Patch Plan metadata.",
+        mime_type="application/json",
+    )
+    def blueprint_patch_plan_state_resource(plan_id: str) -> str:
+        return _json(plan_provider(plan_id))
 
 
 __all__ = ["register_resources"]
