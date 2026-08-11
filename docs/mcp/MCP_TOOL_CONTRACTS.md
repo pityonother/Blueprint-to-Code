@@ -1,4 +1,4 @@
-# Phase 2 MCP Tool Contracts
+# Phase 3 MCP Tool Contracts
 
 五个 Phase 1 工具保持名称、参数和只读行为兼容。六个 Phase 2 工具只写 `.blueprint-tasks/**`，annotation 固定为 `readOnly=false`、`destructive=false`、`openWorld=false`，description 明确写出：
 
@@ -12,7 +12,7 @@ DOES NOT MODIFY ARK DEVKIT OR BLUEPRINT EVIDENCE.
 | Tool | 写入 | 成功合同 | 关键约束 |
 |---|---|---|---|
 | `arkdev_status` | 无 | MCP status v1 | stdio/windows-x64；ARK mutation=false |
-| `arkdev_editor_state` | 无 | editor state v1 | 默认 DISCONNECTED |
+| `arkdev_editor_state` | 无 | editor state v1 additive | atomic snapshot + freshness + exact Evidence/Task binding |
 | `blueprint_list_assets` | 无 | asset list v1 | bounded/path-free |
 | `blueprint_get_context` | 无 | context v1 | 一发式语义不变；maxHops<=2 |
 | `blueprint_get_node` | 无 | node v1 | exact current `bp://` nodeRef |
@@ -54,6 +54,33 @@ arkdev://plans/{plan_id}
 ```
 
 Task/Plan Resource 参数只接受 opaque ID；投影会重新执行 revision gate，不暴露本机路径。
+
+`arkdev://editor/state` 固定调用 `includeSelection=true`、`includeGraphNodes=false`、空 `taskId`，不会写 Task verification timestamp。
+
+## `arkdev_editor_state` additive 输入/输出
+
+输入：
+
+```json
+{
+  "includeSelection": true,
+  "includeGraphNodes": false,
+  "maxGraphNodes": 200,
+  "taskId": ""
+}
+```
+
+`maxGraphNodes` 范围为 `1..1000`；默认不返回 node 列表。`taskId` 只能为空或精确 `task://` opaque handle。
+
+保留 editor state v1 原字段，并 additive 返回 `snapshot`、`activityStatus`、`graphStatus`、`selectionStatus`、`activeAssetDetails`、`activeGraphDetails`、`activeAssetBinding`、`activeGraphBinding`、`graphNodes`、`graphNodeSummary` 与 `taskBinding`。`graphStatus` 明确区分 `NO_ACTIVE_BLUEPRINT`、`BLUEPRINT_EDITOR_INTERFACE_UNAVAILABLE`、`NO_FOCUSED_GRAPH` 与 `FOCUSED_GRAPH`。公开 payload 不含 bridge 文件路径。
+
+绑定规则只有：
+
+- Blueprint `objectPath` 精确相等；
+- current FRESH Evidence 内 graph name 唯一精确相等；
+- 当前 graph 的 `extra_json.node_guid` 与 live NodeGuid 精确相等。
+
+name/class/x/y 只用于诊断，绝不提升为 exact。可选 Task binding 调用 `resume(..., persist_verification=false)`；`mutationReady` 永远为 `false`。
 
 ## Prompts（恰好三个）
 

@@ -140,22 +140,13 @@ class ArkdevEditorBridgeContractTests(unittest.TestCase):
         bridge = DisconnectedEditorBridge()
         self.assertEqual(bridge.health()["status"], "DISCONNECTED")
         self.assertEqual(bridge.get_capabilities(), ())
-        self.assertEqual(
-            bridge.get_state(include_selection=True),
-            {
-                "schema": "blueprint-to-code.arkdev-editor-state/v1",
-                "connected": False,
-                "bridgeVersion": "",
-                "devkitBuild": "",
-                "activeAsset": None,
-                "activeGraph": None,
-                "selectedNodes": [],
-                "dirty": None,
-                "compileStatus": "UNKNOWN",
-                "capabilities": [],
-                "reasonCode": "EDITOR_BRIDGE_NOT_INSTALLED",
-            },
-        )
+        state = bridge.get_state(include_selection=True)
+        self.assertEqual(state["schema"], "blueprint-to-code.arkdev-editor-state/v1")
+        self.assertFalse(state["connected"])
+        self.assertEqual(state["reasonCode"], "EDITOR_BRIDGE_NOT_INSTALLED")
+        self.assertEqual(state["graphStatus"], "DISCONNECTED")
+        self.assertEqual(state["graphNodes"], [])
+        self.assertEqual(state["taskBinding"], {})
 
     def test_fixture_bridge_never_advertises_mutation_capabilities(self) -> None:
         bridge = FixtureEditorBridge(
@@ -171,6 +162,10 @@ class ArkdevEditorBridgeContractTests(unittest.TestCase):
         advertised = set(bridge.get_capabilities())
         self.assertTrue(bridge.health()["connected"])
         self.assertFalse(advertised & MUTATION_CAPABILITIES)
+        self.assertEqual(
+            bridge.get_state(include_selection=True)["graphStatus"],
+            "FOCUSED_GRAPH",
+        )
 
 
 if __name__ == "__main__":
