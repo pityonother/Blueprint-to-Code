@@ -1,6 +1,8 @@
-# ARK DevKit Official Scripting Probe：一次性人工运行
+# ARK DevKit Official Scripting Probe v2：一次性人工运行
 
-本流程最多执行一次 DevKit 内 probe，不需要截图。Codex 不通过 Computer Use 操作编辑器。
+ObjectIterator closure 只允许一次新的 DevKit 内 probe，不需要截图。只有脚本因
+明确编码错误而未生成合法结果时，才允许修复后重跑一次。Codex 不通过
+Computer Use 操作编辑器。
 
 ## 运行前
 
@@ -20,13 +22,20 @@
   "schema": "blueprint-to-code.arkdev-scripting-probe-request/v1",
   "objectPath": "/Game/YourFolder/BP_Test.BP_Test",
   "graphName": "EventGraph",
-  "maxNodes": 200
+  "maxNodes": 200,
+  "maxObjectsScanned": 50000
 }
 ```
 
 `objectPath` 必须是 `/Game/` 或 `/Engine/` 开头的 Unreal object path，不是本机文件路径。`graphName` 必须与 Blueprint 中的 Graph 名完全一致。
 
+`maxNodes` 的硬上限为 200，`maxObjectsScanned` 的硬上限为 50,000；达到扫描
+上限即停止，不会转为无界 Iterator。
+
 ## 在 DevKit 内只运行一次
+
+先打开或加载 `request.json` 指定的 Blueprint，再执行脚本。完成后只需回复
+“已运行”，不要求截图。
 
 二选一，不要两种方式都执行：
 
@@ -59,8 +68,11 @@ EXPLICIT_TARGET=AVAILABLE|MISSING|ERROR
 
 ```text
 .arkdev-probe/live-probe.json
-.arkdev-probe/explicit-graph-snapshot.json（仅成功时）
+.arkdev-probe/explicit-graph-snapshot.json（仅全部 snapshot PASS 门成功时）
 ```
+
+`live-probe.json` 每次都会刷新。若本次不是权威 snapshot 成功，脚本会移除旧的
+`explicit-graph-snapshot.json`，避免 validator 把历史文件误认成本次结果。
 
 ## 外部验证
 
@@ -79,3 +91,10 @@ python scripts\validate_arkdev_scripting_probe.py
 - 不改 Node、Pin、默认值或位置。
 - 不 compile、不 save、不创建 Editor Utility asset。
 - 不连接 MCP，不启动 listener，不访问外部网络。
+
+## 2026-08-12 closure 运行记录
+
+本轮唯一一次新运行已完成并生成合法 v2 结果，状态为
+`EXPLICIT_TARGET=ERROR`，gap 为 `OBJECT_ITERATOR_SCAN_LIMIT_REACHED`。这不是
+编码错误，因此不得重跑。历史 Phase 3B probe 1 次，本轮 closure 1 次，累计
+DevKit 人工运行 2 次。

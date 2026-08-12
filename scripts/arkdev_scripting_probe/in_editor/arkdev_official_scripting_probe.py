@@ -22,10 +22,18 @@ from arkdev_scripting_probe.contracts import (  # noqa: E402
 )
 from arkdev_scripting_probe.in_editor.arkdev_explicit_graph_snapshot import (  # noqa: E402
     collect_explicit_graph_snapshot,
+    empty_explicit_target,
 )
 
 
 _CLASS_NAMES = (
+    "Object",
+    "ObjectIterator",
+    "EdGraph",
+    "EdGraphNode",
+    "K2Node",
+    "BlueprintGraphEditor",
+    "BlueprintGraphPinLibrary",
     "AssetEditorSubsystem",
     "BlueprintEditorLibrary",
     "EditorUtilitySubsystem",
@@ -36,6 +44,11 @@ _CLASS_NAMES = (
     "EditorUtilityWidgetBlueprint",
 )
 _SAFE_METHODS = {
+    "Object": (
+        "get_outer",
+        "get_typed_outer",
+        "get_path_name",
+    ),
     "AssetEditorSubsystem": (
         "get_all_edited_assets",
         "find_editor_for_asset",
@@ -44,6 +57,8 @@ _SAFE_METHODS = {
         "get_blueprint_asset",
         "find_event_graph",
         "find_graph",
+        "get_all_graphs",
+        "get_all_graph_names",
         "get_node_pos",
         "get_node_size",
         "list_all_pins",
@@ -56,6 +71,10 @@ _SAFE_METHODS = {
     ),
 }
 _MUTATION_METHODS = {
+    "Object": (
+        "modify",
+        "set_editor_property",
+    ),
     "AssetEditorSubsystem": ("open_editor_for_assets",),
     "BlueprintEditorLibrary": (
         "compile_blueprint",
@@ -65,17 +84,48 @@ _MUTATION_METHODS = {
         "create_connection",
     ),
     "EditorAssetLibrary": ("save_asset",),
+    "BlueprintGraphEditor": (
+        "add_node",
+        "create_node",
+        "create_connection",
+        "remove_node",
+    ),
+    "BlueprintGraphPinLibrary": (
+        "break_pin_links",
+        "break_all_pin_links",
+        "create_connection",
+        "set_default_value",
+        "set_default_object",
+        "set_default_text",
+    ),
 }
 _VISIBLE_METHOD_TOKENS = (
     "asset",
     "blueprint",
     "compile",
+    "connect",
+    "connection",
+    "create",
+    "break",
+    "default",
+    "disconnect",
     "editor",
     "graph",
     "node",
     "pin",
     "save",
     "utility",
+)
+
+_GRAPH_MUTATION_PREFIXES = (
+    "add_",
+    "break_",
+    "connect_",
+    "create_",
+    "delete_",
+    "disconnect_",
+    "remove_",
+    "set_default",
 )
 
 
@@ -109,6 +159,21 @@ def _visible_methods(owner: object | None) -> list[str]:
     )[:64]
 
 
+def _graph_mutation_methods(owner: object | None) -> list[str]:
+    if owner is None:
+        return []
+    try:
+        names = dir(owner)
+    except Exception:
+        return []
+    return sorted(
+        name[:128]
+        for name in names
+        if not name.startswith("_")
+        and any(name.casefold().startswith(prefix) for prefix in _GRAPH_MUTATION_PREFIXES)
+    )[:128]
+
+
 def _engine_version(unreal_module: object | None) -> str:
     if unreal_module is None:
         return ""
@@ -137,10 +202,22 @@ def _introspection(
     list[dict[str, str]],
 ]:
     if unreal_module is None:
+        methods = {
+            f"{class_name}.{method_name}": "NOT_TESTED"
+            for class_name, method_names in _SAFE_METHODS.items()
+            for method_name in method_names
+        }
+        methods.update(
+            {
+                f"{class_name}.{method_name}": "NOT_TESTED"
+                for class_name, method_names in _MUTATION_METHODS.items()
+                for method_name in method_names
+            }
+        )
         return (
             {name: "NOT_TESTED" for name in _CLASS_NAMES},
-            {},
-            {},
+            methods,
+            {name: [] for name in _CLASS_NAMES},
             [],
         )
     classes: dict[str, str] = {}
@@ -169,6 +246,17 @@ def _introspection(
             else:
                 status = "MISSING"
             methods[f"{class_name}.{method_name}"] = status
+        if class_name in {"BlueprintGraphEditor", "BlueprintGraphPinLibrary"}:
+            for method_name in _graph_mutation_methods(owner):
+                key = f"{class_name}.{method_name}"
+                methods[key] = "PRESENT_BUT_NOT_USED"
+                observation = {
+                    "owner": class_name,
+                    "method": method_name,
+                    "status": "PRESENT_BUT_NOT_USED",
+                }
+                if observation not in mutation_observed:
+                    mutation_observed.append(observation)
     mutation_observed.sort(key=lambda item: (item["owner"], item["method"]))
     return classes, methods, visible, mutation_observed
 
@@ -255,21 +343,15 @@ def build_probe_bundle(
     gaps = list(active_gaps)
     snapshot: dict[str, object] | None = None
     if unreal_module is None:
-        explicit_target: dict[str, object] = {
-            "status": "NOT_TESTED",
-            "objectPath": "",
-            "graphName": "",
-            "capabilities": {},
-            "gaps": ["UNREAL_IMPORT_FAILED"],
-        }
+        explicit_target = empty_explicit_target(
+            status="NOT_TESTED",
+            gap="UNREAL_IMPORT_FAILED",
+        )
     elif request is None:
-        explicit_target = {
-            "status": "NOT_TESTED",
-            "objectPath": "",
-            "graphName": "",
-            "capabilities": {},
-            "gaps": ["EXPLICIT_TARGET_NOT_REQUESTED"],
-        }
+        explicit_target = empty_explicit_target(
+            status="NOT_TESTED",
+            gap="EXPLICIT_TARGET_NOT_REQUESTED",
+        )
         gaps.append("EXPLICIT_TARGET_NOT_REQUESTED")
     else:
         try:
@@ -278,13 +360,11 @@ def build_probe_bundle(
                 request,
             )
         except Exception:
-            explicit_target = {
-                "status": "ERROR",
-                "objectPath": str(request.get("objectPath") or "")[:4096],
-                "graphName": str(request.get("graphName") or "")[:256],
-                "capabilities": {},
-                "gaps": ["EXPLICIT_TARGET_PROBE_FAILED"],
-            }
+            explicit_target = empty_explicit_target(
+                status="ERROR",
+                gap="EXPLICIT_TARGET_PROBE_FAILED",
+                request=request,
+            )
         gaps.extend(str(item) for item in explicit_target.get("gaps", []))
 
     engine_version = _engine_version(unreal_module)
@@ -363,13 +443,16 @@ def main() -> int:
         python_version=platform.python_version(),
     )
     _write(output_root / "live-probe.json", result)
-    if snapshot is not None:
-        _write(output_root / "explicit-graph-snapshot.json", snapshot)
+    snapshot_path = output_root / "explicit-graph-snapshot.json"
+    target = result["explicitTarget"]
+    assert isinstance(target, Mapping)
+    if snapshot is not None and target.get("status") == "AVAILABLE":
+        _write(snapshot_path, snapshot)
+    elif snapshot_path.is_file():
+        snapshot_path.unlink()
     print("ARKDEV_OFFICIAL_SCRIPTING_PROBE=COMPLETE")
     python = result["python"]
-    target = result["explicitTarget"]
     assert isinstance(python, Mapping)
-    assert isinstance(target, Mapping)
     print(f"PYTHON_RUNTIME={'PASS' if python['available'] else 'ERROR'}")
     print(
         f"UNREAL_IMPORT={'PASS' if python['unrealImport'] else 'UNAVAILABLE'}"

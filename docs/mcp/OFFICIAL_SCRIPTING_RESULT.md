@@ -19,17 +19,32 @@
 | `ASSET_EDITOR_SUBSYSTEM` | 类在当前 runtime 中可见 |
 | `BLUEPRINT_EDITOR_LIBRARY` | 类在当前 runtime 中可见 |
 | `EDITOR_UTILITY_SUBSYSTEM` | 类在当前 runtime 中可见 |
+| `OBJECT_ITERATOR` | `ObjectIterator` 表面在当前 runtime 可见；具体迭代结果另看两种 iterator 字段 |
+| `ED_GRAPH_NODE_CLASS` / `K2_NODE_CLASS` | 对应节点类在当前 runtime 可见 |
+| `BLUEPRINT_GRAPH_EDITOR_CLASS` / `BLUEPRINT_GRAPH_PIN_LIBRARY_CLASS` | 对应类在当前 runtime 可见；不代表调用过 mutation |
+| `OBJECT_GET_OUTER` / `OBJECT_GET_TYPED_OUTER` / `OBJECT_GET_PATH_NAME` | 对显式目标的实际只读调用成功，不只是方法名可见 |
 | `EXPLICIT_ASSET_LOAD` | 指定 Unreal object path 实际加载成功 |
 | `EXPLICIT_GRAPH_FIND` | 指定 Graph 实际找到 |
-| `GRAPH_NODE_ENUMERATION` | Graph nodes 实际可枚举 |
-| `NODE_GUID_READ` | 每个返回范围内的来源 Node 都读取到合法非全零 GUID |
-| `NODE_POSITION_READ` | 每个来源 Node 都读取到 x/y |
+| `DIRECT_GRAPH_PROPERTY` | `graph.nodes` 或等价 editor property 实际可读 |
+| `OBJECT_ITERATOR_EDGRAPHNODE` / `OBJECT_ITERATOR_K2NODE` | 对应 bounded Iterator 实际完成；扫描截断或调用异常为 `ERROR` |
+| `EXACT_OUTER_NODE_ENUMERATION` | Graph nodes 由 identity、exact typed outer 或“EdGraph 类型 + 完整路径相等”证明；名字/类名/位置/路径前缀不算 |
+| `GRAPH_NODE_ENUMERATION` | Graph nodes 经允许策略实际完整枚举，且未扫描截断 |
+| `NODE_GUID_READ` | 每个 exact member 都读取到合法非全零 GUID；无效 GUID 节点不得进入权威返回集合 |
+| `NODE_POSITION_READ` | 每个 exact member 都实际读取到 x/y |
+| `NODE_LIST_ALL_PINS` / `NODE_PIN_READ` | Pin API 实际可调用 / 节点 Pin 签名实际读取成功；不是 snapshot 硬门 |
+| `BLUEPRINT_STATUS_READ` | 显式 Blueprint compile status 实际只读成功 |
+| `PACKAGE_DIRTY_READ` | package dirty state 有稳定官方只读调用且执行成功；不是 snapshot 硬门 |
 | `ACTIVE_ASSET_READ` | 官方 API 能明确读取 active asset，而非从 opened list 推断 |
 | `FOCUSED_GRAPH_READ` | 官方 API 能明确读取 focused Graph |
 | `SELECTION_READ` | 官方 API 能明确读取 editor selection |
 | `DIRTY_STATE_READ` | 官方 API 能明确读取 dirty state |
 | `COMPILE_STATE_READ` | 官方 API 能明确读取 compile state |
 | `EXPLICIT_GRAPH_SNAPSHOT` | snapshot 文件通过合同、digest、node cap 和 path-free 验证 |
+
+计数语义固定为：`objectsScanned` 是实际检查的 Iterator 对象数；
+`matchingNodes` 是去重后的 exact members（包含无效 GUID）；`returnedNodes` 是带
+有效 GUID 的权威返回节点数；`nodesOmitted = matchingNodes - returnedNodes`。
+`scanTruncated=true` 永远不能得到 snapshot PASS。
 
 Validator 值含义：
 
@@ -50,15 +65,28 @@ UNREAL_IMPORT
 EXPLICIT_ASSET_LOAD
 EXPLICIT_GRAPH_FIND
 GRAPH_NODE_ENUMERATION
+NODE_GUID_READ
 NODE_POSITION_READ
 EXPLICIT_GRAPH_SNAPSHOT
 ```
 
 下一阶段可以评估把 one-shot snapshot 接入既有 EditorBridge protocol，但本 PR 不实施。
 
+### `PARTIAL_NODE_ENUMERATION`
+
+exact node enumeration 成功，但 GUID 或位置硬门未通过。必须逐项保留 GUID、位置
+和 Pin 缺口，不接入 MCP。
+
+### `PARTIAL_NO_NODE_ENUMERATION`
+
+直接属性与 bounded ObjectIterator 都没有产出完整 exact node enumeration。扫描
+达到 50,000 上限也属于此运行时可行性结果，但它只证明“允许预算内没有完成”，
+不证明目标节点在全局 UObject 集合中不存在。
+
 ### `PARTIAL`
 
-Python 与 `unreal` 可用，但上述完整快照条件没有全部通过。必须逐项保留缺口，不接入 MCP。下一阶段再比较显式目标 bridge 与 Editor Utility fallback。
+保留为旧 Probe v1 的历史路线名。Probe v2 新结果使用上述两个更精确的 partial
+分支。
 
 ### `EDITOR_UTILITY_CANDIDATE`
 
@@ -135,3 +163,74 @@ CTYPES=false
 ```
 
 结论为 `PARTIAL`，不是完整 Graph Snapshot 成功，也不是官方 scripting surfaces 全部不可用。本 PR 不把该结果接入 MCP；下一阶段只能在显式目标 bridge 的其他官方只读面与 Editor Utility fallback 之间另行评估。
+
+## 2026-08-12 ObjectIterator closure 实测记录
+
+在同一 ARK DevKit 5.5.4 embedded Python 中执行了本轮唯一一次新 probe。v2
+`live-probe.json` 的 digest、合同和 path-free 校验成功；能力 validator 按合同报告
+`EXPLICIT_GRAPH_SNAPSHOT=ERROR` 并以非零状态 fail closed。未生成 snapshot。
+
+```text
+PROBE_VERSION=arkdev-official-scripting-probe/v2
+OBJECT_ITERATOR=PASS
+ED_GRAPH_NODE_CLASS=PASS
+K2_NODE_CLASS=PASS
+BLUEPRINT_GRAPH_EDITOR_CLASS=UNAVAILABLE
+BLUEPRINT_GRAPH_PIN_LIBRARY_CLASS=UNAVAILABLE
+
+EXPLICIT_ASSET_LOAD=PASS
+EXPLICIT_GRAPH_FIND=PASS
+DIRECT_GRAPH_PROPERTY=UNAVAILABLE
+OBJECT_ITERATOR_EDGRAPHNODE=ERROR
+OBJECT_ITERATOR_K2NODE=NOT_TESTED
+EXACT_OUTER_NODE_ENUMERATION=NOT_TESTED
+EXACT_TYPED_OUTER_NODE_ENUMERATION=NOT_TESTED
+
+OBJECTS_SCANNED=50000
+MATCHING_NODES=0
+RETURNED_NODES=0
+ENUMERATION_STRATEGY=NONE
+SCAN_TRUNCATED=true
+
+NODE_GUID_READ=NOT_TESTED
+NODE_POSITION_READ=NOT_TESTED
+NODE_PIN_READ=NOT_TESTED
+BLUEPRINT_STATUS_READ=UNAVAILABLE
+PACKAGE_DIRTY_READ=UNAVAILABLE
+
+EXPLICIT_GRAPH_SNAPSHOT=ERROR
+OFFICIAL_SCRIPTING_ROUTE=PARTIAL_NO_NODE_ENUMERATION
+```
+
+`ObjectIterator(EdGraphNode)` 确实开始运行，但在检查 50,000 个 UObject 后仍未
+完成迭代，也未在预算范围内找到目标 `EventGraph` 的 exact-outer member。脚本按
+预算记录 `OBJECT_ITERATOR_SCAN_LIMIT_REACHED` 并停止；由于共享扫描预算已经
+耗尽，没有启动 `ObjectIterator(K2Node)`。这是一份合法的 bounded feasibility
+结果，不是脚本编码错误，因此不允许第二次 DevKit 运行。
+
+该结果不证明目标节点在全局 UObject 集合中不存在；它证明当前官方 Python
+显式目标路线不能在本轮允许的 50,000 对象预算内完成权威节点快照。不能把它
+升级为 `GRAPH_NODE_ENUMERATION=PASS`，也不能开始 MCP integration。
+
+运行时还确认：
+
+- `ObjectIterator`、`EdGraphNode`、`K2Node`、`Object.get_outer`、
+  `Object.get_typed_outer` 和 `Object.get_path_name` 在反射层可见；
+- `BlueprintGraphEditor`、`BlueprintGraphPinLibrary`、Graph list、Pin list、
+  node-position library、Blueprint status 和 package dirty 查询在本次所需表面不可用
+  或未进入节点读取阶段；
+- mutation APIs 只记录为 `PRESENT_BUT_NOT_USED`；脚本没有调用 mutation、compile、
+  save、open editor、connection 或 pin mutation。
+
+```text
+PROBE_SEMANTIC_DIGEST=1e8763c3ca7a5fd536dc85129b4cda0a291c0b07d75f66fe35bad279e5c675ea
+NEW_MANUAL_RUNS=1
+CUMULATIVE_MANUAL_RUNS=2
+MUTATION_API_CALLED=false
+ARK_ASSET_CHANGED=false
+MCP_INTEGRATION_STARTED=false
+PATCH_EXECUTOR_STARTED=false
+```
+
+本轮到此结束。下一项独立决策只能是 Editor Utility / GraphEditor capability spike，
+或停止 runtime Bridge 并保留 Phase 1/2；本 PR 不执行任何一种后续路线。

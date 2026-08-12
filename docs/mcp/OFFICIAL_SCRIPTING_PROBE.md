@@ -41,7 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 完整安装结果写入 gitignored 的 `.arkdev-probe/install-capabilities.json`。终端只显示不含本机路径的能力摘要和 `NEXT_MANUAL_ACTION`。
 
-## DevKit 内一次性探测
+## DevKit 内一次性探测（Probe v2）
 
 `scripts/arkdev_scripting_probe/in_editor/arkdev_official_scripting_probe.py` 只执行以下操作：
 
@@ -49,7 +49,30 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 - 反射官方类、候选只读方法和相关可见方法名；
 - 读取 `get_all_edited_assets`（如果确实存在），但不把 opened assets 推断为 active asset；
 - 读取用户在 `.arkdev-probe/request.json` 指定的 asset 和 graph；
-- 枚举最多 200 个 Graph node，并只输出实际可读的 GUID、名称、类名和位置。
+- 按 `graph.nodes`、`ObjectIterator(EdGraphNode)`、`ObjectIterator(K2Node)`
+  的顺序尝试节点枚举；
+- Iterator 成员只接受 `get_outer() is graph`，或“outer 确为 `EdGraph` 且完整
+  Unreal object path 完全相等”；`get_typed_outer(EdGraph)` 可作为第二种 exact proof；
+- 最多检查 50,000 个 UObject，最多返回 200 个节点；达到扫描上限立即以
+  `OBJECT_ITERATOR_SCAN_LIMIT_REACHED` fail closed；
+- 按 exact object path / GUID 去重；无有效非全零 GUID 的 exact member 只计入
+  `matchingNodes`，不进入 `authoritativeNodes`；
+- 只读 Node GUID、位置、Pin 签名、Blueprint compile status，并在官方只读
+  dirty 查询存在时读取 package dirty state。
+
+Probe v2 记录：
+
+```text
+objectsScanned
+matchingNodes
+returnedNodes
+nodesOmitted
+scanTruncated
+enumerationStrategy
+compileStatus
+```
+
+名字、类名、位置、数组顺序和路径前缀都不能作为 Graph 成员证明。
 
 脚本不会打开或聚焦资产编辑器。详细的一次性人工步骤见 [OFFICIAL_SCRIPTING_MANUAL_RUN.md](OFFICIAL_SCRIPTING_MANUAL_RUN.md)。
 
@@ -65,13 +88,20 @@ set_node_pos
 break_pin_links
 create_connection
 save_asset
+modify
+set_editor_property
 ```
+
+`BlueprintGraphEditor` 和 `BlueprintGraphPinLibrary` 只做反射。其创建、连接、
+断开、删除和默认值修改方法即使可见，也只记录为
+`PRESENT_BUT_NOT_USED`，本阶段绝不调用。
 
 实现中不调用 `set_editor_property`、`modify`、`ScopedEditorTransaction`、compile、save、open/focus editor、socket、HTTP listener、private DLL、`ctypes`、Computer Use、截图或 OCR。
 
 ## 合同与验证
 
-- Probe：`blueprint-to-code.arkdev-scripting-probe/v1`
+- Probe schema：`blueprint-to-code.arkdev-scripting-probe/v1`
+- Probe implementation：`arkdev-official-scripting-probe/v2`
 - Snapshot：`blueprint-to-code.arkdev-explicit-graph-snapshot/v1`
 - 状态：`AVAILABLE | MISSING | ERROR | NOT_TESTED | PRESENT_BUT_NOT_USED`
 - `semanticDigest`：对排除 `generatedAt` 和 `semanticDigest` 后的 canonical JSON 计算 SHA-256。
@@ -82,7 +112,11 @@ save_asset
 python scripts\validate_arkdev_scripting_probe.py
 ```
 
-它只输出 `PASS | UNAVAILABLE | NOT_TESTED | ERROR` 的 path-free 能力矩阵。字段解释和路线判定见 [OFFICIAL_SCRIPTING_RESULT.md](OFFICIAL_SCRIPTING_RESULT.md)。
+它只输出 `PASS | UNAVAILABLE | NOT_TESTED | ERROR` 的 path-free 能力矩阵。
+其中类/方法可见性与实际调用能力分别记录；`NODE_LIST_ALL_PINS` 表示调用面，
+`NODE_PIN_READ` 表示实际节点数据读取结果；旧的 active-editor
+`COMPILE_STATE_READ` 不替代显式 Blueprint 的 `BLUEPRINT_STATUS_READ`。
+字段解释和路线判定见 [OFFICIAL_SCRIPTING_RESULT.md](OFFICIAL_SCRIPTING_RESULT.md)。
 
 ## 与 PR #43 的关系
 

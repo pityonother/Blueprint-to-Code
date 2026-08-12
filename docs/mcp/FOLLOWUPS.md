@@ -8,9 +8,9 @@
 - portable runtime 内置 MCP 依赖。
 - Computer Use、截图识别、视觉模板和蓝图施工图。
 - `blueprint_service.py` 拆分与 query planner 优化；Phase 2 有意只复用现有领域函数。
-- Pin type compatibility、`TryCreateConnection` 与当前 DevKit build 的 node creation availability 验证。
-- Editor Utility Blueprint/Widget fallback asset；只有 Phase 3B 证明 Python 路线不足且 Editor Utility 可用后，下一阶段才单独设计。
-- 将 Phase 3B one-shot snapshot 接入现有 EditorBridge protocol；本阶段不扩展 MCP tool list。
+- Pin type compatibility、`TryCreateConnection` 与当前 DevKit build 的 node creation availability 验证。本轮只允许只读 `list_all_pins` / Pin 签名探测，不调用连接或 Pin mutation。
+- Editor Utility Blueprint/Widget fallback asset；2026-08-12 bounded ObjectIterator closure 为 `PARTIAL_NO_NODE_ENUMERATION`，下一阶段若继续，必须作为独立 capability spike 设计。本轮只反射 `BlueprintGraphEditor` / `BlueprintGraphPinLibrary`，不创建或运行 Utility asset。
+- 将 Phase 3B one-shot snapshot 接入现有 EditorBridge protocol；只有权威 snapshot 路线成功后才可作为下一阶段，本阶段不扩展 MCP tool list。2026-08-12 结果未达到该门。
 
 Phase 2 只证明 proposed-node 的声明、唯一 CREATE_NODE 与 operation dependency closure 完整；它不把该结构性检查扩张为 Unreal 类型、factory、compile、save 或 runtime correctness 声明。
 

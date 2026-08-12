@@ -10,10 +10,17 @@
     "graphName",
     "graphPath",
     "graphClass",
+    "objectsScanned",
+    "matchingNodes",
+    "returnedNodes",
+    "nodesOmitted",
+    "scanTruncated",
+    "enumerationStrategy",
+    "compileStatus",
     "nodeCount",
     "nodesReturned",
-    "nodesOmitted",
     "nodes",
+    "authoritativeNodes",
     "capabilities",
     "gaps",
     "semanticDigest"
@@ -30,45 +37,39 @@
     "graphName": {"type": "string", "minLength": 1, "maxLength": 256},
     "graphPath": {"type": "string", "maxLength": 4096},
     "graphClass": {"type": "string", "maxLength": 256},
+    "objectsScanned": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 50000
+    },
+    "matchingNodes": {"type": "integer", "minimum": 0},
+    "returnedNodes": {"type": "integer", "minimum": 0, "maximum": 200},
+    "nodesOmitted": {"type": "integer", "minimum": 0},
+    "scanTruncated": {"const": false},
+    "enumerationStrategy": {
+      "enum": [
+        "DIRECT_GRAPH_PROPERTY",
+        "OBJECT_ITERATOR_EDGRAPHNODE_EXACT_OUTER",
+        "OBJECT_ITERATOR_K2NODE_EXACT_OUTER"
+      ]
+    },
+    "compileStatus": {"$ref": "#/$defs/compileStatus"},
+    "packageDirty": {"type": "boolean"},
     "nodeCount": {"type": "integer", "minimum": 0},
     "nodesReturned": {"type": "integer", "minimum": 0, "maximum": 200},
-    "nodesOmitted": {"type": "integer", "minimum": 0},
     "nodes": {
       "type": "array",
       "maxItems": 200,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name", "className"],
-        "properties": {
-          "nodeGuid": {
-            "type": "string",
-            "pattern": "^(?!0{32}$)[0-9A-F]{32}$"
-          },
-          "name": {"type": "string", "maxLength": 256},
-          "className": {"type": "string", "maxLength": 256},
-          "x": {"type": "integer"},
-          "y": {"type": "integer"}
-        }
-      }
+      "items": {"$ref": "#/$defs/observedNode"}
     },
-    "capabilities": {
-      "type": "object",
-      "additionalProperties": {"$ref": "#/$defs/status"}
-    },
-    "gaps": {
+    "authoritativeNodes": {
       "type": "array",
-      "uniqueItems": true,
-      "items": {
-        "type": "string",
-        "pattern": "^[A-Z0-9_]+$",
-        "maxLength": 128
-      }
+      "maxItems": 200,
+      "items": {"$ref": "#/$defs/authoritativeNode"}
     },
-    "semanticDigest": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
-    }
+    "capabilities": {"$ref": "#/$defs/targetCapabilityMap"},
+    "gaps": {"$ref": "#/$defs/gaps"},
+    "semanticDigest": {"$ref": "#/$defs/digest"}
   },
   "$defs": {
     "status": {
@@ -79,6 +80,112 @@
         "NOT_TESTED",
         "PRESENT_BUT_NOT_USED"
       ]
+    },
+    "guid": {
+      "type": "string",
+      "pattern": "^(?!0{32}$)[0-9A-F]{32}$"
+    },
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "direction"],
+      "properties": {
+        "name": {"type": "string", "maxLength": 256},
+        "direction": {"type": "string", "maxLength": 256},
+        "category": {"type": "string", "maxLength": 256},
+        "subcategory": {"type": "string", "maxLength": 256}
+      }
+    },
+    "observedNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "className"],
+      "dependentRequired": {
+        "pinCount": ["pins"],
+        "pins": ["pinCount"]
+      },
+      "properties": {
+        "nodeGuid": {"$ref": "#/$defs/guid"},
+        "name": {"type": "string", "maxLength": 256},
+        "className": {"type": "string", "maxLength": 256},
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+        "pinCount": {"type": "integer", "minimum": 0},
+        "pins": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pin"}
+        }
+      }
+    },
+    "authoritativeNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeGuid", "name", "className"],
+      "dependentRequired": {
+        "pinCount": ["pins"],
+        "pins": ["pinCount"]
+      },
+      "properties": {
+        "nodeGuid": {"$ref": "#/$defs/guid"},
+        "name": {"type": "string", "maxLength": 256},
+        "className": {"type": "string", "maxLength": 256},
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+        "pinCount": {"type": "integer", "minimum": 0},
+        "pins": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pin"}
+        }
+      }
+    },
+    "targetCapabilityMap": {
+      "type": "object",
+      "required": [
+        "explicitAssetLoad",
+        "blueprintObject",
+        "explicitGraphFind",
+        "graphNodeEnumeration",
+        "nodeGuidRead",
+        "nodePositionRead",
+        "directGraphProperty",
+        "objectIteratorEdGraphNode",
+        "objectIteratorK2Node",
+        "exactOuterNodeEnumeration",
+        "exactTypedOuterNodeEnumeration",
+        "objectGetOuter",
+        "objectGetTypedOuter",
+        "objectGetPathName",
+        "blueprintListGraphs",
+        "blueprintListGraphNames",
+        "nodeGetPos",
+        "nodeListAllPins",
+        "nodePinRead",
+        "blueprintStatusRead",
+        "packageDirtyRead"
+      ],
+      "additionalProperties": {"$ref": "#/$defs/status"}
+    },
+    "compileStatus": {
+      "enum": [
+        "BS_UP_TO_DATE",
+        "BS_UP_TO_DATE_WITH_WARNINGS",
+        "BS_DIRTY",
+        "BS_ERROR",
+        "BS_UNKNOWN"
+      ]
+    },
+    "gaps": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_]+$",
+        "maxLength": 128
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     }
   }
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://blueprint-to-code.local/schemas/arkdev_scripting_probe.v1.schema.json",
-  "title": "ARK DevKit Official Scripting Probe v1",
+  "title": "ARK DevKit Official Scripting Probe v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,7 +25,7 @@
       "const": "blueprint-to-code.arkdev-scripting-probe/v1"
     },
     "probeVersion": {
-      "const": "arkdev-official-scripting-probe/v1"
+      "const": "arkdev-official-scripting-probe/v2"
     },
     "generatedAt": {
       "type": "string",
@@ -56,8 +56,8 @@
         "pluginDetected": {"type": "boolean"}
       }
     },
-    "classes": {"$ref": "#/$defs/statusMap"},
-    "methods": {"$ref": "#/$defs/statusMap"},
+    "classes": {"$ref": "#/$defs/classStatusMap"},
+    "methods": {"$ref": "#/$defs/methodStatusMap"},
     "visibleMethods": {
       "type": "object",
       "additionalProperties": {
@@ -75,6 +75,13 @@
         "objectPath",
         "graphName",
         "capabilities",
+        "objectsScanned",
+        "matchingNodes",
+        "returnedNodes",
+        "nodesOmitted",
+        "scanTruncated",
+        "enumerationStrategy",
+        "compileStatus",
         "gaps"
       ],
       "properties": {
@@ -85,7 +92,30 @@
           "pattern": "^(|/(Game|Engine)/)"
         },
         "graphName": {"type": "string", "maxLength": 256},
-        "capabilities": {"$ref": "#/$defs/statusMap"},
+        "capabilities": {"$ref": "#/$defs/targetCapabilityMap"},
+        "objectsScanned": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50000
+        },
+        "matchingNodes": {"type": "integer", "minimum": 0},
+        "returnedNodes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200
+        },
+        "nodesOmitted": {"type": "integer", "minimum": 0},
+        "scanTruncated": {"type": "boolean"},
+        "enumerationStrategy": {
+          "enum": [
+            "NONE",
+            "DIRECT_GRAPH_PROPERTY",
+            "OBJECT_ITERATOR_EDGRAPHNODE_EXACT_OUTER",
+            "OBJECT_ITERATOR_K2NODE_EXACT_OUTER"
+          ]
+        },
+        "compileStatus": {"$ref": "#/$defs/compileStatus"},
+        "packageDirty": {"type": "boolean"},
         "gaps": {"$ref": "#/$defs/gaps"}
       }
     },
@@ -154,6 +184,62 @@
     "statusMap": {
       "type": "object",
       "additionalProperties": {"$ref": "#/$defs/status"}
+    },
+    "classStatusMap": {
+      "type": "object",
+      "required": [
+        "ObjectIterator",
+        "EdGraphNode",
+        "K2Node",
+        "BlueprintGraphEditor",
+        "BlueprintGraphPinLibrary"
+      ],
+      "additionalProperties": {"$ref": "#/$defs/status"}
+    },
+    "methodStatusMap": {
+      "type": "object",
+      "required": [
+        "Object.get_outer",
+        "Object.get_typed_outer",
+        "Object.get_path_name"
+      ],
+      "additionalProperties": {"$ref": "#/$defs/status"}
+    },
+    "targetCapabilityMap": {
+      "type": "object",
+      "required": [
+        "explicitAssetLoad",
+        "blueprintObject",
+        "explicitGraphFind",
+        "graphNodeEnumeration",
+        "nodeGuidRead",
+        "nodePositionRead",
+        "directGraphProperty",
+        "objectIteratorEdGraphNode",
+        "objectIteratorK2Node",
+        "exactOuterNodeEnumeration",
+        "exactTypedOuterNodeEnumeration",
+        "objectGetOuter",
+        "objectGetTypedOuter",
+        "objectGetPathName",
+        "blueprintListGraphs",
+        "blueprintListGraphNames",
+        "nodeGetPos",
+        "nodeListAllPins",
+        "nodePinRead",
+        "blueprintStatusRead",
+        "packageDirtyRead"
+      ],
+      "additionalProperties": {"$ref": "#/$defs/status"}
+    },
+    "compileStatus": {
+      "enum": [
+        "BS_UP_TO_DATE",
+        "BS_UP_TO_DATE_WITH_WARNINGS",
+        "BS_DIRTY",
+        "BS_ERROR",
+        "BS_UNKNOWN"
+      ]
     },
     "gaps": {
       "type": "array",
