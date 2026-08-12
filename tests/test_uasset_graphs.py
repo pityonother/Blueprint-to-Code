@@ -490,6 +490,251 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(properties["FunctionReference"]["member_name"], "RealFunction")
         self.assertEqual(properties["NodePosX"]["value"], 42)
 
+    def test_exact_guid_struct_properties_decode_across_supported_tag_layouts(self):
+        guid_raw = struct.pack(
+            "<IIII",
+            0x11223344,
+            0x55667788,
+            0x99AABBCC,
+            0xDDEEFF00,
+        )
+        expected_guid = "112233445566778899AABBCCDDEEFF00"
+        decoy_guid = bytes.fromhex("FFEEDDCCBBAA99887766554433221100")
+
+        def parse_single(
+            property_name: str,
+            struct_name: str,
+            layout: str,
+        ) -> dict[str, object]:
+            names = [
+                "None",
+                property_name,
+                "StructProperty",
+                struct_name,
+            ]
+
+            def fname(name: str) -> bytes:
+                return struct.pack("<ii", names.index(name), 0)
+
+            if layout == "ark_compact":
+                encoded = (
+                    fname(property_name)
+                    + fname("StructProperty")
+                    + struct.pack("<ii", 16, 0)
+                    + fname(struct_name)
+                    + decoy_guid
+                    + guid_raw
+                )
+            elif layout == "ark_compact_guid_marker":
+                encoded = (
+                    fname(property_name)
+                    + fname("StructProperty")
+                    + struct.pack("<ii", 16, 0)
+                    + fname(struct_name)
+                    + decoy_guid
+                    + b"\x00"
+                    + guid_raw
+                )
+            else:
+                child_type = fname(struct_name) + struct.pack("<i", 0)
+                property_type = (
+                    fname("StructProperty")
+                    + struct.pack("<i", 1)
+                    + child_type
+                )
+                encoded = (
+                    fname(property_name)
+                    + property_type
+                    + struct.pack("<i", 16)
+                    + b"\x0a"
+                    + decoy_guid
+                    + guid_raw
+                )
+
+            properties, warnings = parse_export_properties(
+                encoded + fname("None"),
+                names,
+                [],
+                [],
+            )
+            self.assertEqual(warnings, [])
+            self.assertIn(property_name, properties)
+            return properties[property_name]
+
+        cases = (
+            ("NodeGuid", "Guid", "ark_compact"),
+            ("GraphGuid", "Guid", "ue5_property_type_name"),
+            ("PersistentGuid", "FGuid", "ark_compact_guid_marker"),
+            ("MemberGuid", "FGuid", "ue5_property_type_name"),
+        )
+        for property_name, struct_name, layout in cases:
+            with self.subTest(
+                property_name=property_name,
+                struct_name=struct_name,
+                layout=layout,
+            ):
+                parsed = parse_single(property_name, struct_name, layout)
+                self.assertEqual(parsed["guid"], expected_guid)
+                self.assertEqual(parsed["confidence"], "high")
+                self.assertEqual(
+                    parsed["struct_parse"],
+                    {
+                        "parsed": True,
+                        "struct_name": struct_name,
+                        "value_offset": parsed["struct_parse"]["value_offset"],
+                        "value_size": 16,
+                        "method": "exact_struct_value",
+                    },
+                )
+                self.assertNotEqual(
+                    parsed["guid"],
+                    uasset_graphs_module.guid_to_text(decoy_guid),
+                )
+
+                if property_name == "NodeGuid":
+                    node = node_info_from_export(
+                        node_export={
+                            "class_name": "K2Node_CallFunction",
+                            "display_name": "K2Node_CallFunction_0",
+                        },
+                        properties={property_name: parsed},
+                        pins=[],
+                        index=1,
+                    )
+                    self.assertEqual(node.node_guid, expected_guid)
+
+    def test_exact_guid_struct_value_rejects_zero_truncation_and_decoys(self):
+        expected_raw = struct.pack(
+            "<IIII",
+            0x01020304,
+            0x11121314,
+            0x21222324,
+            0x31323334,
+        )
+        decoy_raw = struct.pack("<IIII", 9, 8, 7, 6)
+
+        def parse_block(
+            data: bytes,
+            *,
+            struct_name: str = "Guid",
+            declared_size: int = 16,
+            value_offset: int = 32,
+            end: int | None = None,
+        ) -> dict[str, object]:
+            return uasset_graphs_module.parse_property_block_value(
+                data,
+                {
+                    "name": "NodeGuid",
+                    "type": "StructProperty",
+                    "offset": 0,
+                    "end": len(data) if end is None else end,
+                    "value_offset": value_offset,
+                    "declared_size": declared_size,
+                    "struct": struct_name,
+                    "tag_layout": "ark_compact",
+                },
+                [],
+                [],
+                [],
+            )
+
+        exact = parse_block(decoy_raw + (b"\x55" * 16) + expected_raw)
+        self.assertEqual(
+            exact["guid"],
+            "01020304111213142122232431323334",
+        )
+        self.assertEqual(exact["struct_parse"]["value_offset"], 32)
+        self.assertEqual(exact["struct_parse"]["method"], "exact_struct_value")
+
+        zero = parse_block(decoy_raw + (b"\x55" * 16) + (b"\x00" * 16))
+        truncated = parse_block(
+            decoy_raw + (b"\x55" * 16) + expected_raw[:15],
+            end=48,
+        )
+        wrong_size = parse_block(
+            decoy_raw + (b"\x55" * 16) + expected_raw,
+            declared_size=15,
+        )
+        wrong_struct = parse_block(
+            decoy_raw + (b"\x55" * 16) + expected_raw,
+            struct_name="Vector",
+        )
+
+        for label, parsed in (
+            ("zero", zero),
+            ("truncated", truncated),
+            ("wrong_size", wrong_size),
+            ("wrong_struct", wrong_struct),
+        ):
+            with self.subTest(label=label):
+                self.assertNotIn("guid", parsed)
+                self.assertFalse(parsed["struct_parse"]["parsed"])
+        self.assertEqual(zero["confidence"], "low")
+        self.assertIn("error", zero)
+        self.assertIn("error", truncated)
+        self.assertIn("error", wrong_size)
+        self.assertNotIn("error", wrong_struct)
+
+    def test_exact_graph_guid_is_projected_into_graph_payload_metadata(self):
+        names = [
+            "None",
+            "GraphGuid",
+            "StructProperty",
+            "Guid",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        graph_guid_raw = struct.pack(
+            "<IIII",
+            0x11223344,
+            0x55667788,
+            0x99AABBCC,
+            0xDDEEFF00,
+        )
+        graph_data = (
+            fname("GraphGuid")
+            + fname("StructProperty")
+            + struct.pack("<ii", 16, 0)
+            + fname("Guid")
+            + bytes(16)
+            + b"\x00"
+            + graph_guid_raw
+            + fname("None")
+        )
+        graph_export = {
+            "index": 0,
+            "package_index": 1,
+            "object_name": "EventGraph",
+            "display_name": "EventGraph",
+            "class_name": "EdGraph",
+            "serial_location": {
+                "file": "uasset",
+                "offset": 0,
+                "size": len(graph_data),
+                "available": True,
+            },
+        }
+
+        payload = uasset_graphs_module.parse_graph_export_payload(
+            {
+                "uasset_data": graph_data,
+                "names": names,
+                "imports": [],
+                "exports": [graph_export],
+            },
+            graph_export,
+            asset_path="/Game/Test/Fixture.Fixture",
+            asset_name="Fixture",
+            node_cache={},
+        )
+
+        self.assertEqual(
+            payload["payload"]["metadata"]["graph_guid"],
+            "112233445566778899AABBCCDDEEFF00",
+        )
+
     def test_cdo_class_defaults_recover_scalar_struct_and_soft_object_values(self):
         names = [
             "/Game/Fixture",
@@ -1580,6 +1825,16 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(pins[0].category, "exec")
         self.assertEqual(pins[0].links[0]["target_node"], "Target")
         self.assertEqual(pins[0].source, "uasset_custom_pin_scan")
+        self.assertTrue(pins[0].id.startswith("Source_pin_"))
+        self.assertEqual(pins[0].persistent_guid, "")
+        self.assertEqual(
+            pins[0].resolution["native_pin_id_authority"],
+            "UNAVAILABLE",
+        )
+        self.assertNotEqual(
+            pins[0].resolution.get("heuristic_guid_candidate", ""),
+            pins[0].id,
+        )
         self.assertIn(pins[0].confidence, {"medium", "low"})
 
     def test_legacy_exported_edgraphpin_objects_recover_links(self):
@@ -1682,7 +1937,14 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(pins[0].source, "uasset_exported_pin_object")
         self.assertEqual(pins[0].links[0]["target_node"], "Target")
         self.assertEqual(pins[0].links[0]["target_pin_id"], "TargetExecutePin")
-        self.assertEqual(pins[0].links[0]["resolution_status"], "resolved_pin")
+        self.assertEqual(
+            pins[0].links[0]["resolution_status"],
+            "resolved_pin_heuristic",
+        )
+        self.assertEqual(
+            pins[0].links[0]["resolution_method"],
+            "export_object_reference_only",
+        )
 
     def test_node_semantic_reader_emits_function_semantics(self):
         properties = {
@@ -1829,6 +2091,57 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(source_pin.links[0]["resolution_status"], "resolved_pin")
         self.assertEqual(source_pin.links[0]["resolution_method"], "exact_target_pin_id_candidate")
         self.assertEqual(source_pin.links[0]["confidence"], "high")
+
+    def test_link_resolution_does_not_promote_uasset_internal_pin_key(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        source = NodeInfo(
+            index=1,
+            class_name="K2Node_CallFunction",
+            node_type="K2Node_CallFunction",
+            name="Source",
+        )
+        target = NodeInfo(
+            index=2,
+            class_name="K2Node_CallFunction",
+            node_type="K2Node_CallFunction",
+            name="Target",
+        )
+        source_pin = PinInfo(
+            id="Source_pin_1",
+            name="then",
+            direction="EGPD_Output",
+            category="exec",
+            source="uasset_custom_pin_scan",
+            resolution={"native_pin_id_authority": "UNAVAILABLE"},
+        )
+        source_pin.links.append(
+            {
+                "target_node": "Target",
+                "target_pin_id": "Target_pin_1",
+                "confidence": "medium",
+            }
+        )
+        target_pin = PinInfo(
+            id="Target_pin_1",
+            name="execute",
+            direction="EGPD_Input",
+            category="exec",
+            source="uasset_custom_pin_scan",
+            resolution={"native_pin_id_authority": "UNAVAILABLE"},
+        )
+        source.pins.append(source_pin)
+        target.pins.append(target_pin)
+
+        counts = resolve_graph_link_target_pins([source, target])
+
+        self.assertEqual(counts["resolved_pin"], 0)
+        self.assertEqual(counts["resolved_pin_heuristic"], 1)
+        self.assertEqual(
+            source_pin.links[0]["resolution_method"],
+            "non_authoritative_target_pin_key",
+        )
+        self.assertNotEqual(source_pin.links[0]["confidence"], "high")
 
     def test_incoming_links_synthesize_boundary_pins(self):
         from blueprint_translator.models import NodeInfo, PinInfo

@@ -1569,6 +1569,14 @@ def property_parse_confidence(type_name: str, parsed: dict[str, object]) -> str:
         value = parsed.get("value")
         return "medium" if isinstance(value, list) and value else "low"
     if type_name == "StructProperty":
+        struct_parse = parsed.get("struct_parse")
+        if (
+            isinstance(struct_parse, dict)
+            and struct_parse.get("parsed") is True
+            and struct_parse.get("method") == "exact_struct_value"
+            and parsed.get("guid")
+        ):
+            return "high"
         if (
             parsed.get("member_name")
             and parsed.get("member_parent_object_path")
@@ -1590,6 +1598,55 @@ def extract_guid_value(data: bytes, names: list[str], property_name: str) -> str
     return ""
 
 
+def exact_guid_struct_value(
+    export_data: bytes,
+    block: dict[str, object],
+) -> tuple[str, dict[str, object], str]:
+    """Decode only the declared value bytes of an FGuid StructProperty."""
+
+    struct_name = str(block.get("struct") or block.get("struct_name") or "")
+    struct_parse: dict[str, object] = {
+        "parsed": False,
+        "struct_name": struct_name,
+    }
+    if struct_name not in {"Guid", "FGuid"}:
+        return "", struct_parse, ""
+
+    declared_size = block.get("declared_size")
+    value_offset = block.get("value_offset")
+    block_offset = block.get("offset")
+    block_end = block.get("end")
+    struct_parse["method"] = "exact_struct_value"
+    if type(declared_size) is not int or declared_size != 16:
+        struct_parse["value_size"] = (
+            declared_size if type(declared_size) is int else 0
+        )
+        return "", struct_parse, "FGUID_DECLARED_SIZE_MISMATCH"
+    struct_parse["value_size"] = 16
+    if (
+        type(value_offset) is not int
+        or type(block_offset) is not int
+        or type(block_end) is not int
+        or block_offset < 0
+        or value_offset < block_offset
+        or value_offset + 16 > block_end
+        or value_offset + 16 > len(export_data)
+    ):
+        if type(value_offset) is int:
+            struct_parse["value_offset"] = value_offset
+        return "", struct_parse, "FGUID_VALUE_BOUNDS_INVALID"
+
+    struct_parse["value_offset"] = value_offset
+    raw = export_data[value_offset : value_offset + 16]
+    if raw == bytes(16):
+        return "", struct_parse, "FGUID_VALUE_ZERO"
+    guid = guid_to_text(raw)
+    if not guid:
+        return "", struct_parse, "FGUID_VALUE_NOT_RECOVERED"
+    struct_parse["parsed"] = True
+    return guid, struct_parse, ""
+
+
 def parse_property_block_value(
     export_data: bytes,
     block: dict[str, object],
@@ -1602,7 +1659,13 @@ def parse_property_block_value(
     chunk = export_data[pos:end]
     name = str(block.get("name") or "")
     type_name = str(block.get("type") or "")
-    value_positions = [pos + 25, pos + 24, pos + 26, pos + 29, max(pos, end - 4)]
+    value_positions: list[int] = []
+    exact_value_offset = block.get("value_offset")
+    if type(exact_value_offset) is int:
+        value_positions.append(exact_value_offset)
+    value_positions.extend(
+        [pos + 25, pos + 24, pos + 26, pos + 29, max(pos, end - 4)]
+    )
     item: dict[str, object] = {
         "name": name,
         "type": type_name,
@@ -1632,14 +1695,52 @@ def parse_property_block_value(
             item["object"] = object_ref_name(int(ref or 0), imports, exports)
             item["object_path"] = object_ref_path(int(ref or 0), imports, exports)
         elif type_name == "ArrayProperty":
-            refs, array_offset = extract_object_ref_array(chunk, imports, exports)
+            array_chunk = chunk
+            declared_size = block.get("declared_size")
+            if (
+                type(exact_value_offset) is int
+                and type(declared_size) is int
+                and declared_size >= 0
+                and pos <= exact_value_offset
+                and exact_value_offset + declared_size <= end
+                and exact_value_offset + declared_size <= len(export_data)
+            ):
+                array_chunk = export_data[
+                    exact_value_offset : exact_value_offset + declared_size
+                ]
+            refs, array_offset = extract_object_ref_array(
+                array_chunk,
+                imports,
+                exports,
+            )
             item["value"] = refs
             item["array_offset"] = array_offset
             item["element_kind"] = "FPackageIndex" if refs else "unknown"
-            item["array_parse"] = array_parse_payload(refs, array_offset, len(chunk))
+            item["array_parse"] = array_parse_payload(
+                refs,
+                array_offset,
+                len(array_chunk),
+            )
             item["objects"] = [object_ref_name(value, imports, exports) for value in refs[:500]]
             item["object_paths"] = [object_ref_path(value, imports, exports) for value in refs[:500]]
         elif type_name == "StructProperty":
+            struct_name = str(
+                block.get("struct") or block.get("struct_name") or ""
+            )
+            if struct_name:
+                item["struct"] = struct_name
+            guid, struct_parse, guid_error = exact_guid_struct_value(
+                export_data,
+                block,
+            )
+            if struct_name in {"Guid", "FGuid"}:
+                item["struct_parse"] = struct_parse
+                if guid:
+                    item["guid"] = guid
+                elif guid_error:
+                    item["error"] = guid_error
+                item["confidence"] = property_parse_confidence(type_name, item)
+                return item
             struct_region = export_data[pos : min(len(export_data), max(end, pos + 192))]
             member_name = extract_member_reference_name(struct_region, names)
             if member_name:
@@ -1661,12 +1762,9 @@ def parse_property_block_value(
                 item["member_parent_raw_offset"] = (
                     pos + int(member_parent["raw_offset"])
                 )
-            guid = extract_guid_value(chunk, names, "MemberGuid")
-            if guid:
-                item["guid"] = guid
             item["struct_parse"] = {
                 "parsed": False,
-                "struct_name": str(item.get("member_name") or ""),
+                "struct_name": struct_name or str(item.get("member_name") or ""),
                 "raw_size": len(chunk),
             }
         elif type_name in {"StrProperty", "TextProperty"}:
@@ -1697,7 +1795,55 @@ def parse_export_properties(
 ) -> tuple[dict[str, dict[str, object]], list[str]]:
     warnings: list[str] = []
     properties: dict[str, dict[str, object]] = {}
-    blocks = parse_top_property_blocks(export_data, names)
+    legacy_blocks = parse_top_property_blocks(export_data, names)
+    structured_candidates: list[list[dict[str, object]]] = []
+    for sequence_reader in (
+        _ark_cdo_property_sequence,
+        _ark_guid_cdo_property_sequence,
+        _ue5_cdo_property_sequence,
+    ):
+        candidate_blocks, _candidate_end, candidate_ok = sequence_reader(
+            export_data,
+            names,
+        )
+        if candidate_ok and candidate_blocks:
+            structured_candidates.append(candidate_blocks)
+    if structured_candidates:
+        structured_blocks = max(
+            structured_candidates,
+            key=lambda rows: (len(rows), int(rows[-1].get("end") or 0)),
+        )
+    else:
+        structured_blocks = [
+            block
+            for block in cdo_property_tag_blocks(export_data, names)
+            if block.get("tag_layout")
+            in {
+                "ark_compact",
+                "ark_compact_guid_marker",
+                "ue5_property_type_name",
+            }
+        ]
+    if structured_blocks:
+        structured_ranges = [
+            (int(block.get("offset") or 0), int(block.get("end") or 0))
+            for block in structured_blocks
+        ]
+        uncovered_legacy = [
+            block
+            for block in legacy_blocks
+            if not any(
+                int(block.get("offset") or 0) < structured_end
+                and int(block.get("end") or 0) > structured_start
+                for structured_start, structured_end in structured_ranges
+            )
+        ]
+        blocks = sorted(
+            structured_blocks + uncovered_legacy,
+            key=lambda block: int(block.get("offset") or 0),
+        )
+    else:
+        blocks = legacy_blocks
     for block in blocks:
         name = str(block.get("name") or "")
         if not name:
@@ -3273,9 +3419,17 @@ def parse_exported_pin_links(
             "source_offset": 0,
             "target_pin_id_candidates": [target_pin_id] if target_pin_id else [],
             "source": "uasset_exported_pin_linked_to",
-            "confidence": "high" if target_node and target_pin_id else "medium",
-            "resolution_status": "resolved_pin" if target_node and target_pin_id else "unresolved",
-            "resolution_method": "exact_existing_target_pin_id" if target_node and target_pin_id else "unresolved",
+            "confidence": "medium",
+            "resolution_status": (
+                "resolved_pin_heuristic"
+                if target_node and target_pin_id
+                else "unresolved"
+            ),
+            "resolution_method": (
+                "export_object_reference_only"
+                if target_node and target_pin_id
+                else "unresolved"
+            ),
         }
         links.append(link)
     return links
@@ -3326,9 +3480,13 @@ def parse_exported_pin_object(
     pin_guid = ""
     guid_item = properties.get("PersistentGuid", {})
     if isinstance(guid_item, dict):
-        pin_guid = str(guid_item.get("guid") or "")
-    if not pin_guid:
-        pin_guid = extract_pin_guid_from_region(pin_data)
+        struct_parse = guid_item.get("struct_parse")
+        if (
+            isinstance(struct_parse, dict)
+            and struct_parse.get("parsed") is True
+            and struct_parse.get("method") == "exact_struct_value"
+        ):
+            pin_guid = str(guid_item.get("guid") or "")
     links = parse_exported_pin_links(properties, pin_owner_by_ref=pin_owner_by_ref)
     pin_id = exported_pin_id(pin_ref, pin_export)
     pin_type = {
@@ -3378,7 +3536,14 @@ def parse_exported_pin_object(
             if isinstance(pin_export.get("serial_location"), dict)
             else 0,
         ),
-        resolution={"status": "resolved_pin" if links else "no_links_recovered", "link_count": len(links)},
+        resolution={
+            "status": "resolved_pin" if links else "no_links_recovered",
+            "link_count": len(links),
+            "native_pin_id_authority": "UNAVAILABLE",
+            "persistent_guid_method": (
+                "exact_struct_value" if pin_guid else "UNAVAILABLE"
+            ),
+        },
     )
     for link in links:
         link.update(classify_pin_link(pin, link, graph_refset))
@@ -3551,15 +3716,21 @@ def parse_custom_pins(
                     if target_name:
                         links.append(candidate)
         linked_raw = " ".join(f"{item['target_node']} {item['target_pin_id']}".strip() for item in links)
-        pin_guid = extract_pin_guid_from_region(region[: max(0, min(len(region), 96))])
+        heuristic_guid_candidate = extract_pin_guid_from_region(
+            region[: max(0, min(len(region), 96))]
+        )
         default_value = extract_pin_default_value(region)
         default_object = extract_default_object_name(region, imports, exports, graph_refset)
         direction = infer_pin_direction(pin_name, category, node_type)
         pin_confidence = "medium"
         pin_warnings: list[str] = []
-        if not pin_guid:
-            pin_warnings.append("PinId/PersistentGuid was not structurally decoded; a stable synthetic id is used.")
-        pin_id = pin_guid or f"{node_export.get('display_name') or node_export.get('object_name')}_pin_{index + 1}"
+        pin_warnings.append(
+            "PinId/PersistentGuid was not structurally decoded; a stable synthetic id is used."
+        )
+        pin_id = (
+            f"{node_export.get('display_name') or node_export.get('object_name')}"
+            f"_pin_{index + 1}"
+        )
         subcategory = infer_pin_subcategory(region, names, category_pos, name_pos)
         container_type = infer_pin_container_type(region, names)
         pin_type_object = extract_pin_type_object_reference(
@@ -3598,14 +3769,24 @@ def parse_custom_pins(
             pin_type=pin_type,
             default=default_value,
             default_object=default_object,
-            persistent_guid=pin_guid,
+            persistent_guid="",
             linked_to_raw=linked_raw,
             links=links,  # type: ignore[arg-type]
             source="uasset_custom_pin_scan",
             confidence=pin_confidence,
             warnings=pin_warnings,
             raw_offsets=raw_offsets(name_pos, region_end),
-            resolution=pin_resolution,
+            resolution={
+                **pin_resolution,
+                "native_pin_id_authority": "UNAVAILABLE",
+                "persistent_guid_method": "UNAVAILABLE",
+                "internal_pin_key_method": "deterministic_ordinal",
+                **(
+                    {"heuristic_guid_candidate": heuristic_guid_candidate}
+                    if heuristic_guid_candidate
+                    else {}
+                ),
+            },
         )
         for link in links:
             link.update(classify_pin_link(pin, link, graph_refset))
@@ -3642,7 +3823,16 @@ def node_info_from_export(
     node_guid = ""
     guid_item = properties.get("NodeGuid", {})
     if isinstance(guid_item, dict):
-        node_guid = str(guid_item.get("guid") or "")
+        struct_parse = guid_item.get("struct_parse")
+        guid = str(guid_item.get("guid") or "")
+        if (
+            isinstance(struct_parse, dict)
+            and struct_parse.get("parsed") is True
+            and struct_parse.get("method") == "exact_struct_value"
+            and re.fullmatch(r"[0-9A-F]{32}", guid)
+            and guid != "0" * 32
+        ):
+            node_guid = guid
     warning_list = [str(warning) for warning in warnings if str(warning)]
     serial_location = node_export.get("serial_location", {})
     offset_start = 0
@@ -3694,6 +3884,29 @@ def graph_type_from_export(graph_export: dict[str, object]) -> str:
     return candidate_type_hint(name)
 
 
+def project_exact_graph_guid(graph_record: dict[str, object]) -> None:
+    """Place a verified GraphGuid in the persisted graph payload metadata."""
+
+    properties = graph_record.get("properties")
+    payload = graph_record.get("payload")
+    if not isinstance(properties, dict) or not isinstance(payload, dict):
+        return
+    graph_guid = properties.get("GraphGuid")
+    metadata = payload.get("metadata")
+    if not isinstance(graph_guid, dict) or not isinstance(metadata, dict):
+        return
+    struct_parse = graph_guid.get("struct_parse")
+    guid = str(graph_guid.get("guid") or "")
+    if (
+        isinstance(struct_parse, dict)
+        and struct_parse.get("parsed") is True
+        and struct_parse.get("method") == "exact_struct_value"
+        and re.fullmatch(r"[0-9A-F]{32}", guid)
+        and guid != "0" * 32
+    ):
+        metadata["graph_guid"] = guid
+
+
 def classify_graph_failure(graph: dict[str, object]) -> list[str]:
     categories: list[str] = []
     node_count = int(graph.get("node_count") or 0)
@@ -3728,6 +3941,9 @@ def classify_graph_status(nodes: list[NodeInfo], warnings: Iterable[str]) -> str
         return "partial"
     if link_count == 0:
         return "heuristic"
+    coverage = graph_coverage(nodes)
+    if int(coverage.get("exact_link_count") or 0) != link_count:
+        return "heuristic"
     return "complete"
 
 
@@ -3745,6 +3961,16 @@ def graph_confidence(nodes: list[NodeInfo], warnings: Iterable[str]) -> str:
     return confidence_floor(*levels)
 
 
+def pin_has_authoritative_native_id(pin: PinInfo) -> bool:
+    """Return whether ``pin.id`` represents a published native PinId."""
+
+    if not pin.id:
+        return False
+    if pin.source.startswith("uasset_"):
+        return pin.resolution.get("native_pin_id_authority") == "EXACT"
+    return True
+
+
 def graph_coverage(nodes: list[NodeInfo]) -> dict[str, object]:
     node_count = len(nodes)
     pin_nodes = sum(1 for node in nodes if node.pins)
@@ -3755,6 +3981,30 @@ def graph_coverage(nodes: list[NodeInfo]) -> dict[str, object]:
     links = [link for node in nodes for pin in node.pins for link in pin.links]
     exec_links = [link for node in nodes for pin in node.pins if pin.category == "exec" for link in pin.links]
     data_links = [link for node in nodes for pin in node.pins if pin.category != "exec" for link in pin.links]
+    exact_node_guids = sum(
+        1
+        for node in nodes
+        if node.node_guid
+        and isinstance(node.properties.get("NodeGuid"), dict)
+        and isinstance(node.properties["NodeGuid"].get("struct_parse"), dict)
+        and node.properties["NodeGuid"]["struct_parse"].get("parsed") is True
+        and node.properties["NodeGuid"]["struct_parse"].get("method")
+        == "exact_struct_value"
+    )
+    native_pin_ids = sum(1 for pin in pins if pin_has_authoritative_native_id(pin))
+    persistent_guids = sum(
+        1
+        for pin in pins
+        if pin.persistent_guid
+        and pin.resolution.get("persistent_guid_method") == "exact_struct_value"
+    )
+    exact_links = sum(
+        1
+        for link in links
+        if str(link.get("resolution_method") or "")
+        in {"exact_existing_target_pin_id", "exact_target_pin_id_candidate"}
+        and str(link.get("resolution_status") or "") == "resolved_pin"
+    )
     return {
         "nodes_with_pins": pin_nodes,
         "nodes_with_links": linked_nodes,
@@ -3766,6 +4016,13 @@ def graph_coverage(nodes: list[NodeInfo]) -> dict[str, object]:
         "link_count": len(links),
         "exec_link_count": len(exec_links),
         "data_link_count": len(data_links),
+        "node_guid_exact_count": exact_node_guids,
+        "node_guid_missing_count": node_count - exact_node_guids,
+        "native_pin_id_exact_count": native_pin_ids,
+        "persistent_guid_exact_count": persistent_guids,
+        "pin_identity_unavailable_count": len(pins) - native_pin_ids,
+        "exact_link_count": exact_links,
+        "heuristic_or_unresolved_link_count": len(links) - exact_links,
     }
 
 
@@ -3831,8 +4088,8 @@ def synthesize_boundary_pins_from_incoming_links(nodes: list[NodeInfo]) -> list[
                 "source_offset": 0,
                 "source": "uasset_reverse_link_synthesis",
                 "confidence": "medium",
-                "resolution_status": "resolved_pin" if source_pin.id else "resolved_pin_heuristic",
-                "resolution_method": "exact_existing_target_pin_id" if source_pin.id else "heuristic_boundary_synthesis",
+                "resolution_status": "resolved_pin_heuristic",
+                "resolution_method": "heuristic_boundary_synthesis",
                 "status": "resolved_node",
                 "kind": "exec" if category == "exec" else "data",
                 "target_node_guid": source_node.node_guid,
@@ -3930,14 +4187,39 @@ def resolve_graph_link_target_pins(nodes: list[NodeInfo]) -> dict[str, object]:
                     unresolved += 1
                     method_counts[method] += 1
                     continue
-                if link.get("target_pin_id"):
+                requested_pin_id = str(link.get("target_pin_id") or "")
+                exact_existing = next(
+                    (
+                        pin
+                        for pin in target.pins
+                        if pin.id == requested_pin_id
+                        and pin_has_authoritative_native_id(pin)
+                    ),
+                    None,
+                )
+                if requested_pin_id and exact_existing is not None:
                     link["resolution_status"] = "resolved_pin"
                     link["resolution_method"] = "exact_existing_target_pin_id"
+                    link["target_pin_id_authority"] = "EXACT"
                     link["confidence"] = confidence_floor(str(link.get("confidence") or "medium"), "high")
                     exact += 1
                     method_counts["exact_existing_target_pin_id"] += 1
                     continue
-                target_pin_by_id = {pin.id: pin for pin in target.pins if pin.id}
+                if requested_pin_id:
+                    link["resolution_status"] = "resolved_pin_heuristic"
+                    link["resolution_method"] = "non_authoritative_target_pin_key"
+                    link["confidence"] = confidence_floor(
+                        str(link.get("confidence") or "medium"),
+                        "medium",
+                    )
+                    heuristic += 1
+                    method_counts["non_authoritative_target_pin_key"] += 1
+                    continue
+                target_pin_by_id = {
+                    pin.id: pin
+                    for pin in target.pins
+                    if pin.id and pin_has_authoritative_native_id(pin)
+                }
                 target_pin: PinInfo | None = None
                 for candidate_id in link.get("target_pin_id_candidates", []) or []:
                     candidate = target_pin_by_id.get(str(candidate_id))
@@ -3950,6 +4232,7 @@ def resolve_graph_link_target_pins(nodes: list[NodeInfo]) -> dict[str, object]:
                     link["target_node_guid"] = target.node_guid
                     link["resolution_status"] = "resolved_pin"
                     link["resolution_method"] = "exact_target_pin_id_candidate"
+                    link["target_pin_id_authority"] = "EXACT"
                     link["confidence"] = "high"
                     exact += 1
                     method_counts["exact_target_pin_id_candidate"] += 1
@@ -4238,6 +4521,7 @@ def parse_graph_export_payload(
         "warnings": all_warnings,
         "payload": payload,
     }
+    project_exact_graph_guid(graph_record)
     graph_record["failure_categories"] = [] if status == "complete" else classify_graph_failure(graph_record)
     return {
         **graph_record,
