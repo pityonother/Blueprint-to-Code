@@ -31,6 +31,9 @@ from blueprint_translator.evidence_schema import (  # noqa: E402
     make_default_ref,
     make_revision_id,
 )
+from blueprint_translator.evidence_writer import (  # noqa: E402
+    DIRECT_PAYLOAD_PARSER_VERSION,
+)
 from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
     materialize_blueprint_defaults,
 )
@@ -48,7 +51,7 @@ from blueprint_translator.kb_vnext.storage import (  # noqa: E402
 )
 
 
-DIRECT_PARSER = "uasset-graph-reader-evidence-v3"
+DIRECT_PARSER = DIRECT_PAYLOAD_PARSER_VERSION
 LEGACY_PARSER = "legacy-capture-evidence-v3"
 EVIDENCE_SCHEMA = "ark.blueprint.evidence.v2"
 OBJECT_PATH = "/Game/Test/BP_Test.BP_Test"
@@ -503,15 +506,18 @@ def _write_capture(
     *,
     legacy_marker: bool = False,
     source_mode: str = "direct",
+    parser_version: str | None = None,
 ) -> tuple[str, Path, str]:
     asset_root = capture_root / "BP_Test"
     evidence_root = asset_root / "evidence"
     evidence_root.mkdir(parents=True)
     package_path = asset_root / "BP_Test.uasset"
-    parser_version = LEGACY_PARSER if source_mode == "legacy" else DIRECT_PARSER
+    selected_parser_version = parser_version or (
+        LEGACY_PARSER if source_mode == "legacy" else DIRECT_PARSER
+    )
     source_rows, fingerprint, revision, package_fingerprint = _source_identity(
         package_path,
-        parser_version=parser_version,
+        parser_version=selected_parser_version,
         source_mode=source_mode,
     )
     if legacy_marker:
@@ -530,7 +536,7 @@ def _write_capture(
             "BP_Test",
             OBJECT_PATH,
             fingerprint,
-            parser_version,
+            selected_parser_version,
             EVIDENCE_SCHEMA,
             "2026-07-27T00:00:00+00:00",
             str(package_path),
@@ -554,7 +560,7 @@ def _write_capture(
                 "object_path": OBJECT_PATH,
                 "revision_id": revision,
                 "source_fingerprint": fingerprint,
-                "parser_version": parser_version,
+                "parser_version": selected_parser_version,
                 "schema": EVIDENCE_SCHEMA,
                 "database": "evidence.sqlite",
                 "agent_index": "../output/agent_index.md",
@@ -1178,6 +1184,33 @@ class BlueprintIngestTests(unittest.TestCase):
                     )
                     core.close()
                     discovery.close()
+
+    def test_previous_direct_parser_is_rejected_after_v4_cutover(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            revision, database_path, package_fingerprint = _write_capture(
+                root / "captures",
+                parser_version="uasset-graph-reader-evidence-v3",
+            )
+            discovery = _discovery(
+                revision,
+                package_path=database_path.parents[1] / "BP_Test.uasset",
+                package_fingerprint=package_fingerprint,
+            )
+            core = _core()
+
+            result = materialize_blueprint_defaults(
+                discovery,
+                core,
+                capture_root=root / "captures",
+                ontology=self.ontology,
+            )
+
+            self.assertEqual(result.counts["freshAssets"], 0)
+            self.assertEqual(result.counts["rejectedAssets"], 1)
+            self.assertEqual(core.execute("SELECT COUNT(*) FROM facts").fetchone()[0], 0)
+            core.close()
+            discovery.close()
 
     def test_rejects_revision_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

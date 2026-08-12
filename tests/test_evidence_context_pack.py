@@ -347,7 +347,7 @@ class EvidenceRepositoryContextPackTests(unittest.TestCase):
                 "wireCount": 1,
                 "linkObservationCount": 1,
                 "defaultCount": 1,
-                "gapCount": 1,
+                "gapCount": 2,
             },
         )
         self.assertEqual(pack["estimated_tokens"], estimate_tokens(rendered))
@@ -355,14 +355,26 @@ class EvidenceRepositoryContextPackTests(unittest.TestCase):
 
         graph = pack["key_graphs"][0]
         default = pack["key_defaults"][0]
-        gap = pack["gaps"][0]
-        for evidence_ref in (graph["ref"], default["ref"], gap["ref"]):
+        gap = next(
+            item
+            for item in pack["gaps"]
+            if isinstance(item, dict) and item.get("kind") == "diagnostic"
+        )
+        heuristic_gap = next(
+            item
+            for item in pack["gaps"]
+            if isinstance(item, dict) and item.get("kind") == "edge_observation"
+        )
+        for evidence_ref in (graph["ref"], default["ref"], gap["ref"], heuristic_gap["ref"]):
             self.assertTrue(str(evidence_ref).startswith("bp://"), evidence_ref)
             self.assertIn(f"@{indexed['revision_id']}", str(evidence_ref))
         self.assertEqual(graph["graph"], "EventGraph")
         self.assertEqual(default["name"], "MaxHealth")
         self.assertEqual(gap["reasonCode"], "missing_target_pin_id")
         self.assertIn("clipboard", str(gap["nextProbe"]).lower())
+        self.assertEqual(heuristic_gap["status"], "HEURISTIC")
+        self.assertTrue(heuristic_gap["targetPinRef"])
+        self.assertEqual(heuristic_gap["targetNativePinId"], "")
 
         next_query = str(pack["next_query"])
         self.assertIn("query_blueprint_evidence.py", next_query)

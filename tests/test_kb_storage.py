@@ -43,6 +43,9 @@ from blueprint_translator.evidence_schema import (  # noqa: E402
     make_asset_id,
     make_revision_id,
 )
+from blueprint_translator.evidence_writer import (  # noqa: E402
+    DIRECT_PAYLOAD_PARSER_VERSION,
+)
 from blueprint_translator.asset_ledger import (  # noqa: E402
     metadata_fingerprint,
 )
@@ -55,7 +58,7 @@ def _blueprint_capture_fixture(
     asset_name = "BP_Base"
     object_path = "/Game/Test/BP_Base.BP_Base"
     asset_id = make_asset_id(object_path)
-    parser = "uasset-graph-reader-evidence-v3"
+    parser = DIRECT_PAYLOAD_PARSER_VERSION
     schema = "ark.blueprint.evidence.v2"
     source_path = "@memory/normalized_graph_facts"
     source_sha = "b" * 64

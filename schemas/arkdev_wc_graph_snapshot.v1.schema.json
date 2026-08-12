@@ -1,0 +1,385 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/arkdev_wc_graph_snapshot.v1.schema.json",
+  "title": "ARK DevKit WC Graph Snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "source",
+    "readOnly",
+    "devkitBuildFingerprint",
+    "asset",
+    "graph",
+    "requestBounds",
+    "capabilityMatrix",
+    "counts",
+    "coverage",
+    "pinIdentity",
+    "identityLocators",
+    "nodes",
+    "links",
+    "gaps",
+    "semanticDigest"
+  ],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.arkdev-wc-graph-snapshot/v1"},
+    "source": {"const": "ARKDEV_WC_REFLECTION"},
+    "readOnly": {"const": true},
+    "devkitBuildFingerprint": {"$ref": "#/$defs/buildFingerprint"},
+    "asset": {"$ref": "#/$defs/asset"},
+    "graph": {"$ref": "#/$defs/graph"},
+    "requestBounds": {"$ref": "#/$defs/bounds"},
+    "capabilityMatrix": {"$ref": "#/$defs/capabilities"},
+    "counts": {"$ref": "#/$defs/counts"},
+    "coverage": {"$ref": "#/$defs/coverage"},
+    "pinIdentity": {
+      "enum": [
+        "PIN_IDENTITY_PASS",
+        "PIN_SIGNATURE_ONLY",
+        "PIN_UNAVAILABLE"
+      ]
+    },
+    "identityLocators": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {"$ref": "#/$defs/locator"}
+    },
+    "nodes": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "links": {
+      "type": "array",
+      "maxItems": 64000,
+      "items": {"$ref": "#/$defs/link"}
+    },
+    "gaps": {"$ref": "#/$defs/gaps"},
+    "semanticDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "status": {
+      "enum": ["PASS", "PARTIAL", "UNAVAILABLE", "ERROR", "NOT_TESTED"]
+    },
+    "guid": {
+      "type": "string",
+      "pattern": "^(?!0{32}$)[0-9A-F]{32}$"
+    },
+    "optionalGuid": {
+      "type": "string",
+      "pattern": "^$|^(?!0{32}$)[0-9A-F]{32}$"
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "unrealPath": {
+      "type": "string",
+      "pattern": "^$|^/(Game|Engine|Script)/",
+      "maxLength": 4096
+    },
+    "buildFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engineVersion", "buildVersion"],
+      "properties": {
+        "engineVersion": {"type": "string", "maxLength": 128},
+        "buildVersion": {"type": "string", "maxLength": 128}
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "objectPath",
+        "observedObjectPath",
+        "name",
+        "rawClassName",
+        "readMethod"
+      ],
+      "properties": {
+        "objectPath": {
+          "type": "string",
+          "pattern": "^/(Game|Engine)/",
+          "maxLength": 4096
+        },
+        "observedObjectPath": {"$ref": "#/$defs/unrealPath"},
+        "name": {"type": "string", "maxLength": 256},
+        "rawClassName": {"type": "string", "maxLength": 4096},
+        "readMethod": {"type": "string", "maxLength": 256}
+      }
+    },
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "observedName",
+        "path",
+        "rawClassName",
+        "canonicalClassName",
+        "typedGraph",
+        "readMethod"
+      ],
+      "properties": {
+        "name": {"type": "string", "maxLength": 256},
+        "observedName": {"type": "string", "maxLength": 256},
+        "path": {"$ref": "#/$defs/unrealPath"},
+        "rawClassName": {"type": "string", "maxLength": 4096},
+        "canonicalClassName": {"type": "string", "maxLength": 256},
+        "typedGraph": {"type": "boolean"},
+        "readMethod": {"type": "string", "maxLength": 512}
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxNodes",
+        "maxPinsPerNode",
+        "maxIdentityLocators",
+        "maxLinks"
+      ],
+      "properties": {
+        "maxNodes": {"type": "integer", "minimum": 1, "maximum": 500},
+        "maxPinsPerNode": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "maxIdentityLocators": {"const": 12},
+        "maxLinks": {"const": 64000}
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "explicitAssetLoad",
+        "exactAssetObjectPath",
+        "blueprintObject",
+        "explicitGraphFind",
+        "typedGraph",
+        "exactGraphIdentity",
+        "wcNodesRead",
+        "wcPropertyNames",
+        "typedNode",
+        "exactOuter",
+        "rawClassRead",
+        "wcNodeGuidRead",
+        "nodeGuidRead",
+        "nodePositionRead",
+        "nodePinsRead",
+        "wcNodePinsRead",
+        "pinIdRead",
+        "persistentGuidRead",
+        "linksRead"
+      ],
+      "properties": {
+        "explicitAssetLoad": {"$ref": "#/$defs/status"},
+        "exactAssetObjectPath": {"$ref": "#/$defs/status"},
+        "blueprintObject": {"$ref": "#/$defs/status"},
+        "explicitGraphFind": {"$ref": "#/$defs/status"},
+        "typedGraph": {"$ref": "#/$defs/status"},
+        "exactGraphIdentity": {"$ref": "#/$defs/status"},
+        "wcNodesRead": {"$ref": "#/$defs/status"},
+        "wcPropertyNames": {"$ref": "#/$defs/status"},
+        "typedNode": {"$ref": "#/$defs/status"},
+        "exactOuter": {"$ref": "#/$defs/status"},
+        "rawClassRead": {"$ref": "#/$defs/status"},
+        "wcNodeGuidRead": {"$ref": "#/$defs/status"},
+        "nodeGuidRead": {"$ref": "#/$defs/status"},
+        "nodePositionRead": {"$ref": "#/$defs/status"},
+        "nodePinsRead": {"$ref": "#/$defs/status"},
+        "wcNodePinsRead": {"$ref": "#/$defs/status"},
+        "pinIdRead": {"$ref": "#/$defs/status"},
+        "persistentGuidRead": {"$ref": "#/$defs/status"},
+        "linksRead": {"$ref": "#/$defs/status"}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeCountObserved",
+        "nodeCountReturned",
+        "nodesOmitted",
+        "nodeGuidRecovered",
+        "wcNodeGuidRecovered",
+        "nodePositionRecovered",
+        "identityLocatorCount",
+        "pinCount",
+        "pinsOmitted",
+        "pinSignatureRecovered",
+        "pinIdObserved",
+        "persistentGuidObserved",
+        "nativePinIdRecovered",
+        "persistentGuidRecovered",
+        "linkCount"
+      ],
+      "properties": {
+        "nodeCountObserved": {"type": "integer", "minimum": 0},
+        "nodeCountReturned": {"type": "integer", "minimum": 0, "maximum": 500},
+        "nodesOmitted": {"type": "integer", "minimum": 0},
+        "nodeGuidRecovered": {"type": "integer", "minimum": 0, "maximum": 500},
+        "wcNodeGuidRecovered": {"type": "integer", "minimum": 0, "maximum": 500},
+        "nodePositionRecovered": {"type": "integer", "minimum": 0, "maximum": 500},
+        "identityLocatorCount": {"type": "integer", "minimum": 0, "maximum": 500},
+        "pinCount": {"type": "integer", "minimum": 0, "maximum": 64000},
+        "pinsOmitted": {"type": "integer", "minimum": 0},
+        "pinSignatureRecovered": {"type": "integer", "minimum": 0, "maximum": 64000},
+        "pinIdObserved": {"type": "integer", "minimum": 0, "maximum": 64000},
+        "persistentGuidObserved": {"type": "integer", "minimum": 0, "maximum": 64000},
+        "nativePinIdRecovered": {"type": "integer", "minimum": 0, "maximum": 64000},
+        "persistentGuidRecovered": {"type": "integer", "minimum": 0, "maximum": 64000},
+        "linkCount": {"type": "integer", "minimum": 0, "maximum": 64000}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeGuidPercent",
+        "wcNodeGuidPercent",
+        "nodePositionPercent",
+        "exactLocatorPercent",
+        "pinSignaturePercent",
+        "observedPinIdPercent",
+        "observedPersistentGuidPercent",
+        "nativePinIdPercent",
+        "persistentGuidPercent"
+      ],
+      "properties": {
+        "nodeGuidPercent": {"type": "number", "minimum": 0, "maximum": 100},
+        "wcNodeGuidPercent": {"type": "number", "minimum": 0, "maximum": 100},
+        "nodePositionPercent": {"type": "number", "minimum": 0, "maximum": 100},
+        "exactLocatorPercent": {"type": "number", "minimum": 0, "maximum": 100},
+        "pinSignaturePercent": {"type": "number", "minimum": 0, "maximum": 100},
+        "observedPinIdPercent": {"type": "number", "minimum": 0, "maximum": 100},
+        "observedPersistentGuidPercent": {"type": "number", "minimum": 0, "maximum": 100},
+        "nativePinIdPercent": {"type": "number", "minimum": 0, "maximum": 100},
+        "persistentGuidPercent": {"type": "number", "minimum": 0, "maximum": 100}
+      }
+    },
+    "readMethods": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "maxLength": 256}
+    },
+    "locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeGuid",
+        "nodeObjectName",
+        "nodeObjectPath",
+        "rawClassName",
+        "canonicalClassName",
+        "outerGraphPath",
+        "outerGraphMatch"
+      ],
+      "properties": {
+        "nodeGuid": {"$ref": "#/$defs/guid"},
+        "nodeObjectName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "nodeObjectPath": {"$ref": "#/$defs/unrealPath"},
+        "rawClassName": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "canonicalClassName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "outerGraphPath": {"$ref": "#/$defs/unrealPath"},
+        "outerGraphMatch": {"const": true},
+        "x": {"type": "integer"},
+        "y": {"type": "integer"}
+      }
+    },
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "pinName",
+        "direction",
+        "pinType",
+        "defaultValue",
+        "defaultObject",
+        "defaultTextValue",
+        "readMethods"
+      ],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0, "maximum": 127},
+        "pinId": {"$ref": "#/$defs/guid"},
+        "persistentGuid": {"$ref": "#/$defs/guid"},
+        "pinName": {"type": "string", "maxLength": 256},
+        "direction": {"type": "string", "maxLength": 256},
+        "pinType": {"type": "string", "maxLength": 4096},
+        "defaultValue": {"type": "string", "maxLength": 4096},
+        "defaultObject": {"type": "string", "maxLength": 4096},
+        "defaultTextValue": {"type": "string", "maxLength": 4096},
+        "readMethods": {"$ref": "#/$defs/readMethods"}
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "objectPath",
+        "rawClassName",
+        "canonicalClassName",
+        "typedNode",
+        "outerGraphMatch",
+        "readMethods",
+        "pins",
+        "pinsOmitted"
+      ],
+      "properties": {
+        "name": {"type": "string", "maxLength": 256},
+        "objectPath": {"$ref": "#/$defs/unrealPath"},
+        "rawClassName": {"type": "string", "maxLength": 4096},
+        "canonicalClassName": {"type": "string", "maxLength": 256},
+        "typedNode": {"type": "boolean"},
+        "outerGraphMatch": {"type": "boolean"},
+        "nodeGuid": {"$ref": "#/$defs/guid"},
+        "x": {"type": "integer"},
+        "y": {"type": "integer"},
+        "readMethods": {"$ref": "#/$defs/readMethods"},
+        "pins": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/pin"}
+        },
+        "pinsOmitted": {"type": "integer", "minimum": 0}
+      }
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceNodeGuid",
+        "sourceNodeName",
+        "sourcePinIdObserved",
+        "sourcePinName",
+        "targetNodeGuid",
+        "targetNodeName",
+        "targetNodePath",
+        "targetPinIdObserved",
+        "targetPinName"
+      ],
+      "properties": {
+        "sourceNodeGuid": {"$ref": "#/$defs/optionalGuid"},
+        "sourceNodeName": {"type": "string", "maxLength": 256},
+        "sourcePinIdObserved": {"$ref": "#/$defs/optionalGuid"},
+        "sourcePinName": {"type": "string", "maxLength": 256},
+        "targetNodeGuid": {"$ref": "#/$defs/optionalGuid"},
+        "targetNodeName": {"type": "string", "maxLength": 256},
+        "targetNodePath": {"$ref": "#/$defs/unrealPath"},
+        "targetPinIdObserved": {"$ref": "#/$defs/optionalGuid"},
+        "targetPinName": {"type": "string", "maxLength": 256}
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_]+$",
+        "maxLength": 128
+      }
+    }
+  }
+}

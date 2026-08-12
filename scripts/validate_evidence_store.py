@@ -111,6 +111,50 @@ def _first_text(*values: object) -> str:
     return ""
 
 
+def _authoritative_native_pin_id(raw_pin: Mapping[str, object]) -> str:
+    source = _first_text(raw_pin.get("source"))
+    resolution = raw_pin.get("resolution")
+    if source.startswith("uasset_"):
+        if not isinstance(resolution, Mapping):
+            return ""
+        if resolution.get("native_pin_id_authority") != "EXACT":
+            return ""
+    return _first_text(raw_pin.get("native_pin_id"), raw_pin.get("id"))
+
+
+def _authoritative_persistent_guid(raw_pin: Mapping[str, object]) -> str:
+    source = _first_text(raw_pin.get("source"))
+    resolution = raw_pin.get("resolution")
+    if source.startswith("uasset_"):
+        if not isinstance(resolution, Mapping):
+            return ""
+        if resolution.get("persistent_guid_method") != "exact_struct_value":
+            return ""
+    return _first_text(raw_pin.get("persistent_guid"))
+
+
+def _authoritative_target_pin_id(raw_link: Mapping[str, object]) -> str:
+    source = _first_text(raw_link.get("source"), raw_link.get("link_source"))
+    if source.startswith("uasset_"):
+        if raw_link.get("target_pin_id_authority") != "EXACT":
+            return ""
+    return _first_text(
+        raw_link.get("target_native_pin_id"),
+        raw_link.get("target_pin_id"),
+    )
+
+
+def _parser_local_pin_key(raw_pin: Mapping[str, object]) -> str:
+    return _first_text(raw_pin.get("native_pin_id"), raw_pin.get("id"))
+
+
+def _parser_local_target_pin_key(raw_link: Mapping[str, object]) -> str:
+    return _first_text(
+        raw_link.get("target_native_pin_id"),
+        raw_link.get("target_pin_id"),
+    )
+
+
 def _as_int(value: object, default: int | None = None) -> int | None:
     try:
         return int(value)  # type: ignore[arg-type]
@@ -215,7 +259,7 @@ def _find_target_node(
     if len(candidates) == 1:
         return candidates[0]
 
-    native_pin_id = _first_text(link.get("target_pin_id"), link.get("target_native_pin_id"))
+    native_pin_id = _authoritative_target_pin_id(link)
     pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
     if native_pin_id:
         id_matches = unique_nodes(
@@ -262,7 +306,7 @@ def _find_target_pin(
             }.values()
         )
 
-    native_pin_id = _first_text(link.get("target_pin_id"), link.get("target_native_pin_id"))
+    native_pin_id = _authoritative_target_pin_id(link)
     if native_pin_id:
         matches = unique_pins(
             pin
@@ -278,8 +322,21 @@ def _find_target_pin(
                 if len(named_matches) == 1:
                     return named_matches[0]
             return None
+    source = _first_text(link.get("source"), link.get("link_source"))
+    if source.startswith("uasset_") and not native_pin_id:
+        parser_local_pin_key = _parser_local_target_pin_key(link)
+        if parser_local_pin_key:
+            matches = unique_pins(
+                pin
+                for pin in target_node["pins"]  # type: ignore[index]
+                if pin["parser_local_pin_key"] == parser_local_pin_key
+            )
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                return None
     pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
-    if pin_name:
+    if pin_name and not source.startswith("uasset_"):
         matches = unique_pins(
             pin
             for pin in target_node["pins"]  # type: ignore[index]
@@ -404,7 +461,8 @@ def _legacy_model(asset_dir: Path) -> dict[str, Any]:
                 pin = {
                     "node_identity": identity,
                     "ordinal": pin_ordinal,
-                    "native_pin_id": _first_text(raw_pin.get("id"), raw_pin.get("native_pin_id")),
+                    "native_pin_id": _authoritative_native_pin_id(raw_pin),
+                    "parser_local_pin_key": _parser_local_pin_key(raw_pin),
                     "name": _first_text(raw_pin.get("name")),
                     "direction": _first_text(raw_pin.get("direction")),
                     "category": _first_text(raw_pin.get("category")),
@@ -417,6 +475,7 @@ def _legacy_model(asset_dir: Path) -> dict[str, Any]:
                         identity,
                         pin_ordinal,
                         pin["native_pin_id"],
+                        _authoritative_persistent_guid(raw_pin),
                         pin["name"],
                         pin["direction"],
                     )
@@ -436,9 +495,7 @@ def _legacy_model(asset_dir: Path) -> dict[str, Any]:
                     target_node_name = _first_text(
                         raw_link.get("target_node"), raw_link.get("target_node_name")
                     )
-                    target_native_pin_id = _first_text(
-                        raw_link.get("target_pin_id"), raw_link.get("target_native_pin_id")
-                    )
+                    target_native_pin_id = _authoritative_target_pin_id(raw_link)
                     target_pin_name = _first_text(
                         raw_link.get("target_pin"), raw_link.get("target_pin_name")
                     )
@@ -586,12 +643,21 @@ def _database_model(connection: sqlite3.Connection) -> dict[str, Any]:
         if str(row[2]):
             search_names.append(str(row[2]))
     for row in connection.execute(
-        "SELECT g.export_index, n.node_identity, p.ordinal, p.native_pin_id, p.name, p.direction "
+        "SELECT g.export_index, n.node_identity, p.ordinal, p.native_pin_id, "
+        "p.persistent_guid, p.name, p.direction "
         "FROM pins p JOIN nodes n ON n.node_ref = p.node_ref "
         "JOIN graphs g ON g.graph_ref = n.graph_ref"
     ):
         associations["pins"][
-            (int(row[0]), str(row[1]), int(row[2]), str(row[3]), str(row[4]), str(row[5]))
+            (
+                int(row[0]),
+                str(row[1]),
+                int(row[2]),
+                str(row[3]),
+                str(row[4]),
+                str(row[5]),
+                str(row[6]),
+            )
         ] += 1
     for row in connection.execute(
         "SELECT g.export_index, sn.node_identity, sp.ordinal, tn.node_identity, tp.ordinal, "

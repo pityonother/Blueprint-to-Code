@@ -17,7 +17,38 @@ import datetime
 import json
 import os
 import re
+import sys
 import traceback
+
+
+_PROJECT_ROOT_HINT = globals().get("BLUEPRINT_TO_CODE_PROJECT_ROOT")
+if _PROJECT_ROOT_HINT:
+    _SCRIPTS_ROOT = os.path.join(
+        os.path.abspath(os.path.expanduser(str(_PROJECT_ROOT_HINT))),
+        "scripts",
+    )
+else:
+    _SCRIPT_DIR = os.path.dirname(
+        os.path.abspath(globals().get("__file__") or os.getcwd())
+    )
+    _SCRIPTS_ROOT = os.path.dirname(_SCRIPT_DIR)
+if _SCRIPTS_ROOT and _SCRIPTS_ROOT not in sys.path:
+    sys.path.insert(0, _SCRIPTS_ROOT)
+
+try:
+    from devkit_exporters.arkdev_wc_properties import (
+        wc_get_all_property_names as _shared_wc_property_names,
+        wc_get_all_property_names_detailed as _shared_wc_property_names_detailed,
+        wc_get_all_property_values as _shared_wc_all_property_values,
+        wc_get_all_property_values_detailed as _shared_wc_all_property_values_detailed,
+        wc_get_property_value as _shared_wc_get_property_value,
+    )
+except Exception:
+    _shared_wc_property_names = None
+    _shared_wc_property_names_detailed = None
+    _shared_wc_all_property_values = None
+    _shared_wc_all_property_values_detailed = None
+    _shared_wc_get_property_value = None
 
 try:
     import unreal
@@ -1344,57 +1375,43 @@ def editor_property_names(obj):
     return sorted(name for name in names if valid_property_name(name))
 
 
-def wc_property_names(obj):
-    method = getattr(obj, "wc_get_all_property_names", None)
-    if not callable(method):
-        return []
-    try:
-        names = method() or []
-        return sorted(str(name) for name in names if valid_property_name(str(name)))
-    except Exception as exc:
-        STATE.skip("wc_get_all_property_names", object_name(obj), str(exc))
-        return []
+def wc_property_names_detailed(obj, limit=MAX_CLASS_DEFAULT_PROPERTIES):
+    if _shared_wc_property_names_detailed is None:
+        STATE.skip("wc_get_all_property_names", object_name(obj), "shared helper unavailable")
+        return [], False
+    return _shared_wc_property_names_detailed(obj, limit=limit)
 
 
-def wc_all_property_values(obj):
-    method = getattr(obj, "wc_get_all_property_values", None)
-    if not callable(method):
+def wc_property_names(obj, limit=MAX_CLASS_DEFAULT_PROPERTIES):
+    if _shared_wc_property_names is None:
+        STATE.skip("wc_get_all_property_names", object_name(obj), "shared helper unavailable")
+        return []
+    return _shared_wc_property_names(obj, limit=limit)
+
+
+def wc_all_property_values_detailed(obj, limit=MAX_CLASS_DEFAULT_PROPERTIES):
+    if _shared_wc_all_property_values_detailed is None:
+        STATE.skip("wc_get_all_property_values", object_name(obj), "shared helper unavailable")
+        return {}, False
+    return _shared_wc_all_property_values_detailed(obj, limit=limit)
+
+
+def wc_all_property_values(obj, limit=MAX_CLASS_DEFAULT_PROPERTIES):
+    if _shared_wc_all_property_values is None:
+        STATE.skip("wc_get_all_property_values", object_name(obj), "shared helper unavailable")
         return {}
-    try:
-        raw = method() or {}
-    except Exception as exc:
-        STATE.skip("wc_get_all_property_values", object_name(obj), str(exc))
-        return {}
-    if isinstance(raw, dict):
-        return {str(key): value for key, value in raw.items() if valid_property_name(str(key))}
-    values = {}
-    try:
-        for item in raw:
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                key, value = item[0], item[1]
-                if valid_property_name(str(key)):
-                    values[str(key)] = value
-    except Exception:
-        pass
-    return values
+    return _shared_wc_all_property_values(obj, limit=limit)
 
 
 def wc_get_property_value(obj, name):
-    method = getattr(obj, "wc_get_property_value", None)
-    if not callable(method):
+    if _shared_wc_get_property_value is None:
+        STATE.skip("wc_get_property_value", name, "shared helper unavailable")
         return False, None
-    for candidate in (name, str(name)):
-        try:
-            return True, method(candidate)
-        except Exception:
-            continue
-    try:
-        if unreal is not None and hasattr(unreal, "Name"):
-            return True, method(unreal.Name(str(name)))
-    except Exception:
-        pass
-    STATE.skip("wc_get_property_value", name, "failed for string and Name arguments")
-    return False, None
+    return _shared_wc_get_property_value(
+        obj,
+        name,
+        unreal_module=unreal,
+    )
 
 
 def raw_property_value(obj, name):
@@ -1492,7 +1509,7 @@ def collect_wc_defaults(obj, source, limit, omit_names=None):
     if obj is None:
         return defaults
     omit = set(omit_names or [])
-    raw_values = wc_all_property_values(obj)
+    raw_values, values_truncated = wc_all_property_values_detailed(obj, limit)
     if raw_values:
         for name, value in sorted(raw_values.items()):
             if name in omit:
@@ -1504,11 +1521,18 @@ def collect_wc_defaults(obj, source, limit, omit_names=None):
                 STATE.skip(source, name, "callable/editor method, not a property value")
                 continue
             defaults[name] = default_entry(value, source)
+        if values_truncated:
+            STATE.skip(
+                source,
+                object_name(obj),
+                "wc_get_all_property_values property limit reached ({})".format(limit),
+            )
         if defaults:
             STATE.info("Collected {} defaults through wc_get_all_property_values from {}".format(len(defaults), object_name(obj)))
             return defaults
 
-    for name in wc_property_names(obj):
+    property_names, names_truncated = wc_property_names_detailed(obj, limit)
+    for name in property_names:
         if name in omit:
             continue
         if len(defaults) >= limit:
@@ -1521,6 +1545,12 @@ def collect_wc_defaults(obj, source, limit, omit_names=None):
             STATE.skip(source, name, "callable/editor method, not a property value")
             continue
         defaults[name] = default_entry(value, source)
+    if names_truncated:
+        STATE.skip(
+            source,
+            object_name(obj),
+            "wc_get_all_property_names property limit reached ({})".format(limit),
+        )
     if defaults:
         STATE.info("Collected {} defaults through wc_get_property_value from {}".format(len(defaults), object_name(obj)))
     return defaults

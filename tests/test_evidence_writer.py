@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from blueprint_translator.evidence_writer import (  # noqa: E402
+    DIRECT_PAYLOAD_PARSER_VERSION,
     write_evidence_store_from_capture,
     write_evidence_store_from_payload,
 )
@@ -333,6 +334,162 @@ def _open_rows(database_path: Path) -> Iterator[sqlite3.Connection]:
 
 
 class EvidenceWriterTests(unittest.TestCase):
+    def test_direct_parser_v4_keeps_heuristic_pin_keys_out_of_authority(self):
+        graph_payload = {
+            "metadata": {
+                "asset_name": "IdentityFixture",
+                "graph_name": "EventGraph",
+                "graph_type": "EventGraph",
+                "uasset_export_index": 1,
+                "uasset_read_status": "heuristic",
+                "graph_guid": "11111111222222223333333344444444",
+            },
+            "nodes": [
+                {
+                    "index": 1,
+                    "name": "K2Node_Event_0",
+                    "class_name": "K2Node_Event",
+                    "node_guid": "AAAABBBBCCCCDDDDEEEEFFFF00001111",
+                    "properties": {
+                        "NodeGuid": {
+                            "name": "NodeGuid",
+                            "type": "StructProperty",
+                            "guid": "AAAABBBBCCCCDDDDEEEEFFFF00001111",
+                            "confidence": "high",
+                            "source": "uasset_property_tag",
+                            "struct_parse": {
+                                "parsed": True,
+                                "method": "exact_struct_value",
+                                "struct_name": "Guid",
+                                "value_offset": 64,
+                                "value_size": 16,
+                            },
+                        }
+                    },
+                    "pins": [
+                        {
+                            "id": "K2Node_Event_0_pin_1",
+                            "persistent_guid": (
+                                "12345678123456781234567812345678"
+                            ),
+                            "name": "then",
+                            "direction": "EGPD_Output",
+                            "category": "exec",
+                            "source": "uasset_custom_pin_scan",
+                            "confidence": "medium",
+                            "resolution": {
+                                "native_pin_id_authority": "UNAVAILABLE",
+                                "persistent_guid_method": "UNAVAILABLE",
+                                "heuristic_guid_candidate": (
+                                    "12345678123456781234567812345678"
+                                ),
+                            },
+                            "links": [
+                                {
+                                    "target_node": "K2Node_CallFunction_0",
+                                    "target_pin_id": (
+                                        "K2Node_CallFunction_0_pin_1"
+                                    ),
+                                    "target_pin": "execute",
+                                    "source": "uasset_pin_package_index_scan",
+                                    "resolution_status": (
+                                        "resolved_pin_heuristic"
+                                    ),
+                                    "resolution_method": (
+                                        "heuristic_direction_category"
+                                    ),
+                                    "confidence": "medium",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "index": 2,
+                    "name": "K2Node_CallFunction_0",
+                    "class_name": "K2Node_CallFunction",
+                    "pins": [
+                        {
+                            "id": "K2Node_CallFunction_0_pin_1",
+                            "persistent_guid": (
+                                "87654321876543218765432187654321"
+                            ),
+                            "name": "execute",
+                            "direction": "EGPD_Input",
+                            "category": "exec",
+                            "source": "uasset_custom_pin_scan",
+                            "confidence": "medium",
+                            "resolution": {
+                                "native_pin_id_authority": "UNAVAILABLE",
+                                "persistent_guid_method": "UNAVAILABLE",
+                            },
+                            "links": [],
+                        }
+                    ],
+                },
+            ],
+        }
+        payload = {
+            "asset_name": "IdentityFixture",
+            "asset_path": "/Game/Test/IdentityFixture.IdentityFixture",
+            "graphs": [
+                {
+                    "graph": "EventGraph",
+                    "graph_type": "EventGraph",
+                    "export_index": 1,
+                    "status": "heuristic",
+                    "confidence": "medium",
+                    "payload": graph_payload,
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "evidence.sqlite"
+            result = write_evidence_store_from_payload(
+                str(payload["asset_path"]),
+                None,
+                payload,
+                database_path,
+            )
+            with _open_rows(database_path) as connection:
+                pin = connection.execute(
+                    "SELECT native_pin_id, persistent_guid, resolution_json "
+                    "FROM pins WHERE name = 'then'"
+                ).fetchone()
+                authority_pin_count = connection.execute(
+                    "SELECT COUNT(*) FROM pins "
+                    "WHERE native_pin_id <> '' OR persistent_guid <> ''"
+                ).fetchone()[0]
+                observation = connection.execute(
+                    "SELECT target_pin_ref, target_native_pin_id "
+                    "FROM edge_observations"
+                ).fetchone()
+                edge = connection.execute(
+                    "SELECT resolution_status, confidence FROM edges"
+                ).fetchone()
+                graph = connection.execute(
+                    "SELECT metadata_json FROM graphs"
+                ).fetchone()
+
+        self.assertEqual(result["parser_version"], DIRECT_PAYLOAD_PARSER_VERSION)
+        self.assertEqual(DIRECT_PAYLOAD_PARSER_VERSION, "uasset-graph-reader-evidence-v4")
+        self.assertEqual(pin["native_pin_id"], "")
+        self.assertEqual(pin["persistent_guid"], "")
+        self.assertEqual(authority_pin_count, 0)
+        self.assertIsNotNone(observation["target_pin_ref"])
+        self.assertEqual(observation["target_native_pin_id"], "")
+        self.assertEqual(edge["resolution_status"], "resolved_pin_heuristic")
+        self.assertEqual(edge["confidence"], "medium")
+        self.assertEqual(
+            json.loads(pin["resolution_json"])["heuristic_guid_candidate"],
+            "12345678123456781234567812345678",
+        )
+        self.assertEqual(
+            json.loads(graph["metadata_json"])["graph_guid"],
+            "11111111222222223333333344444444",
+        )
+
     def test_function_reference_preserves_exact_member_parent_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

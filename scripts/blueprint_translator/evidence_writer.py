@@ -54,7 +54,7 @@ _SIDECAR_NAMES = (
     "uasset_failed_graph_queue.json",
 )
 
-DIRECT_PAYLOAD_PARSER_VERSION = "uasset-graph-reader-evidence-v3"
+DIRECT_PAYLOAD_PARSER_VERSION = "uasset-graph-reader-evidence-v4"
 JSON_COMPRESSION_THRESHOLD = 4096
 PUBLISH_REPLACE_ATTEMPTS = 6
 SEARCH_SUMMARY_MAX_CHARS = 160
@@ -349,6 +349,56 @@ def _first_text(*values: object) -> str:
         if value is not None and str(value).strip():
             return str(value).strip()
     return ""
+
+
+def _authoritative_native_pin_id(raw_pin: dict[str, Any]) -> str:
+    """Keep parser-internal or heuristic Pin keys out of authority columns."""
+
+    source = _first_text(raw_pin.get("source"))
+    resolution = raw_pin.get("resolution")
+    if source.startswith("uasset_"):
+        if not isinstance(resolution, dict):
+            return ""
+        if resolution.get("native_pin_id_authority") != "EXACT":
+            return ""
+    return _first_text(raw_pin.get("native_pin_id"), raw_pin.get("id"))
+
+
+def _authoritative_persistent_guid(raw_pin: dict[str, Any]) -> str:
+    """Publish only structurally decoded uasset PersistentGuid values."""
+
+    source = _first_text(raw_pin.get("source"))
+    resolution = raw_pin.get("resolution")
+    if source.startswith("uasset_"):
+        if not isinstance(resolution, dict):
+            return ""
+        if resolution.get("persistent_guid_method") != "exact_struct_value":
+            return ""
+    return _first_text(raw_pin.get("persistent_guid"))
+
+
+def _authoritative_target_pin_id(raw_link: dict[str, Any]) -> str:
+    source = _first_text(raw_link.get("source"), raw_link.get("link_source"))
+    if source.startswith("uasset_"):
+        if raw_link.get("target_pin_id_authority") != "EXACT":
+            return ""
+    return _first_text(
+        raw_link.get("target_native_pin_id"),
+        raw_link.get("target_pin_id"),
+    )
+
+
+def _parser_local_pin_key(raw_pin: dict[str, Any]) -> str:
+    """Return a parser-local Pin key without publishing it as native identity."""
+
+    return _first_text(raw_pin.get("native_pin_id"), raw_pin.get("id"))
+
+
+def _parser_local_target_pin_key(raw_link: dict[str, Any]) -> str:
+    return _first_text(
+        raw_link.get("target_native_pin_id"),
+        raw_link.get("target_pin_id"),
+    )
 
 
 def _as_int(value: object, default: int | None = None) -> int | None:
@@ -684,6 +734,8 @@ def _insert_nodes_and_pins(
             if not isinstance(raw_pin, dict):
                 continue
             pin_ref = make_pin_ref(node_ref, pin_ordinal)
+            native_pin_id = _authoritative_native_pin_id(raw_pin)
+            persistent_guid = _authoritative_persistent_guid(raw_pin)
             default_value = raw_pin.get("default", raw_pin.get("default_value", ""))
             excluded_pin = {
                 "links", "id", "native_pin_id", "persistent_guid", "name", "direction", "category", "subcategory",
@@ -696,8 +748,8 @@ def _insert_nodes_and_pins(
                 "resolution_json, raw_offsets_json, warnings_json, extra_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    pin_ref, node_ref, pin_ordinal, _first_text(raw_pin.get("id"), raw_pin.get("native_pin_id")),
-                    _first_text(raw_pin.get("persistent_guid")), _first_text(raw_pin.get("name")),
+                    pin_ref, node_ref, pin_ordinal, native_pin_id,
+                    persistent_guid, _first_text(raw_pin.get("name")),
                     _first_text(raw_pin.get("direction")), _first_text(raw_pin.get("category")),
                     _first_text(raw_pin.get("subcategory")), _compact_json(default_value),
                     _first_text(raw_pin.get("default_object")), _first_text(raw_pin.get("linked_to_raw")),
@@ -713,7 +765,8 @@ def _insert_nodes_and_pins(
                 "pin_ref": pin_ref,
                 "node_ref": node_ref,
                 "ordinal": pin_ordinal,
-                "native_pin_id": _first_text(raw_pin.get("id"), raw_pin.get("native_pin_id")),
+                "native_pin_id": native_pin_id,
+                "parser_local_pin_key": _parser_local_pin_key(raw_pin),
                 "name": _first_text(raw_pin.get("name")),
                 "direction": _first_text(raw_pin.get("direction")),
                 "category": _first_text(raw_pin.get("category")),
@@ -777,7 +830,7 @@ def _find_target_node(
         return None, False
     if len(candidates) == 1:
         return candidates[0], False
-    native_pin_id = _first_text(link.get("target_pin_id"), link.get("target_native_pin_id"))
+    native_pin_id = _authoritative_target_pin_id(link)
     pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
     if native_pin_id:
         id_matches = _unique_records(
@@ -820,35 +873,51 @@ def _find_target_node(
 def _find_target_pin(
     link: dict[str, Any],
     target_node: dict[str, Any] | None,
-) -> tuple[dict[str, Any] | None, bool]:
+) -> tuple[dict[str, Any] | None, bool, bool]:
     if target_node is None:
-        return None, False
-    native_pin_id = _first_text(link.get("target_pin_id"), link.get("target_native_pin_id"))
+        return None, False, False
+    native_pin_id = _authoritative_target_pin_id(link)
     if native_pin_id:
         matches = _unique_records(
             (pin for pin in target_node["pins"] if pin["native_pin_id"] == native_pin_id),
             "pin_ref",
         )
         if len(matches) == 1:
-            return matches[0], False
+            return matches[0], False, False
         if len(matches) > 1:
             pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
             if pin_name:
                 named_matches = [pin for pin in matches if pin["name"] == pin_name]
                 if len(named_matches) == 1:
-                    return named_matches[0], False
-            return None, True
+                    return named_matches[0], False, False
+            return None, True, False
+    source = _first_text(link.get("source"), link.get("link_source"))
+    if source.startswith("uasset_") and not native_pin_id:
+        parser_local_pin_key = _parser_local_target_pin_key(link)
+        if parser_local_pin_key:
+            matches = _unique_records(
+                (
+                    pin
+                    for pin in target_node["pins"]
+                    if pin["parser_local_pin_key"] == parser_local_pin_key
+                ),
+                "pin_ref",
+            )
+            if len(matches) == 1:
+                return matches[0], False, True
+            if len(matches) > 1:
+                return None, True, False
     pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
-    if pin_name:
+    if pin_name and not source.startswith("uasset_"):
         matches = _unique_records(
             (pin for pin in target_node["pins"] if pin["name"] == pin_name),
             "pin_ref",
         )
         if len(matches) == 1:
-            return matches[0], False
+            return matches[0], False, False
         if len(matches) > 1:
-            return None, True
-    return None, False
+            return None, True, False
+    return None, False, False
 
 
 def _insert_edges(
@@ -869,10 +938,13 @@ def _insert_edges(
                 if not isinstance(raw_link, dict):
                     continue
                 target_node, target_node_ambiguous = _find_target_node(raw_link, lookup)
-                target_pin, target_pin_ambiguous = _find_target_pin(raw_link, target_node)
+                target_pin, target_pin_ambiguous, heuristic_pin_match = _find_target_pin(
+                    raw_link,
+                    target_node,
+                )
                 ambiguous = target_node_ambiguous or target_pin_ambiguous
                 target_node_name = _first_text(raw_link.get("target_node"), raw_link.get("target_node_name"))
-                target_pin_id = _first_text(raw_link.get("target_pin_id"), raw_link.get("target_native_pin_id"))
+                target_pin_id = _authoritative_target_pin_id(raw_link)
                 target_pin_name = _first_text(raw_link.get("target_pin"), raw_link.get("target_pin_name"))
                 kind = _first_text(raw_link.get("kind"))
                 if not kind:
@@ -881,8 +953,19 @@ def _insert_edges(
                 resolution_status = _first_text(raw_link.get("resolution_status"), status)
                 if ambiguous:
                     resolution_status = "ambiguous"
+                elif heuristic_pin_match:
+                    resolution_status = "resolved_pin_heuristic"
                 elif target_pin is not None and not resolution_status:
                     resolution_status = "resolved_pin"
+                edge_confidence = _first_text(
+                    raw_link.get("confidence"),
+                    raw_link.get("link_confidence"),
+                )
+                if (
+                    heuristic_pin_match
+                    and edge_confidence.casefold() not in {"low", "medium"}
+                ):
+                    edge_confidence = "medium"
                 observation_ref = f"{graph_ref}/observation/{_short_hash(source_pin['pin_ref'], link_ordinal, _compact_json(raw_link))}"
                 cursor = connection.execute(
                     "INSERT INTO edge_observations(observation_ref, graph_ref, source_node_ref, source_pin_ref, "
@@ -893,7 +976,7 @@ def _insert_edges(
                         target_node["node_ref"] if target_node else None, target_pin["pin_ref"] if target_pin else None,
                         target_node_name, target_pin_id, target_pin_name, kind, status, resolution_status,
                         _first_text(raw_link.get("source"), raw_link.get("link_source")),
-                        _first_text(raw_link.get("confidence"), raw_link.get("link_confidence")),
+                        edge_confidence,
                         _compact_json(_without(raw_link, {"target_pin_id_candidates", "candidate_pin_ids"})),
                     ),
                 )
@@ -937,7 +1020,7 @@ def _insert_edges(
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         edge_ref, graph_ref, source_ref, target_ref, kind,
-                        _first_text(raw_link.get("confidence"), raw_link.get("link_confidence")), resolution_status,
+                        edge_confidence, resolution_status,
                     ),
                 )
 
