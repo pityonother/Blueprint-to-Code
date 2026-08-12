@@ -424,10 +424,11 @@ class EvidenceMigrationTests(unittest.TestCase):
                     }
                 )
 
-        self.assertEqual(result["gap_count"], 2)
-        self.assertRegex(agent_index, r"(?im)^-\s*Evidence gaps:\s*2(?:;|\s*$)")
-        self.assertEqual(overview["summary"]["gapCount"], 2)
-        self.assertEqual(gaps["coverage"]["requested"], 2)
+        self.assertEqual(result["gap_count"], 3)
+        self.assertRegex(agent_index, r"(?im)^-\s*Evidence gaps:\s*3(?:;|\s*$)")
+        self.assertEqual(overview["summary"]["gapCount"], 3)
+        self.assertEqual(gaps["coverage"]["requested"], 3)
+        self.assertEqual(gaps["coverage"]["byStatus"]["HEURISTIC"], 1)
         self.assertEqual(gaps["coverage"]["byStatus"]["NOT_RECOVERED"], 1)
         self.assertEqual(gaps["coverage"]["byStatus"]["SOURCE_NOT_AVAILABLE"], 1)
         default_gap_names = {
@@ -466,8 +467,8 @@ class EvidenceMigrationTests(unittest.TestCase):
             refreshed_text = index_path.read_text(encoding="utf-8")
             self.assertEqual(database_path.read_bytes(), database_before)
             self.assertEqual(refreshed["revision_id"], migrated["revision_id"])
-            self.assertEqual(refreshed["gap_count"], 2)
-            self.assertRegex(refreshed_text, r"(?im)^-\s*Evidence gaps:\s*2(?:;|\s*$)")
+            self.assertEqual(refreshed["gap_count"], 3)
+            self.assertRegex(refreshed_text, r"(?im)^-\s*Evidence gaps:\s*3(?:;|\s*$)")
 
     def test_agent_index_is_bounded_copyable_and_treats_blueprint_text_as_data(self):
         hostile = (
