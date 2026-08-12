@@ -17,3 +17,5 @@ Phase 2 只证明 proposed-node 的声明、唯一 CREATE_NODE 与 operation dep
 任何未来 mutation 工具必须使用新名称、独立审批和可验证 rollback，不能改变五个 Evidence 只读工具或六个本地 metadata 工具的语义。
 
 PR #43 保留为需要匹配 C++ source-plugin build 环境的独立 Draft 路线。Phase 3B 不修改、合并、关闭或 retarget 它，也不复制其 C++ bridge 实现。
+
+Phase 3C 的 Evidence-guided exact-node lookup 合同与只读 probe 可独立实现，但 2026-08-12 的 current local Evidence 在所有 312 个 indexed captures 中都没有非空 node `NodeGuid`，v2 compatibility generation 也没有 public authority manifest SHA。因此 request builder 必须 fail closed，未安排 DevKit 人工运行。后续应先由独立 Evidence 生成工作包恢复 confirmed NodeGuid + current manifest binding；不得用 UObject name、离线临时解析或全局 ObjectIterator 替代 authority。

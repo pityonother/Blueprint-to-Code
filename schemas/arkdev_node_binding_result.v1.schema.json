@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/arkdev_node_binding_result.v1.schema.json",
+  "title": "ARK DevKit Evidence-Guided Node Binding Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "requestId", "requestSemanticDigest", "generatedAt", "runtime",
+    "assetStatus", "graphStatus", "nodes", "summary", "route", "mutationReady",
+    "objectIteratorCalled", "mutationApiCalled", "gaps", "semanticDigest"
+  ],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.arkdev-node-binding-result/v1"},
+    "requestId": {
+      "type": "string",
+      "pattern": "^node-binding-request://[^\\s]+$",
+      "maxLength": 4096
+    },
+    "requestSemanticDigest": {"$ref": "#/$defs/digest"},
+    "generatedAt": {"type": "string", "minLength": 1, "maxLength": 128},
+    "runtime": {"$ref": "#/$defs/runtime"},
+    "assetStatus": {"$ref": "#/$defs/targetStatus"},
+    "assetObjectPath": {
+      "type": "string",
+      "pattern": "^/(Game|Engine)/",
+      "maxLength": 4096
+    },
+    "graphStatus": {"$ref": "#/$defs/targetStatus"},
+    "graphPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "summary": {"$ref": "#/$defs/summary"},
+    "route": {
+      "enum": [
+        "EXACT_NODE_AND_PIN_BINDING",
+        "EXACT_NODE_BINDING_PIN_PARTIAL",
+        "EXACT_NODE_BINDING_PIN_UNAVAILABLE",
+        "PARTIAL_NODE_BINDING",
+        "NODE_BINDING_UNAVAILABLE"
+      ]
+    },
+    "mutationReady": {"const": false},
+    "objectIteratorCalled": {"const": false},
+    "mutationApiCalled": {"const": false},
+    "gaps": {"$ref": "#/$defs/gaps"},
+    "semanticDigest": {"$ref": "#/$defs/digest"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"assetStatus": {"const": "EXACT"}}, "required": ["assetStatus"]},
+      "then": {"required": ["assetObjectPath"]},
+      "else": {"not": {"required": ["assetObjectPath"]}}
+    },
+    {
+      "if": {"properties": {"graphStatus": {"const": "EXACT"}}, "required": ["graphStatus"]},
+      "then": {"required": ["graphPath"]},
+      "else": {"not": {"required": ["graphPath"]}}
+    }
+  ],
+  "$defs": {
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engineVersion", "pythonVersion"],
+      "properties": {
+        "engineVersion": {"type": "string", "minLength": 1, "maxLength": 128},
+        "pythonVersion": {"type": "string", "minLength": 1, "maxLength": 64},
+        "findObjectAvailable": {"type": "boolean"},
+        "loadObjectAvailable": {"type": "boolean"},
+        "edGraphNodeClassAvailable": {"type": "boolean"},
+        "k2NodeClassAvailable": {"type": "boolean"}
+      }
+    },
+    "targetStatus": {"enum": ["EXACT", "NOT_FOUND", "ERROR"]},
+    "guid": {
+      "type": "string",
+      "pattern": "^(?!0{32}$)[0-9A-F]{32}$"
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeRef", "objectName", "expectedClassName", "expectedNodeGuid",
+        "lookupMethod", "bindingStatus", "positionStatus", "pinRead",
+        "pinBindingStatus", "gaps"
+      ],
+      "dependentRequired": {
+        "evidenceX": ["evidenceY"],
+        "evidenceY": ["evidenceX"],
+        "liveX": ["liveY"],
+        "liveY": ["liveX"],
+        "pins": ["pinsReturned", "pinsOmitted", "pinsTruncated"],
+        "pinsReturned": ["pins", "pinsOmitted", "pinsTruncated"],
+        "pinsOmitted": ["pins", "pinsReturned", "pinsTruncated"],
+        "pinsTruncated": ["pins", "pinsReturned", "pinsOmitted"]
+      },
+      "properties": {
+        "nodeRef": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "objectName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "expectedClassName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "expectedNodeGuid": {"$ref": "#/$defs/guid"},
+        "lookupMethod": {"enum": ["NONE", "FIND_OBJECT", "LOAD_OBJECT"]},
+        "bindingStatus": {
+          "enum": ["NOT_FOUND", "OUTER_MISMATCH", "CLASS_MISMATCH", "GUID_MISMATCH", "EXACT"]
+        },
+        "actualObjectName": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "actualObjectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "actualClassName": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "actualNodeGuid": {"$ref": "#/$defs/guid"},
+        "outerPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "outerMatches": {"type": "boolean"},
+        "evidenceX": {"type": "integer"},
+        "evidenceY": {"type": "integer"},
+        "liveX": {"type": "integer"},
+        "liveY": {"type": "integer"},
+        "positionStatus": {
+          "enum": ["POSITION_AVAILABLE", "POSITION_UNAVAILABLE", "POSITION_ERROR", "NOT_TESTED"]
+        },
+        "positionMatches": {"type": "boolean"},
+        "pinRead": {"enum": ["PASS", "PARTIAL", "UNAVAILABLE", "NOT_TESTED"]},
+        "pinBindingStatus": {"enum": ["SIGNATURE_ONLY", "UNAVAILABLE"]},
+        "pinSignatureMatches": {"type": "boolean"},
+        "pins": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/pin"}
+        },
+        "pinsReturned": {"type": "integer", "minimum": 0, "maximum": 64},
+        "pinsOmitted": {"type": "integer", "minimum": 0},
+        "pinsTruncated": {"type": "boolean"},
+        "gaps": {"$ref": "#/$defs/gaps"}
+      }
+    },
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "direction", "ordinal"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "direction": {"type": "string", "minLength": 1, "maxLength": 256},
+        "ordinal": {"type": "integer", "minimum": 0, "maximum": 511},
+        "category": {"type": "string", "maxLength": 256},
+        "subcategory": {"type": "string", "maxLength": 256},
+        "default": {"type": ["string", "number", "integer", "boolean", "null"]}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested", "exact", "notFound", "outerMismatch", "classMismatch",
+        "guidMismatch", "positionAvailable", "pinReadable"
+      ],
+      "properties": {
+        "requested": {"type": "integer", "minimum": 1, "maximum": 12},
+        "exact": {"type": "integer", "minimum": 0, "maximum": 12},
+        "notFound": {"type": "integer", "minimum": 0, "maximum": 12},
+        "outerMismatch": {"type": "integer", "minimum": 0, "maximum": 12},
+        "classMismatch": {"type": "integer", "minimum": 0, "maximum": 12},
+        "guidMismatch": {"type": "integer", "minimum": 0, "maximum": 12},
+        "positionAvailable": {"type": "integer", "minimum": 0, "maximum": 12},
+        "pinReadable": {"type": "integer", "minimum": 0, "maximum": 12}
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_]+$",
+        "maxLength": 128
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
