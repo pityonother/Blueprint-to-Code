@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/arkdev_wc_graph_snapshot_result.v1.schema.json",
+  "title": "ARK DevKit WC Graph Snapshot Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "generatedAt",
+    "status",
+    "request",
+    "snapshot",
+    "gate",
+    "arkGraphIdentitySource",
+    "readyForWcEvidenceAdapter",
+    "readyToRetryPr45",
+    "safety",
+    "gaps",
+    "semanticDigest"
+  ],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.arkdev-wc-graph-snapshot-result/v1"},
+    "generatedAt": {"type": "string", "maxLength": 64},
+    "status": {"enum": ["PASS", "PARTIAL", "FAIL", "ERROR"]},
+    "request": {
+      "oneOf": [
+        {"$ref": "#/$defs/request"},
+        {"type": "null"}
+      ]
+    },
+    "snapshot": {
+      "oneOf": [
+        {"$ref": "arkdev_wc_graph_snapshot.v1.schema.json"},
+        {"type": "null"}
+      ]
+    },
+    "gate": {"$ref": "#/$defs/gate"},
+    "arkGraphIdentitySource": {
+      "enum": ["WC_REFLECTION", "CLIPBOARD_REQUIRED"]
+    },
+    "readyForWcEvidenceAdapter": {"type": "boolean"},
+    "readyToRetryPr45": {"const": false},
+    "safety": {"$ref": "#/$defs/safety"},
+    "gaps": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_]+$",
+        "maxLength": 128
+      }
+    },
+    "semanticDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "assetObjectPath",
+        "graphName",
+        "maxNodes",
+        "maxPinsPerNode"
+      ],
+      "properties": {
+        "schema": {
+          "const": "blueprint-to-code.arkdev-wc-graph-snapshot-request/v1"
+        },
+        "assetObjectPath": {
+          "type": "string",
+          "pattern": "^/(Game|Engine)/",
+          "maxLength": 4096
+        },
+        "graphName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "maxNodes": {"type": "integer", "minimum": 1, "maximum": 500},
+        "maxPinsPerNode": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        }
+      }
+    },
+    "gateStatus": {
+      "enum": ["PASS", "PARTIAL", "UNAVAILABLE", "ERROR", "NOT_TESTED"]
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wcNodesRead",
+        "wcNodeGuidRead",
+        "wcPositionRead",
+        "wcPinsRead",
+        "wcLinksRead",
+        "nodeIdentity"
+      ],
+      "properties": {
+        "wcNodesRead": {"$ref": "#/$defs/gateStatus"},
+        "wcNodeGuidRead": {"$ref": "#/$defs/gateStatus"},
+        "wcPositionRead": {"$ref": "#/$defs/gateStatus"},
+        "wcPinsRead": {"$ref": "#/$defs/gateStatus"},
+        "wcLinksRead": {"$ref": "#/$defs/gateStatus"},
+        "nodeIdentity": {"$ref": "#/$defs/gateStatus"}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readOnly", "mutationApiCalled", "objectIteratorCalled"],
+      "properties": {
+        "readOnly": {"const": true},
+        "mutationApiCalled": {"const": false},
+        "objectIteratorCalled": {"const": false}
+      }
+    }
+  }
+}
