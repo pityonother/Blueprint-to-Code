@@ -49,7 +49,11 @@ def _pin(
         "confidence": "high",
         "warnings": [],
         "raw_offsets": {},
-        "resolution": {"status": "resolved_pin", "link_count": len(links or [])},
+        "resolution": {
+            "status": "resolved_pin",
+            "link_count": len(links or []),
+            "native_pin_id_authority": "EXACT",
+        },
     }
 
 
@@ -116,6 +120,7 @@ def _edge(
         "source_pin_direction": "EGPD_Output",
         "target_node": target_node,
         "target_pin_id": target_pin_id,
+        "target_pin_id_authority": "EXACT",
         "kind": kind,
         "resolution_status": "resolved_pin",
         "status": "resolved_pin",
@@ -147,6 +152,7 @@ class EvidenceQueryContractTests(unittest.TestCase):
         entry_to_branch = {
             "target_node": "Branch",
             "target_pin_id": "P_BRANCH_EXEC",
+            "target_pin_id_authority": "EXACT",
             "source": "uasset_exported_pin_linked_to",
             "confidence": "high",
             "resolution_status": "resolved_pin",
@@ -155,6 +161,7 @@ class EvidenceQueryContractTests(unittest.TestCase):
         now_to_compare = {
             "target_node": "CompareFloat",
             "target_pin_id": "P_COMPARE_A",
+            "target_pin_id_authority": "EXACT",
             "source": "uasset_exported_pin_linked_to",
             "confidence": "high",
             "resolution_status": "resolved_pin",
@@ -163,6 +170,7 @@ class EvidenceQueryContractTests(unittest.TestCase):
         timeout_to_compare = {
             "target_node": "CompareFloat",
             "target_pin_id": "P_COMPARE_B",
+            "target_pin_id_authority": "EXACT",
             "source": "uasset_exported_pin_linked_to",
             "confidence": "high",
             "resolution_status": "resolved_pin",
@@ -171,6 +179,7 @@ class EvidenceQueryContractTests(unittest.TestCase):
         compare_to_branch = {
             "target_node": "Branch",
             "target_pin_id": "P_BRANCH_CONDITION",
+            "target_pin_id_authority": "EXACT",
             "source": "uasset_exported_pin_linked_to",
             "confidence": "high",
             "resolution_status": "resolved_pin",
@@ -179,6 +188,7 @@ class EvidenceQueryContractTests(unittest.TestCase):
         branch_to_success = {
             "target_node": "SuccessCall",
             "target_pin_id": "P_SUCCESS_EXEC",
+            "target_pin_id_authority": "EXACT",
             "source": "uasset_exported_pin_linked_to",
             "confidence": "high",
             "resolution_status": "resolved_pin",

@@ -144,6 +144,17 @@ def _authoritative_target_pin_id(raw_link: Mapping[str, object]) -> str:
     )
 
 
+def _parser_local_pin_key(raw_pin: Mapping[str, object]) -> str:
+    return _first_text(raw_pin.get("native_pin_id"), raw_pin.get("id"))
+
+
+def _parser_local_target_pin_key(raw_link: Mapping[str, object]) -> str:
+    return _first_text(
+        raw_link.get("target_native_pin_id"),
+        raw_link.get("target_pin_id"),
+    )
+
+
 def _as_int(value: object, default: int | None = None) -> int | None:
     try:
         return int(value)  # type: ignore[arg-type]
@@ -295,7 +306,7 @@ def _find_target_pin(
             }.values()
         )
 
-    native_pin_id = _first_text(link.get("target_pin_id"), link.get("target_native_pin_id"))
+    native_pin_id = _authoritative_target_pin_id(link)
     if native_pin_id:
         matches = unique_pins(
             pin
@@ -311,8 +322,20 @@ def _find_target_pin(
                 if len(named_matches) == 1:
                     return named_matches[0]
             return None
-    pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
     source = _first_text(link.get("source"), link.get("link_source"))
+    if source.startswith("uasset_") and not native_pin_id:
+        parser_local_pin_key = _parser_local_target_pin_key(link)
+        if parser_local_pin_key:
+            matches = unique_pins(
+                pin
+                for pin in target_node["pins"]  # type: ignore[index]
+                if pin["parser_local_pin_key"] == parser_local_pin_key
+            )
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                return None
+    pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
     if pin_name and not source.startswith("uasset_"):
         matches = unique_pins(
             pin
@@ -439,6 +462,7 @@ def _legacy_model(asset_dir: Path) -> dict[str, Any]:
                     "node_identity": identity,
                     "ordinal": pin_ordinal,
                     "native_pin_id": _authoritative_native_pin_id(raw_pin),
+                    "parser_local_pin_key": _parser_local_pin_key(raw_pin),
                     "name": _first_text(raw_pin.get("name")),
                     "direction": _first_text(raw_pin.get("direction")),
                     "category": _first_text(raw_pin.get("category")),

@@ -465,9 +465,9 @@ class EvidenceWriterTests(unittest.TestCase):
                     "SELECT target_pin_ref, target_native_pin_id "
                     "FROM edge_observations"
                 ).fetchone()
-                edge_count = connection.execute(
-                    "SELECT COUNT(*) FROM edges"
-                ).fetchone()[0]
+                edge = connection.execute(
+                    "SELECT resolution_status, confidence FROM edges"
+                ).fetchone()
                 graph = connection.execute(
                     "SELECT metadata_json FROM graphs"
                 ).fetchone()
@@ -477,9 +477,10 @@ class EvidenceWriterTests(unittest.TestCase):
         self.assertEqual(pin["native_pin_id"], "")
         self.assertEqual(pin["persistent_guid"], "")
         self.assertEqual(authority_pin_count, 0)
-        self.assertIsNone(observation["target_pin_ref"])
+        self.assertIsNotNone(observation["target_pin_ref"])
         self.assertEqual(observation["target_native_pin_id"], "")
-        self.assertEqual(edge_count, 0)
+        self.assertEqual(edge["resolution_status"], "resolved_pin_heuristic")
+        self.assertEqual(edge["confidence"], "medium")
         self.assertEqual(
             json.loads(pin["resolution_json"])["heuristic_guid_candidate"],
             "12345678123456781234567812345678",
