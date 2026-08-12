@@ -603,6 +603,41 @@ class UAssetGraphCandidateTests(unittest.TestCase):
                     )
                     self.assertEqual(node.node_guid, expected_guid)
 
+    def test_no_marker_guid_starting_with_zero_is_not_shifted_into_padding(self):
+        names = ["None", "NodeGuid", "StructProperty", "Guid"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        guid_raw = struct.pack(
+            "<IIII",
+            0x01020300,
+            0x11121314,
+            0x21222324,
+            0x31323334,
+        )
+        encoded = (
+            fname("NodeGuid")
+            + fname("StructProperty")
+            + struct.pack("<ii", 16, 0)
+            + fname("Guid")
+            + bytes(16)
+            + guid_raw
+            + fname("None")
+            + b"\x00"
+        )
+
+        properties, warnings = parse_export_properties(encoded, names, [], [])
+
+        self.assertTrue(
+            any("layout is ambiguous" in warning for warning in warnings),
+            warnings,
+        )
+        node_guid = properties.get("NodeGuid", {})
+        self.assertNotIn("guid", node_guid)
+        if node_guid:
+            self.assertFalse(node_guid["struct_parse"]["parsed"])
+
     def test_exact_guid_struct_value_rejects_zero_truncation_and_decoys(self):
         expected_raw = struct.pack(
             "<IIII",

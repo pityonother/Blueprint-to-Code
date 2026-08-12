@@ -7,6 +7,7 @@ objects, inspect editor focus, open assets, compile Blueprints, or save packages
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 
 from arkdev_scripting_probe.contracts import (
@@ -592,9 +593,7 @@ def collect_wc_graph_snapshot(
     loaded_asset_path = _text(loaded_asset_path_full)
     asset_class, _asset_class_method = _raw_class_name(asset)
     exact_asset_path = loaded_asset_path_full == object_path
-    capabilities["exactAssetObjectPath"] = (
-        "PASS" if exact_asset_path else "UNAVAILABLE"
-    )
+    capabilities["exactAssetObjectPath"] = "PASS" if exact_asset_path else "UNAVAILABLE"
     if not exact_asset_path:
         gaps.append("ASSET_OBJECT_PATH_MISMATCH_OR_UNAVAILABLE")
     snapshot["asset"] = {
@@ -606,9 +605,7 @@ def collect_wc_graph_snapshot(
     }
 
     blueprint, blueprint_method = _blueprint_asset(unreal_module, asset)
-    capabilities["blueprintObject"] = (
-        "PASS" if blueprint is not None else "UNAVAILABLE"
-    )
+    capabilities["blueprintObject"] = "PASS" if blueprint is not None else "UNAVAILABLE"
     if blueprint is None:
         gaps.append("BLUEPRINT_OBJECT_UNAVAILABLE")
         return _finalize_snapshot(snapshot)
@@ -625,10 +622,7 @@ def collect_wc_graph_snapshot(
     graph_typed, _graph_type_method = _type_match(graph, unreal_module, ("EdGraph",))
     capabilities["typedGraph"] = "PASS" if graph_typed else "UNAVAILABLE"
     exact_graph_identity = bool(
-        actual_graph_name == graph_name
-        and graph_path
-        and graph_class
-        and graph_typed
+        actual_graph_name == graph_name and graph_path and graph_class and graph_typed
     )
     capabilities["exactGraphIdentity"] = (
         "PASS" if exact_graph_identity else "UNAVAILABLE"
@@ -679,8 +673,6 @@ def collect_wc_graph_snapshot(
     typed_count = 0
     outer_count = 0
     class_count = 0
-    guid_count = 0
-    wc_guid_count = 0
     position_count = 0
     wc_pins_count = 0
     pins_read_count = 0
@@ -706,10 +698,6 @@ def collect_wc_graph_snapshot(
             unreal_module=unreal_module,
         )
         node_guid = _canonical_guid(raw_guid) if guid_ok else ""
-        if node_guid:
-            guid_count += 1
-            if guid_method.startswith("wc_get_property_value:"):
-                wc_guid_count += 1
 
         x_ok, raw_x, x_method = _read_field(
             node,
@@ -784,6 +772,7 @@ def collect_wc_graph_snapshot(
     pins_omitted = 0
     pin_signature_count = 0
     pin_id_count = 0
+    pin_id_occurrences: Counter[str] = Counter()
     persistent_guid_count = 0
     linked_to_read_count = 0
     linked_to_total = 0
@@ -819,6 +808,8 @@ def collect_wc_graph_snapshot(
             pin_id = _canonical_guid(values.get("PinId"))
             persistent_guid = _canonical_guid(values.get("PersistentGuid"))
             pin_id_count += int(bool(pin_id))
+            if pin_id:
+                pin_id_occurrences[pin_id] += 1
             persistent_guid_count += int(bool(persistent_guid))
             pin_name = _text(values.get("PinName"), 256)
             direction = _text(values.get("Direction"), 256)
@@ -873,6 +864,39 @@ def collect_wc_graph_snapshot(
         record["pins"] = pins
         pin_count += len(pins)
 
+    node_guid_occurrences = Counter(
+        str(record["nodeGuid"]) for record, _source in records if record.get("nodeGuid")
+    )
+    duplicate_node_guids = {
+        guid for guid, occurrences in node_guid_occurrences.items() if occurrences > 1
+    }
+    if duplicate_node_guids:
+        gaps.append("NODE_GUID_DUPLICATE")
+    guid_count = sum(
+        1
+        for record, _source in records
+        if record.get("nodeGuid")
+        and node_guid_occurrences[str(record["nodeGuid"])] == 1
+    )
+    wc_guid_count = sum(
+        1
+        for record, _source in records
+        if record.get("nodeGuid")
+        and node_guid_occurrences[str(record["nodeGuid"])] == 1
+        and isinstance(record.get("readMethods"), Mapping)
+        and str(record["readMethods"].get("nodeGuid", "")).startswith(
+            "wc_get_property_value:"
+        )
+    )
+    duplicate_pin_ids = {
+        pin_id for pin_id, occurrences in pin_id_occurrences.items() if occurrences > 1
+    }
+    if duplicate_pin_ids:
+        gaps.append("PIN_ID_DUPLICATE")
+    native_pin_id_count = sum(
+        1 for occurrences in pin_id_occurrences.values() if occurrences == 1
+    )
+
     node_total = len(records)
     capabilities["typedNode"] = _capability(typed_count, node_total)
     capabilities["exactOuter"] = _capability(outer_count, node_total)
@@ -896,14 +920,13 @@ def collect_wc_graph_snapshot(
         assert isinstance(methods, Mapping)
         exact = bool(
             record.get("nodeGuid")
+            and str(record["nodeGuid"]) not in duplicate_node_guids
             and record.get("name")
             and record.get("rawClassName")
             and record.get("canonicalClassName")
             and record.get("typedNode") is True
             and record.get("outerGraphMatch") is True
-            and str(methods.get("nodeGuid", "")).startswith(
-                "wc_get_property_value:"
-            )
+            and str(methods.get("nodeGuid", "")).startswith("wc_get_property_value:")
         )
         exact_locator_count += int(exact)
         if exact and len(locators) < MAX_IDENTITY_LOCATORS:
@@ -932,7 +955,7 @@ def collect_wc_graph_snapshot(
             "pinSignatureRecovered": pin_signature_count,
             "pinIdObserved": pin_id_count,
             "persistentGuidObserved": persistent_guid_count,
-            "nativePinIdRecovered": pin_id_count,
+            "nativePinIdRecovered": native_pin_id_count,
             "persistentGuidRecovered": persistent_guid_count,
             "linkCount": len(links),
         }
@@ -949,7 +972,7 @@ def collect_wc_graph_snapshot(
                 persistent_guid_count,
                 pin_count,
             ),
-            "nativePinIdPercent": _coverage(pin_id_count, pin_count),
+            "nativePinIdPercent": _coverage(native_pin_id_count, pin_count),
             "persistentGuidPercent": _coverage(
                 persistent_guid_count,
                 pin_count,
@@ -957,7 +980,7 @@ def collect_wc_graph_snapshot(
         }
     )
 
-    if pin_count and pin_id_count == pin_count:
+    if pin_count and pins_omitted == 0 and native_pin_id_count == pin_count:
         snapshot["pinIdentity"] = "PIN_IDENTITY_PASS"
     elif pin_count and pin_signature_count:
         snapshot["pinIdentity"] = "PIN_SIGNATURE_ONLY"
@@ -1006,6 +1029,21 @@ def _gate_from_snapshot(snapshot: Mapping[str, object]) -> dict[str, str]:
     node_guid_percent = float(coverage.get("wcNodeGuidPercent", 0.0))
     position_percent = float(coverage.get("nodePositionPercent", 0.0))
     exact_percent = float(coverage.get("exactLocatorPercent", 0.0))
+    nodes = snapshot.get("nodes")
+    node_guids = (
+        [
+            str(node.get("nodeGuid"))
+            for node in nodes
+            if isinstance(node, Mapping) and node.get("nodeGuid")
+        ]
+        if isinstance(nodes, Sequence)
+        and not isinstance(
+            nodes,
+            (str, bytes, bytearray),
+        )
+        else []
+    )
+    duplicate_node_guid = len(node_guids) != len(set(node_guids))
     node_pass = bool(
         capabilities.get("wcNodesRead") == "PASS"
         and capabilities.get("explicitAssetLoad") == "PASS"
@@ -1020,6 +1058,7 @@ def _gate_from_snapshot(snapshot: Mapping[str, object]) -> dict[str, str]:
         and node_guid_percent >= 90.0
         and position_percent >= 90.0
         and exact_percent >= 90.0
+        and not duplicate_node_guid
     )
     return {
         "wcNodesRead": "PASS"
@@ -1098,6 +1137,45 @@ def _require_int(value: object, *, maximum: int | None = None) -> int:
     return value
 
 
+def _require_fields(
+    value: Mapping[object, object],
+    *,
+    required: Sequence[str],
+    optional: Sequence[str] = (),
+) -> None:
+    required_fields = set(required)
+    allowed_fields = required_fields | set(optional)
+    actual_fields = set(value)
+    if not required_fields.issubset(actual_fields):
+        raise ValueError("required contract field missing")
+    if not actual_fields.issubset(allowed_fields):
+        raise ValueError("additional contract field is not allowed")
+
+
+def _require_text(value: object, *, maximum: int, minimum: int = 0) -> str:
+    if not isinstance(value, str) or not minimum <= len(value) <= maximum:
+        raise ValueError("invalid contract text")
+    return value
+
+
+def _require_unreal_path(value: object, *, allow_empty: bool = True) -> str:
+    text = _require_text(value, maximum=4096)
+    if not text and allow_empty:
+        return text
+    if not text.startswith(("/Game/", "/Engine/", "/Script/")):
+        raise ValueError("invalid Unreal object path")
+    return text
+
+
+def _require_guid_text(value: object, *, allow_empty: bool = False) -> str:
+    text = _require_text(value, maximum=32)
+    if not text and allow_empty:
+        return text
+    if _canonical_guid(text) != text:
+        raise ValueError("invalid canonical Guid")
+    return text
+
+
 def _require_sequence(value: object, maximum: int) -> Sequence[object]:
     if not isinstance(value, Sequence) or isinstance(
         value,
@@ -1113,6 +1191,27 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("snapshot must be an object")
     snapshot = dict(value)
+    _require_fields(
+        snapshot,
+        required=(
+            "schema",
+            "source",
+            "readOnly",
+            "devkitBuildFingerprint",
+            "asset",
+            "graph",
+            "requestBounds",
+            "capabilityMatrix",
+            "counts",
+            "coverage",
+            "pinIdentity",
+            "identityLocators",
+            "nodes",
+            "links",
+            "gaps",
+            "semanticDigest",
+        ),
+    )
     if snapshot.get("schema") != SNAPSHOT_SCHEMA:
         raise ValueError("snapshot schema mismatch")
     if snapshot.get("source") != SOURCE or snapshot.get("readOnly") is not True:
@@ -1122,18 +1221,112 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
     coverage = snapshot.get("coverage")
     bounds = snapshot.get("requestBounds")
     if not all(
-        isinstance(group, Mapping)
-        for group in (capabilities, counts, coverage, bounds)
+        isinstance(group, Mapping) for group in (capabilities, counts, coverage, bounds)
     ):
         raise ValueError("snapshot contract group missing")
     assert isinstance(capabilities, Mapping)
     assert isinstance(counts, Mapping)
     assert isinstance(coverage, Mapping)
     assert isinstance(bounds, Mapping)
+    _require_fields(
+        capabilities,
+        required=(
+            "explicitAssetLoad",
+            "exactAssetObjectPath",
+            "blueprintObject",
+            "explicitGraphFind",
+            "typedGraph",
+            "exactGraphIdentity",
+            "wcNodesRead",
+            "wcPropertyNames",
+            "typedNode",
+            "exactOuter",
+            "rawClassRead",
+            "wcNodeGuidRead",
+            "nodeGuidRead",
+            "nodePositionRead",
+            "nodePinsRead",
+            "wcNodePinsRead",
+            "pinIdRead",
+            "persistentGuidRead",
+            "linksRead",
+        ),
+    )
+    _require_fields(
+        counts,
+        required=(
+            "nodeCountObserved",
+            "nodeCountReturned",
+            "nodesOmitted",
+            "nodeGuidRecovered",
+            "wcNodeGuidRecovered",
+            "nodePositionRecovered",
+            "identityLocatorCount",
+            "pinCount",
+            "pinsOmitted",
+            "pinSignatureRecovered",
+            "pinIdObserved",
+            "persistentGuidObserved",
+            "nativePinIdRecovered",
+            "persistentGuidRecovered",
+            "linkCount",
+        ),
+    )
+    _require_fields(
+        coverage,
+        required=(
+            "nodeGuidPercent",
+            "wcNodeGuidPercent",
+            "nodePositionPercent",
+            "exactLocatorPercent",
+            "pinSignaturePercent",
+            "observedPinIdPercent",
+            "observedPersistentGuidPercent",
+            "nativePinIdPercent",
+            "persistentGuidPercent",
+        ),
+    )
+    _require_fields(
+        bounds,
+        required=(
+            "maxNodes",
+            "maxPinsPerNode",
+            "maxIdentityLocators",
+            "maxLinks",
+        ),
+    )
+    fingerprint = snapshot.get("devkitBuildFingerprint")
+    if not isinstance(fingerprint, Mapping):
+        raise ValueError("snapshot build fingerprint missing")
+    _require_fields(fingerprint, required=("engineVersion", "buildVersion"))
+    _require_text(fingerprint.get("engineVersion"), maximum=128)
+    _require_text(fingerprint.get("buildVersion"), maximum=128)
     asset = snapshot.get("asset")
     graph = snapshot.get("graph")
     if not isinstance(asset, Mapping) or not isinstance(graph, Mapping):
         raise ValueError("snapshot target identity missing")
+    _require_fields(
+        asset,
+        required=(
+            "objectPath",
+            "observedObjectPath",
+            "name",
+            "rawClassName",
+            "readMethod",
+        ),
+    )
+    _require_fields(
+        graph,
+        required=(
+            "name",
+            "observedName",
+            "path",
+            "rawClassName",
+            "canonicalClassName",
+            "typedGraph",
+            "readMethod",
+        ),
+    )
     if any(status not in _CAPABILITY_STATUSES for status in capabilities.values()):
         raise ValueError("invalid capability status")
     exact_asset_path = bool(
@@ -1209,13 +1402,39 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
     calculated_pins_omitted = 0
     pin_signature_count = 0
     pin_id_observed = 0
+    pin_id_occurrences: Counter[str] = Counter()
     persistent_guid_observed = 0
     linked_to_read = 0
 
-    exact_node_keys: set[tuple[str, str, str, str, str]] = set()
+    node_guid_occurrences: Counter[str] = Counter()
     for raw_node in nodes:
         if not isinstance(raw_node, Mapping):
             raise ValueError("invalid node record")
+        _require_fields(
+            raw_node,
+            required=(
+                "name",
+                "objectPath",
+                "rawClassName",
+                "canonicalClassName",
+                "typedNode",
+                "outerGraphMatch",
+                "readMethods",
+                "pins",
+                "pinsOmitted",
+            ),
+            optional=("nodeGuid", "x", "y"),
+        )
+        guid = raw_node.get("nodeGuid")
+        if isinstance(guid, str) and _canonical_guid(guid) == guid:
+            node_guid_occurrences[guid] += 1
+    duplicate_node_guids = {
+        guid for guid, occurrences in node_guid_occurrences.items() if occurrences > 1
+    }
+
+    exact_node_keys: set[tuple[str, str, str, str, str]] = set()
+    for raw_node in nodes:
+        assert isinstance(raw_node, Mapping)
         methods = raw_node.get("readMethods")
         if not isinstance(methods, Mapping):
             raise ValueError("node read methods missing")
@@ -1231,9 +1450,10 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
 
         guid = raw_node.get("nodeGuid")
         valid_guid = isinstance(guid, str) and _canonical_guid(guid) == guid
-        node_guid_count += int(valid_guid)
+        unique_guid = valid_guid and str(guid) not in duplicate_node_guids
+        node_guid_count += int(unique_guid)
         guid_method = str(methods.get("nodeGuid", ""))
-        wc_guid = valid_guid and guid_method.startswith("wc_get_property_value:")
+        wc_guid = unique_guid and guid_method.startswith("wc_get_property_value:")
         wc_node_guid_count += int(wc_guid)
         has_position = all(
             isinstance(raw_node.get(key), int)
@@ -1254,7 +1474,7 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
         outer_count += int(outer)
         class_count += int(class_ok)
         exact = bool(
-            valid_guid
+            unique_guid
             and wc_guid
             and raw_node.get("name")
             and typed
@@ -1276,6 +1496,20 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
         for raw_pin in pins:
             if not isinstance(raw_pin, Mapping):
                 raise ValueError("invalid Pin record")
+            _require_fields(
+                raw_pin,
+                required=(
+                    "index",
+                    "pinName",
+                    "direction",
+                    "pinType",
+                    "defaultValue",
+                    "defaultObject",
+                    "defaultTextValue",
+                    "readMethods",
+                ),
+                optional=("pinId", "persistentGuid"),
+            )
             signature = bool(
                 raw_pin.get("pinName")
                 or raw_pin.get("direction")
@@ -1285,9 +1519,13 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
             observed_id = raw_pin.get("pinId")
             observed_persistent = raw_pin.get("persistentGuid")
             if observed_id is not None:
-                if not isinstance(observed_id, str) or _canonical_guid(observed_id) != observed_id:
+                if (
+                    not isinstance(observed_id, str)
+                    or _canonical_guid(observed_id) != observed_id
+                ):
                     raise ValueError("invalid observed PinId")
                 pin_id_observed += 1
+                pin_id_occurrences[observed_id] += 1
             if observed_persistent is not None:
                 if (
                     not isinstance(observed_persistent, str)
@@ -1299,8 +1537,7 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
             if not isinstance(pin_methods, Mapping):
                 raise ValueError("Pin read methods missing")
             linked_to_read += int(
-                str(pin_methods.get("LinkedTo", ""))
-                not in {"", "UNAVAILABLE"}
+                str(pin_methods.get("LinkedTo", "")) not in {"", "UNAVAILABLE"}
             )
 
     if calculated_pin_count != pin_count:
@@ -1309,6 +1546,38 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
         raise ValueError("omitted Pin count mismatch")
     if len(links) != _require_int(counts.get("linkCount"), maximum=MAX_LINKS):
         raise ValueError("link count mismatch")
+    for raw_link in links:
+        if not isinstance(raw_link, Mapping):
+            raise ValueError("invalid Link record")
+        _require_fields(
+            raw_link,
+            required=(
+                "sourceNodeGuid",
+                "sourceNodeName",
+                "sourcePinIdObserved",
+                "sourcePinName",
+                "targetNodeGuid",
+                "targetNodeName",
+                "targetNodePath",
+                "targetPinIdObserved",
+                "targetPinName",
+            ),
+        )
+        for key in (
+            "sourceNodeGuid",
+            "sourcePinIdObserved",
+            "targetNodeGuid",
+            "targetPinIdObserved",
+        ):
+            _require_guid_text(raw_link.get(key), allow_empty=True)
+        for key in (
+            "sourceNodeName",
+            "sourcePinName",
+            "targetNodeName",
+            "targetPinName",
+        ):
+            _require_text(raw_link.get(key), maximum=256)
+        _require_unreal_path(raw_link.get("targetNodePath"))
     if _require_int(counts.get("identityLocatorCount")) != exact_locator_count:
         raise ValueError("locator count mismatch")
     if len(locators) != min(exact_locator_count, MAX_IDENTITY_LOCATORS):
@@ -1316,6 +1585,19 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
     for raw_locator in locators:
         if not isinstance(raw_locator, Mapping):
             raise ValueError("invalid identity locator")
+        _require_fields(
+            raw_locator,
+            required=(
+                "nodeGuid",
+                "nodeObjectName",
+                "nodeObjectPath",
+                "rawClassName",
+                "canonicalClassName",
+                "outerGraphPath",
+                "outerGraphMatch",
+            ),
+            optional=("x", "y"),
+        )
         key = (
             str(raw_locator.get("nodeGuid", "")),
             str(raw_locator.get("nodeObjectName", "")),
@@ -1326,6 +1608,9 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
         if raw_locator.get("outerGraphMatch") is not True or key not in exact_node_keys:
             raise ValueError("locator is not backed by an exact node")
 
+    native_pin_id_count = sum(
+        1 for occurrences in pin_id_occurrences.values() if occurrences == 1
+    )
     expected_counts = {
         "nodeGuidRecovered": node_guid_count,
         "wcNodeGuidRecovered": wc_node_guid_count,
@@ -1333,7 +1618,7 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
         "pinSignatureRecovered": pin_signature_count,
         "pinIdObserved": pin_id_observed,
         "persistentGuidObserved": persistent_guid_observed,
-        "nativePinIdRecovered": pin_id_observed,
+        "nativePinIdRecovered": native_pin_id_count,
         "persistentGuidRecovered": persistent_guid_observed,
     }
     for key, expected in expected_counts.items():
@@ -1351,7 +1636,7 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
             persistent_guid_observed,
             pin_count,
         ),
-        "nativePinIdPercent": _coverage(pin_id_observed, pin_count),
+        "nativePinIdPercent": _coverage(native_pin_id_count, pin_count),
         "persistentGuidPercent": _coverage(
             persistent_guid_observed,
             pin_count,
@@ -1384,7 +1669,11 @@ def validate_wc_graph_snapshot(value: object) -> dict[str, object]:
             or not 0.0 <= float(percent) <= 100.0
         ):
             raise ValueError("invalid coverage percent")
-    if pin_count and pin_id_observed == pin_count:
+    if (
+        pin_count
+        and calculated_pins_omitted == 0
+        and native_pin_id_count == pin_count
+    ):
         expected_pin_identity = "PIN_IDENTITY_PASS"
     elif pin_count and pin_signature_count:
         expected_pin_identity = "PIN_SIGNATURE_ONLY"
@@ -1403,6 +1692,23 @@ def validate_wc_graph_snapshot_result(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("result must be an object")
     result = dict(value)
+    _require_fields(
+        result,
+        required=(
+            "schema",
+            "generatedAt",
+            "status",
+            "request",
+            "snapshot",
+            "gate",
+            "arkGraphIdentitySource",
+            "readyForWcEvidenceAdapter",
+            "readyToRetryPr45",
+            "safety",
+            "gaps",
+            "semanticDigest",
+        ),
+    )
     if result.get("schema") != RESULT_SCHEMA:
         raise ValueError("result schema mismatch")
     if result.get("status") not in _RESULT_STATUSES:
@@ -1417,6 +1723,20 @@ def validate_wc_graph_snapshot_result(value: object) -> dict[str, object]:
         "objectIteratorCalled": False,
     }:
         raise ValueError("unsafe result")
+    gate_value = result.get("gate")
+    if not isinstance(gate_value, Mapping):
+        raise ValueError("result Gate missing")
+    _require_fields(
+        gate_value,
+        required=(
+            "wcNodesRead",
+            "wcNodeGuidRead",
+            "wcPositionRead",
+            "wcPinsRead",
+            "wcLinksRead",
+            "nodeIdentity",
+        ),
+    )
     snapshot_value = result.get("snapshot")
     if snapshot_value is None:
         if result.get("status") != "ERROR":
@@ -1442,9 +1762,10 @@ def validate_wc_graph_snapshot_result(value: object) -> dict[str, object]:
             raise ValueError("asset target binding mismatch")
         if graph.get("name") != request["graphName"]:
             raise ValueError("graph target binding mismatch")
-        if bounds.get("maxNodes") != request["maxNodes"] or bounds.get(
-            "maxPinsPerNode"
-        ) != request["maxPinsPerNode"]:
+        if (
+            bounds.get("maxNodes") != request["maxNodes"]
+            or bounds.get("maxPinsPerNode") != request["maxPinsPerNode"]
+        ):
             raise ValueError("request bound binding mismatch")
         expected_gate = _gate_from_snapshot(snapshot)
         if result.get("gate") != expected_gate:

@@ -22,6 +22,7 @@ from arkdev_scripting_probe.wc_graph_snapshot import (  # noqa: E402
     validate_wc_snapshot_request,
     validator_summary,
 )
+from arkdev_scripting_probe.contracts import attach_semantic_digest  # noqa: E402
 from build_arkdev_wc_graph_snapshot_request import build_request  # noqa: E402
 from devkit_exporters.arkdev_wc_properties import (  # noqa: E402
     wc_get_all_property_names,
@@ -338,6 +339,70 @@ class ArkDevWcGraphSnapshotTests(unittest.TestCase):
         self.assertEqual(result["gate"]["nodeIdentity"], "UNAVAILABLE")
         validate_wc_graph_snapshot_result(result)
 
+    def test_duplicate_node_guids_fail_closed(self) -> None:
+        blueprint = _make_blueprint(5)
+        for node in blueprint.graph.nodes:
+            node.values["NodeGuid"] = "1" * 32
+        _FakeUnreal.asset = blueprint
+
+        result = build_wc_graph_snapshot_result(
+            _FakeUnreal,
+            self.request,
+            generated_at="2026-08-12T00:00:00Z",
+        )
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertFalse(result["readyForWcEvidenceAdapter"])
+        snapshot = result["snapshot"]
+        assert isinstance(snapshot, dict)
+        self.assertEqual(snapshot["counts"]["nodeGuidRecovered"], 0)
+        self.assertEqual(snapshot["counts"]["wcNodeGuidRecovered"], 0)
+        self.assertEqual(snapshot["counts"]["identityLocatorCount"], 0)
+        self.assertIn("NODE_GUID_DUPLICATE", snapshot["gaps"])
+        validate_wc_graph_snapshot_result(result)
+
+    def test_duplicate_native_pin_ids_do_not_pass_pin_identity(self) -> None:
+        blueprint = _make_blueprint(5)
+        for node in blueprint.graph.nodes:
+            node.pin.values["PinId"] = "2" * 32
+        _FakeUnreal.asset = blueprint
+
+        result = build_wc_graph_snapshot_result(
+            _FakeUnreal,
+            self.request,
+            generated_at="2026-08-12T00:00:00Z",
+        )
+
+        snapshot = result["snapshot"]
+        assert isinstance(snapshot, dict)
+        self.assertEqual(snapshot["pinIdentity"], "PIN_SIGNATURE_ONLY")
+        self.assertEqual(snapshot["counts"]["pinIdObserved"], 5)
+        self.assertEqual(snapshot["counts"]["nativePinIdRecovered"], 0)
+        self.assertIn("PIN_ID_DUPLICATE", snapshot["gaps"])
+        validate_wc_graph_snapshot_result(result)
+
+    def test_truncated_pins_do_not_claim_complete_pin_identity(self) -> None:
+        blueprint = _make_blueprint(5)
+        first_node = blueprint.graph.nodes[0]
+        first_node.values["Pins"] = [
+            _Pin(first_node, index=1000 + index, with_pin_id=True)
+            for index in range(9)
+        ]
+        _FakeUnreal.asset = blueprint
+
+        result = build_wc_graph_snapshot_result(
+            _FakeUnreal,
+            self.request,
+            generated_at="2026-08-12T00:00:00Z",
+        )
+
+        snapshot = result["snapshot"]
+        assert isinstance(snapshot, dict)
+        self.assertEqual(snapshot["counts"]["pinsOmitted"], 1)
+        self.assertEqual(snapshot["pinIdentity"], "PIN_SIGNATURE_ONLY")
+        self.assertIn("PIN_LIMIT_REACHED", snapshot["gaps"])
+        validate_wc_graph_snapshot_result(result)
+
     def test_missing_explicit_asset_is_a_valid_fail_closed_result(self) -> None:
         result = build_wc_graph_snapshot_result(
             _FakeUnreal,
@@ -413,6 +478,52 @@ class ArkDevWcGraphSnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_wc_graph_snapshot_result(result)
 
+    def test_snapshot_validator_rejects_additional_properties(self) -> None:
+        _FakeUnreal.asset = _make_blueprint(5)
+        result = build_wc_graph_snapshot_result(
+            _FakeUnreal,
+            self.request,
+            generated_at="2026-08-12T00:00:00Z",
+        )
+        snapshot = result["snapshot"]
+        assert isinstance(snapshot, dict)
+        snapshot["unexpectedClaim"] = True
+        attach_semantic_digest(snapshot)
+        attach_semantic_digest(result)
+
+        with self.assertRaises(ValueError):
+            validate_wc_graph_snapshot_result(result)
+
+    def test_result_validator_rejects_additional_properties(self) -> None:
+        _FakeUnreal.asset = _make_blueprint(5)
+        result = build_wc_graph_snapshot_result(
+            _FakeUnreal,
+            self.request,
+            generated_at="2026-08-12T00:00:00Z",
+        )
+        result["unexpectedClaim"] = True
+        attach_semantic_digest(result)
+
+        with self.assertRaises(ValueError):
+            validate_wc_graph_snapshot_result(result)
+
+    def test_snapshot_validator_rejects_invalid_link_items(self) -> None:
+        _FakeUnreal.asset = _make_blueprint(5)
+        result = build_wc_graph_snapshot_result(
+            _FakeUnreal,
+            self.request,
+            generated_at="2026-08-12T00:00:00Z",
+        )
+        snapshot = result["snapshot"]
+        assert isinstance(snapshot, dict)
+        snapshot["links"] = [42]
+        snapshot["counts"]["linkCount"] = 1
+        attach_semantic_digest(snapshot)
+        attach_semantic_digest(result)
+
+        with self.assertRaises(ValueError):
+            validate_wc_graph_snapshot_result(result)
+
     def test_schema_files_are_valid_json_and_bind_contract_ids(self) -> None:
         snapshot_schema = json.loads(
             (ROOT / "schemas" / "arkdev_wc_graph_snapshot.v1.schema.json").read_text(
@@ -421,12 +532,12 @@ class ArkDevWcGraphSnapshotTests(unittest.TestCase):
         )
         result_schema = json.loads(
             (
-                ROOT
-                / "schemas"
-                / "arkdev_wc_graph_snapshot_result.v1.schema.json"
+                ROOT / "schemas" / "arkdev_wc_graph_snapshot_result.v1.schema.json"
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(snapshot_schema["properties"]["schema"]["const"], SNAPSHOT_SCHEMA)
+        self.assertEqual(
+            snapshot_schema["properties"]["schema"]["const"], SNAPSHOT_SCHEMA
+        )
         self.assertEqual(result_schema["properties"]["schema"]["const"], RESULT_SCHEMA)
 
 

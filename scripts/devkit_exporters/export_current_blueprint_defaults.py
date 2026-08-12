@@ -38,12 +38,16 @@ if _SCRIPTS_ROOT and _SCRIPTS_ROOT not in sys.path:
 try:
     from devkit_exporters.arkdev_wc_properties import (
         wc_get_all_property_names as _shared_wc_property_names,
+        wc_get_all_property_names_detailed as _shared_wc_property_names_detailed,
         wc_get_all_property_values as _shared_wc_all_property_values,
+        wc_get_all_property_values_detailed as _shared_wc_all_property_values_detailed,
         wc_get_property_value as _shared_wc_get_property_value,
     )
 except Exception:
     _shared_wc_property_names = None
+    _shared_wc_property_names_detailed = None
     _shared_wc_all_property_values = None
+    _shared_wc_all_property_values_detailed = None
     _shared_wc_get_property_value = None
 
 try:
@@ -1371,18 +1375,32 @@ def editor_property_names(obj):
     return sorted(name for name in names if valid_property_name(name))
 
 
-def wc_property_names(obj):
+def wc_property_names_detailed(obj, limit=MAX_CLASS_DEFAULT_PROPERTIES):
+    if _shared_wc_property_names_detailed is None:
+        STATE.skip("wc_get_all_property_names", object_name(obj), "shared helper unavailable")
+        return [], False
+    return _shared_wc_property_names_detailed(obj, limit=limit)
+
+
+def wc_property_names(obj, limit=MAX_CLASS_DEFAULT_PROPERTIES):
     if _shared_wc_property_names is None:
         STATE.skip("wc_get_all_property_names", object_name(obj), "shared helper unavailable")
         return []
-    return _shared_wc_property_names(obj)
+    return _shared_wc_property_names(obj, limit=limit)
 
 
-def wc_all_property_values(obj):
+def wc_all_property_values_detailed(obj, limit=MAX_CLASS_DEFAULT_PROPERTIES):
+    if _shared_wc_all_property_values_detailed is None:
+        STATE.skip("wc_get_all_property_values", object_name(obj), "shared helper unavailable")
+        return {}, False
+    return _shared_wc_all_property_values_detailed(obj, limit=limit)
+
+
+def wc_all_property_values(obj, limit=MAX_CLASS_DEFAULT_PROPERTIES):
     if _shared_wc_all_property_values is None:
         STATE.skip("wc_get_all_property_values", object_name(obj), "shared helper unavailable")
         return {}
-    return _shared_wc_all_property_values(obj)
+    return _shared_wc_all_property_values(obj, limit=limit)
 
 
 def wc_get_property_value(obj, name):
@@ -1491,7 +1509,7 @@ def collect_wc_defaults(obj, source, limit, omit_names=None):
     if obj is None:
         return defaults
     omit = set(omit_names or [])
-    raw_values = wc_all_property_values(obj)
+    raw_values, values_truncated = wc_all_property_values_detailed(obj, limit)
     if raw_values:
         for name, value in sorted(raw_values.items()):
             if name in omit:
@@ -1503,11 +1521,18 @@ def collect_wc_defaults(obj, source, limit, omit_names=None):
                 STATE.skip(source, name, "callable/editor method, not a property value")
                 continue
             defaults[name] = default_entry(value, source)
+        if values_truncated:
+            STATE.skip(
+                source,
+                object_name(obj),
+                "wc_get_all_property_values property limit reached ({})".format(limit),
+            )
         if defaults:
             STATE.info("Collected {} defaults through wc_get_all_property_values from {}".format(len(defaults), object_name(obj)))
             return defaults
 
-    for name in wc_property_names(obj):
+    property_names, names_truncated = wc_property_names_detailed(obj, limit)
+    for name in property_names:
         if name in omit:
             continue
         if len(defaults) >= limit:
@@ -1520,6 +1545,12 @@ def collect_wc_defaults(obj, source, limit, omit_names=None):
             STATE.skip(source, name, "callable/editor method, not a property value")
             continue
         defaults[name] = default_entry(value, source)
+    if names_truncated:
+        STATE.skip(
+            source,
+            object_name(obj),
+            "wc_get_all_property_names property limit reached ({})".format(limit),
+        )
     if defaults:
         STATE.info("Collected {} defaults through wc_get_property_value from {}".format(len(defaults), object_name(obj)))
     return defaults

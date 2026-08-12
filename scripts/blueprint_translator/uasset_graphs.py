@@ -1809,10 +1809,34 @@ def parse_export_properties(
         if candidate_ok and candidate_blocks:
             structured_candidates.append(candidate_blocks)
     if structured_candidates:
-        structured_blocks = max(
-            structured_candidates,
-            key=lambda rows: (len(rows), int(rows[-1].get("end") or 0)),
-        )
+        candidate_signatures = {
+            tuple(
+                (
+                    str(block.get("name") or ""),
+                    str(block.get("type") or ""),
+                    int(block.get("offset") or 0),
+                    int(block.get("end") or 0),
+                    block.get("value_offset")
+                    if type(block.get("value_offset")) is int
+                    else None,
+                    block.get("declared_size")
+                    if type(block.get("declared_size")) is int
+                    else None,
+                    str(block.get("struct") or block.get("struct_name") or ""),
+                    str(block.get("inner_type") or ""),
+                    str(block.get("enum") or ""),
+                )
+                for block in rows
+            )
+            for rows in structured_candidates
+        }
+        if len(candidate_signatures) == 1:
+            structured_blocks = structured_candidates[0]
+        else:
+            structured_blocks = []
+            warnings.append(
+                "Property tag layout is ambiguous; exact value offsets were not used."
+            )
     else:
         structured_blocks = [
             block
