@@ -166,7 +166,7 @@ class ArkdevMcpTaskStdioTests(unittest.IsolatedAsyncioTestCase):
             }
 
         self.assertEqual(tuple(tool.name for tool in tools), TOOL_NAMES)
-        self.assertEqual(len(tools), 11)
+        self.assertEqual(len(tools), 16)
         self.assertFalse(created.is_error)
         self.assertEqual(created.structured_content["phase"], "DISCOVERY")
         self.assertEqual(

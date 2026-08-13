@@ -94,6 +94,24 @@ class TaskContextTests(unittest.TestCase):
         self.assertNotIn(str(self.store.root), encoded)
         self.assertNotRegex(encoded, r"(?i)(?<![A-Za-z0-9_])[a-z]:[\\/]")
 
+    def test_create_accepts_one_explicit_reserved_task_handle_and_fails_closed_on_collision(
+        self,
+    ) -> None:
+        task_id = "task://" + "7" * 32
+
+        context = self.create(task_id=task_id)
+
+        self.assertEqual(context["taskId"], task_id)
+        with self.assertRaises(McpExecutionError) as collision:
+            self.create(task_id=task_id)
+        self.assertEqual(collision.exception.code, "INTERNAL_CONTRACT_ERROR")
+        for invalid in ("task://../escape", "task://" + "A" * 32, "task://" + "7" * 31):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                McpExecutionError
+            ) as raised:
+                self.create(task_id=invalid)
+            self.assertEqual(raised.exception.code, "INVALID_ARGUMENT")
+
     def test_identity_invalidating_errors_are_normalized_and_persist_blocked(self) -> None:
         source_codes = (
             "EVIDENCE_NOT_AUTHORITATIVE",

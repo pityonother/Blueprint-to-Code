@@ -1,0 +1,23 @@
+{
+  "proposal": {
+    "schema": "blueprint-to-code.requirement-proposal/v1",
+    "rawRequest": "找出所有影响最终子代等级的因素",
+    "language": "zh-CN",
+    "subproblems": [{
+      "sourceStart": 0,
+      "sourceEnd": 15,
+      "sourceText": "找出所有影响最终子代等级的因素",
+      "intent": "ANSWER_CURRENT_BEHAVIOR",
+      "outputKind": "INFLUENCE_FACTORS",
+      "completeness": "REQUIRED",
+      "targetHints": [{"text": "Rhyniognatha", "role": "PRIMARY_BLUEPRINT", "aliases": ["莱尼虫"], "expectedKind": "Blueprint", "userSupplied": false}],
+      "constraints": {},
+      "acceptanceCriteria": ["列出直接和间接影响并显式报告 native 缺口"]
+    }]
+  },
+  "expected": {
+    "outputKinds": ["INFLUENCE_FACTORS"],
+    "operators": ["BACKWARD_INFLUENCE_SLICE", "FIND_READERS_AND_WRITERS", "VERIFY_COMPLETENESS"],
+    "evidenceKinds": ["GRAPH_STRUCTURE", "DEFAULTS", "NATIVE_SOURCE"]
+  }
+}

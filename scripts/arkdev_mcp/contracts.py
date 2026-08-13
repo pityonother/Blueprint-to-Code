@@ -21,6 +21,11 @@ TOOL_NAMES = (
     "blueprint_patch_plan_draft",
     "blueprint_patch_plan_validate",
     "blueprint_patch_plan_confirm",
+    "blueprint_solver_create",
+    "blueprint_solver_resume",
+    "blueprint_solver_preflight",
+    "blueprint_solver_update",
+    "blueprint_solver_materialize_task",
 )
 ERROR_CODES = frozenset(
     {
@@ -46,6 +51,16 @@ ERROR_CODES = frozenset(
         "PATCH_PLAN_NOT_CONFIRMABLE",
         "PATCH_PLAN_DIGEST_MISMATCH",
         "PLAN_CONFIRMATION_REQUIRED",
+        "SOLVER_NOT_FOUND",
+        "REQUIREMENT_PROPOSAL_INVALID",
+        "REQUEST_TEXT_UNASSIGNED",
+        "SOLVER_PHASE_INVALID",
+        "SOLVER_UPDATE_INVALID",
+        "TARGET_SELECTION_REQUIRED",
+        "TARGET_CANDIDATE_NOT_FOUND",
+        "EVIDENCE_ACQUISITION_REQUIRED",
+        "TASK_NOT_APPLICABLE",
+        "SOLVER_LIMIT_EXCEEDED",
         "INTERNAL_CONTRACT_ERROR",
     }
 )

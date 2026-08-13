@@ -1,5 +1,18 @@
 # Codex Blueprint Task Workflow
 
+Solver v1 在现有 Task Workflow 前增加确定性需求与 Evidence 编排：
+
+```text
+solver_create
+  -> solver_preflight
+  -> ambiguous? ask one minimal question and solver_update
+  -> acquisition required? show actions and stop
+  -> ready? solver_materialize_task
+  -> existing task workflow
+```
+
+Solver 只创建已有 Task Context；不会跳过 research、不会注入 confirmed facts、不会自动 draft 或 confirm Patch Plan。
+
 ```text
 task_create
   -> task_research
@@ -24,4 +37,4 @@ task_create
 
 ## Approval 边界
 
-Codex config 的 `auto` 只覆盖五个 Evidence reads 与六个 local task metadata tools。它不代表用户批准未来的 ARK Editor mutation。Phase 3 只读 Editor Bridge 和更后的 Patch Executor 必须分别设计权限合同。
+Codex config 的 `auto` 只覆盖五个 Evidence reads、六个 local task metadata tools 与五个 local Solver metadata tools。它不代表用户批准 Evidence acquisition、ARK Editor mutation 或未来 Patch Executor。Phase 3 只读 Editor Bridge 和更后的 Patch Executor 必须分别设计权限合同。

@@ -1,0 +1,23 @@
+{
+  "proposal": {
+    "schema": "blueprint-to-code.requirement-proposal/v1",
+    "rawRequest": "列出一个宝箱的全部中文奖池",
+    "language": "zh-CN",
+    "subproblems": [{
+      "sourceStart": 0,
+      "sourceEnd": 13,
+      "sourceText": "列出一个宝箱的全部中文奖池",
+      "intent": "ANSWER_CURRENT_BEHAVIOR",
+      "outputKind": "COMPLETE_ENUMERATION",
+      "completeness": "REQUIRED",
+      "targetHints": [{"text": "TreasureMap_ShoulderDragon", "role": "SUPPLY_CRATE", "aliases": [], "expectedKind": "Blueprint", "userSupplied": false}],
+      "constraints": {"localizedNamesOnly": true, "outputLanguage": "zh-CN"},
+      "acceptanceCriteria": ["无遗漏且仅返回中文本地化名称"]
+    }]
+  },
+  "expected": {
+    "outputKinds": ["COMPLETE_ENUMERATION"],
+    "operators": ["EXPAND_REFERENCE_CLOSURE", "RESOLVE_LOCALIZATION", "VERIFY_COMPLETENESS"],
+    "evidenceKinds": ["REFERENCE_CLOSURE", "LOCALIZATION"]
+  }
+}

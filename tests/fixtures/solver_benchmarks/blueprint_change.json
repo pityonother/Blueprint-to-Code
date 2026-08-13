@@ -1,0 +1,23 @@
+{
+  "proposal": {
+    "schema": "blueprint-to-code.requirement-proposal/v1",
+    "rawRequest": "读取当前行为，将超过阈值后的数量增长封顶；阈值以下行为、奖池内容保持不变。",
+    "language": "zh-CN",
+    "subproblems": [{
+      "sourceStart": 0,
+      "sourceEnd": 37,
+      "sourceText": "读取当前行为，将超过阈值后的数量增长封顶；阈值以下行为、奖池内容保持不变。",
+      "intent": "DESIGN_BLUEPRINT_CHANGE",
+      "outputKind": "BLUEPRINT_CHANGE",
+      "completeness": "REQUIRED",
+      "targetHints": [{"text": "ShoulderDragon", "role": "PRIMARY_BLUEPRINT", "aliases": ["精灵龙"], "expectedKind": "Blueprint", "userSupplied": false}],
+      "constraints": {"desiredBehavior": ["超过阈值后的数量增长封顶"], "invariants": ["阈值以下行为不变", "奖池内容不变"], "acceptanceTests": ["验证阈值减一、阈值和阈值加一"]},
+      "acceptanceCriteria": ["产出只读 Patch Plan 输入合同，不执行修改"]
+    }]
+  },
+  "expected": {
+    "outputKinds": ["BLUEPRINT_CHANGE"],
+    "operators": ["ANALYZE_CURRENT_BEHAVIOR", "COMPARE_CURRENT_TO_DESIRED", "COMPILE_PATCH_PLAN"],
+    "evidenceKinds": ["NODE_IDENTITY", "PIN_SIGNATURES", "DEFAULTS"]
+  }
+}

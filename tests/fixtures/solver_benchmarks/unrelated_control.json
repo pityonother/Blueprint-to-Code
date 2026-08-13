@@ -1,0 +1,23 @@
+{
+  "proposal": {
+    "schema": "blueprint-to-code.requirement-proposal/v1",
+    "rawRequest": "找出一个变量的所有写入点，并设计只允许服务端写入的修改。",
+    "language": "zh-CN",
+    "subproblems": [{
+      "sourceStart": 0,
+      "sourceEnd": 28,
+      "sourceText": "找出一个变量的所有写入点，并设计只允许服务端写入的修改。",
+      "intent": "DESIGN_BLUEPRINT_CHANGE",
+      "outputKind": "BLUEPRINT_CHANGE",
+      "completeness": "REQUIRED",
+      "targetHints": [{"text": "ServerAuthorityFixture", "role": "PRIMARY_BLUEPRINT", "aliases": [], "expectedKind": "Blueprint", "userSupplied": false}],
+      "constraints": {"desiredBehavior": ["仅服务器可写入变量"], "invariants": ["现有读取行为不变"], "acceptanceTests": ["服务器写入成功", "客户端写入被拒绝"]},
+      "acceptanceCriteria": ["定位所有写入点并形成通用修改计划"]
+    }]
+  },
+  "expected": {
+    "outputKinds": ["BLUEPRINT_CHANGE"],
+    "operators": ["ANALYZE_CURRENT_BEHAVIOR", "COMPARE_CURRENT_TO_DESIRED", "COMPILE_PATCH_PLAN"],
+    "evidenceKinds": ["GRAPH_STRUCTURE", "NODE_IDENTITY", "PIN_SIGNATURES"]
+  }
+}
