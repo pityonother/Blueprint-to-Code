@@ -1491,26 +1491,6 @@ def validate_asset(
 
     legacy: dict[str, Any] | None = None
     legacy_manifest_path = root / "graphs_from_uasset_manifest.json"
-    if legacy_manifest_path.exists():
-        try:
-            legacy = _legacy_model(root)
-            report["source"] = {
-                "mode": "legacy",
-                "manifest": str(legacy["manifest_path"]),
-                "manifestGraphCount": len(legacy["graph_paths"]),
-                "manifestGraphFiles": legacy["graph_paths"],
-                "validGraphJsonBytes": legacy["graph_bytes"],
-            }
-            checks["source"] = {"ok": True, "mode": "legacy"}
-        except Exception as exc:
-            checks["source"] = _failed_check(f"{type(exc).__name__}: {exc}")
-            hard_failures.append(
-                "source: manifest-referenced legacy evidence could not be read"
-            )
-            return report
-    else:
-        report["source"] = {"mode": "direct"}
-        checks["source"] = {"ok": True, "mode": "direct"}
 
     try:
         evidence_state = resolve_asset_evidence_state(root, allow_stale=True)
@@ -1543,7 +1523,44 @@ def validate_asset(
     if not checks["sqlite"]["ok"]:  # type: ignore[index]
         hard_failures.append("sqlite: integrity or foreign-key check failed")
 
-    source_mode = "legacy" if legacy is not None else "direct"
+    parser_version = str(database["identity"].get("parserVersion") or "")
+    if parser_version == DIRECT_PAYLOAD_PARSER_VERSION:
+        source_mode = "direct"
+    elif parser_version == LEGACY_CAPTURE_PARSER_VERSION:
+        source_mode = "legacy"
+    else:
+        # Keep the previous lineage hint only for a useful version-error report.
+        # Unknown parser versions still fail the strict versions gate below.
+        source_mode = "legacy" if legacy_manifest_path.exists() else "direct"
+
+    if source_mode == "legacy":
+        if not legacy_manifest_path.exists():
+            checks["source"] = _failed_check(
+                "legacy parser evidence is missing graphs_from_uasset_manifest.json"
+            )
+            hard_failures.append(
+                "source: manifest-referenced legacy evidence could not be read"
+            )
+            return report
+        try:
+            legacy = _legacy_model(root)
+            report["source"] = {
+                "mode": "legacy",
+                "manifest": str(legacy["manifest_path"]),
+                "manifestGraphCount": len(legacy["graph_paths"]),
+                "manifestGraphFiles": legacy["graph_paths"],
+                "validGraphJsonBytes": legacy["graph_bytes"],
+            }
+            checks["source"] = {"ok": True, "mode": "legacy"}
+        except Exception as exc:
+            checks["source"] = _failed_check(f"{type(exc).__name__}: {exc}")
+            hard_failures.append(
+                "source: manifest-referenced legacy evidence could not be read"
+            )
+            return report
+    else:
+        checks["source"] = {"ok": True, "mode": "direct"}
+
     if source_mode == "direct":
         identity = database["identity"]
         report["source"] = {

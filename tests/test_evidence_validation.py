@@ -549,6 +549,29 @@ class EvidenceValidationTests(unittest.TestCase):
             stale,
         )
 
+    def test_direct_current_ignores_unbound_legacy_sidecars(self):
+        from blueprint_translator.evidence_writer import DIRECT_PAYLOAD_PARSER_VERSION
+        from validate_evidence_store import validate_asset
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture_root = Path(temp_dir) / "captures"
+            _make_capture(capture_root, name="MixedGenerationFixture")
+            asset_dir, _uasset_path = _make_direct_capture(
+                capture_root,
+                name="MixedGenerationFixture",
+            )
+
+            report = validate_asset(asset_dir)
+
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["source"]["mode"], "direct")
+        self.assertEqual(
+            report["checks"]["versions"]["expectedParserVersion"],
+            DIRECT_PAYLOAD_PARSER_VERSION,
+        )
+        self.assertFalse(report["checks"]["legacyReconciliation"]["enabled"])
+        self.assertTrue(report["checks"]["sourceManifest"]["ok"])
+
     def test_parser_version_must_match_the_current_legacy_constant(self):
         from blueprint_translator.evidence_schema import LEGACY_CAPTURE_PARSER_VERSION
         from validate_evidence_store import validate_asset
