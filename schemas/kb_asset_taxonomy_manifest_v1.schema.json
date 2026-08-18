@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arkdev.local/schemas/kb_asset_taxonomy_manifest_v1.schema.json",
+  "title": "ARK KB Asset Taxonomy Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "publicationEligible",
+    "sampleReadiness",
+    "authorityScope",
+    "ruleset",
+    "taxonomyFingerprint",
+    "sourceBinding",
+    "classHierarchyBinding",
+    "evidenceCoverage",
+    "counts",
+    "distributions",
+    "files",
+    "warnings"
+  ],
+  "properties": {
+    "schema": {"const": "ark.kb.asset-taxonomy-manifest.v1"},
+    "status": {"const": "COMPLETE"},
+    "publicationEligible": {"type": "boolean"},
+    "sampleReadiness": {"enum": ["COMPLETE", "COVERAGE_PARTIAL", "DEGRADED"]},
+    "authorityScope": {"type": "string", "minLength": 1},
+    "ruleset": {
+      "type": "object",
+      "required": [
+        "version",
+        "sha256",
+        "exactClassRuleCount",
+        "semanticCandidateRuleCount",
+        "nameOrFolderConfirmedSemanticInference",
+        "nameOrFolderCandidateRecall"
+      ],
+      "properties": {
+        "version": {"const": "ark-asset-taxonomy-rules/v1"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "exactClassRuleCount": {"type": "integer", "minimum": 1},
+        "semanticCandidateRuleCount": {"type": "integer", "minimum": 1},
+        "nameOrFolderConfirmedSemanticInference": {"const": false},
+        "nameOrFolderCandidateRecall": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "taxonomyFingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sourceBinding": {"type": "object"},
+    "classHierarchyBinding": {"type": "object"},
+    "evidenceCoverage": {
+      "type": "object",
+      "required": [
+        "assetRegistryMetadata",
+        "classHierarchy",
+        "dependencyTopology",
+        "assetContentDeepRead",
+        "runtimeBehavior"
+      ]
+    },
+    "counts": {
+      "type": "object",
+      "required": [
+        "registryRows",
+        "uniqueAssetObjects",
+        "duplicateRegistryRows",
+        "packages",
+        "technicallyUnknownPackages",
+        "semanticallyUnresolvedPackages"
+      ],
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "distributions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {"type": "integer", "minimum": 0}
+      }
+    },
+    "files": {"type": "object"},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

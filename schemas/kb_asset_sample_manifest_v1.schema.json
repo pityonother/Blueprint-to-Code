@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arkdev.local/schemas/kb_asset_sample_manifest_v1.schema.json",
+  "title": "ARK KB Asset Taxonomy Sample Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "selectionAlgorithm",
+    "samplerPolicy",
+    "seed",
+    "taxonomyFingerprint",
+    "requestedSampleSize",
+    "actualSampleSize",
+    "populationPackageCount",
+    "samplingConstraints",
+    "coverage",
+    "samples"
+  ],
+  "properties": {
+    "schema": {"const": "ark.kb.asset-taxonomy-sample.v1"},
+    "status": {"enum": ["COMPLETE", "COVERAGE_PARTIAL", "DEGRADED"]},
+    "selectionAlgorithm": {"const": "quota-first-weighted-greedy-coverage/v5"},
+    "samplerPolicy": {
+      "type": "object",
+      "required": ["version", "algorithm", "sha256"],
+      "properties": {
+        "version": {"const": "ark-asset-taxonomy-sampler-policy/v2"},
+        "algorithm": {"const": "quota-first-weighted-greedy-coverage/v5"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "seed": {"type": "string", "minLength": 1},
+    "taxonomyFingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "requestedSampleSize": {"type": "integer", "minimum": 0},
+    "actualSampleSize": {"type": "integer", "minimum": 0},
+    "populationPackageCount": {"type": "integer", "minimum": 0},
+    "samplingConstraints": {"type": "object"},
+    "coverage": {
+      "type": "object",
+      "required": ["totalTargets", "coveredTargets", "uncoveredTargets", "targetPopulations"]
+    },
+    "samples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "selectionOrder",
+          "packageName",
+          "profileFingerprint",
+          "candidateHash",
+          "selectionReasons",
+          "dimensions"
+        ]
+      }
+    }
+  }
+}
