@@ -24,6 +24,7 @@ from blueprint_translator.evidence_repository import (
     open_resolved_asset_repository,
     resolve_asset_evidence_state,
 )
+from blueprint_translator.evidence_schema import parse_evidence_ref
 from blueprint_translator.interpretation_publication import (
     LoadedInterpretation,
     load_current_interpretation,
@@ -57,6 +58,14 @@ _MAX_PIN_CANDIDATES = 400
 _MAX_EDGE_CANDIDATES = 400
 _FACT_PAGE_SIZE = 20
 _GAP_PAGE_SIZE = 20
+
+
+def _is_context_seed_ref(value: object) -> bool:
+    try:
+        parsed = parse_evidence_ref(str(value or ""))
+    except ValueError:
+        return False
+    return parsed.get("kind") in {"node", "pin"}
 
 
 def _canonical_json(value: object) -> str:
@@ -366,7 +375,7 @@ class BlueprintService:
                 )
                 for fact in facts:
                     for ref in fact.get("evidenceRefs", []):
-                        if "/n/" in str(ref) and str(ref) not in seeds:
+                        if _is_context_seed_ref(ref) and str(ref) not in seeds:
                             seeds.append(str(ref))
                         if len(seeds) == 10:
                             break

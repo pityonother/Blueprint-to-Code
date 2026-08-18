@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +98,38 @@ class BlueprintServiceTests(unittest.TestCase):
         self.assertLessEqual(len(first["pins"]), 160)
         self.assertLessEqual(len(first["edges"]), 160)
         _assert_path_free(self, first, self.capture_root)
+
+    def test_context_uses_only_exact_node_or_pin_evidence_refs_as_seeds(self) -> None:
+        baseline = self.context(max_hops=0)
+        graph_ref = baseline["graphTargets"][0]["ref"]
+        node_ref = baseline["nodes"][0]["ref"]
+        pin_ref = baseline["pins"][0]["ref"]
+        facts = [
+            {
+                "id": "statement://fixture",
+                "kind": "CALL",
+                "text": "Call fixture",
+                "status": "HEURISTIC",
+                "graphRef": graph_ref,
+                "nodeRef": node_ref,
+                "evidenceRefs": [
+                    node_ref,
+                    f"{node_ref}/reference/function/not-a-seed",
+                    pin_ref,
+                ],
+                "gapRefs": [],
+            }
+        ]
+
+        with patch.object(BlueprintService, "_facts", return_value=facts):
+            result = self.context(
+                goal="fixture",
+                graph_ref=graph_ref,
+                max_hops=0,
+            )
+
+        self.assertGreater(len(result["nodes"]), 0)
+        self.assertEqual(result["facts"], facts)
 
     def test_current_interpreter_1_1_dinodefense_fixture_is_readable_across_services(
         self,

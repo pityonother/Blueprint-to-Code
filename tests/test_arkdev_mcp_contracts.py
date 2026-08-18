@@ -98,6 +98,7 @@ class ArkdevMcpContractTests(unittest.TestCase):
 
     def test_path_free_guard_accepts_only_trusted_unreal_object_path_fields(self) -> None:
         trusted_paths = (
+            "/ASBExportGun/Weapons/Fixture.Fixture",
             "/DinoDefense/Camera/Fixture.Fixture",
             "/Engine/EngineMaterials/Fixture.Fixture",
             "/Game/Test/Fixture.Fixture",

@@ -17,7 +17,16 @@ _UNREAL_OBJECT_PATH = re.compile(
     r"(?P<object>[A-Za-z0-9_]+)$"
 )
 _PUBLIC_UNREAL_MOUNTS = frozenset(
-    {"dinodefense", "engine", "game", "pcg", "plugin", "plugins", "script"}
+    {
+        "asbexportgun",
+        "dinodefense",
+        "engine",
+        "game",
+        "pcg",
+        "plugin",
+        "plugins",
+        "script",
+    }
 )
 
 

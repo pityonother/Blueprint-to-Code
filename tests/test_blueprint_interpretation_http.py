@@ -248,15 +248,21 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
                 },
             }
 
-        virtual_path = "/DinoDefense/Camera/Fixture.Fixture"
-        result = blueprint_get_payload(
-            "/api/blueprint/assets/Fixture/evidence/health",
-            "",
-            capture_root=self.capture_root,
-            inspect_health=inspect(virtual_path),
-        )
-        self.assertEqual(result.status, HTTPStatus.OK)
-        self.assertEqual(result.payload["health"]["asset"]["objectPath"], virtual_path)
+        for virtual_path in (
+            "/ASBExportGun/Weapons/Fixture.Fixture",
+            "/DinoDefense/Camera/Fixture.Fixture",
+        ):
+            with self.subTest(virtual_path=virtual_path):
+                result = blueprint_get_payload(
+                    "/api/blueprint/assets/Fixture/evidence/health",
+                    "",
+                    capture_root=self.capture_root,
+                    inspect_health=inspect(virtual_path),
+                )
+                self.assertEqual(result.status, HTTPStatus.OK)
+                self.assertEqual(
+                    result.payload["health"]["asset"]["objectPath"], virtual_path
+                )
 
         native_path = "/Script/Engine.Actor"
         native = blueprint_get_payload(
