@@ -40,8 +40,15 @@ MAX_HINT_PREVIEW = 20
 
 _WINDOWS_ABSOLUTE = re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/]")
 _UNC_PATH = re.compile(r"(?<![A-Za-z0-9_])\\\\[^\\\s]+[\\/]")
-_POSIX_LOCAL_PATH = re.compile(
-    r"(?<![:/<A-Za-z0-9_])/(?!Game/|Script/|Engine/|Plugin/|Plugins/)[^\s]+"
+_FILE_URI = re.compile(r"(?i)(?<![A-Za-z0-9_])file:(?://)?/")
+_POSIX_LOCAL_PATH = re.compile(r"(?<![:/<A-Za-z0-9_])/[^\s]+")
+_UNREAL_OBJECT_PATH = re.compile(
+    r"^/(?P<mount>[A-Za-z][A-Za-z0-9_]*)/"
+    r"(?P<package>[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)*)\."
+    r"(?P<object>[A-Za-z0-9_]+)$"
+)
+_PUBLIC_UNREAL_MOUNTS = frozenset(
+    {"dinodefense", "engine", "game", "pcg", "plugin", "plugins", "script"}
 )
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
@@ -321,7 +328,25 @@ def _collection(value: object, *keys: str) -> list[dict[str, object]]:
     return result
 
 
-def _path_free(value: object) -> None:
+def _public_unreal_object_path(value: str, *, field_name: str) -> bool:
+    normalized_field = field_name.casefold()
+    if not normalized_field.endswith(("objectpath", "objectpaths")):
+        return False
+    match = _UNREAL_OBJECT_PATH.fullmatch(value)
+    if match is None or match.group("mount").casefold() not in _PUBLIC_UNREAL_MOUNTS:
+        return False
+    if match.group("mount").casefold() == "script":
+        return "/" not in match.group("package")
+    package_leaf = match.group("package").rsplit("/", 1)[-1]
+    object_name = match.group("object")
+    return object_name in {package_leaf, f"{package_leaf}_C"}
+
+
+def _unreal_object_path_field(field_name: str) -> bool:
+    return field_name.casefold().endswith(("objectpath", "objectpaths"))
+
+
+def _path_free(value: object, *, field_name: str = "") -> None:
     if isinstance(value, Path):
         raise problem(
             HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -330,9 +355,23 @@ def _path_free(value: object) -> None:
         )
     if isinstance(value, str):
         if (
+            value
+            and _unreal_object_path_field(field_name)
+            and not _public_unreal_object_path(value, field_name=field_name)
+        ):
+            raise problem(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "BLUEPRINT_RESPONSE_INVALID",
+                "Blueprint response contains a non-public value.",
+            )
+        if (
             _WINDOWS_ABSOLUTE.search(value)
             or _UNC_PATH.search(value)
-            or _POSIX_LOCAL_PATH.search(value)
+            or _FILE_URI.search(value)
+            or (
+                _POSIX_LOCAL_PATH.search(value)
+                and not _public_unreal_object_path(value, field_name=field_name)
+            )
         ):
             raise problem(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -343,11 +382,11 @@ def _path_free(value: object) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
             _path_free(str(key))
-            _path_free(item)
+            _path_free(item, field_name=str(key))
         return
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for item in value:
-            _path_free(item)
+            _path_free(item, field_name=field_name)
 
 
 def _core_error(exc: Exception) -> ApiProblem:

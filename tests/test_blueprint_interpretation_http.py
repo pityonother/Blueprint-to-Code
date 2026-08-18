@@ -24,6 +24,7 @@ if str(SCRIPTS) not in sys.path:
 from blueprint_server.request import ApiProblem  # noqa: E402
 from blueprint_server.routes_blueprint import (  # noqa: E402
     BlueprintRouteResult,
+    _path_free,
     blueprint_get_payload,
 )
 import blueprint_tool_server as tool_server  # noqa: E402
@@ -217,6 +218,82 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.payload["summary"], {"ready": 1, "total": 4})
         self.assertEqual(inspected, ["NotReady", "Ready"])
+
+    def test_health_accepts_virtual_unreal_mount_without_allowing_local_posix_path(self) -> None:
+        def inspect(object_path: str):
+            return lambda _asset_dir: {
+                "status": "READY",
+                "asset": {
+                    "name": "Fixture",
+                    "assetId": ASSET_ID,
+                    "objectPath": object_path,
+                },
+                "evidence": {
+                    "revisionId": EVIDENCE_REVISION,
+                    "manifestSha256": EVIDENCE_MANIFEST_SHA,
+                    "pointerSha256": "0" * 64,
+                    "freshnessStatus": "FRESH",
+                    "releaseAuthority": True,
+                    "migrationRequired": False,
+                },
+                "interpretation": {
+                    "status": "CURRENT",
+                    "revisionId": INTERPRETATION_REVISION,
+                    "manifestSha256": INTERPRETATION_MANIFEST_SHA,
+                    "pointerSha256": INTERPRETATION_POINTER_SHA,
+                    "semanticDigest": "1" * 64,
+                    "interpreterVersion": "blueprint-interpreter/1.1.0",
+                    "schemaVersion": "blueprint-to-code.blueprint-interpretation/v1",
+                    "generatedAt": "2026-08-18T00:00:00Z",
+                },
+            }
+
+        virtual_path = "/DinoDefense/Camera/Fixture.Fixture"
+        result = blueprint_get_payload(
+            "/api/blueprint/assets/Fixture/evidence/health",
+            "",
+            capture_root=self.capture_root,
+            inspect_health=inspect(virtual_path),
+        )
+        self.assertEqual(result.status, HTTPStatus.OK)
+        self.assertEqual(result.payload["health"]["asset"]["objectPath"], virtual_path)
+
+        native_path = "/Script/Engine.Actor"
+        native = blueprint_get_payload(
+            "/api/blueprint/assets/Fixture/evidence/health",
+            "",
+            capture_root=self.capture_root,
+            inspect_health=inspect(native_path),
+        )
+        self.assertEqual(native.payload["health"]["asset"]["objectPath"], native_path)
+
+        for local_path in (
+            "/home/ac/private/evidence.sqlite",
+            "/Users/ac/private/private.private",
+            "/Volumes/Secret/Project/Asset.Asset",
+            "/workspace/repo/Secret.Secret",
+            "/C/Users/ac/Secret.Secret",
+            "/Game/private/evidence.sqlite",
+            "file:///Users/ac/private/evidence.sqlite",
+            "file:/Users/ac/private/evidence.sqlite",
+            "file://localhost/Users/ac/private/evidence.sqlite",
+        ):
+            with self.subTest(local_path=local_path):
+                with self.assertRaises(ApiProblem) as raised:
+                    blueprint_get_payload(
+                        "/api/blueprint/assets/Fixture/evidence/health",
+                        "",
+                        capture_root=self.capture_root,
+                        inspect_health=inspect(local_path),
+                    )
+                self.assertEqual(
+                    raised.exception.payload["code"], "BLUEPRINT_RESPONSE_INVALID"
+                )
+
+        with self.assertRaises(ApiProblem):
+            _path_free({"detail": "/Game/private/private.private"})
+        with self.assertRaises(ApiProblem):
+            _path_free({"detail": "file:///Users/ac/private/evidence.sqlite"})
 
     def test_interpretation_filters_and_paginates_statements(self) -> None:
         first = self.route(
