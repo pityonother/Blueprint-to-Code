@@ -5950,6 +5950,7 @@ def write_uasset_graph_read_files(
     payload: dict[str, object],
     *,
     artifact_mode: str | None = None,
+    source_binary_path: str | Path | None = None,
 ) -> dict[str, str]:
     """Write capture artifacts according to the central legacy/dual/indexed policy.
 
@@ -5977,6 +5978,7 @@ def write_uasset_graph_read_files(
             str(uasset_path or ""),
             payload,
             asset_dir,
+            source_binary_path=source_binary_path,
         )
         result_paths.update(
             {

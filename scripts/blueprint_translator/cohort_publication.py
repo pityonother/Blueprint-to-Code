@@ -342,6 +342,7 @@ def publish_evidence_cohort(
                 agent_index_bytes=item.state.agent_index_raw,
                 asset_id=str(manifest.get("assetId") or ""),
                 object_path=item.plan.object_path,
+                require_fresh=True,
             )
             interpretation = publish_interpretation(
                 item.destination_dir,

@@ -1755,6 +1755,8 @@ def write_evidence_store_from_payload(
     uasset_path: str | Path | None,
     payload: dict[str, Any],
     database_path: str | Path,
+    *,
+    source_binary_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Write v2 evidence directly from the parser's in-memory payload.
 
@@ -1768,7 +1770,12 @@ def write_evidence_store_from_payload(
         raise ValueError("asset_path is required")
     asset_name = _first_text(payload.get("asset_name"), Path(object_path.split(".", 1)[0]).name, "Blueprint")
     resolved_uasset = Path(uasset_path).expanduser().resolve() if uasset_path else None
-    source_hashes, source_metadata = _direct_source_manifest(resolved_uasset, payload)
+    resolved_binary_source = (
+        Path(source_binary_path).expanduser().resolve()
+        if source_binary_path
+        else resolved_uasset
+    )
+    source_hashes, source_metadata = _direct_source_manifest(resolved_binary_source, payload)
     graphs = payload.get("graphs") if isinstance(payload.get("graphs"), list) else []
 
     def graph_inputs() -> Iterable[tuple[dict[str, Any], dict[str, Any]]]:
@@ -2473,6 +2480,7 @@ def write_evidence_artifacts_from_payload(
     asset_dir: str | Path,
     *,
     publish_v3: bool = True,
+    source_binary_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Publish an immutable v3 revision, then refresh v2 compatibility files."""
 
@@ -2484,7 +2492,13 @@ def write_evidence_artifacts_from_payload(
     staging_root = Path(tempfile.mkdtemp(prefix=".evidence-direct-", dir=destination_root))
     try:
         staged_database = staging_root / "evidence.sqlite"
-        result = write_evidence_store_from_payload(asset_path, uasset_path, payload, staged_database)
+        result = write_evidence_store_from_payload(
+            asset_path,
+            uasset_path,
+            payload,
+            staged_database,
+            source_binary_path=source_binary_path,
+        )
         staged_manifest = _atomic_write_bytes(
             staging_root / "manifest.json",
             (json.dumps(_manifest_payload(result), ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
@@ -2505,6 +2519,7 @@ def write_evidence_artifacts_from_payload(
                 database_path=staged_database,
                 agent_index_path=staged_index,
                 compatibility_manifest_bytes=staged_manifest.read_bytes(),
+                require_fresh=True,
             )
             publication_metadata = {
                 "current_pointer_path": str(destination_root / "evidence" / "current.json"),
