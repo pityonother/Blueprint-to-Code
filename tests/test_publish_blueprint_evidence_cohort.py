@@ -16,6 +16,9 @@ from blueprint_translator.cohort_publication import (  # noqa: E402
     CohortPublicationError,
     publish_evidence_cohort,
 )
+from blueprint_translator.evidence_writer import (  # noqa: E402
+    write_evidence_artifacts_from_payload,
+)
 from blueprint_translator.interpretation_publication import (  # noqa: E402
     inspect_interpretation_health,
 )
@@ -119,6 +122,118 @@ class BlueprintEvidenceCohortPublicationTests(unittest.TestCase):
         self.assertEqual(first["assets"][0]["interpretationRevisionId"], second["assets"][0]["interpretationRevisionId"])
         self.assertTrue(second["assets"][0]["evidenceReused"])
         self.assertTrue(second["assets"][0]["interpretationReused"])
+
+    def test_upgrades_matching_v2_compatibility_destination(self) -> None:
+        publish_interpretation_fixture(self.source_root, name="CohortFixture")
+        destination = self.capture_root / "CohortFixture"
+        object_path = "/Game/Test/CohortFixture.CohortFixture"
+        write_evidence_artifacts_from_payload(
+            object_path,
+            None,
+            interpretation_payload("CohortFixture"),
+            destination,
+            publish_v3=False,
+        )
+        compatibility_manifest = json.loads(
+            (destination / "evidence" / "manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(compatibility_manifest["object_path"], object_path)
+        self.assertFalse((destination / "evidence" / "current.json").exists())
+        self.write_plan([self.entry("CohortFixture", object_path=object_path)])
+
+        result = publish_evidence_cohort(
+            plan_path=self.plan_path,
+            source_root=self.source_root,
+            capture_root=self.capture_root,
+            budget=32_000,
+        )
+
+        self.assertEqual(result["ready"], 1)
+        health = inspect_interpretation_health(destination)
+        self.assertEqual(health["status"], "READY")
+        self.assertEqual(health["evidence"]["freshnessStatus"], "FRESH")
+        self.assertTrue(health["evidence"]["releaseAuthority"])
+        self.assertTrue((destination / "evidence" / "current.json").is_file())
+        self.assertTrue((destination / "interpretation" / "current.json").is_file())
+
+    def test_rejects_conflicting_v2_destination_before_mutation(self) -> None:
+        publish_interpretation_fixture(self.source_root, name="CohortFixture")
+        destination = self.capture_root / "CohortFixture"
+        write_evidence_artifacts_from_payload(
+            "/Game/Test/DifferentIdentity.DifferentIdentity",
+            None,
+            interpretation_payload("DifferentIdentity"),
+            destination,
+            publish_v3=False,
+        )
+        protected_paths = (
+            destination / "evidence" / "evidence.sqlite",
+            destination / "evidence" / "manifest.json",
+            destination / "output" / "agent_index.md",
+        )
+        protected_before = {path: path.read_bytes() for path in protected_paths}
+        self.write_plan([self.entry("CohortFixture")])
+
+        with self.assertRaisesRegex(
+            CohortPublicationError,
+            "COHORT_DESTINATION_IDENTITY_CONFLICT",
+        ):
+            publish_evidence_cohort(
+                plan_path=self.plan_path,
+                source_root=self.source_root,
+                capture_root=self.capture_root,
+            )
+
+        self.assertEqual(
+            {path: path.read_bytes() for path in protected_paths},
+            protected_before,
+        )
+        self.assertFalse((destination / "evidence" / "current.json").exists())
+
+    def test_v2_alias_cannot_bypass_full_cohort_identity_preflight(self) -> None:
+        publish_interpretation_fixture(self.source_root, name="EarlierFixture")
+        publish_interpretation_fixture(self.source_root, name="CohortFixture")
+        destination = self.capture_root / "CohortFixture"
+        write_evidence_artifacts_from_payload(
+            "/Game/Test/DifferentIdentity.DifferentIdentity",
+            None,
+            interpretation_payload("DifferentIdentity"),
+            destination,
+            publish_v3=False,
+        )
+        manifest_path = destination / "evidence" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["objectPath"] = "/Game/Test/CohortFixture.CohortFixture"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        protected_paths = (
+            destination / "evidence" / "evidence.sqlite",
+            manifest_path,
+            destination / "output" / "agent_index.md",
+        )
+        protected_before = {path: path.read_bytes() for path in protected_paths}
+        self.write_plan(
+            [self.entry("EarlierFixture"), self.entry("CohortFixture")]
+        )
+
+        with self.assertRaisesRegex(
+            CohortPublicationError,
+            "COHORT_DESTINATION_IDENTITY_CONFLICT",
+        ):
+            publish_evidence_cohort(
+                plan_path=self.plan_path,
+                source_root=self.source_root,
+                capture_root=self.capture_root,
+            )
+
+        self.assertFalse((self.capture_root / "EarlierFixture").exists())
+        self.assertEqual(
+            {path: path.read_bytes() for path in protected_paths},
+            protected_before,
+        )
+        self.assertFalse((destination / "evidence" / "current.json").exists())
 
     def test_rejects_zero_fact_capture_before_creating_any_destination(self) -> None:
         empty = {

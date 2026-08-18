@@ -227,7 +227,14 @@ def _destination_identity(destination: Path) -> str | None:
             "COHORT_DESTINATION_INVALID",
             f"{destination.name} exists without valid indexed Evidence",
         ) from exc
-    return str(manifest.get("objectPath") or "")
+    if state.source_kind == "INDEXED_V3_CURRENT":
+        return str(manifest.get("objectPath") or "")
+    if state.source_kind == "INDEXED_V2_COMPATIBILITY":
+        return str(manifest.get("object_path") or "")
+    raise CohortPublicationError(
+        "COHORT_DESTINATION_INVALID",
+        f"{destination.name} has an unsupported Evidence source kind",
+    )
 
 
 def _prepare_assets(
