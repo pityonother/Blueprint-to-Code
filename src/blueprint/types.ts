@@ -64,10 +64,16 @@ export interface BlueprintAssetListItem {
   health: BlueprintHealth;
 }
 
+export interface BlueprintAssetReadinessSummary {
+  ready: number;
+  total: number;
+}
+
 export interface BlueprintAssetListResponse extends ApiResult {
   schema: string;
   items: BlueprintAssetListItem[];
   page: BlueprintPage;
+  summary: BlueprintAssetReadinessSummary;
 }
 
 export interface BlueprintEvidenceHealthResponse extends ApiResult {

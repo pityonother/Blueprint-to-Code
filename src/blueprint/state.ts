@@ -1,5 +1,6 @@
 import type {
   BlueprintAssetListItem,
+  BlueprintAssetReadinessSummary,
   BlueprintEvidenceHealthResponse,
   BlueprintEvidenceQueryResponse,
   BlueprintGap,
@@ -17,6 +18,7 @@ export interface BlueprintWorkspaceState {
   assetQuery: string;
   assets: BlueprintAssetListItem[];
   assetsPage: BlueprintPage | null;
+  assetsSummary: BlueprintAssetReadinessSummary | null;
   selectedAsset: string;
   health: BlueprintEvidenceHealthResponse | null;
   interpretation: BlueprintInterpretationResponse | null;
@@ -45,6 +47,7 @@ export function createBlueprintWorkspaceState(): BlueprintWorkspaceState {
     assetQuery: '',
     assets: [],
     assetsPage: null,
+    assetsSummary: null,
     selectedAsset: '',
     health: null,
     interpretation: null,

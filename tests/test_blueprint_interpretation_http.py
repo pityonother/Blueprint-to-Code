@@ -191,6 +191,33 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
         _assert_path_free(self, first.payload, str(self.capture_root))
         _assert_path_free(self, second.payload, str(self.capture_root))
 
+    def test_asset_list_reports_global_ready_total_from_current_v3_candidates(self) -> None:
+        for name in ("Legacy", "Ready", "NotReady"):
+            (self.capture_root / name).mkdir()
+        for name in ("Ready", "NotReady"):
+            for relative in ("evidence/current.json", "interpretation/current.json"):
+                path = self.capture_root / name / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}", encoding="utf-8")
+        inspected: list[str] = []
+
+        def inspect(asset_dir: Path) -> dict[str, object]:
+            inspected.append(asset_dir.name)
+            return {
+                "status": "READY" if asset_dir.name == "Ready" else "INVALID",
+            }
+
+        result = blueprint_get_payload(
+            "/api/blueprint/assets",
+            "q=Ready&limit=10",
+            capture_root=self.capture_root,
+            inspect_health=inspect,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.payload["summary"], {"ready": 1, "total": 4})
+        self.assertEqual(inspected, ["NotReady", "Ready"])
+
     def test_interpretation_filters_and_paginates_statements(self) -> None:
         first = self.route(
             "/api/blueprint/assets/Fixture/interpretation",

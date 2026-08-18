@@ -1,5 +1,9 @@
 import { escapeHtml } from '../../shared/html';
-import type { BlueprintAssetListItem, BlueprintPage } from '../types';
+import type {
+  BlueprintAssetListItem,
+  BlueprintAssetReadinessSummary,
+  BlueprintPage,
+} from '../types';
 
 
 function healthTone(status: string): string {
@@ -15,6 +19,7 @@ export function renderBlueprintAssetList(
   query: string,
   loading: boolean,
   page: BlueprintPage | null = null,
+  summary: BlueprintAssetReadinessSummary | null = null,
 ): string {
   const rows = items.length
     ? items.map((item) => {
@@ -42,6 +47,11 @@ export function renderBlueprintAssetList(
           <h2>选择资产</h2>
         </div>
         <button class="button ghost" type="button" data-blueprint-action="refresh-assets" ${loading ? 'disabled' : ''}>刷新</button>
+      </div>
+      <div class="blueprint-readiness-summary" aria-live="polite">
+        <span>权威 Evidence</span>
+        <strong>READY ${summary?.ready ?? 0} / ${summary?.total ?? 0}</strong>
+        <small>FRESH + releaseAuthority + current v3 Interpretation</small>
       </div>
       <form class="blueprint-asset-search" data-blueprint-form="asset-search">
         <label for="blueprint-asset-query">按资产名筛选</label>

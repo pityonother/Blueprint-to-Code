@@ -61,12 +61,14 @@ try {
       asset: '<img src=x onerror=alert(1)>',
       health: { status: 'READY', reasonCode: '<script>bad</script>' },
     },
-  ], '', '<svg onload=alert(1)>', false);
+  ], '', '<svg onload=alert(1)>', false, null, { ready: 7, total: 337 });
   assert.match(assetList, /data-blueprint-form="asset-search"/);
   assert.match(assetList, /data-blueprint-asset=/);
   assert.doesNotMatch(assetList, /<img src=x/);
   assert.doesNotMatch(assetList, /<script>bad<\/script>/);
   assert.doesNotMatch(assetList, /<svg onload=/);
+  assert.match(assetList, /权威 Evidence/);
+  assert.match(assetList, /READY 7 \/ 337/);
 
   const healthState = {
     activeTab: 'interpretation',
@@ -265,6 +267,7 @@ try {
     schema: 'blueprint-to-code.blueprint-asset-list-response/v1',
     items: [{ asset: 'Fixture', health: readyHealth.health }],
     page: { limit: 100, returned: 1, total: 1, nextCursor: null },
+    summary: { ready: 1, total: 337 },
   };
   const clone = (value) => structuredClone(value);
   const makeClient = (overrides = {}) => ({
@@ -323,6 +326,7 @@ try {
   const refreshController = new BlueprintController(() => {}, () => {}, refreshClient);
   await refreshController.refreshAssets('Fixture');
   assert.ok(refreshController.snapshot().interpretation);
+  assert.deepEqual(refreshController.snapshot().assetsSummary, { ready: 1, total: 337 });
   refreshController.snapshot().assetQuery = 'needle';
   currentHealth.health.status = 'STALE';
   const pendingRefresh = refreshController.refreshAssets('Fixture');

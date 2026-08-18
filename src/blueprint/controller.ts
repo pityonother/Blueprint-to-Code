@@ -286,6 +286,7 @@ export class BlueprintController {
     this.clearAssetPayload();
     this.state.assets = [];
     this.state.assetsPage = null;
+    this.state.assetsSummary = null;
     this.state.loading = true;
     this.state.error = '';
     this.state.staleCode = '';
@@ -295,6 +296,7 @@ export class BlueprintController {
       if (generation !== this.generation) return;
       this.state.assets = response.items;
       this.state.assetsPage = response.page;
+      this.state.assetsSummary = response.summary;
       const selected = response.items.some((item) => item.asset === preferredAsset)
         ? preferredAsset
         : response.items[0]?.asset || '';
@@ -337,6 +339,7 @@ export class BlueprintController {
       const known = new Set(this.state.assets.map((item) => item.asset));
       this.state.assets.push(...response.items.filter((item) => !known.has(item.asset)));
       this.state.assetsPage = mergedPage(response.page, this.state.assets.length);
+      this.state.assetsSummary = response.summary;
     } catch (error) {
       if (generation === this.generation && epoch === this.assetPageEpoch) this.recordLoadError(error);
     } finally {
@@ -671,7 +674,7 @@ export class BlueprintController {
     return `<section class="blueprint-primary-workspace" aria-label="Blueprint Interpretation workspace">
       <nav class="blueprint-primary-tabs" role="tablist" aria-label="Blueprint 数据视图">${this.renderTabs()}</nav>
       <div class="blueprint-primary-layout">
-        ${renderBlueprintAssetList(this.state.assets, this.state.selectedAsset, this.state.assetQuery, this.state.loading, this.state.assetsPage)}
+        ${renderBlueprintAssetList(this.state.assets, this.state.selectedAsset, this.state.assetQuery, this.state.loading, this.state.assetsPage, this.state.assetsSummary)}
         <div class="blueprint-primary-content">
           ${this.state.error ? `<div class="action-notice danger" role="alert">${escapeHtml(this.state.error)}</div>` : ''}
           ${renderBlueprintAssetHealth(this.state)}

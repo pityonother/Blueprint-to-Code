@@ -125,6 +125,26 @@
   gap: 7px;
 }
 
+.blueprint-readiness-summary {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid rgba(87, 199, 167, 0.34);
+  border-radius: 8px;
+  background: rgba(53, 104, 91, 0.16);
+}
+
+.blueprint-readiness-summary span,
+.blueprint-readiness-summary small {
+  color: #9eaaa5;
+  font-size: 0.72rem;
+}
+
+.blueprint-readiness-summary strong {
+  color: #91e3cb;
+  font-size: 1rem;
+}
+
 .blueprint-asset-search label {
   color: #aeb8b3;
   font-size: 0.78rem;
