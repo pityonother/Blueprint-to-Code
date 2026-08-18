@@ -113,6 +113,13 @@ class ArkdevMcpContractTests(unittest.TestCase):
             with self.subTest(object_path=object_path):
                 assert_path_free({"assetObjectPath": object_path})
         assert_path_free({"supportingObjectPaths": list(trusted_paths)})
+        assert_path_free({"activeAsset": "/Game/Test/Fixture.Fixture"})
+        assert_path_free(
+            {
+                "evidenceRef": "bp://asset@revision/g/1",
+                "documentation": "https://example.com/public/path",
+            }
+        )
 
     def test_path_free_guard_rejects_machine_paths_and_disguised_paths_recursively(
         self,
@@ -130,6 +137,16 @@ class ArkdevMcpContractTests(unittest.TestCase):
             {"objectPath": "file://localhost/Users/ac/private/evidence.sqlite"},
             {"detail": "/Game/private/private.private"},
             {"detail": "file:///Users/ac/private/evidence.sqlite"},
+            {"detail": "file:relative/private.txt"},
+            {"detail": "file:secret.txt"},
+            {"detail": "file:%2F%2F%2FUsers%2Fac%2Fprivate%2Fevidence.sqlite"},
+            {"detail": "file%3A%2F%2F%2FC%3A%2FUsers%2Fac%2Fprivate"},
+            {"detail": "%2FUsers%2Fac%2Fprivate%2Fevidence.sqlite"},
+            {"detail": "%252Fhome%252Fac%252Fprivate"},
+            {"detail": "%5CUsers%5Cac%5Cprivate%5Cevidence.sqlite"},
+            {"detail": separator + separator.join(("Users", "ac", "private"))},
+            {"detail": "C:Users" + separator + "ac" + separator + "private"},
+            {"detail": "source:/home/ac/private"},
             {
                 "nested": [
                     "C:"
@@ -153,6 +170,8 @@ class ArkdevMcpContractTests(unittest.TestCase):
                 self.assertNotIn("private", json.dumps(raised.exception.as_payload()))
         with self.assertRaises(McpExecutionError):
             assert_path_free({"path": Path("private/evidence.sqlite")})
+        with self.assertRaises(McpExecutionError):
+            assert_path_free({Path("private-key"): "value"})
 
     def test_phase_two_json_schemas_are_valid_and_use_exact_contract_ids(self) -> None:
         expected = {

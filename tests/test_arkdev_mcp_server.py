@@ -242,12 +242,20 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
             create_server(self.capture_root, editor_bridge=bridge)
         ) as client:
             status = await client.call_tool("arkdev_status", {})
+            editor_state = await client.call_tool(
+                "arkdev_editor_state", {"includeSelection": True}
+            )
 
         self.assertFalse(status.is_error)
         self.assertTrue(status.structured_content["capabilities"]["editorBridge"])
         self.assertEqual(
             status.structured_content["editorBridge"],
             {"status": "CONNECTED", "reasonCode": ""},
+        )
+        self.assertFalse(editor_state.is_error)
+        self.assertEqual(
+            editor_state.structured_content["activeAsset"],
+            "/Game/Test/Fixture.Fixture",
         )
 
 

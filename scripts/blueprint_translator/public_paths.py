@@ -5,11 +5,21 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from os import PathLike
+from urllib.parse import unquote
 
 
 _WINDOWS_ABSOLUTE = re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/]")
+_WINDOWS_DRIVE_RELATIVE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])[A-Z]:(?![\\/])[^\\/\s\"']+[\\/]"
+)
 _UNC_PATH = re.compile(r"(?<![A-Za-z0-9_])\\\\[^\\\s]+[\\/]")
-_FILE_URI = re.compile(r"(?i)(?<![A-Za-z0-9_])file:(?://)?/")
+_WINDOWS_ROOTED = re.compile(
+    r"(?<![A-Za-z0-9_\\])\\(?!\\)[^\\\s\"']+(?:\\[^\\\s\"']+)+"
+)
+_FILE_URI = re.compile(r"(?i)(?<![A-Za-z0-9_])file:")
+_SINGLE_SLASH_URI_PATH = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])[A-Z][A-Z0-9+.-]*:/(?!/)[^\s]+"
+)
 _POSIX_LOCAL_PATH = re.compile(r"(?<![:/<A-Za-z0-9_])/[^\s]+")
 _UNREAL_OBJECT_PATH = re.compile(
     r"^/(?P<mount>[A-Za-z][A-Za-z0-9_]*)/"
@@ -28,12 +38,16 @@ _PUBLIC_UNREAL_MOUNTS = frozenset(
         "script",
     }
 )
+_UNREAL_OBJECT_PATH_FIELDS = frozenset({"activeasset"})
 
 
 def is_unreal_object_path_field(field_name: str) -> bool:
     """Return whether a public field is explicitly typed as an Object Path."""
 
-    return field_name.casefold().endswith(("objectpath", "objectpaths"))
+    normalized = field_name.casefold()
+    return normalized in _UNREAL_OBJECT_PATH_FIELDS or normalized.endswith(
+        ("objectpath", "objectpaths")
+    )
 
 
 def is_public_unreal_object_path(value: str, *, field_name: str) -> bool:
@@ -63,23 +77,42 @@ def public_value_is_path_free(value: object, *, field_name: str = "") -> bool:
             and not is_public_unreal_object_path(value, field_name=field_name)
         ):
             return False
-        if (
-            _WINDOWS_ABSOLUTE.search(value)
-            or _UNC_PATH.search(value)
-            or _FILE_URI.search(value)
-            or (
-                _POSIX_LOCAL_PATH.search(value)
-                and not is_public_unreal_object_path(value, field_name=field_name)
-            )
-        ):
-            return False
+        candidate = value
+        decode_count = 0
+        while True:
+            if (
+                _WINDOWS_ABSOLUTE.search(candidate)
+                or _WINDOWS_DRIVE_RELATIVE.search(candidate)
+                or _UNC_PATH.search(candidate)
+                or _WINDOWS_ROOTED.search(candidate)
+                or _FILE_URI.search(candidate)
+                or _SINGLE_SLASH_URI_PATH.search(candidate)
+                or (
+                    _POSIX_LOCAL_PATH.search(candidate)
+                    and not is_public_unreal_object_path(
+                        candidate, field_name=field_name
+                    )
+                )
+            ):
+                return False
+            decoded = unquote(candidate)
+            if decoded == candidate:
+                break
+            decode_count += 1
+            if decode_count > 8:
+                return False
+            candidate = decoded
         return True
     if isinstance(value, Mapping):
-        return all(
-            public_value_is_path_free(str(key))
-            and public_value_is_path_free(item, field_name=str(key))
-            for key, item in value.items()
-        )
+        for key, item in value.items():
+            if isinstance(key, PathLike):
+                return False
+            field = str(key)
+            if not public_value_is_path_free(field) or not public_value_is_path_free(
+                item, field_name=field
+            ):
+                return False
+        return True
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         return all(
             public_value_is_path_free(item, field_name=field_name) for item in value

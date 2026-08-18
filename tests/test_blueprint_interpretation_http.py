@@ -300,6 +300,12 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
             _path_free({"detail": "/Game/private/private.private"})
         with self.assertRaises(ApiProblem):
             _path_free({"detail": "file:///Users/ac/private/evidence.sqlite"})
+        with self.assertRaises(ApiProblem):
+            _path_free(
+                {"detail": "file:%2F%2F%2FUsers%2Fac%2Fprivate%2Fevidence.sqlite"}
+            )
+        with self.assertRaises(ApiProblem):
+            _path_free({"detail": "\\Users\\ac\\private\\evidence.sqlite"})
 
     def test_interpretation_filters_and_paginates_statements(self) -> None:
         first = self.route(
