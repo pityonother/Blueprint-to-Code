@@ -22,6 +22,9 @@ from .render import gaps_payload, render_markdown, render_pseudocode_and_trace
 from .source import InterpretationSource, load_interpretation_source
 
 
+MAX_INTERPRETATION_BUDGET = 10_000_000
+
+
 _HINT_KEYWORDS = {
     "Glide": ("glide", "gliding"),
     "Sliding": ("slide", "sliding"),
@@ -654,8 +657,11 @@ def _build_from_source(source: InterpretationSource, *, budget: int) -> Interpre
         effective_budget = int(budget)
     except (TypeError, ValueError) as exc:
         raise ValueError("INTERPRETATION_BUDGET_INVALID: budget must be an integer") from exc
-    if effective_budget <= 0 or effective_budget > 100_000:
-        raise ValueError("INTERPRETATION_BUDGET_INVALID: budget must be between 1 and 100000")
+    if effective_budget <= 0 or effective_budget > MAX_INTERPRETATION_BUDGET:
+        raise ValueError(
+            "INTERPRETATION_BUDGET_INVALID: budget must be between 1 and "
+            f"{MAX_INTERPRETATION_BUDGET}"
+        )
     source_work_units = sum(
         len(rows) * weight
         for rows, weight in (
@@ -827,4 +833,4 @@ def build_interpretation(
     return _build_from_source(source, budget=budget)
 
 
-__all__ = ["build_interpretation"]
+__all__ = ["MAX_INTERPRETATION_BUDGET", "build_interpretation"]

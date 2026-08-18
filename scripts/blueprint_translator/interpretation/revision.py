@@ -30,7 +30,7 @@ from .contracts import (
     semantic_digest,
     sha256_bytes,
 )
-from .engine import _build_from_source
+from .engine import MAX_INTERPRETATION_BUDGET, _build_from_source
 from .render import gaps_payload, render_markdown, render_pseudocode_and_trace
 from .source import load_interpretation_source
 
@@ -778,7 +778,10 @@ def _validate_derived_content(
         root,
         evidence_state=state,
     )
-    expected_build = _build_from_source(source, budget=100_000)
+    expected_build = _build_from_source(
+        source,
+        budget=MAX_INTERPRETATION_BUDGET,
+    )
     expected_interpretation = {
         **expected_build.interpretation,
         "generatedAt": interpretation["generatedAt"],

@@ -107,7 +107,8 @@ runtime\python\python.exe scripts\interpret_blueprint_evidence.py `
 
 - `--graph <bp://ref>`：只投影 stdout 中的 JSON；发布仍是完整 asset scope。
 - `--format json|markdown|pseudocode|all`：选择 stdout 格式。
-- `--budget <正整数>`：确定性 work-unit 上限；超限不发布。
+- `--budget <1..10000000>`：确定性 work-unit 上限；超限不发布。较大预算只扩大完整
+  asset-scope 解释的可处理规模，不截断 Graph，也不放宽 Evidence/ref/缺口门禁。
 - `--fail-on-gap`：存在任何 gap 时以独立门禁错误退出且不更新 pointer。
 - `--allow-stale=false`、`--allow-legacy-fallback=false`：显式诊断开关；即使启用，也
   不能让 stale、v2 或 legacy Evidence 推进 Interpretation current。

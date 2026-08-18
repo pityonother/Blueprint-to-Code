@@ -483,6 +483,17 @@ class InterpretationContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INTERPRETATION_BUDGET_EXCEEDED"):
             build_interpretation(self.asset_dir, budget=200)
 
+        self.assertEqual(engine_module.MAX_INTERPRETATION_BUDGET, 10_000_000)
+        build_interpretation(
+            self.asset_dir,
+            budget=engine_module.MAX_INTERPRETATION_BUDGET,
+        )
+        with self.assertRaisesRegex(ValueError, "INTERPRETATION_BUDGET_INVALID"):
+            build_interpretation(
+                self.asset_dir,
+                budget=engine_module.MAX_INTERPRETATION_BUDGET + 1,
+            )
+
     def test_row_budget_fails_before_control_or_data_flow_construction(self) -> None:
         source = load_interpretation_source(self.asset_dir)
         with (
