@@ -5,7 +5,6 @@ import {
   type WorkspaceView,
 } from './app/router';
 import {
-  renderLoading,
   renderWorkspaceShell,
   type WorkspaceShellContent,
 } from './app/shell';
@@ -26,6 +25,8 @@ const legacyWorkspace = new LegacyControlCenterWorkspace(() => render());
 const blueprintController = new BlueprintController(
   () => render(),
   (assetName) => legacyWorkspace.selectAssetByName(assetName),
+  undefined,
+  () => legacyWorkspace.ensureLoaded(),
 );
 const harvestExplorer = new HarvestExplorer(() => render());
 const knowledgeWorkspace = new KnowledgeWorkspace(() => render());
@@ -46,9 +47,6 @@ function bindWorkspaceNavigation(): void {
       const url = workspaceUrl(window.location.href, workspaceView);
       window.history.replaceState({}, '', url);
       render();
-      if (workspaceView === 'blueprint' && !legacyWorkspace.isLoaded()) {
-        legacyWorkspace.ensureLoaded();
-      }
       if (workspaceView === 'knowledge') {
         knowledgeWorkspace.ensureLoaded();
       }
@@ -58,11 +56,6 @@ function bindWorkspaceNavigation(): void {
 
 
 function render(): void {
-  if (workspaceView === 'blueprint' && !legacyWorkspace.isLoaded()) {
-    root.innerHTML = renderLoading();
-    return;
-  }
-
   let content: WorkspaceShellContent;
   if (workspaceView === 'harvest') {
     content = {
@@ -75,7 +68,6 @@ function render(): void {
       mainClass: 'workspace kb-main',
     };
   } else {
-    const selectedAsset = legacyWorkspace.selectedAssetName();
     content = {
       body: blueprintController.render({
         legacy: legacyWorkspace.renderLegacy(),
@@ -88,7 +80,7 @@ function render(): void {
     bindWorkspaceNavigation();
     legacyWorkspace.bind();
     blueprintController.bind();
-    blueprintController.ensureLoaded(selectedAsset);
+    blueprintController.ensureLoaded();
     return;
   }
 
@@ -105,8 +97,6 @@ function render(): void {
 
 
 render();
-if (workspaceView === 'blueprint') {
-  legacyWorkspace.ensureLoaded();
-} else {
+if (workspaceView !== 'blueprint') {
   legacyWorkspace.ensureVersionLoaded();
 }

@@ -283,6 +283,20 @@ try {
     queryEvidence: async () => clone(evidenceQuery),
     ...overrides,
   });
+
+  let compatibilityLoads = 0;
+  const compatibilityController = new BlueprintController(
+    () => {},
+    () => {},
+    makeClient(),
+    () => { compatibilityLoads += 1; },
+  );
+  compatibilityController.setTab('legacy');
+  assert.equal(compatibilityLoads, 1);
+  compatibilityController.setTab('experimental');
+  assert.equal(compatibilityLoads, 2);
+  compatibilityController.setTab('interpretation');
+  assert.equal(compatibilityLoads, 2);
   const deferred = () => {
     let resolve;
     let reject;
@@ -592,15 +606,39 @@ try {
   assert.match(main, /new BlueprintController/);
   assert.match(main, /blueprintController\.render/);
   assert.match(main, /blueprintController\.ensureLoaded/);
+  assert.doesNotMatch(main, /blueprintController\.ensureLoaded\(selectedAsset\)/);
   assert.match(main, /legacy: legacyWorkspace\.renderLegacy\(\)/);
   assert.match(main, /experimental: legacyWorkspace\.renderExperimental\(\)/);
+  assert.match(main, /\(\) => legacyWorkspace\.ensureLoaded\(\)/);
+  assert.doesNotMatch(
+    main,
+    /render\(\);\s*if \(workspaceView === 'blueprint'\) \{\s*legacyWorkspace\.ensureLoaded\(\)/,
+  );
+  assert.doesNotMatch(
+    main,
+    /workspaceView === 'blueprint' && !legacyWorkspace\.isLoaded\(\)[\s\S]{0,120}renderLoading\(\)/,
+  );
   const legacyWorkspaceSource = await readFile(
     new URL('../src/control-center/workspace.ts', import.meta.url),
     'utf8',
   );
   assert.match(
     legacyWorkspaceSource,
-    /renderLegacy\(\): string \{[\s\S]*return renderStepReports\(/,
+    /renderLegacy\(\): string \{[\s\S]*renderStepReports\(/,
+  );
+  assert.match(legacyWorkspaceSource, /private stateLoadError = ''/);
+  assert.match(legacyWorkspaceSource, /private pendingAssetName = ''/);
+  assert.match(
+    legacyWorkspaceSource,
+    /if \(action === 'refresh'\) \{[\s\S]*try \{[\s\S]*await this\.refreshState\(\)[\s\S]*catch \(error\) \{[\s\S]*this\.recordStateLoadError\(error\)/,
+  );
+  assert.match(
+    legacyWorkspaceSource,
+    /selectAssetByName\(assetName: string\): void \{[\s\S]*if \(!this\.state\)[\s\S]*this\.pendingAssetName = assetName/,
+  );
+  assert.match(
+    legacyWorkspaceSource,
+    /renderLegacy\(\): string \{[\s\S]*renderStateLoadError\(\)/,
   );
 
   const css = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');

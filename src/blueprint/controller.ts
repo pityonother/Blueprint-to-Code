@@ -190,6 +190,7 @@ export class BlueprintController {
     private readonly notify: () => void,
     private readonly onAssetSelected: (asset: string) => void = () => {},
     private readonly client: BlueprintApiClient = DEFAULT_API_CLIENT,
+    private readonly onCompatibilityRequested: () => void = () => {},
   ) {}
 
   /** Read-only snapshot used by contract tests and embedding shells. */
@@ -649,6 +650,9 @@ export class BlueprintController {
   private setTab(tab: BlueprintPrimaryTab): void {
     if (tab === this.state.activeTab) return;
     this.state.activeTab = tab;
+    if (tab === 'legacy' || tab === 'experimental') {
+      this.onCompatibilityRequested();
+    }
     this.announce({ kind: 'tab', value: tab });
     if (tab === 'evidence' && isBlueprintReadyHealth(this.state.health?.health) && this.state.interpretation) {
       void this.loadTrace();

@@ -73,6 +73,8 @@ export class LegacyControlCenterWorkspace {
   private selectedMissingFunctions = new Set<string>();
   private graphQueueSummary: GraphQueueSummary | null = null;
   private graphQueueSummaryAssetPath = '';
+  private pendingAssetName = '';
+  private stateLoadError = '';
   private stateRequest: Promise<void> | null = null;
   private versionRequest: Promise<void> | null = null;
 
@@ -94,8 +96,7 @@ export class LegacyControlCenterWorkspace {
     if (this.state || this.stateRequest) return;
     this.stateRequest = this.refreshState()
       .catch((error) => {
-        this.logs = [error instanceof Error ? error.message : String(error)];
-        this.notify();
+        this.recordStateLoadError(error);
       })
       .finally(() => {
         this.stateRequest = null;
@@ -106,8 +107,7 @@ export class LegacyControlCenterWorkspace {
     if (this.appVersion || this.versionRequest) return;
     this.versionRequest = this.refreshVersion()
       .catch((error) => {
-        this.logs = [error instanceof Error ? error.message : String(error)];
-        this.notify();
+        this.recordStateLoadError(error);
       })
       .finally(() => {
         this.versionRequest = null;
@@ -115,8 +115,14 @@ export class LegacyControlCenterWorkspace {
   }
 
   selectAssetByName(assetName: string): void {
+    if (!this.state) {
+      this.pendingAssetName = assetName;
+      return;
+    }
     const asset = this.state?.assets.find((candidate) => candidate.name === assetName);
-    if (!asset || asset.path === this.selectedPath) return;
+    if (!asset) return;
+    this.pendingAssetName = '';
+    if (asset.path === this.selectedPath) return;
     this.selectedPath = asset.path;
     this.devkitInput = asset.path;
     this.captureAssetName = asset.name;
@@ -139,13 +145,14 @@ export class LegacyControlCenterWorkspace {
 
   renderLegacy(): string {
     const asset = this.synchronizedAsset();
-    return renderStepReports(this.workflowView(asset));
+    return `${this.renderStateLoadError()}${renderStepReports(this.workflowView(asset))}`;
   }
 
   renderExperimental(): string {
     const asset = this.synchronizedAsset();
     const workflow = this.workflowView(asset);
     return `
+      ${this.renderStateLoadError()}
       ${renderStepPath(workflow)}
       ${renderStepActions(workflow)}
       ${renderStepResult(asset)}
@@ -154,6 +161,21 @@ export class LegacyControlCenterWorkspace {
       ${renderAdvancedSection(this.advancedView(asset))}
       <p class="footnote">日志最近一条：${escapeHtml(this.logs[0] || '无')}</p>
     `;
+  }
+
+  private renderStateLoadError(): string {
+    if (!this.stateLoadError) return '';
+    return `<div class="action-notice danger" role="alert">
+      <strong>旧版状态不可用</strong>
+      <p>${escapeHtml(this.stateLoadError)}</p>
+      <p>权威 Evidence 首页不受影响；修复旧资产后可使用顶部“刷新状态”重试。</p>
+    </div>`;
+  }
+
+  private recordStateLoadError(error: unknown): void {
+    this.stateLoadError = readableError(error);
+    this.logs = [this.stateLoadError];
+    this.notify();
   }
 
   syncInputs(): void {
@@ -418,6 +440,14 @@ export class LegacyControlCenterWorkspace {
     const previousSelectedPath = this.selectedPath;
     const payload = await api<AppState>('/api/state');
     this.state = payload;
+    this.stateLoadError = '';
+    const pendingAsset = this.state.assets.find(
+      (asset) => asset.name === this.pendingAssetName,
+    );
+    if (pendingAsset) {
+      this.selectedPath = pendingAsset.path;
+      this.pendingAssetName = '';
+    }
     this.appVersion = payload.version;
     if (!this.selectedPath || !this.state.assets.some((asset) => asset.path === this.selectedPath)) {
       this.selectedPath = this.state.assets.find((asset) => asset.graphs > 0 && asset.hasOutput)?.path || this.state.assets[0]?.path || '';
@@ -1060,8 +1090,12 @@ export class LegacyControlCenterWorkspace {
       return;
     }
     if (action === 'refresh') {
-      await this.refreshState();
-      this.appendLog('资产状态已刷新。');
+      try {
+        await this.refreshState();
+        this.appendLog('资产状态已刷新。');
+      } catch (error) {
+        this.recordStateLoadError(error);
+      }
       return;
     }
     if (action === 'open-capture-root') {
