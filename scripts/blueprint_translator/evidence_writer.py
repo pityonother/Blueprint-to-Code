@@ -2519,7 +2519,13 @@ def write_evidence_artifacts_from_payload(
                 database_path=staged_database,
                 agent_index_path=staged_index,
                 compatibility_manifest_bytes=staged_manifest.read_bytes(),
-                require_fresh=True,
+                # The direct binary reader supplies an immutable snapshot path.
+                # Only that path can prove a single parsed source generation and
+                # is therefore allowed to require FRESH before pointer commit.
+                # Synthetic/imported payloads may still publish a v3 current for
+                # compatibility consumers, but strict READY gates will reject
+                # their SOURCE_UNAVAILABLE state.
+                require_fresh=source_binary_path is not None,
             )
             publication_metadata = {
                 "current_pointer_path": str(destination_root / "evidence" / "current.json"),
