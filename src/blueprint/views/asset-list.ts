@@ -4,10 +4,12 @@ import type {
   BlueprintAssetReadinessSummary,
   BlueprintPage,
 } from '../types';
+import { isBlueprintReadyHealth } from '../state';
 
 
-function healthTone(status: string): string {
-  if (status === 'READY') return 'ready';
+function healthTone(item: BlueprintAssetListItem): string {
+  const status = String(item.health.status || 'MISSING');
+  if (isBlueprintReadyHealth(item.health)) return 'ready';
   if (status === 'STALE' || status === 'MIGRATION_REQUIRED') return 'warning';
   if (status === 'INVALID') return 'danger';
   return 'missing';
@@ -34,7 +36,7 @@ export function renderBlueprintAssetList(
             <strong>${escapeHtml(item.asset)}</strong>
             <small>${escapeHtml(item.health.reasonCode || 'Interpretation Contract v1')}</small>
           </span>
-          <span class="blueprint-status ${healthTone(status)}">${escapeHtml(status)}</span>
+          <span class="blueprint-status ${healthTone(item)}">${escapeHtml(status)}</span>
         </button>
       `;
     }).join('')

@@ -14,6 +14,8 @@
   "$defs": {
     "maybeRevision": {"type": "string", "pattern": "^(?:$|[0-9a-f]{24})$"},
     "maybeHash": {"type": "string", "pattern": "^(?:$|[0-9a-f]{64})$"},
+    "exactRevision": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+    "exactHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "health": {
       "type": "object",
       "additionalProperties": false,
@@ -59,7 +61,38 @@
             "generatedAt": {"type": "string", "maxLength": 128}
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "READY"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "properties": {
+                  "revisionId": {"$ref": "#/$defs/exactRevision"},
+                  "manifestSha256": {"$ref": "#/$defs/exactHash"},
+                  "pointerSha256": {"$ref": "#/$defs/exactHash"},
+                  "freshnessStatus": {"const": "FRESH"},
+                  "releaseAuthority": {"const": true},
+                  "migrationRequired": {"const": false}
+                }
+              },
+              "interpretation": {
+                "properties": {
+                  "status": {"const": "CURRENT"},
+                  "revisionId": {"$ref": "#/$defs/exactRevision"},
+                  "manifestSha256": {"$ref": "#/$defs/exactHash"},
+                  "pointerSha256": {"$ref": "#/$defs/exactHash"},
+                  "semanticDigest": {"$ref": "#/$defs/exactHash"}
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

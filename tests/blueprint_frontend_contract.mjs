@@ -15,6 +15,7 @@ try {
     blueprintEvidenceQueryMatchesHealth,
     blueprintIdentitiesMatch,
     blueprintIdentityMatchesHealth,
+    isBlueprintReadyHealth,
   } = await server.ssrLoadModule(
     '/src/blueprint/controller.ts',
   );
@@ -217,11 +218,11 @@ try {
       evidence: {
         ...identity.evidence,
         pointerSha256: evidencePointerSha256,
-        freshnessStatus: 'READY',
+        freshnessStatus: 'FRESH',
         releaseAuthority: true,
         migrationRequired: false,
       },
-      interpretation: { status: 'READY', ...identity.interpretation },
+      interpretation: { status: 'CURRENT', ...identity.interpretation },
     },
   };
   const gapsResponse = {
@@ -260,7 +261,9 @@ try {
     items: [{ marker: 'base' }],
     manifestSha256: identity.evidence.manifestSha256,
     pointerSha256: evidencePointerSha256,
-    freshnessStatus: 'READY',
+    freshnessStatus: 'FRESH',
+    releaseAuthority: true,
+    migrationRequired: false,
   };
   const assetResponse = {
     ok: true,
@@ -291,6 +294,22 @@ try {
   };
 
   assert.equal(blueprintIdentityMatchesHealth(readyHealth, identity, 'Fixture'), true);
+  assert.equal(isBlueprintReadyHealth(readyHealth.health), true);
+  for (const mutate of [
+    (candidate) => { candidate.evidence.freshnessStatus = 'SOURCE_UNAVAILABLE'; },
+    (candidate) => { candidate.evidence.freshnessStatus = 'STALE'; },
+    (candidate) => { candidate.evidence.releaseAuthority = false; },
+    (candidate) => { candidate.evidence.migrationRequired = true; },
+    (candidate) => { delete candidate.evidence.freshnessStatus; },
+  ]) {
+    const notReady = clone(readyHealth.health);
+    mutate(notReady);
+    assert.equal(isBlueprintReadyHealth(notReady), false);
+    assert.equal(
+      blueprintIdentityMatchesHealth({ ...readyHealth, health: notReady }, identity, 'Fixture'),
+      false,
+    );
+  }
   for (const mutate of [
     (candidate) => { candidate.evidence.revisionId = '9'.repeat(24); },
     (candidate) => { candidate.evidence.manifestSha256 = '9'.repeat(64); },

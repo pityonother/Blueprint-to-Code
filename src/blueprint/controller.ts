@@ -15,7 +15,12 @@ import {
   blueprintTabId,
   isBlueprintPrimaryTab,
 } from './routing';
-import { createBlueprintWorkspaceState, type BlueprintWorkspaceState } from './state';
+import {
+  createBlueprintWorkspaceState,
+  isBlueprintReadyHealth,
+  type BlueprintWorkspaceState,
+} from './state';
+export { isBlueprintReadyHealth } from './state';
 import type {
   BlueprintEvidenceHealthResponse,
   BlueprintEvidenceOperation,
@@ -96,7 +101,7 @@ export function blueprintIdentityMatchesHealth(
   if (
     !healthResponse
     || healthResponse.asset !== selectedAsset
-    || health?.status !== 'READY'
+    || !isBlueprintReadyHealth(health)
     || expectedAsset?.name !== selectedAsset
     || identity.asset.name !== selectedAsset
     || !complete(expectedAsset.assetId)
@@ -144,9 +149,12 @@ export function blueprintEvidenceQueryMatchesHealth(
   response: BlueprintEvidenceQueryResponse,
 ): boolean {
   const evidence = healthResponse?.health.evidence;
-  return healthResponse?.health.status === 'READY'
+  return isBlueprintReadyHealth(healthResponse?.health)
     && complete(evidence?.manifestSha256)
     && complete(evidence.pointerSha256)
+    && response.freshnessStatus === 'FRESH'
+    && response.releaseAuthority === true
+    && response.migrationRequired === false
     && response.manifestSha256 === evidence.manifestSha256
     && response.pointerSha256 === evidence.pointerSha256;
 }
@@ -378,7 +386,7 @@ export class BlueprintController {
       const health = await this.client.fetchHealth(asset);
       if (generation !== this.generation || asset !== this.state.selectedAsset) return;
       this.state.health = health;
-      if (health.health.status !== 'READY') {
+      if (!isBlueprintReadyHealth(health.health)) {
         this.clearAssetPayload(true);
         if (health.health.status === 'STALE') this.state.staleCode = BLUEPRINT_CLIENT_STALE_CODE;
         return;
@@ -642,7 +650,7 @@ export class BlueprintController {
     if (tab === this.state.activeTab) return;
     this.state.activeTab = tab;
     this.announce({ kind: 'tab', value: tab });
-    if (tab === 'evidence' && this.state.health?.health.status === 'READY' && this.state.interpretation) {
+    if (tab === 'evidence' && isBlueprintReadyHealth(this.state.health?.health) && this.state.interpretation) {
       void this.loadTrace();
     }
   }

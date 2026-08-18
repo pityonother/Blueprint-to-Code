@@ -65,6 +65,19 @@ def evidence_state_metadata(
     }
 
 
+def is_release_ready_evidence(state: ResolvedEvidenceState) -> bool:
+    """Return whether Evidence satisfies the strict READY trust predicate."""
+
+    return bool(
+        state.source_kind == "INDEXED_V3_CURRENT"
+        and state.freshness_status == "FRESH"
+        and state.release_authority
+        and not state.migration_required
+        and state.manifest_sha256
+        and state.pointer_sha256
+    )
+
+
 class EvidenceRepository:
     """Own a read-only query service and any temporary legacy projection."""
 
@@ -815,6 +828,7 @@ __all__ = [
     "evidence_agent_index_text",
     "evidence_manifest_payload",
     "evidence_state_metadata",
+    "is_release_ready_evidence",
     "open_bound_evidence_database",
     "open_asset_repository",
     "open_resolved_asset_repository",

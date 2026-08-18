@@ -371,7 +371,7 @@ class BlueprintInterpretationPublishedArtifactTests(unittest.TestCase):
         self._temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self._temporary.cleanup)
         self.capture_root = Path(self._temporary.name) / "captures"
-        self.asset_dir, _source_path, _payload = publish_interpretation_fixture(
+        self.asset_dir, self.source_path, _payload = publish_interpretation_fixture(
             self.capture_root
         )
         self.published = publish_interpretation(self.asset_dir, budget=32_000)
@@ -394,6 +394,44 @@ class BlueprintInterpretationPublishedArtifactTests(unittest.TestCase):
                 encoded = json.dumps(result.payload, ensure_ascii=False)
                 self.assertNotIn(str(self.asset_dir), encoded)
                 self.assertNotIn(str(self.asset_dir).replace("\\", "/"), encoded)
+
+    def test_source_unavailable_is_not_ready_and_is_excluded_from_summary(self) -> None:
+        self.source_path.unlink()
+
+        health = self.route("evidence/health")
+        asset_list = blueprint_get_payload(
+            "/api/blueprint/assets",
+            "limit=5",
+            capture_root=self.capture_root,
+        )
+
+        self.assertEqual(health.payload["health"]["status"], "SOURCE_UNAVAILABLE")
+        self.assertEqual(
+            health.payload["health"]["reasonCode"],
+            "BLUEPRINT_EVIDENCE_SOURCE_UNAVAILABLE",
+        )
+        self.assertIsNotNone(asset_list)
+        self.assertEqual(asset_list.payload["summary"], {"ready": 0, "total": 1})
+
+    def test_ready_schema_rejects_non_fresh_or_non_authoritative_evidence(self) -> None:
+        payload = self.route("evidence/health").payload
+        schema = json.loads(
+            (
+                ROOT
+                / "schemas"
+                / "http_api"
+                / "blueprint_evidence_health_response_v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        for field, value in (
+            ("freshnessStatus", "SOURCE_UNAVAILABLE"),
+            ("releaseAuthority", False),
+            ("migrationRequired", True),
+        ):
+            changed = json.loads(json.dumps(payload))
+            changed["health"]["evidence"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                Draft202012Validator(schema).validate(changed)
 
     def test_real_route_payloads_match_their_strict_public_schemas(self) -> None:
         asset_list = blueprint_get_payload(

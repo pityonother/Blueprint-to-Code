@@ -10,6 +10,7 @@ from ..evidence_repository import (
     ResolvedEvidenceState,
     _read_bound_file_bytes,
     evidence_manifest_payload,
+    is_release_ready_evidence,
     open_bound_evidence_database,
     resolve_asset_evidence_state,
 )
@@ -281,16 +282,10 @@ def _evidence_binding(state: ResolvedEvidenceState) -> tuple[str, str, str]:
 
 
 def _require_authoritative_evidence(state: ResolvedEvidenceState) -> None:
-    if (
-        state.source_kind != "INDEXED_V3_CURRENT"
-        or not state.release_authority
-        or state.migration_required
-        or not state.manifest_sha256
-        or not state.pointer_sha256
-    ):
+    if not is_release_ready_evidence(state):
         raise _invalid(
             "INTERPRETATION_EVIDENCE_NOT_AUTHORITATIVE",
-            "Interpretation requires one authoritative current v3 Evidence revision.",
+            "Interpretation requires one FRESH authoritative current v3 Evidence revision.",
         )
 
 

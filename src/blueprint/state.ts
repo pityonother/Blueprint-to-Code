@@ -1,6 +1,7 @@
 import type {
   BlueprintAssetListItem,
   BlueprintAssetReadinessSummary,
+  BlueprintHealth,
   BlueprintEvidenceHealthResponse,
   BlueprintEvidenceQueryResponse,
   BlueprintGap,
@@ -39,6 +40,27 @@ export interface BlueprintCoverage {
   total: number;
   gaps: number;
   confirmedPercent: number;
+}
+
+function complete(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+export function isBlueprintReadyHealth(health: BlueprintHealth | null | undefined): boolean {
+  const evidence = health?.evidence;
+  const interpretation = health?.interpretation;
+  return health?.status === 'READY'
+    && evidence?.freshnessStatus === 'FRESH'
+    && evidence.releaseAuthority === true
+    && evidence.migrationRequired === false
+    && complete(evidence.revisionId)
+    && complete(evidence.manifestSha256)
+    && complete(evidence.pointerSha256)
+    && interpretation?.status === 'CURRENT'
+    && complete(interpretation.revisionId)
+    && complete(interpretation.manifestSha256)
+    && complete(interpretation.pointerSha256)
+    && complete(interpretation.semanticDigest);
 }
 
 export function createBlueprintWorkspaceState(): BlueprintWorkspaceState {
