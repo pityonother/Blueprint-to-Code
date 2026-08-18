@@ -98,6 +98,56 @@ class BlueprintServiceTests(unittest.TestCase):
         self.assertLessEqual(len(first["edges"]), 160)
         _assert_path_free(self, first, self.capture_root)
 
+    def test_current_interpreter_1_1_dinodefense_fixture_is_readable_across_services(
+        self,
+    ) -> None:
+        name = "DinoDefenseFixture"
+        object_path = f"/DinoDefense/Camera/{name}.{name}"
+        payload = interpretation_payload(name)
+        payload["asset_path"] = object_path
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        health = self.service.health(asset=name)
+        authority = self.service.get_task_authority(asset=name)
+        context = self.service.get_context(
+            asset=name,
+            goal="ReceiveBeginPlay",
+        )
+
+        self.assertTrue((asset_dir / "evidence" / "current.json").is_file())
+        self.assertTrue((asset_dir / "interpretation" / "current.json").is_file())
+        self.assertEqual(health["health"]["status"], "READY")
+        self.assertEqual(health["health"]["asset"]["objectPath"], object_path)
+        self.assertEqual(
+            health["health"]["evidence"]["freshnessStatus"],
+            "FRESH",
+        )
+        self.assertIs(
+            health["health"]["evidence"]["releaseAuthority"],
+            True,
+        )
+        self.assertEqual(
+            health["health"]["interpretation"]["interpreterVersion"],
+            "blueprint-interpreter/1.1.0",
+        )
+        self.assertEqual(authority["objectPath"], object_path)
+        self.assertEqual(authority["freshness"], "FRESH")
+        self.assertEqual(context["identity"]["asset"]["objectPath"], object_path)
+        self.assertIs(
+            context["identity"]["evidence"]["releaseAuthority"],
+            True,
+        )
+        self.assertEqual(
+            context["identity"]["interpretation"]["interpreterVersion"],
+            "blueprint-interpreter/1.1.0",
+        )
+        self.assertEqual(context["freshness"], "FRESH")
+
     def test_context_requires_explicit_graph_selection_when_goal_has_no_match(
         self,
     ) -> None:

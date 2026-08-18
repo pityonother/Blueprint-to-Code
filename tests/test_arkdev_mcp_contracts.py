@@ -96,26 +96,60 @@ class ArkdevMcpContractTests(unittest.TestCase):
             },
         )
 
-    def test_path_free_guard_rejects_windows_and_posix_paths_recursively(self) -> None:
-        assert_path_free({"asset": "/Game/Test/Fixture.Fixture"})
+    def test_path_free_guard_accepts_only_trusted_unreal_object_path_fields(self) -> None:
+        trusted_paths = (
+            "/DinoDefense/Camera/Fixture.Fixture",
+            "/Engine/EngineMaterials/Fixture.Fixture",
+            "/Game/Test/Fixture.Fixture",
+            "/Game/Test/Fixture.Fixture_C",
+            "/PCG/Test/Fixture.Fixture",
+            "/Plugin/Test/Fixture.Fixture",
+            "/Plugins/Test/Fixture.Fixture",
+            "/Script/Engine.Actor",
+        )
+
+        for object_path in trusted_paths:
+            with self.subTest(object_path=object_path):
+                assert_path_free({"assetObjectPath": object_path})
+        assert_path_free({"supportingObjectPaths": list(trusted_paths)})
+
+    def test_path_free_guard_rejects_machine_paths_and_disguised_paths_recursively(
+        self,
+    ) -> None:
         separator = chr(92)
-        for private_path in (
-            "C:" + separator + separator.join(("Users", "fixture", "evidence.sqlite")),
-            "/" + "home/fixture/evidence.sqlite",
-            "failure at /" + "tmp/fixture/evidence.sqlite",
-            "open file" + "://fixture/evidence.sqlite",
-            "share "
-            + separator * 2
-            + separator.join(("server", "fixture", "evidence.sqlite")),
+        for private_value in (
+            {"objectPath": "/home/ac/private/evidence.sqlite"},
+            {"objectPath": "/Users/ac/private/private.private"},
+            {"objectPath": "/Volumes/Secret/Project/Asset.Asset"},
+            {"objectPath": "/workspace/repo/Secret.Secret"},
+            {"objectPath": "/C/Users/ac/Secret.Secret"},
+            {"objectPath": "/Game/private/evidence.sqlite"},
+            {"objectPath": "file:///Users/ac/private/evidence.sqlite"},
+            {"objectPath": "file:/Users/ac/private/evidence.sqlite"},
+            {"objectPath": "file://localhost/Users/ac/private/evidence.sqlite"},
+            {"detail": "/Game/private/private.private"},
+            {"detail": "file:///Users/ac/private/evidence.sqlite"},
+            {
+                "nested": [
+                    "C:"
+                    + separator
+                    + separator.join(("Users", "fixture", "evidence.sqlite"))
+                ]
+            },
+            {"nested": ["failure at /" + "tmp/fixture/evidence.sqlite"]},
+            {
+                "nested": [
+                    "share "
+                    + separator * 2
+                    + separator.join(("server", "fixture", "evidence.sqlite"))
+                ]
+            },
         ):
-            with self.subTest(private_path=private_path):
+            with self.subTest(private_value=private_value):
                 with self.assertRaises(McpExecutionError) as raised:
-                    assert_path_free({"nested": [private_path]})
+                    assert_path_free(private_value)
                 self.assertEqual(raised.exception.code, "INTERNAL_CONTRACT_ERROR")
-                self.assertNotIn(
-                    private_path,
-                    json.dumps(raised.exception.as_payload(), ensure_ascii=False),
-                )
+                self.assertNotIn("private", json.dumps(raised.exception.as_payload()))
         with self.assertRaises(McpExecutionError):
             assert_path_free({"path": Path("private/evidence.sqlite")})
 
