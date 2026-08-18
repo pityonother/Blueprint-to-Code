@@ -277,7 +277,11 @@ def _prepare_assets(
                 f"{asset.asset} already belongs to another objectPath",
             )
         try:
-            preview = build_interpretation(source_dir, budget=budget)
+            preview = build_interpretation(
+                source_dir,
+                budget=budget,
+                bounded_selection=True,
+            )
         except Exception as exc:
             raise CohortPublicationError(
                 "COHORT_INTERPRETATION_PREFLIGHT_FAILED",
@@ -347,6 +351,7 @@ def publish_evidence_cohort(
             interpretation = publish_interpretation(
                 item.destination_dir,
                 budget=budget,
+                bounded_selection=True,
                 expected_semantic_digest=item.interpretation_digest,
             )
             health = inspect_interpretation_health(item.destination_dir)

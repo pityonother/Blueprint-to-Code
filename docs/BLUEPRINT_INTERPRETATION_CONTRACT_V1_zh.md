@@ -116,6 +116,18 @@ runtime\python\python.exe scripts\interpret_blueprint_evidence.py `
 `all` 的 stdout 是不含本机绝对路径的 JSON receipt；人类报告与伪代码从 immutable
 revision 读取。CLI 成功不等于 ARK 运行时实测通过。
 
+批量权威发布器使用 `graph-atomic-output-bounded/v1`：按 `(export_index, graph_ref)`
+确定性选择完整 Graph，不截断 Graph 内的 Node、Pin、Edge 或 Observation。若完整
+Interpretation 超过预算，就逐步降低 Graph work 上限并重放同一选择算法，直到来源和
+渲染输出同时满足预算。每个未选择 Graph 都必须产生且只产生一条
+`INTERPRETATION_GRAPH_OMITTED_BY_BUDGET / NOT_RECOVERED` gap；完整 Graph 事实仍保留在
+绑定的权威 Evidence 中，可继续通过 Evidence 查询。`selection`（预算、完整性、已选择/
+遗漏 Graph、来源/选择 work units）进入 semantic digest，reader 按记录预算重建并逐项
+比对，因此改写 selection 或删除遗漏 gap 都会失败关闭。
+
+单文件读取上限保持：Interpretation JSON/trace 16 MiB，gaps/Markdown/伪代码 8 MiB；
+bounded 模式不通过扩大这些上限来容纳深图。
+
 ## 5. HTTP API 与 UI
 
 Control Center 提供只读 GET：

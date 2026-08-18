@@ -249,6 +249,52 @@ class InterpretationPublicationTests(unittest.TestCase):
             "INTERPRETATION_SEMANTIC_EVIDENCE_MISMATCH",
         )
 
+    def test_rehashed_bounded_selection_tampering_is_rejected(self) -> None:
+        published = publish_interpretation(
+            self.asset_dir,
+            budget=32_000,
+            bounded_selection=True,
+        )
+
+        def mutate(documents: dict[str, Any]) -> None:
+            selection = documents["interpretation"]["selection"]
+            selection["selectedWorkUnits"] -= 1
+
+        self.install_rewritten_current(published, mutate=mutate)
+        with self.assertRaises(InterpretationArtifactInvalid) as caught:
+            load_current_interpretation(self.asset_dir)
+        self.assertEqual(
+            caught.exception.code,
+            "INTERPRETATION_SEMANTIC_EVIDENCE_MISMATCH",
+        )
+
+    def test_rehashed_missing_budget_omission_gap_is_rejected(self) -> None:
+        published = publish_interpretation(
+            self.asset_dir,
+            budget=5_000,
+            bounded_selection=True,
+        )
+
+        def mutate(documents: dict[str, Any]) -> None:
+            gaps = documents["gaps"]
+            removed = next(
+                gap
+                for gap in gaps["items"]
+                if gap["code"] == "INTERPRETATION_GRAPH_OMITTED_BY_BUDGET"
+            )
+            gaps["items"] = [
+                gap for gap in gaps["items"] if gap["id"] != removed["id"]
+            ]
+            gaps["counts"]["INTERPRETATION_GRAPH_OMITTED_BY_BUDGET"] -= 1
+
+        self.install_rewritten_current(published, mutate=mutate)
+        with self.assertRaises(InterpretationArtifactInvalid) as caught:
+            load_current_interpretation(self.asset_dir)
+        self.assertEqual(
+            caught.exception.code,
+            "INTERPRETATION_SELECTION_GAPS_INVALID",
+        )
+
     def test_fabricated_pseudocode_is_rejected_after_full_rehash(self) -> None:
         published = publish_interpretation(self.asset_dir, budget=32_000)
 

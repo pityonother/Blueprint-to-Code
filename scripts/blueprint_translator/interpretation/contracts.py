@@ -14,7 +14,7 @@ TRACE_SCHEMA = "blueprint-to-code.blueprint-interpretation-trace/v1"
 GAPS_SCHEMA = "blueprint-to-code.blueprint-interpretation-gaps/v1"
 MANIFEST_SCHEMA = "blueprint-to-code.blueprint-interpretation-manifest/v1"
 CURRENT_SCHEMA = "blueprint-to-code.blueprint-interpretation-current/v1"
-INTERPRETER_VERSION = "blueprint-interpreter/1.0.0"
+INTERPRETER_VERSION = "blueprint-interpreter/1.1.0"
 PSEUDOCODE_HEADER = (
     "EVIDENCE-DERIVED PSEUDOCODE — NOT ORIGINAL C++ — NOT GUARANTEED COMPILABLE"
 )

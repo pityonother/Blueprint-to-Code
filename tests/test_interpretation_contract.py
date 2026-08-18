@@ -554,6 +554,130 @@ class InterpretationContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INTERPRETATION_BUDGET_EXCEEDED"):
             build_interpretation(large_asset, budget=32_000)
 
+    def test_bounded_interpretation_omits_only_whole_graphs_and_rebuilds(self) -> None:
+        large_asset, _source, _payload = publish_interpretation_fixture(
+            Path(self._temporary.name),
+            name="BoundedLargeInterpretationFixture",
+            payload=large_interpretation_payload(),
+        )
+
+        first = build_interpretation(
+            large_asset,
+            budget=32_000,
+            bounded_selection=True,
+        )
+        second = build_interpretation(
+            large_asset,
+            budget=32_000,
+            bounded_selection=True,
+        )
+        self.assertEqual(first.interpretation, second.interpretation)
+        self.assertEqual(first.gaps, second.gaps)
+        selection = first.interpretation["selection"]
+        self.assertEqual(
+            selection["algorithm"],
+            "graph-atomic-output-bounded/v1",
+        )
+        self.assertFalse(selection["complete"])
+        self.assertEqual(selection["selectedGraphRefs"], [])
+        self.assertEqual(len(selection["omittedGraphRefs"]), 1)
+        omitted_ref = selection["omittedGraphRefs"][0]
+        omission_gaps = [
+            gap
+            for gap in first.gaps["items"]
+            if gap["code"] == "INTERPRETATION_GRAPH_OMITTED_BY_BUDGET"
+        ]
+        self.assertEqual(len(omission_gaps), 1)
+        self.assertEqual(omission_gaps[0]["graphRef"], omitted_ref)
+        self.assertEqual(omission_gaps[0]["evidenceRefs"], [omitted_ref])
+        self.assertEqual(omission_gaps[0]["status"], "NOT_RECOVERED")
+        self.assertEqual(first.interpretation["controlFlow"]["graphs"], [])
+        self.assertEqual(first.interpretation["dataFlow"]["graphs"], [])
+
+        published = publish_interpretation(
+            large_asset,
+            budget=32_000,
+            bounded_selection=True,
+        )
+        loaded = load_current_interpretation(large_asset)
+        self.assertEqual(
+            loaded.interpretation["selection"],
+            selection,
+        )
+        self.assertEqual(
+            loaded.interpretation["semanticDigest"],
+            published.semantic_digest,
+        )
+
+    def test_bounded_interpretation_mixed_selection_does_not_leak_graph_rows(self) -> None:
+        source = load_interpretation_source(self.asset_dir)
+        built = build_interpretation(
+            self.asset_dir,
+            budget=5_000,
+            bounded_selection=True,
+        )
+        selection = built.interpretation["selection"]
+        selected = set(selection["selectedGraphRefs"])
+        omitted = set(selection["omittedGraphRefs"])
+        all_graphs = {str(row["graph_ref"]) for row in source.graphs}
+        self.assertTrue(selected)
+        self.assertTrue(omitted)
+        self.assertEqual(selected | omitted, all_graphs)
+        self.assertTrue(selected.isdisjoint(omitted))
+        self.assertEqual(
+            {
+                graph["graphRef"]
+                for flow in ("controlFlow", "dataFlow")
+                for graph in built.interpretation[flow]["graphs"]
+            },
+            selected,
+        )
+        self.assertTrue(
+            all(
+                statement["graphRef"] in selected
+                for statement in built.interpretation["statements"]
+                if statement["kind"] != "GAP" and statement["graphRef"]
+            )
+        )
+        omission_gaps = [
+            gap
+            for gap in built.gaps["items"]
+            if gap["code"] == "INTERPRETATION_GRAPH_OMITTED_BY_BUDGET"
+        ]
+        self.assertEqual(
+            {gap["graphRef"] for gap in omission_gaps},
+            omitted,
+        )
+        self.assertEqual(len(omission_gaps), len(omitted))
+
+    def test_bounded_output_retries_use_iteration_not_python_recursion(self) -> None:
+        source = load_interpretation_source(self.asset_dir)
+        real_once = engine_module._build_from_source_once
+        attempts = 0
+
+        def retry_many_times(*args: object, **kwargs: object):
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 1_100:
+                raise engine_module._BoundedSelectionRetry(32_000 - attempts)
+            return real_once(*args, **kwargs)
+
+        with patch.object(
+            engine_module,
+            "_build_from_source_once",
+            side_effect=retry_many_times,
+        ):
+            built = engine_module._build_from_source(
+                source,
+                budget=32_000,
+                bounded_selection=True,
+            )
+        self.assertEqual(attempts, 1_101)
+        self.assertEqual(
+            built.interpretation["selection"]["algorithm"],
+            "graph-atomic-output-bounded/v1",
+        )
+
     def test_deep_control_graph_scc_is_iterative(self) -> None:
         nodes = [f"bp://fixture/deep/{index:04d}" for index in range(5_000)]
         successors = {

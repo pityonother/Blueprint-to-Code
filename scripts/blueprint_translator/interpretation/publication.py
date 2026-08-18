@@ -271,6 +271,7 @@ def publish_interpretation(
     asset_dir: str | Path,
     *,
     budget: int = 20_000,
+    bounded_selection: bool = False,
     fail_on_gap: bool = False,
     allow_stale: bool = False,
     allow_legacy_fallback: bool = False,
@@ -284,6 +285,7 @@ def publish_interpretation(
     build = build_interpretation(
         root,
         budget=budget,
+        bounded_selection=bounded_selection,
         allow_stale=allow_stale,
         allow_legacy_fallback=allow_legacy_fallback,
     )

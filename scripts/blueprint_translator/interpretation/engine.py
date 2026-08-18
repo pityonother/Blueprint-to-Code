@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import replace
 from pathlib import Path
 import re
 from typing import Any, Iterable
@@ -23,6 +24,19 @@ from .source import InterpretationSource, load_interpretation_source
 
 
 MAX_INTERPRETATION_BUDGET = 10_000_000
+BOUNDED_SELECTION_ALGORITHM = "graph-atomic-output-bounded/v1"
+
+_SOURCE_ROW_WEIGHTS = {
+    "graphs": 64,
+    "nodes": 256,
+    "pins": 96,
+    "edges": 192,
+    "observations": 96,
+    "references": 64,
+    "defaults": 64,
+    "diagnostics": 96,
+    "coverage": 32,
+}
 
 
 _HINT_KEYWORDS = {
@@ -234,6 +248,141 @@ def _gap(
         "evidenceRefs": refs,
         "source": source,
     }
+
+
+def _source_work_units(source: InterpretationSource) -> int:
+    return sum(
+        len(getattr(source, field)) * weight
+        for field, weight in _SOURCE_ROW_WEIGHTS.items()
+    )
+
+
+def _scope_graph_ref(value: object, graph_refs: frozenset[str]) -> str | None:
+    scope_ref = _text(value)
+    if scope_ref in graph_refs:
+        return scope_ref
+    prefix, marker, tail = scope_ref.partition("/g/")
+    if not marker or not tail:
+        return None
+    graph_index = tail.split("/", 1)[0]
+    candidate = f"{prefix}/g/{graph_index}"
+    return candidate if candidate in graph_refs else None
+
+
+def _bounded_graph_source(
+    source: InterpretationSource,
+    *,
+    budget: int,
+    selection_limit: int | None = None,
+) -> tuple[InterpretationSource, dict[str, object], list[dict[str, Any]]]:
+    """Select whole graphs deterministically and keep every omission explicit."""
+
+    ordered_graphs = tuple(
+        sorted(
+            source.graphs,
+            key=lambda row: (int(row.get("export_index") or -1), str(row["graph_ref"])),
+        )
+    )
+    ordered_refs = tuple(str(row["graph_ref"]) for row in ordered_graphs)
+    ordered_ref_set = frozenset(ordered_refs)
+    node_graph = {
+        str(row["node_ref"]): str(row["graph_ref"])
+        for row in source.nodes
+    }
+
+    def row_graph(field: str, row: dict[str, Any]) -> str | None:
+        if field == "pins":
+            return node_graph.get(str(row.get("node_ref") or ""))
+        if field in {"nodes", "edges", "observations", "references"}:
+            value = str(row.get("graph_ref") or "")
+            return value if value in ordered_ref_set else None
+        if field in {"diagnostics", "coverage"}:
+            return _scope_graph_ref(row.get("scope_ref"), ordered_ref_set)
+        return None
+
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
+        graph_ref: {field: [] for field in _SOURCE_ROW_WEIGHTS if field != "graphs"}
+        for graph_ref in ordered_refs
+    }
+    fixed: dict[str, list[dict[str, Any]]] = {
+        field: [] for field in _SOURCE_ROW_WEIGHTS if field != "graphs"
+    }
+    for field in fixed:
+        for row in getattr(source, field):
+            owner = row_graph(field, row)
+            (grouped[owner][field] if owner is not None else fixed[field]).append(row)
+
+    fixed_work = sum(
+        len(rows) * _SOURCE_ROW_WEIGHTS[field]
+        for field, rows in fixed.items()
+    )
+    if fixed_work > budget:
+        raise ValueError(
+            "INTERPRETATION_BUDGET_EXCEEDED: "
+            f"asset_scope_work_units={fixed_work} budget={budget}"
+        )
+
+    effective_selection_limit = max(
+        fixed_work,
+        min(budget, budget if selection_limit is None else selection_limit),
+    )
+    selected_work = fixed_work
+    selected_refs: list[str] = []
+    omitted_refs: list[str] = []
+    graph_by_ref = {str(row["graph_ref"]): row for row in ordered_graphs}
+    for graph_ref in ordered_refs:
+        rows = grouped[graph_ref]
+        graph_work = _SOURCE_ROW_WEIGHTS["graphs"] + sum(
+            len(values) * _SOURCE_ROW_WEIGHTS[field]
+            for field, values in rows.items()
+        )
+        if selected_work + graph_work <= effective_selection_limit:
+            selected_refs.append(graph_ref)
+            selected_work += graph_work
+        else:
+            omitted_refs.append(graph_ref)
+
+    selected_set = frozenset(selected_refs)
+    filtered_fields: dict[str, tuple[dict[str, Any], ...]] = {
+        "graphs": tuple(graph_by_ref[ref] for ref in selected_refs),
+    }
+    for field, fixed_rows in fixed.items():
+        filtered_fields[field] = tuple(
+            [*fixed_rows]
+            + [
+                row
+                for graph_ref in selected_refs
+                for row in grouped[graph_ref][field]
+            ]
+        )
+    filtered = replace(source, **filtered_fields)
+    actual_selected_work = _source_work_units(filtered)
+    selection = {
+        "algorithm": BOUNDED_SELECTION_ALGORITHM,
+        "budget": budget,
+        "sourceWorkUnits": _source_work_units(source),
+        "selectedWorkUnits": actual_selected_work,
+        "complete": not omitted_refs,
+        "selectedGraphRefs": selected_refs,
+        "omittedGraphRefs": omitted_refs,
+    }
+    omission_gaps = [
+        _gap(
+            "INTERPRETATION_GRAPH_OMITTED_BY_BUDGET",
+            graph_ref=graph_ref,
+            detail=(
+                "This whole graph was omitted from the bounded Interpretation projection; "
+                "its complete facts remain queryable in the bound Evidence revision."
+            ),
+            evidence_refs=[graph_ref],
+            status="NOT_RECOVERED",
+            source="INTERPRETER_BUDGET_SELECTION",
+        )
+        for graph_ref in omitted_refs
+    ]
+    if selected_set & frozenset(omitted_refs):
+        raise AssertionError("bounded graph selection sets must be disjoint")
+    return filtered, selection, omission_gaps
 
 
 def _statement_text(node: dict[str, Any], kind: str) -> str:
@@ -652,7 +801,19 @@ def _validate_statement_evidence(
             )
 
 
-def _build_from_source(source: InterpretationSource, *, budget: int) -> InterpretationBuild:
+class _BoundedSelectionRetry(Exception):
+    def __init__(self, selection_limit: int) -> None:
+        super().__init__(selection_limit)
+        self.selection_limit = selection_limit
+
+
+def _build_from_source_once(
+    source: InterpretationSource,
+    *,
+    budget: int,
+    bounded_selection: bool = False,
+    _selection_limit: int | None = None,
+) -> InterpretationBuild:
     try:
         effective_budget = int(budget)
     except (TypeError, ValueError) as exc:
@@ -662,20 +823,16 @@ def _build_from_source(source: InterpretationSource, *, budget: int) -> Interpre
             "INTERPRETATION_BUDGET_INVALID: budget must be between 1 and "
             f"{MAX_INTERPRETATION_BUDGET}"
         )
-    source_work_units = sum(
-        len(rows) * weight
-        for rows, weight in (
-            (source.graphs, 64),
-            (source.nodes, 256),
-            (source.pins, 96),
-            (source.edges, 192),
-            (source.observations, 96),
-            (source.references, 64),
-            (source.defaults, 64),
-            (source.diagnostics, 96),
-            (source.coverage, 32),
+    source_work_units = _source_work_units(source)
+    selection: dict[str, object] = {"graphRefs": []}
+    selection_gaps: list[dict[str, Any]] = []
+    if bounded_selection:
+        source, selection, selection_gaps = _bounded_graph_source(
+            source,
+            budget=effective_budget,
+            selection_limit=_selection_limit,
         )
-    )
+        source_work_units = _source_work_units(source)
     if source_work_units > effective_budget:
         raise ValueError(
             "INTERPRETATION_BUDGET_EXCEEDED: "
@@ -703,6 +860,7 @@ def _build_from_source(source: InterpretationSource, *, budget: int) -> Interpre
         *data.gaps,
         *_structural_gaps(source),
         *_default_gaps(source),
+        *selection_gaps,
     ]
     gaps_by_id = {str(gap["id"]): gap for gap in combined_gaps}
     gaps = sorted(gaps_by_id.values(), key=lambda row: str(row["id"]))
@@ -749,7 +907,7 @@ def _build_from_source(source: InterpretationSource, *, budget: int) -> Interpre
         "evidenceManifestSha256": evidence_manifest_sha256,
         "interpreterVersion": INTERPRETER_VERSION,
         "schemaVersion": INTERPRETATION_SCHEMA,
-        "selection": {"graphRefs": []},
+        "selection": selection,
         "assetSummary": _asset_summary(
             source,
             gaps,
@@ -803,6 +961,18 @@ def _build_from_source(source: InterpretationSource, *, budget: int) -> Interpre
         + len(pseudocode.encode("utf-8"))
     ) // 4
     if estimated_tokens > effective_budget:
+        selected_refs = (
+            list(selection.get("selectedGraphRefs") or [])
+            if bounded_selection
+            else []
+        )
+        if selected_refs:
+            # The initial graph-atomic pass is bounded by source work.  If its
+            # rendered projection is still too large, lower that limit and
+            # deterministically replay the same greedy ordering until both the
+            # source and rendered-output budgets are satisfied.
+            next_limit = int(selection["selectedWorkUnits"]) - 1
+            raise _BoundedSelectionRetry(next_limit)
         raise ValueError(
             "INTERPRETATION_BUDGET_EXCEEDED: "
             f"estimated={estimated_tokens} budget={effective_budget}"
@@ -818,10 +988,43 @@ def _build_from_source(source: InterpretationSource, *, budget: int) -> Interpre
     )
 
 
+def _build_from_source(
+    source: InterpretationSource,
+    *,
+    budget: int,
+    bounded_selection: bool = False,
+) -> InterpretationBuild:
+    selection_limit: int | None = None
+    previous_limit: int | None = None
+    while True:
+        try:
+            return _build_from_source_once(
+                source,
+                budget=budget,
+                bounded_selection=bounded_selection,
+                _selection_limit=selection_limit,
+            )
+        except _BoundedSelectionRetry as retry:
+            if (
+                not bounded_selection
+                or retry.selection_limit < 0
+                or (
+                    previous_limit is not None
+                    and retry.selection_limit >= previous_limit
+                )
+            ):
+                raise AssertionError(
+                    "bounded Interpretation selection did not make monotonic progress"
+                ) from retry
+            previous_limit = retry.selection_limit
+            selection_limit = retry.selection_limit
+
+
 def build_interpretation(
     asset_dir: str | Path,
     *,
     budget: int = 20_000,
+    bounded_selection: bool = False,
     allow_stale: bool = False,
     allow_legacy_fallback: bool = False,
 ) -> InterpretationBuild:
@@ -830,7 +1033,15 @@ def build_interpretation(
         allow_stale=allow_stale,
         allow_legacy_fallback=allow_legacy_fallback,
     )
-    return _build_from_source(source, budget=budget)
+    return _build_from_source(
+        source,
+        budget=budget,
+        bounded_selection=bounded_selection,
+    )
 
 
-__all__ = ["MAX_INTERPRETATION_BUDGET", "build_interpretation"]
+__all__ = [
+    "BOUNDED_SELECTION_ALGORITHM",
+    "MAX_INTERPRETATION_BUDGET",
+    "build_interpretation",
+]
