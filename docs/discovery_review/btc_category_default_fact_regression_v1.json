@@ -1,0 +1,149 @@
+{
+  "schema": "ark.btc.category-default-fact-regression-contract.v1",
+  "purposeZh": "固定复测分类基线里 6 个 READY+CLOSED_EXACT 样本的 14 个默认值，验证 MCP 能直接返回可用值和当前 bp:// 引用。",
+  "caseCount": 14,
+  "cases": [
+    {
+      "sampleIndex": 13,
+      "categoryCode": "EDITOR_LEVEL_TOOL",
+      "asset": "EUA_AreaPoint",
+      "goal": "Radius",
+      "expected": {
+        "typeName": "FloatProperty",
+        "value": 3500.0
+      }
+    },
+    {
+      "sampleIndex": 13,
+      "categoryCode": "EDITOR_LEVEL_TOOL",
+      "asset": "EUA_AreaPoint",
+      "goal": "DataLayerAssets",
+      "expected": {
+        "typeName": "ArrayProperty",
+        "resolvedObjectPaths": [
+          "/Game/Maps/TheIslandSubMaps/DataLayers/EditorTools.EditorTools"
+        ]
+      }
+    },
+    {
+      "sampleIndex": 17,
+      "categoryCode": "GAMEPLAY_EFFECT_BUFF",
+      "asset": "Buff_CycloneBox",
+      "goal": "CycloneDuration",
+      "expected": {
+        "typeName": "FloatProperty",
+        "value": 90.0
+      }
+    },
+    {
+      "sampleIndex": 17,
+      "categoryCode": "GAMEPLAY_EFFECT_BUFF",
+      "asset": "Buff_CycloneBox",
+      "goal": "CycloneInterval",
+      "expected": {
+        "typeName": "FloatProperty",
+        "value": 360.0
+      }
+    },
+    {
+      "sampleIndex": 17,
+      "categoryCode": "GAMEPLAY_EFFECT_BUFF",
+      "asset": "Buff_CycloneBox",
+      "goal": "MaxNumCycloneInBox",
+      "expected": {
+        "typeName": "IntProperty",
+        "value": 1
+      }
+    },
+    {
+      "sampleIndex": 25,
+      "categoryCode": "MISSION_EVENT_FLOW",
+      "asset": "MissionServerSidePoint_HordeDinoSpawner",
+      "goal": "bIsTamed",
+      "expected": {
+        "typeName": "BoolProperty",
+        "value": true
+      }
+    },
+    {
+      "sampleIndex": 25,
+      "categoryCode": "MISSION_EVENT_FLOW",
+      "asset": "MissionServerSidePoint_HordeDinoSpawner",
+      "goal": "bIgnoreMaxTameLimit",
+      "expected": {
+        "typeName": "BoolProperty",
+        "value": true
+      }
+    },
+    {
+      "sampleIndex": 25,
+      "categoryCode": "MISSION_EVENT_FLOW",
+      "asset": "MissionServerSidePoint_HordeDinoSpawner",
+      "goal": "bUseFixedSpawnLevel",
+      "expected": {
+        "typeName": "BoolProperty",
+        "value": false
+      }
+    },
+    {
+      "sampleIndex": 31,
+      "categoryCode": "NPC_SPAWN_MANAGER_WATER",
+      "asset": "NPCZoneManagerBlueprint_Water",
+      "goal": "MinDesiredNumberOfNPC",
+      "expected": {
+        "typeName": "IntProperty",
+        "value": 30
+      }
+    },
+    {
+      "sampleIndex": 31,
+      "categoryCode": "NPC_SPAWN_MANAGER_WATER",
+      "asset": "NPCZoneManagerBlueprint_Water",
+      "goal": "MaxDesiredNumberOfNPC",
+      "expected": {
+        "typeName": "IntProperty",
+        "value": 30
+      }
+    },
+    {
+      "sampleIndex": 31,
+      "categoryCode": "NPC_SPAWN_MANAGER_WATER",
+      "asset": "NPCZoneManagerBlueprint_Water",
+      "goal": "bOnlySpawnInWater",
+      "expected": {
+        "typeName": "BoolProperty",
+        "value": true
+      }
+    },
+    {
+      "sampleIndex": 31,
+      "categoryCode": "NPC_SPAWN_MANAGER_WATER",
+      "asset": "NPCZoneManagerBlueprint_Water",
+      "goal": "bNeverSpawnInWater",
+      "expected": {
+        "typeName": "BoolProperty",
+        "value": false
+      }
+    },
+    {
+      "sampleIndex": 32,
+      "categoryCode": "PACKED_LEVEL_ENVIRONMENT_ACTOR",
+      "asset": "BPP_GiantBranch_D",
+      "goal": "WorldAsset",
+      "expected": {
+        "typeName": "SoftObjectProperty",
+        "objectPath": "/Game/Genesis/Environment/Bog/TreeRocks/GiantBranches/Instances/GiantBranch_D.GiantBranch_D"
+      }
+    },
+    {
+      "sampleIndex": 44,
+      "categoryCode": "REWARD_SPAWN_EFFECT",
+      "asset": "BP_SpawnCrate",
+      "goal": "AnimLength",
+      "expected": {
+        "typeName": "DoubleProperty",
+        "value": 6.0
+      }
+    }
+  ]
+}

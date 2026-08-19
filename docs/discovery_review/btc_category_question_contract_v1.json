@@ -1,0 +1,273 @@
+{
+  "schema": "ark.btc.category-question-contract.v1",
+  "purposeZh": "固定每个资产类别的最小玩家问题，使同一批样本在工具改进前后可以公平重跑。",
+  "contracts": {
+    "AUDIO_AMBIENCE": {
+      "questionZh": "这个环境音资产播放什么声音，使用什么衰减或区域设置？",
+      "requiredSignalGroups": [
+        {"id": "audio-source", "terms": ["Sound", "Audio", "Ambient"]},
+        {"id": "audio-shape", "terms": ["Attenuation", "Volume", "Radius"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "CAMERA_CONTROL": {
+      "questionZh": "玩家进入这个区域后视角如何改变，又在什么条件下恢复？",
+      "requiredSignalGroups": [
+        {"id": "camera-action", "terms": ["Camera", "ViewTarget", "FOV"]},
+        {"id": "camera-trigger", "terms": ["Overlap", "Enter", "Exit", "Activate"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "CINEMATIC_CONTROL": {
+      "questionZh": "这个资产控制哪段过场或插值，何时开始和结束？",
+      "requiredSignalGroups": [
+        {"id": "cinematic-source", "terms": ["Matinee", "Sequence", "Interpolation", "Timeline"]},
+        {"id": "cinematic-action", "terms": ["Play", "Start", "Stop", "Finished"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "CREATURE_CHARACTER": {
+      "questionZh": "这个角色的核心默认配置是什么，出生后首先执行哪些关键逻辑？",
+      "requiredSignalGroups": [
+        {"id": "character-config", "terms": ["Character", "Controller", "Movement", "Dino"]},
+        {"id": "character-entry", "terms": ["BeginPlay", "Construction", "Spawn"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "DATA_CONFIGURATION": {
+      "questionZh": "这个配置资产实际保存了哪些业务字段和值？",
+      "requiredSignalGroups": [
+        {"id": "configuration-field", "terms": ["Settings", "Config", "Group", "Data"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "DESTRUCTIBLE_ENVIRONMENT_STRUCTURE": {
+      "questionZh": "它引用哪个 GeometryCollection，是否还能证明运行时破坏条件？",
+      "requiredSignalGroups": [
+        {"id": "geometry", "terms": ["GeometryCollection", "Destructible"]},
+        {"id": "destruction", "terms": ["Damage", "Fracture", "Break"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "EDITOR_LEVEL_TOOL": {
+      "questionZh": "这个编辑器工具会生成或修改什么关卡对象，入口和结果是什么？",
+      "requiredSignalGroups": [
+        {"id": "tool-target", "terms": ["Spline", "Area", "Level", "Flowmap"]},
+        {"id": "tool-action", "terms": ["Create", "Generate", "Update", "Build"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "EXPLORER_CHEST_ACTOR": {
+      "questionZh": "能否确认它是可开启宝箱，以及奖励或 Loot 绑定来自哪里？",
+      "requiredSignalGroups": [
+        {"id": "openable", "terms": ["OpenAnimation", "Open", "Chest"]},
+        {"id": "reward-binding", "terms": ["Loot", "Inventory", "ItemSet", "Reward"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "GAMEPLAY_EFFECT_BUFF": {
+      "questionZh": "这个 Buff 何时添加或移除，影响谁，持续和叠加规则是什么？",
+      "requiredSignalGroups": [
+        {"id": "buff-effect", "terms": ["Buff", "Apply", "AddBuff", "Status"]},
+        {"id": "buff-lifetime", "terms": ["Duration", "Timer", "Deactivate", "Remove"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "HAZARD_DAMAGE_VOLUME": {
+      "questionZh": "玩家或生物在什么条件下触发危险，具体受到什么伤害或效果？",
+      "requiredSignalGroups": [
+        {"id": "hazard-trigger", "terms": ["Overlap", "Trigger", "Enter", "Touch"]},
+        {"id": "hazard-effect", "terms": ["Damage", "Buff", "Hazard", "Kill"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "ITEM_WEAPON_PICKUP": {
+      "questionZh": "拾取后会给玩家什么物品或武器，触发链是什么？",
+      "requiredSignalGroups": [
+        {"id": "pickup-trigger", "terms": ["Pickup", "Overlap", "Touch", "Give"]},
+        {"id": "pickup-item", "terms": ["PrimalItem", "Item", "Weapon", "Inventory"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "LIGHTING_WEATHER_SKY": {
+      "questionZh": "这个资产控制哪些光照、天气或天空参数，关键默认值是多少？",
+      "requiredSignalGroups": [
+        {"id": "lighting-target", "terms": ["Light", "Sky", "Cloud", "Weather"]},
+        {"id": "lighting-value", "terms": ["Intensity", "Color", "Temperature", "Brightness"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "MISSION_EVENT_FLOW": {
+      "questionZh": "任务何时触发、生成什么、如何推进并结束？",
+      "requiredSignalGroups": [
+        {"id": "mission-trigger", "terms": ["Mission", "Trigger", "Start", "Overlap"]},
+        {"id": "mission-progress", "terms": ["Spawn", "Complete", "Stage", "Checkpoint"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "MOD_METADATA": {
+      "questionZh": "这个 Mod 数据资产记录了什么名称、入口、依赖或兼容信息？",
+      "requiredSignalGroups": [
+        {"id": "mod-field", "terms": ["Mod", "Name", "Map", "Dependency", "Description"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "NAVIGATION_SYSTEM": {
+      "questionZh": "这个原生导航类怎样选择导航区域并更新活动网格？",
+      "requiredSignalGroups": [],
+      "requiresExactFlow": true
+    },
+    "NPC_SPAWN_MANAGER_CAVE": {
+      "questionZh": "洞穴刷新管理器使用哪个 SpawnEntries，并有哪些洞穴或水陆限制？",
+      "requiredSignalGroups": [
+        {"id": "spawn-table", "terms": ["NPCSpawnEntries", "SpawnEntries"]},
+        {"id": "cave-rule", "terms": ["Cave", "Water", "DesiredNumber"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "NPC_SPAWN_MANAGER_LAND": {
+      "questionZh": "陆地刷新管理器使用哪个 SpawnEntries，是否禁止水下生成？",
+      "requiredSignalGroups": [
+        {"id": "spawn-table", "terms": ["NPCSpawnEntries", "SpawnEntries"]},
+        {"id": "land-rule", "terms": ["NeverSpawnInWater", "Water", "DesiredNumber"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "NPC_SPAWN_MANAGER_WATER": {
+      "questionZh": "水域刷新管理器使用哪个 SpawnEntries，是否只在水中生成？",
+      "requiredSignalGroups": [
+        {"id": "spawn-table", "terms": ["NPCSpawnEntries", "SpawnEntries"]},
+        {"id": "water-rule", "terms": ["OnlySpawnInWater", "Water", "DesiredNumber"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "PACKED_LEVEL_ENVIRONMENT_ACTOR": {
+      "questionZh": "这个打包场景 Actor 引用了哪个 LevelInstance 或场景内容？",
+      "requiredSignalGroups": [
+        {"id": "level-instance", "terms": ["LevelInstance", "PackedLevel", "WorldAsset"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "PORTAL_TELEPORT_POINT": {
+      "questionZh": "传送在什么条件下触发，目标点或目标地图在哪里？",
+      "requiredSignalGroups": [
+        {"id": "teleport-trigger", "terms": ["Teleport", "Overlap", "Activate"]},
+        {"id": "teleport-destination", "terms": ["Destination", "Target", "Location", "Map"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "PROCEDURAL_ECOLOGY": {
+      "questionZh": "PCG 根据什么图、点或标签生成什么内容，何时重建？",
+      "requiredSignalGroups": [
+        {"id": "pcg-input", "terms": ["PCG", "Point", "Biome", "Tag"]},
+        {"id": "pcg-output", "terms": ["Graph", "Spawn", "Generate", "Resource"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "PROGRESSION_SKILL_DATA": {
+      "questionZh": "这个技能或里程碑数据定义了哪些要求、奖励和解锁引用？",
+      "requiredSignalGroups": [
+        {"id": "progression-field", "terms": ["Requirement", "Reward", "Unlock", "Skill", "Milestone"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "RESOURCE_INTERACTION_NODE": {
+      "questionZh": "它究竟是资源采集点、环境增益点还是其他交互，输出和绑定是什么？",
+      "requiredSignalGroups": [
+        {"id": "resource-role", "terms": ["Resource", "Harvest", "Oil", "Gas", "StructureTag"]},
+        {"id": "interaction-output", "terms": ["BuffsToApply", "Give", "Inventory", "Apply"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "REVIEW_REQUIRED": {
+      "questionZh": "不依赖资产名字，仅凭恢复内容能否确定这个资产的主要用途？",
+      "requiredSignalGroups": [
+        {"id": "role-evidence", "terms": ["Mesh", "Component", "Material", "Sound", "Station", "Flower"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "REWARD_MARKER_POINT": {
+      "questionZh": "它是奖励点、箱体还是纯标记，实际引用了哪个奖励资产？",
+      "requiredSignalGroups": [
+        {"id": "marker-role", "terms": ["Point", "Marker", "Chest", "Crate"]},
+        {"id": "reward-reference", "terms": ["Loot", "Inventory", "ItemSet", "Reward"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "REWARD_SPAWN_EFFECT": {
+      "questionZh": "它是补给箱容器、刷新逻辑还是视觉效果控制器？",
+      "requiredSignalGroups": [
+        {"id": "crate-role", "terms": ["Crate", "Supply", "Spawn"]},
+        {"id": "effect-role", "terms": ["Emitter", "Particle", "Effect", "Component"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "REWARD_SPAWN_VOLUME": {
+      "questionZh": "这个原生区域怎样选择刷新点并生成补给箱？",
+      "requiredSignalGroups": [],
+      "requiresExactFlow": true
+    },
+    "SPAWN_ZONE_SYSTEM": {
+      "questionZh": "这个原生区域怎样参与 NPC 刷新、重叠和休眠同步？",
+      "requiredSignalGroups": [],
+      "requiresExactFlow": true
+    },
+    "STRUCTURE_BUILDING": {
+      "questionZh": "它是玩家可建结构还是环境物件，结构资源和运行时行为证据是什么？",
+      "requiredSignalGroups": [
+        {"id": "structure-role", "terms": ["PrimalStructure", "Structure", "GeometryCollection"]},
+        {"id": "structure-behavior", "terms": ["Build", "Damage", "Destroy", "Placement"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "VFX_POST_PROCESS": {
+      "questionZh": "这个资产修改哪些后处理或视觉参数，在什么条件下生效？",
+      "requiredSignalGroups": [
+        {"id": "post-process", "terms": ["PostProcess", "Blend", "Material", "Exposure"]},
+        {"id": "activation", "terms": ["Activate", "Enabled", "BeginPlay", "Preview"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "WATER_SYSTEM": {
+      "questionZh": "这个水体或瀑布由哪些组件、样条、声音和材质共同控制？",
+      "requiredSignalGroups": [
+        {"id": "water-presentation", "terms": ["Water", "Particle", "Material"]},
+        {"id": "water-shape-audio", "terms": ["Spline", "Audio", "Sound", "Flow"]}
+      ],
+      "requiresExactFlow": true
+    },
+    "WORLD_ENVIRONMENT_GEOMETRY": {
+      "questionZh": "它是纯场景表现还是还带伤害逻辑，引用哪些网格、材质或样条？",
+      "requiredSignalGroups": [
+        {"id": "environment-asset", "terms": ["Mesh", "Material", "Spline", "Geometry"]},
+        {"id": "gameplay-boundary", "terms": ["Damage", "Buff", "Overlap", "Collision"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "WORLD_LOGIC_MARKER_POINT": {
+      "questionZh": "这个服务端点位有哪些网络和用途默认值，是否含实际玩法逻辑？",
+      "requiredSignalGroups": [
+        {"id": "server-marker", "terms": ["NetLoadOnClient", "ServerSide", "Point", "ActorLabel"]}
+      ],
+      "requiresExactFlow": false
+    },
+    "WORLD_RESTRICTION_VOLUME": {
+      "questionZh": "这个原生禁建区域怎样判断某个位置或结构是否允许建造？",
+      "requiredSignalGroups": [],
+      "requiresExactFlow": true
+    },
+    "WORLD_SPLINE_PATH": {
+      "questionZh": "谁消费这个原生样条，样条如何决定路径、方向或强度？",
+      "requiredSignalGroups": [],
+      "requiresExactFlow": true
+    },
+    "WORLD_TERMINAL": {
+      "questionZh": "这个世界终端的显示名是什么，交互、库存或 Boss 行为如何绑定？",
+      "requiredSignalGroups": [
+        {"id": "terminal-identity", "terms": ["DescriptiveName", "Terminal", "Obelisk"]},
+        {"id": "terminal-function", "terms": ["Inventory", "Activate", "Boss", "Tribute"]}
+      ],
+      "requiresExactFlow": false
+    }
+  }
+}
