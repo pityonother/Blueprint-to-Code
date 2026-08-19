@@ -127,29 +127,56 @@ class ArkdevMcpContractTests(unittest.TestCase):
         separator = chr(92)
         posix_private = "/" + "/".join(("home", "ac", "private"))
         users_private = "/" + "/".join(("Users", "ac", "private"))
+        volumes_asset = "/" + "/".join(("Volumes", "Secret", "Project", "Asset.Asset"))
+        workspace_asset = "/" + "/".join(("workspace", "repo", "Secret.Secret"))
+        local_file_uri = "file:" + "//localhost" + users_private + "/evidence.sqlite"
+        percent = chr(37)
+        encoded_slash = percent + "2F"
+        encoded_colon = percent + "3A"
+        encoded_backslash = percent + "5C"
         for private_value in (
             {"objectPath": posix_private + "/evidence.sqlite"},
             {"objectPath": users_private + "/private.private"},
-            {"objectPath": "/Volumes/Secret/Project/Asset.Asset"},
-            {"objectPath": "/workspace/repo/Secret.Secret"},
+            {"objectPath": volumes_asset},
+            {"objectPath": workspace_asset},
             {"objectPath": "/C/Users/ac/Secret.Secret"},
             {"objectPath": "/Game/private/evidence.sqlite"},
             {"objectPath": "file://" + users_private + "/evidence.sqlite"},
             {"objectPath": "file:" + users_private + "/evidence.sqlite"},
-            {
-                "objectPath": "file://localhost"
-                + users_private
-                + "/evidence.sqlite"
-            },
+            {"objectPath": local_file_uri},
             {"detail": "/Game/private/private.private"},
             {"detail": "file://" + users_private + "/evidence.sqlite"},
             {"detail": "file:relative/private.txt"},
             {"detail": "file:secret.txt"},
-            {"detail": "file:%2F%2F%2FUsers%2Fac%2Fprivate%2Fevidence.sqlite"},
-            {"detail": "file%3A%2F%2F%2FC%3A%2FUsers%2Fac%2Fprivate"},
-            {"detail": "%2FUsers%2Fac%2Fprivate%2Fevidence.sqlite"},
-            {"detail": "%252Fhome%252Fac%252Fprivate"},
-            {"detail": "%5CUsers%5Cac%5Cprivate%5Cevidence.sqlite"},
+            {
+                "detail": "file:"
+                + encoded_slash * 3
+                + encoded_slash.join(("Users", "ac", "private", "evidence.sqlite"))
+            },
+            {
+                "detail": "file"
+                + encoded_colon
+                + encoded_slash * 3
+                + "C"
+                + encoded_colon
+                + encoded_slash
+                + encoded_slash.join(("Users", "ac", "private"))
+            },
+            {
+                "detail": encoded_slash
+                + encoded_slash.join(("Users", "ac", "private", "evidence.sqlite"))
+            },
+            {
+                "detail": percent
+                + "252F"
+                + (percent + "252F").join(("home", "ac", "private"))
+            },
+            {
+                "detail": encoded_backslash
+                + encoded_backslash.join(
+                    ("Users", "ac", "private", "evidence.sqlite")
+                )
+            },
             {"detail": separator + separator.join(("Users", "ac", "private"))},
             {"detail": "C:Users" + separator + "ac" + separator + "private"},
             {"detail": "source:" + posix_private},

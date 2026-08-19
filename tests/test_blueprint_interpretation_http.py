@@ -276,16 +276,20 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
         separator = chr(92)
         posix_private = "/" + "/".join(("home", "ac", "private"))
         users_private = "/" + "/".join(("Users", "ac", "private"))
+        volumes_asset = "/" + "/".join(("Volumes", "Secret", "Project", "Asset.Asset"))
+        workspace_asset = "/" + "/".join(("workspace", "repo", "Secret.Secret"))
+        local_file_uri = "file:" + "//localhost" + users_private + "/evidence.sqlite"
+        encoded_slash = chr(37) + "2F"
         for local_path in (
             posix_private + "/evidence.sqlite",
             users_private + "/private.private",
-            "/Volumes/Secret/Project/Asset.Asset",
-            "/workspace/repo/Secret.Secret",
+            volumes_asset,
+            workspace_asset,
             "/C/Users/ac/Secret.Secret",
             "/Game/private/evidence.sqlite",
             "file://" + users_private + "/evidence.sqlite",
             "file:" + users_private + "/evidence.sqlite",
-            "file://localhost" + users_private + "/evidence.sqlite",
+            local_file_uri,
         ):
             with self.subTest(local_path=local_path):
                 with self.assertRaises(ApiProblem) as raised:
@@ -305,7 +309,13 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
             _path_free({"detail": "file://" + users_private + "/evidence.sqlite"})
         with self.assertRaises(ApiProblem):
             _path_free(
-                {"detail": "file:%2F%2F%2FUsers%2Fac%2Fprivate%2Fevidence.sqlite"}
+                {
+                    "detail": "file:"
+                    + encoded_slash * 3
+                    + encoded_slash.join(
+                        ("Users", "ac", "private", "evidence.sqlite")
+                    )
+                }
             )
         with self.assertRaises(ApiProblem):
             _path_free(
