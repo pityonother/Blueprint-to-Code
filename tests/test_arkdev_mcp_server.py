@@ -129,6 +129,14 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
                     "budgetTokens": 2400,
                 },
             )
+            default_context = await client.call_tool(
+                "blueprint_get_context",
+                {
+                    "asset": "InterpretationFixture",
+                    "goal": "DefaultThreshold",
+                    "budgetTokens": 2400,
+                },
+            )
             error = await client.call_tool(
                 "blueprint_get_context",
                 {"asset": "MissingFixture", "goal": "ReceiveBeginPlay"},
@@ -157,6 +165,10 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
             context.structured_content["schema"],
             "blueprint-to-code.mcp-blueprint-context/v1",
         )
+        self.assertFalse(default_context.is_error)
+        self.assertEqual(len(default_context.structured_content["facts"]), 1)
+        self.assertEqual(default_context.structured_content["graphTargets"], [])
+        self.assertIn("1 facts and 0 nodes", default_context.content[0].text)
         self.assertTrue(error.is_error)
         self.assertEqual(
             error.structured_content,

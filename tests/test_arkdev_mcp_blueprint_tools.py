@@ -60,6 +60,313 @@ class BlueprintServiceTests(unittest.TestCase):
         arguments.update(overrides)
         return self.service.get_context(**arguments)
 
+    def test_single_term_goal_deduplicates_identical_default_search(self) -> None:
+        class RecordingRepository:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+            def query(self, request: dict[str, object]) -> dict[str, object]:
+                kinds = tuple(str(value) for value in request["kinds"])
+                self.calls.append((str(request["query"]), kinds))
+                return {"items": []}
+
+        repository = RecordingRepository()
+
+        BlueprintService._search_goal(  # noqa: SLF001 - bounded search contract
+            repository,  # type: ignore[arg-type]
+            "DefaultThreshold",
+        )
+
+        self.assertEqual(
+            repository.calls,
+            [
+                ("DefaultThreshold", ("default",)),
+                ("DefaultThreshold", ("graph", "node")),
+            ],
+        )
+
+    def test_default_fact_missing_source_status_fails_closed(self) -> None:
+        class StatuslessRepository:
+            def query(self, _request: dict[str, object]) -> dict[str, object]:
+                return {
+                    "items": [
+                        {
+                            "ref": "bp://asset@revision/default/Value",
+                            "kind": "default",
+                            "name": "Value",
+                            "typeName": "IntProperty",
+                            "valueUsable": True,
+                            "value": 6,
+                        }
+                    ]
+                }
+
+        facts = BlueprintService._default_facts(  # noqa: SLF001
+            StatuslessRepository(),  # type: ignore[arg-type]
+            [
+                {
+                    "ref": "bp://asset@revision/default/Value",
+                    "kind": "default",
+                    "name": "Value",
+                }
+            ],
+            "Value",
+        )
+
+        self.assertEqual(facts[0]["sourceValueStatus"], "NOT_RECOVERED")
+        self.assertEqual(facts[0]["status"], "NOT_RECOVERED")
+        self.assertIs(facts[0]["valueUsable"], False)
+
+    def test_default_fact_rejects_entity_from_a_different_evidence_ref(
+        self,
+    ) -> None:
+        requested_ref = "bp://asset@revision/default/RequestedValue"
+        returned_ref = "bp://asset@revision/default/DifferentValue"
+
+        class MismatchedRepository:
+            def query(self, _request: dict[str, object]) -> dict[str, object]:
+                return {
+                    "items": [
+                        {
+                            "ref": returned_ref,
+                            "kind": "default",
+                            "name": "DifferentValue",
+                            "typeName": "IntProperty",
+                            "valueStatus": "CONFIRMED",
+                            "valueUsable": True,
+                            "value": 99,
+                        }
+                    ]
+                }
+
+        with self.assertRaises(McpExecutionError):
+            BlueprintService._default_facts(  # noqa: SLF001
+                MismatchedRepository(),  # type: ignore[arg-type]
+                [
+                    {
+                        "ref": requested_ref,
+                        "kind": "default",
+                        "name": "RequestedValue",
+                    }
+                ],
+                "RequestedValue",
+            )
+
+    def test_default_fact_rejects_extra_entity_items(self) -> None:
+        requested_ref = "bp://asset@revision/default/RequestedValue"
+
+        class ExtraItemRepository:
+            def query(self, _request: dict[str, object]) -> dict[str, object]:
+                return {
+                    "items": [
+                        {
+                            "ref": requested_ref,
+                            "kind": "default",
+                            "name": "RequestedValue",
+                            "typeName": "IntProperty",
+                            "valueStatus": "CONFIRMED",
+                            "valueUsable": True,
+                            "value": 7,
+                        },
+                        {
+                            "ref": "bp://asset@revision/default/UnexpectedValue",
+                            "kind": "default",
+                            "name": "UnexpectedValue",
+                            "typeName": "IntProperty",
+                            "valueStatus": "CONFIRMED",
+                            "valueUsable": True,
+                            "value": 99,
+                        },
+                    ]
+                }
+
+        with self.assertRaises(McpExecutionError):
+            BlueprintService._default_facts(  # noqa: SLF001
+                ExtraItemRepository(),  # type: ignore[arg-type]
+                [
+                    {
+                        "ref": requested_ref,
+                        "kind": "default",
+                        "name": "RequestedValue",
+                    }
+                ],
+                "RequestedValue",
+            )
+
+    def test_default_fact_preserves_nested_resolved_object_value_path(self) -> None:
+        ref = "bp://asset@revision/default/NestedObjects"
+
+        class NestedObjectRepository:
+            def query(self, _request: dict[str, object]) -> dict[str, object]:
+                return {
+                    "items": [
+                        {
+                            "ref": ref,
+                            "kind": "default",
+                            "name": "NestedObjects",
+                            "typeName": "ArrayProperty",
+                            "valueStatus": "CONFIRMED",
+                            "valueUsable": True,
+                            "value": [1],
+                            "resolvedObjectFields": [
+                                {
+                                    "elementIndex": 0,
+                                    "propertyIndex": 0,
+                                    "propertyName": "DamageTypeEntryValuesOverrides",
+                                    "name": "/Game/Test/Damage.Damage",
+                                    "valuePath": [
+                                        0,
+                                        "DamageTypeEntryValuesOverrides",
+                                        1,
+                                    ],
+                                }
+                            ],
+                            "resolvedObjectFieldCoverage": {
+                                "available": 1,
+                                "returned": 1,
+                            },
+                        }
+                    ]
+                }
+
+        facts = BlueprintService._default_facts(  # noqa: SLF001
+            NestedObjectRepository(),  # type: ignore[arg-type]
+            [{"ref": ref, "kind": "default", "name": "NestedObjects"}],
+            "NestedObjects",
+        )
+
+        field = facts[0]["resolvedObjectFields"][0]
+        self.assertEqual(
+            field["valuePath"],
+            [0, "DamageTypeEntryValuesOverrides", 1],
+        )
+        self.assertEqual(field["objectPath"], "/Game/Test/Damage.Damage")
+        self.assertIs(facts[0]["resolvedObjectFieldIdentityComplete"], True)
+
+    def test_default_fact_retries_bounded_entity_budget_until_item_is_returned(
+        self,
+    ) -> None:
+        ref = "bp://asset@revision/default/NestedObjects"
+
+        class BudgetedRepository:
+            def __init__(self) -> None:
+                self.budgets: list[int] = []
+
+            def query(self, request: dict[str, object]) -> dict[str, object]:
+                budget = int(request["budgetTokens"])
+                self.budgets.append(budget)
+                if budget < 4800:
+                    return {
+                        "items": [],
+                        "coverage": {"requested": 1, "returned": 0},
+                        "nextQueries": [
+                            {
+                                "operation": "entity",
+                                "selector": {"ref": ref},
+                                "budgetTokens": budget * 2,
+                            }
+                        ],
+                    }
+                return {
+                    "items": [
+                        {
+                            "ref": ref,
+                            "kind": "default",
+                            "name": "NestedObjects",
+                            "typeName": "ArrayProperty",
+                            "valueStatus": "CONFIRMED",
+                            "valueUsable": True,
+                            "value": [1],
+                        }
+                    ]
+                }
+
+        repository = BudgetedRepository()
+
+        facts = BlueprintService._default_facts(  # noqa: SLF001
+            repository,  # type: ignore[arg-type]
+            [{"ref": ref, "kind": "default", "name": "NestedObjects"}],
+            "NestedObjects",
+        )
+
+        self.assertEqual(repository.budgets, [1200, 2400, 4800])
+        self.assertEqual([item["name"] for item in facts], ["NestedObjects"])
+
+    def test_context_retries_entity_budget_for_large_nested_object_projection(
+        self,
+    ) -> None:
+        name = "NestedObjectBudgetFixture"
+        count = 24
+        property_name = "DamageTypeEntryValuesOverrides"
+        refs = [-(index + 1) for index in range(count)]
+        names = [
+            f"DmgType_Melee_LongDamageType_{index:03d}_C"
+            for index in range(count)
+        ]
+        payload = interpretation_payload(name)
+        payload["class_defaults"]["variables"]["NestedObjects"] = {
+            "value": [{property_name: refs}],
+            "type": "ArrayProperty",
+            "source": "interpretation_fixture",
+            "confidence": "high",
+            "array_parse": {
+                "parsed": True,
+                "count": 1,
+                "element_kind": "StructProperty",
+                "elements": [
+                    {
+                        "index": 0,
+                        "properties": [
+                            {
+                                "name": property_name,
+                                "type": "ArrayProperty",
+                                "value": refs,
+                                "objects": names,
+                                "array_parse": {
+                                    "parsed": True,
+                                    "count": count,
+                                    "element_kind": "ObjectProperty",
+                                    "elements": [
+                                        {
+                                            "index": index,
+                                            "value": refs[index],
+                                            "object": names[index],
+                                        }
+                                        for index in range(count)
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=64_000)
+
+        result = self.context(
+            asset=name,
+            goal="NestedObjects",
+            budget_tokens=6_000,
+        )
+
+        facts = [
+            item
+            for item in result["facts"]
+            if item.get("kind") == "CLASS_DEFAULT"
+        ]
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(len(facts[0]["resolvedObjectFields"]), 24)
+        self.assertIs(facts[0]["resolvedObjectFieldIdentityComplete"], True)
+        self.assertEqual(
+            facts[0]["resolvedObjectFields"][23]["valuePath"],
+            [0, property_name, 23],
+        )
+
     def test_asset_list_reuses_public_health_and_opaque_pagination(self) -> None:
         second_dir, _source, _payload = publish_interpretation_fixture(
             self.capture_root,
@@ -192,6 +499,392 @@ class BlueprintServiceTests(unittest.TestCase):
         self.assertGreater(len(candidates), 0)
         self.assertLessEqual(len(candidates), 5)
         _assert_path_free(self, raised.exception.as_payload(), self.capture_root)
+
+    def test_context_can_answer_exact_class_default_without_graph_selection(
+        self,
+    ) -> None:
+        result = self.context(goal="DefaultThreshold")
+
+        self.assertEqual(result["graphTargets"], [])
+        self.assertEqual(result["nodes"], [])
+        self.assertEqual(result["pins"], [])
+        self.assertEqual(result["edges"], [])
+        self.assertEqual(len(result["facts"]), 1)
+        fact = result["facts"][0]
+        self.assertEqual(fact["kind"], "CLASS_DEFAULT")
+        self.assertEqual(fact["name"], "DefaultThreshold")
+        self.assertEqual(fact["typeName"], "FloatProperty")
+        self.assertEqual(fact["value"], 2.5)
+        self.assertEqual(fact["status"], "CONFIRMED")
+        self.assertEqual(fact["evidenceRefs"], [fact["id"]])
+        self.assertTrue(fact["id"].startswith("bp://"))
+        _assert_path_free(self, result, self.capture_root)
+
+    def test_context_can_answer_exact_default_name_containing_spaces(self) -> None:
+        name = "SpacedDefaultFixture"
+        payload = interpretation_payload(name)
+        payload["class_defaults"]["variables"]["SpotLight Brightness"] = {
+            "value": 6.0,
+            "type": "FloatProperty",
+            "source": "interpretation_fixture",
+            "confidence": "high",
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        result = self.context(asset=name, goal="SpotLight Brightness")
+
+        defaults = [
+            item
+            for item in result["facts"]
+            if item.get("kind") == "CLASS_DEFAULT"
+        ]
+        self.assertEqual([item["name"] for item in defaults], ["SpotLight Brightness"])
+        self.assertEqual(defaults[0]["value"], 6.0)
+
+        normalized = self.context(
+            asset=name,
+            goal="  SpotLight   Brightness  ",
+        )
+        normalized_defaults = [
+            item
+            for item in normalized["facts"]
+            if item.get("kind") == "CLASS_DEFAULT"
+        ]
+        self.assertEqual(
+            [item["name"] for item in normalized_defaults],
+            ["SpotLight Brightness"],
+        )
+
+    def test_context_finds_spaced_exact_default_beyond_each_term_page(self) -> None:
+        name = "SpacedDefaultCrowdingFixture"
+        payload = interpretation_payload(name)
+        for index in range(30):
+            payload["class_defaults"]["variables"][f"SpotLight A{index:03d}"] = {
+                "value": index,
+                "type": "IntProperty",
+                "source": "interpretation_fixture",
+                "confidence": "high",
+            }
+            payload["class_defaults"]["variables"][f"BrightnessA{index:03d}"] = {
+                "value": index,
+                "type": "IntProperty",
+                "source": "interpretation_fixture",
+                "confidence": "high",
+            }
+        payload["class_defaults"]["variables"]["SpotLight Brightness"] = {
+            "value": 6.0,
+            "type": "FloatProperty",
+            "source": "interpretation_fixture",
+            "confidence": "high",
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=64_000)
+
+        result = self.context(asset=name, goal="SpotLight Brightness")
+
+        defaults = [
+            item
+            for item in result["facts"]
+            if item.get("kind") == "CLASS_DEFAULT"
+        ]
+        self.assertEqual([item["name"] for item in defaults], ["SpotLight Brightness"])
+        self.assertEqual(defaults[0]["value"], 6.0)
+
+    def test_context_keeps_unique_graph_route_when_defaults_share_search_term(
+        self,
+    ) -> None:
+        name = "DefaultCrowdingFixture"
+        payload = interpretation_payload(name)
+        graph = payload["graphs"][0]
+        graph["graph"] = "FooGraph"
+        graph["payload"]["metadata"]["graph_name"] = "FooGraph"
+        for index in range(100):
+            payload["class_defaults"]["variables"][f"FooDefault{index:03d}"] = {
+                "value": index,
+                "type": "IntProperty",
+                "source": "interpretation_fixture",
+                "confidence": "high",
+            }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        result = self.context(asset=name, goal="Foo")
+
+        self.assertEqual(
+            [item["name"] for item in result["graphTargets"]],
+            ["FooGraph"],
+        )
+        self.assertFalse(
+            any(item.get("kind") == "CLASS_DEFAULT" for item in result["facts"])
+        )
+
+    def test_context_keeps_unique_graph_and_adds_exact_default_fact(self) -> None:
+        result = self.context(goal="DefaultThreshold ReceiveBeginPlay")
+
+        self.assertEqual(
+            [item["name"] for item in result["graphTargets"]],
+            ["EventGraph"],
+        )
+        defaults = [
+            item
+            for item in result["facts"]
+            if item.get("kind") == "CLASS_DEFAULT"
+        ]
+        self.assertEqual([item["name"] for item in defaults], ["DefaultThreshold"])
+
+    def test_context_rejects_substring_only_default_as_graphless_answer(self) -> None:
+        with self.assertRaises(McpExecutionError) as raised:
+            self.context(goal="Threshold")
+
+        self.assertEqual(raised.exception.code, "GRAPH_SELECTION_REQUIRED")
+
+    def test_context_returns_only_exact_defaults_when_fuzzy_defaults_are_crowded(
+        self,
+    ) -> None:
+        name = "ExactDefaultFixture"
+        payload = interpretation_payload(name)
+        for prefix in ("aa", "bb", "cc", "dd", "ee"):
+            for index in range(25):
+                payload["class_defaults"]["variables"][
+                    f"{prefix}Fuzzy{index:03d}"
+                ] = {
+                    "value": index,
+                    "type": "IntProperty",
+                    "source": "interpretation_fixture",
+                    "confidence": "high",
+                }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=64_000)
+
+        result = self.context(
+            asset=name,
+            goal="aa bb cc dd ee DefaultThreshold",
+        )
+
+        defaults = [
+            item
+            for item in result["facts"]
+            if item.get("kind") == "CLASS_DEFAULT"
+        ]
+        self.assertEqual([item["name"] for item in defaults], ["DefaultThreshold"])
+
+    def test_context_low_budget_fails_instead_of_returning_stuck_continuation(
+        self,
+    ) -> None:
+        with self.assertRaises(McpExecutionError) as raised:
+            self.context(goal="DefaultThreshold", budget_tokens=800)
+
+        self.assertEqual(raised.exception.code, "RESULT_BUDGET_EXCEEDED")
+        self.assertGreater(
+            raised.exception.details["minimumBudgetTokens"],
+            800,
+        )
+
+    def test_context_withholds_machine_local_default_value_without_losing_fact(
+        self,
+    ) -> None:
+        name = "LocalPathDefaultFixture"
+        payload = interpretation_payload(name)
+        payload["class_defaults"]["variables"]["LocalInstallPath"] = {
+            "value": r"C:\Users\fixture\private\asset.uasset",
+            "type": "StrProperty",
+            "source": "interpretation_fixture",
+            "confidence": "high",
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        result = self.context(asset=name, goal="LocalInstallPath")
+
+        self.assertEqual(result["graphTargets"], [])
+        self.assertEqual(len(result["facts"]), 1)
+        fact = result["facts"][0]
+        self.assertEqual(fact["name"], "LocalInstallPath")
+        self.assertEqual(fact["sourceValueStatus"], "CONFIRMED")
+        self.assertEqual(fact["status"], "NOT_RECOVERED")
+        self.assertIs(fact["valueUsable"], False)
+        self.assertEqual(fact["valueExposure"], "WITHHELD_BY_PATH_POLICY")
+        self.assertNotIn("value", fact)
+        _assert_path_free(self, result, self.capture_root)
+
+    def test_context_does_not_retype_unreal_looking_string_as_object_path(self) -> None:
+        name = "UnrealLookingStringFixture"
+        payload = interpretation_payload(name)
+        payload["class_defaults"]["variables"]["DisplayText"] = {
+            "value": "/Game/Test/FixtureAsset.FixtureAsset",
+            "type": "StrProperty",
+            "source": "interpretation_fixture",
+            "confidence": "high",
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        result = self.context(asset=name, goal="DisplayText")
+
+        fact = result["facts"][0]
+        self.assertEqual(fact["status"], "NOT_RECOVERED")
+        self.assertEqual(fact["valueExposure"], "WITHHELD_BY_PATH_POLICY")
+        self.assertIs(fact["valueUsable"], False)
+        self.assertNotIn("objectPath", fact)
+        _assert_path_free(self, result, self.capture_root)
+
+    def test_context_projects_unreal_object_default_as_typed_object_path(self) -> None:
+        name = "ObjectPathDefaultFixture"
+        object_path = "/Game/Test/FixtureAsset.FixtureAsset"
+        payload = interpretation_payload(name)
+        payload["class_defaults"]["variables"]["ConfiguredAsset"] = {
+            "value": object_path,
+            "type": "SoftObjectProperty",
+            "source": "interpretation_fixture",
+            "confidence": "high",
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        result = self.context(asset=name, goal="ConfiguredAsset")
+
+        fact = result["facts"][0]
+        self.assertEqual(fact["objectPath"], object_path)
+        self.assertEqual(fact["valueExposure"], "OBJECT_PATH")
+        self.assertNotIn("value", fact)
+        _assert_path_free(self, result, self.capture_root)
+
+    def test_context_projects_resolved_object_array_as_typed_object_paths(self) -> None:
+        name = "ObjectArrayDefaultFixture"
+        object_path = "/Game/Test/EditorTools.EditorTools"
+        payload = interpretation_payload(name)
+        payload["class_defaults"]["variables"]["DataLayerAssets"] = {
+            "value": [3],
+            "type": "ArrayProperty",
+            "source": "interpretation_fixture",
+            "confidence": "medium",
+            "objects": [object_path],
+            "array_parse": {
+                "parsed": True,
+                "count": 1,
+                "element_kind": "SoftObjectProperty",
+            },
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        result = self.context(asset=name, goal="DataLayerAssets")
+
+        fact = result["facts"][0]
+        self.assertEqual(fact["resolvedObjectPaths"], [object_path])
+        self.assertEqual(fact["value"], [3])
+        self.assertIs(fact["valueUsable"], True)
+        _assert_path_free(self, result, self.capture_root)
+
+    def test_context_marks_truncated_resolved_object_array_incomplete(self) -> None:
+        name = "LargeObjectArrayDefaultFixture"
+        object_paths: list[str] = [
+            f"/Game/Test/Object{index:03d}.Object{index:03d}"
+            for index in range(30)
+        ]
+        object_paths[5] = ""
+        payload = interpretation_payload(name)
+        payload["class_defaults"]["variables"]["ConfiguredAssets"] = {
+            "value": list(range(30)),
+            "type": "ArrayProperty",
+            "source": "interpretation_fixture",
+            "confidence": "medium",
+            "objects": object_paths,
+            "array_parse": {
+                "parsed": True,
+                "count": 30,
+                "element_kind": "SoftObjectProperty",
+            },
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=64_000)
+
+        result = self.context(asset=name, goal="ConfiguredAssets")
+
+        fact = result["facts"][0]
+        self.assertEqual(
+            fact["resolvedObjectCoverage"],
+            {"available": 30, "returned": 24},
+        )
+        self.assertIs(fact["resolvedObjectIdentityComplete"], False)
+        self.assertEqual(len(fact["resolvedObjectPaths"]), 24)
+        self.assertIsNone(fact["resolvedObjectPaths"][5])
+        self.assertEqual(fact["resolvedObjectPaths"][6], object_paths[6])
+        self.assertIs(fact["valueUsable"], True)
+        _assert_path_free(self, result, self.capture_root)
+
+    def test_context_does_not_confirm_incomplete_compressed_default_value(
+        self,
+    ) -> None:
+        name = "LargeDefaultFixture"
+        payload = interpretation_payload(name)
+        large_value = list(range(2000))
+        payload["class_defaults"]["variables"]["LargeValues"] = {
+            "value": large_value,
+            "type": "ArrayProperty",
+            "source": "interpretation_fixture",
+            "confidence": "high",
+            "array_parse": {
+                "parsed": True,
+                "count": len(large_value),
+                "element_kind": "IntProperty",
+            },
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        result = self.context(asset=name, goal="LargeValues")
+
+        fact = result["facts"][0]
+        self.assertEqual(fact["sourceValueStatus"], "CONFIRMED")
+        self.assertEqual(fact["status"], "NOT_RECOVERED")
+        self.assertEqual(fact["valueExposure"], "AVAILABLE_NOT_RETURNED")
+        self.assertIs(fact["valueUsable"], False)
+        self.assertNotIn("value", fact)
+        self.assertNotIn("valueFragment", fact)
+        self.assertGreater(fact["valueCoverage"]["availableChars"], 400)
+        _assert_path_free(self, result, self.capture_root)
 
     def test_context_fails_closed_when_evidence_source_is_stale(self) -> None:
         self.source_path.write_bytes(self.source_path.read_bytes() + b"-changed")

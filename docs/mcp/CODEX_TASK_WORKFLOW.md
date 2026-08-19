@@ -15,7 +15,8 @@ task_create
 
 ## 不可跳过的规则
 
-- `blueprint_get_context` 保持一发式只读工具；Task research 只是复用同一领域函数并保存 bounded slice。
+- `blueprint_get_context` 保持一发式只读工具；精确属性名可返回带当前 `bp://` 引用的 `CLASS_DEFAULT`，未完整返回或被路径策略隐藏的值不得晋升为 confirmed fact；Task research 只是复用同一领域函数并保存 bounded slice。
+- 纯默认值查询可以完成只读事实核对，但没有 Graph target 时 Task 仍保持 `DISCOVERY`；不能把一个属性值直接当作可施工的 Graph/Patch Plan 范围。
 - 不允许 caller 直接注入 confirmedFacts。
 - validate 之后必须展示目标、revision、graphs、node/default/connect changes、capabilities、blockers 与 status。
 - Never call `blueprint_patch_plan_confirm` until the user explicitly approves the displayed plan in the current conversation.

@@ -14,7 +14,7 @@ DOES NOT MODIFY ARK DEVKIT OR BLUEPRINT EVIDENCE.
 | `arkdev_status` | 无 | MCP status v1 | stdio/windows-x64；ARK mutation=false |
 | `arkdev_editor_state` | 无 | editor state v1 | 默认 DISCONNECTED |
 | `blueprint_list_assets` | 无 | asset list v1 | bounded/path-free |
-| `blueprint_get_context` | 无 | context v1 | 一发式语义不变；maxHops<=2 |
+| `blueprint_get_context` | 无 | context v1 | 精确属性名可直接返回 `CLASS_DEFAULT`；图查询 maxHops<=2 |
 | `blueprint_get_node` | 无 | node v1 | exact current `bp://` nodeRef |
 | `blueprint_task_create` | Task metadata | Task Context v1 | authoritative FRESH identity；opaque handle；不自动 research |
 | `blueprint_task_resume` | verification timestamp / BLOCKED state | compact resume v1 | 默认小于 1600 estimated tokens；不返回 raw slices/operations |
@@ -42,6 +42,8 @@ PLAN_CONFIRMATION_REQUIRED
 ```
 
 Evidence identity 改变时，Task 写入 `phase=BLOCKED` 与 `reasonCode=EVIDENCE_REVISION_CHANGED` 后 fail closed；绝不自动把旧 refs 映射到新 revision。
+
+`CLASS_DEFAULT` 只把完整返回且 `valueUsable=true` 的值晋升为 confirmed fact。对象数组会同时返回 bounded 的 `resolvedObjectPaths`/`resolvedObjectNames`、`resolvedObjectCoverage` 与 `resolvedObjectIdentityComplete`；后者为 false 时只能使用已返回的对象身份，不能声称整个数组引用已完整恢复。`sourceValueStatus` 缺失、值被路径策略隐藏、压缩值只返回片段时一律 fail closed。
 
 ## Resources（最多五个）
 

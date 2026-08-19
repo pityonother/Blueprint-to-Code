@@ -319,7 +319,8 @@ def create_server(
                 continuation=continuation,
             ),
             lambda payload: (
-                f"Returned {len(payload.get('nodes', []))} nodes from "
+                f"Returned {len(payload.get('facts', []))} facts and "
+                f"{len(payload.get('nodes', []))} nodes from "
                 f"{len(payload.get('graphTargets', []))} graph targets."
             ),
         )
