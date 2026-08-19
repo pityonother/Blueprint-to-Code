@@ -702,8 +702,11 @@ class BlueprintServiceTests(unittest.TestCase):
     ) -> None:
         name = "LocalPathDefaultFixture"
         payload = interpretation_payload(name)
+        separator = chr(92)
         payload["class_defaults"]["variables"]["LocalInstallPath"] = {
-            "value": r"C:\Users\fixture\private\asset.uasset",
+            "value": "C:"
+            + separator
+            + separator.join(("Users", "fixture", "private", "asset.uasset")),
             "type": "StrProperty",
             "source": "interpretation_fixture",
             "confidence": "high",

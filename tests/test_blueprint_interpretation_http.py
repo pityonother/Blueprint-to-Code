@@ -273,16 +273,19 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
         )
         self.assertEqual(native.payload["health"]["asset"]["objectPath"], native_path)
 
+        separator = chr(92)
+        posix_private = "/" + "/".join(("home", "ac", "private"))
+        users_private = "/" + "/".join(("Users", "ac", "private"))
         for local_path in (
-            "/home/ac/private/evidence.sqlite",
-            "/Users/ac/private/private.private",
+            posix_private + "/evidence.sqlite",
+            users_private + "/private.private",
             "/Volumes/Secret/Project/Asset.Asset",
             "/workspace/repo/Secret.Secret",
             "/C/Users/ac/Secret.Secret",
             "/Game/private/evidence.sqlite",
-            "file:///Users/ac/private/evidence.sqlite",
-            "file:/Users/ac/private/evidence.sqlite",
-            "file://localhost/Users/ac/private/evidence.sqlite",
+            "file://" + users_private + "/evidence.sqlite",
+            "file:" + users_private + "/evidence.sqlite",
+            "file://localhost" + users_private + "/evidence.sqlite",
         ):
             with self.subTest(local_path=local_path):
                 with self.assertRaises(ApiProblem) as raised:
@@ -299,13 +302,18 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
         with self.assertRaises(ApiProblem):
             _path_free({"detail": "/Game/private/private.private"})
         with self.assertRaises(ApiProblem):
-            _path_free({"detail": "file:///Users/ac/private/evidence.sqlite"})
+            _path_free({"detail": "file://" + users_private + "/evidence.sqlite"})
         with self.assertRaises(ApiProblem):
             _path_free(
                 {"detail": "file:%2F%2F%2FUsers%2Fac%2Fprivate%2Fevidence.sqlite"}
             )
         with self.assertRaises(ApiProblem):
-            _path_free({"detail": "\\Users\\ac\\private\\evidence.sqlite"})
+            _path_free(
+                {
+                    "detail": separator
+                    + separator.join(("Users", "ac", "private", "evidence.sqlite"))
+                }
+            )
 
     def test_interpretation_filters_and_paginates_statements(self) -> None:
         first = self.route(

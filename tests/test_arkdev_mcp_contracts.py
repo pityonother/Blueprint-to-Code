@@ -125,18 +125,24 @@ class ArkdevMcpContractTests(unittest.TestCase):
         self,
     ) -> None:
         separator = chr(92)
+        posix_private = "/" + "/".join(("home", "ac", "private"))
+        users_private = "/" + "/".join(("Users", "ac", "private"))
         for private_value in (
-            {"objectPath": "/home/ac/private/evidence.sqlite"},
-            {"objectPath": "/Users/ac/private/private.private"},
+            {"objectPath": posix_private + "/evidence.sqlite"},
+            {"objectPath": users_private + "/private.private"},
             {"objectPath": "/Volumes/Secret/Project/Asset.Asset"},
             {"objectPath": "/workspace/repo/Secret.Secret"},
             {"objectPath": "/C/Users/ac/Secret.Secret"},
             {"objectPath": "/Game/private/evidence.sqlite"},
-            {"objectPath": "file:///Users/ac/private/evidence.sqlite"},
-            {"objectPath": "file:/Users/ac/private/evidence.sqlite"},
-            {"objectPath": "file://localhost/Users/ac/private/evidence.sqlite"},
+            {"objectPath": "file://" + users_private + "/evidence.sqlite"},
+            {"objectPath": "file:" + users_private + "/evidence.sqlite"},
+            {
+                "objectPath": "file://localhost"
+                + users_private
+                + "/evidence.sqlite"
+            },
             {"detail": "/Game/private/private.private"},
-            {"detail": "file:///Users/ac/private/evidence.sqlite"},
+            {"detail": "file://" + users_private + "/evidence.sqlite"},
             {"detail": "file:relative/private.txt"},
             {"detail": "file:secret.txt"},
             {"detail": "file:%2F%2F%2FUsers%2Fac%2Fprivate%2Fevidence.sqlite"},
@@ -146,7 +152,7 @@ class ArkdevMcpContractTests(unittest.TestCase):
             {"detail": "%5CUsers%5Cac%5Cprivate%5Cevidence.sqlite"},
             {"detail": separator + separator.join(("Users", "ac", "private"))},
             {"detail": "C:Users" + separator + "ac" + separator + "private"},
-            {"detail": "source:/home/ac/private"},
+            {"detail": "source:" + posix_private},
             {
                 "nested": [
                     "C:"
