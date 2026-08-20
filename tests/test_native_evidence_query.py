@@ -123,6 +123,55 @@ class NativeEvidenceQueryTests(unittest.TestCase):
         )
         self.assertEqual(callees["items"][0]["name"], "ApplyClamp")
 
+    def test_callee_query_returns_identity_only_boundary_functions(self):
+        boundary_id = (
+            "native://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
+            "fixture.dll/0x1400"
+        )
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        caller = next(
+            row for row in payload["targets"] if row["evidenceId"] == INT_FUNCTION
+        )
+        caller["calls"].append(
+            {
+                "targetEvidenceId": boundary_id,
+                "callsiteRva": "0x1020",
+                "status": "CONFIRMED",
+                "confidence": "HIGH",
+            }
+        )
+        caller["calledFunctions"] = [
+            {
+                "evidenceId": boundary_id,
+                "name": "BoundaryOnlyCallee",
+                "qualifiedName": "Fixture::BoundaryOnlyCallee",
+                "owner": "Fixture",
+                "rva": "0x1400",
+                "signature": "int Fixture::BoundaryOnlyCallee(int)",
+            }
+        ]
+        source = self.root / "boundary-source.json"
+        source.write_text(json.dumps(payload), encoding="utf-8")
+        evidence_dir = self.root / "boundary-evidence"
+        write_native_evidence_artifacts(source, evidence_dir)
+
+        with open_native_evidence_repository(evidence_dir) as repository:
+            response = repository.query(
+                {
+                    "operation": "callees",
+                    "id": INT_FUNCTION,
+                    "budgetTokens": 1200,
+                }
+            )
+
+        boundary = next(
+            row for row in response["items"] if row["evidenceId"] == boundary_id
+        )
+        self.assertEqual(boundary["kind"], "function-reference")
+        self.assertEqual(boundary["name"], "BoundaryOnlyCallee")
+        self.assertEqual(boundary["availability"], "IDENTITY_ONLY")
+        self.assertEqual(boundary["relation"]["status"], "CONFIRMED")
+
     def test_specialized_queries_and_context_pack_preserve_gaps(self):
         operations = {
             "field-accesses": {"query": "QualityScale"},
