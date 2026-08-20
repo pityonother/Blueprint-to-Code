@@ -13,6 +13,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from blueprint_translator.cohort_publication import (  # noqa: E402
+    preflight_evidence_cohort,
     publish_evidence_cohort,
 )
 
@@ -28,18 +29,49 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--capture-root", type=Path, required=True)
     parser.add_argument("--budget", type=int, default=100_000)
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="validate every source and destination without publishing",
+    )
+    parser.add_argument(
+        "--expected-preflight-sha256",
+        help=(
+            "publish only if the live preflight still matches this reviewed "
+            "SHA-256"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(argv if argv is not None else sys.argv[1:]))
     try:
-        result = publish_evidence_cohort(
-            plan_path=args.plan,
-            source_root=args.source_root,
-            capture_root=args.capture_root,
-            budget=args.budget,
-        )
+        if args.preflight_only and args.expected_preflight_sha256 is not None:
+            raise ValueError(
+                "COHORT_PLAN_INVALID: --preflight-only cannot be combined with "
+                "--expected-preflight-sha256"
+            )
+        if not args.preflight_only and args.expected_preflight_sha256 is None:
+            raise ValueError(
+                "COHORT_PREFLIGHT_REQUIRED: publish requires "
+                "--expected-preflight-sha256"
+            )
+        if args.preflight_only:
+            result = preflight_evidence_cohort(
+                plan_path=args.plan,
+                source_root=args.source_root,
+                capture_root=args.capture_root,
+                budget=args.budget,
+            )
+        else:
+            result = publish_evidence_cohort(
+                plan_path=args.plan,
+                source_root=args.source_root,
+                capture_root=args.capture_root,
+                budget=args.budget,
+                expected_preflight_sha256=args.expected_preflight_sha256,
+            )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 2

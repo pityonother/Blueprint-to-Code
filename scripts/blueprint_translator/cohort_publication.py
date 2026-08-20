@@ -8,6 +8,7 @@ time with the existing immutable revision and pointer-CAS contracts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from .evidence_publication import (
     _lexical_absolute,
     _require_plain_directory,
     _require_plain_path_chain,
+    evidence_publication_lock,
     publish_prepared_evidence_revision,
 )
 from .evidence_repository import (
@@ -34,6 +36,7 @@ from .interpretation_publication import (
 
 
 PLAN_SCHEMA: Final = "blueprint-to-code.evidence-cohort-plan/v1"
+PREFLIGHT_SCHEMA: Final = "blueprint-to-code.evidence-cohort-preflight/v1"
 RECEIPT_SCHEMA: Final = "blueprint-to-code.evidence-cohort-publication/v1"
 _CATEGORY_RE: Final = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 _COHORT_ID_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -69,6 +72,8 @@ class _PreparedAsset:
     source_dir: Path
     destination_dir: Path
     state: ResolvedEvidenceState
+    destination_was_present: bool
+    destination_pointer_sha256: str | None
     semantic_fact_count: int
     interpretation_digest: str
 
@@ -214,9 +219,9 @@ def _manifest_semantic_fact_count(manifest: dict[str, Any]) -> int:
     return total
 
 
-def _destination_identity(destination: Path) -> str | None:
+def _destination_identity(destination: Path) -> tuple[str | None, str | None]:
     if not destination.exists():
-        return None
+        return None, None
     _require_plain_path_chain(destination, label="cohort destination asset")
     _require_plain_directory(destination, label="cohort destination asset")
     try:
@@ -228,9 +233,9 @@ def _destination_identity(destination: Path) -> str | None:
             f"{destination.name} exists without valid indexed Evidence",
         ) from exc
     if state.source_kind == "INDEXED_V3_CURRENT":
-        return str(manifest.get("objectPath") or "")
+        return str(manifest.get("objectPath") or ""), state.pointer_sha256
     if state.source_kind == "INDEXED_V2_COMPATIBILITY":
-        return str(manifest.get("object_path") or "")
+        return str(manifest.get("object_path") or ""), state.pointer_sha256
     raise CohortPublicationError(
         "COHORT_DESTINATION_INVALID",
         f"{destination.name} has an unsupported Evidence source kind",
@@ -277,7 +282,9 @@ def _prepare_assets(
                 "COHORT_SOURCE_HAS_NO_SEMANTIC_FACTS",
                 f"{asset.asset} is an identity-only capture",
             )
-        destination_object_path = _destination_identity(destination)
+        destination_object_path, destination_pointer_sha256 = _destination_identity(
+            destination
+        )
         if destination_object_path is not None and destination_object_path != asset.object_path:
             raise CohortPublicationError(
                 "COHORT_DESTINATION_IDENTITY_CONFLICT",
@@ -300,6 +307,8 @@ def _prepare_assets(
                 source_dir=source_dir,
                 destination_dir=destination,
                 state=state,
+                destination_was_present=destination_object_path is not None,
+                destination_pointer_sha256=destination_pointer_sha256,
                 semantic_fact_count=semantic_fact_count,
                 interpretation_digest=preview.semantic_digest,
             )
@@ -307,15 +316,13 @@ def _prepare_assets(
     return tuple(prepared)
 
 
-def publish_evidence_cohort(
+def _preflight_inputs(
     *,
     plan_path: str | os.PathLike[str],
     source_root: str | os.PathLike[str],
     capture_root: str | os.PathLike[str],
-    budget: int = 100_000,
-) -> dict[str, object]:
-    """Publish every reviewed asset and return a path-free completion receipt."""
-
+    budget: int,
+) -> tuple[str, tuple[_PlanAsset, ...], tuple[_PreparedAsset, ...], Path]:
     if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
         raise CohortPublicationError("COHORT_PLAN_INVALID", "budget must be positive")
     plan = _lexical_absolute(plan_path)
@@ -340,21 +347,130 @@ def publish_evidence_cohort(
         capture_root=captures,
         budget=budget,
     )
+    return cohort_id, assets, prepared, captures
+
+
+def preflight_evidence_cohort(
+    *,
+    plan_path: str | os.PathLike[str],
+    source_root: str | os.PathLike[str],
+    capture_root: str | os.PathLike[str],
+    budget: int = 100_000,
+) -> dict[str, object]:
+    """Validate a cohort completely without creating or changing destinations."""
+
+    cohort_id, assets, prepared, _captures = _preflight_inputs(
+        plan_path=plan_path,
+        source_root=source_root,
+        capture_root=capture_root,
+        budget=budget,
+    )
+    return _preflight_payload(cohort_id=cohort_id, assets=assets, prepared=prepared)
+
+
+def _preflight_payload(
+    *,
+    cohort_id: str,
+    assets: tuple[_PlanAsset, ...],
+    prepared: tuple[_PreparedAsset, ...],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema": PREFLIGHT_SCHEMA,
+        "cohortId": cohort_id,
+        "status": "READY_TO_PUBLISH",
+        "total": len(assets),
+        "representedObjectCount": sum(
+            asset.represented_object_count for asset in assets
+        ),
+        "assets": [
+            {
+                "asset": item.plan.asset,
+                "categoryCode": item.plan.category_code,
+                "objectPath": item.plan.object_path,
+                "representedObjectCount": item.plan.represented_object_count,
+                "semanticFactCount": item.semantic_fact_count,
+                "sourceEvidenceRevisionId": str(
+                    evidence_manifest_payload(item.state).get("revisionId") or ""
+                ),
+                "sourceManifestSha256": item.state.manifest_sha256,
+                "sourcePointerSha256": item.state.pointer_sha256,
+                "interpretationSemanticDigest": item.interpretation_digest,
+                "destinationStatus": (
+                    "EXISTING_COMPATIBLE"
+                    if item.destination_was_present
+                    else "NEW"
+                ),
+                "destinationPointerSha256": item.destination_pointer_sha256,
+            }
+            for item in prepared
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload["preflightSha256"] = hashlib.sha256(canonical).hexdigest()
+    return payload
+
+
+def publish_evidence_cohort(
+    *,
+    plan_path: str | os.PathLike[str],
+    source_root: str | os.PathLike[str],
+    capture_root: str | os.PathLike[str],
+    budget: int = 100_000,
+    expected_preflight_sha256: str | None = None,
+) -> dict[str, object]:
+    """Publish every reviewed asset and return a path-free completion receipt."""
+
+    cohort_id, assets, prepared, captures = _preflight_inputs(
+        plan_path=plan_path,
+        source_root=source_root,
+        capture_root=capture_root,
+        budget=budget,
+    )
+    preflight = _preflight_payload(
+        cohort_id=cohort_id,
+        assets=assets,
+        prepared=prepared,
+    )
+    actual_preflight_sha256 = str(preflight["preflightSha256"])
+    if expected_preflight_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_preflight_sha256):
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID",
+                "expected preflight SHA-256 must be 64 lowercase hexadecimal characters",
+            )
+        if expected_preflight_sha256 != actual_preflight_sha256:
+            raise CohortPublicationError(
+                "COHORT_PREFLIGHT_MISMATCH",
+                "source generation, Interpretation preview, or destination state changed",
+            )
 
     captures.mkdir(parents=True, exist_ok=True)
     _require_plain_directory(captures, label="cohort capture root")
     receipts: list[dict[str, object]] = []
     for item in prepared:
-        manifest = evidence_manifest_payload(item.state)
         try:
-            evidence = publish_prepared_evidence_revision(
-                asset_dir=item.destination_dir,
-                database_path=item.state.database_path,
-                agent_index_bytes=item.state.agent_index_raw,
-                asset_id=str(manifest.get("assetId") or ""),
-                object_path=item.plan.object_path,
-                require_fresh=True,
-            )
+            with evidence_publication_lock(item.source_dir):
+                live_state = resolve_asset_evidence_state(item.source_dir)
+                if _source_generation(live_state) != _source_generation(item.state):
+                    raise CohortPublicationError(
+                        "COHORT_SOURCE_GENERATION_CHANGED",
+                        f"{item.plan.asset} source Evidence changed after preflight",
+                    )
+                manifest = evidence_manifest_payload(live_state)
+                evidence = publish_prepared_evidence_revision(
+                    asset_dir=item.destination_dir,
+                    database_path=live_state.database_path,
+                    agent_index_bytes=live_state.agent_index_raw,
+                    asset_id=str(manifest.get("assetId") or ""),
+                    object_path=item.plan.object_path,
+                    expected_pointer_sha256=item.destination_pointer_sha256,
+                    require_fresh=True,
+                )
             interpretation = publish_interpretation(
                 item.destination_dir,
                 budget=budget,
@@ -362,6 +478,8 @@ def publish_evidence_cohort(
                 expected_semantic_digest=item.interpretation_digest,
             )
             health = inspect_interpretation_health(item.destination_dir)
+        except CohortPublicationError:
+            raise
         except Exception as exc:
             raise CohortPublicationError(
                 "COHORT_ASSET_PUBLICATION_FAILED",
@@ -400,6 +518,7 @@ def publish_evidence_cohort(
         "schema": RECEIPT_SCHEMA,
         "cohortId": cohort_id,
         "status": "COMPLETE",
+        "preflightSha256": actual_preflight_sha256,
         "ready": len(receipts),
         "total": len(assets),
         "representedObjectCount": sum(
@@ -409,9 +528,28 @@ def publish_evidence_cohort(
     }
 
 
+def _source_generation(state: ResolvedEvidenceState) -> tuple[object, ...]:
+    return (
+        state.source_kind,
+        state.release_authority,
+        state.freshness_status,
+        state.migration_required,
+        state.manifest_sha256,
+        state.pointer_sha256,
+        state.database_sha256,
+        state.database_bytes,
+        state.manifest_content_sha256,
+        state.manifest_bytes,
+        state.agent_index_sha256,
+        state.agent_index_bytes,
+    )
+
+
 __all__ = [
     "CohortPublicationError",
     "PLAN_SCHEMA",
+    "PREFLIGHT_SCHEMA",
     "RECEIPT_SCHEMA",
+    "preflight_evidence_cohort",
     "publish_evidence_cohort",
 ]
