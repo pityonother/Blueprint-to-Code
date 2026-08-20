@@ -1121,9 +1121,9 @@ def build_capability_report(
             "answerClosure": dict(sorted(answer_closure_counts.items())),
         },
         "boundariesZh": [
-            "READY 只证明权威发布链，不等于内容闭环。",
+            "可正式查询只证明权威发布链，不等于内容闭环。",
             "证据可用性与问题闭环是两条独立轴；可正式查询不会自动提升为完整回答。",
-            "validator PASS 只证明证据容器完整，不等于恢复了业务字段。",
+            "证据容器完整性检查通过只证明容器完整，不等于恢复了业务字段。",
             "没有逐问题人工复核且引用重查通过时，内容不得自动提升为 CLOSED。",
             "相似类名只用于抽样导航；结论仅允许在 exact class 范围传播。",
         ],
@@ -1477,7 +1477,7 @@ def render_report_zh(report: Mapping[str, object]) -> str:
         "# BTC 全类别资产自动读取能力基线",
         "",
         "这份报告测的是 BTC 能否把不同类别资产读到可回答、可引用、可重查的结论闭环。",
-        "READY 和 validator PASS 只作为独立检查，不代替内容闭环。",
+        "可正式查询与证据容器完整性检查只作为独立检查，不代替内容闭环。",
         "",
         "## 总览",
         "",
@@ -1490,9 +1490,9 @@ def render_report_zh(report: Mapping[str, object]) -> str:
         f"- 当前不支持：{count_map.get('unsupported', 0)}",
         f"- 读取失败：{count_map.get('failed', 0)}",
         f"- 尚未测试：{count_map.get('notRun', 0)}",
-        f"- 已在 P0 首页 READY：{count_map.get('ready', 0)}",
-        f"  - READY 且窄问题精确闭环：{count_map.get('readyClosedExact', 0)}",
-        f"  - READY 但仍只能部分回答：{count_map.get('readyPartial', 0)}",
+        f"- 已在 P0 首页标记为可正式查询：{count_map.get('ready', 0)}",
+        f"  - 可正式查询且窄问题精确闭环：{count_map.get('readyClosedExact', 0)}",
+        f"  - 可正式查询但仍只能部分回答：{count_map.get('readyPartial', 0)}",
         f"  - 未发布但窄问题已精确闭环：{count_map.get('nonReadyClosedExact', 0)}",
         "",
         "## 分类样本来源",
@@ -1505,12 +1505,12 @@ def render_report_zh(report: Mapping[str, object]) -> str:
         ),
         f"- 固定计划内容 SHA-256：`{sample_plan_binding.get('sha256', '')}`。",
         "- 每个 Blueprint Evidence 行都保留 clusterId、精确目标路径、玩家问题和"
-        " Evidence revision；READY 行强制改用 canonical current Evidence，批次证据"
+        " Evidence revision；可正式查询行强制改用 canonical current Evidence，批次证据"
         "不能冒充当前发布版本。DataAsset、Native 和未运行样本按各自证据边界记录。",
         "",
         "## 按类别汇总",
         "",
-        "| 中文类别 | 代码 | 样本数 | 闭环情况 | READY |",
+        "| 中文类别 | 代码 | 样本数 | 闭环情况 | 可正式查询 |",
         "|---|---|---:|---|---:|",
     ]
     category_rows: dict[tuple[str, str], list[Mapping[str, object]]] = defaultdict(
@@ -1549,7 +1549,7 @@ def render_report_zh(report: Mapping[str, object]) -> str:
             "",
             "## 逐样本结果",
             "",
-            "| # | 中文类别 | 样本 | 内容 | 闭环 | READY | 主要阻断 |",
+            "| # | 中文类别 | 样本 | 内容 | 闭环 | 可正式查询 | 主要阻断 |",
             "|---:|---|---|---|---|:---:|---|",
         ]
     )

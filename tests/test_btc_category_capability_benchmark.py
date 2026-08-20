@@ -1119,6 +1119,15 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
         self.assertIn("## 分类样本来源", markdown)
         self.assertIn("category-stratified-role-family-aware/v1", markdown)
         self.assertIn("窄问题精确闭环", markdown)
+        self.assertIn("可正式查询", markdown)
+        for internal_status in (
+            "READY",
+            "FRESH",
+            "releaseAuthority",
+            "validator PASS",
+        ):
+            with self.subTest(internal_status=internal_status):
+                self.assertNotIn(internal_status, markdown)
 
     def test_non_closed_sample_without_prose_gap_does_not_claim_no_blocker(self):
         report = {
