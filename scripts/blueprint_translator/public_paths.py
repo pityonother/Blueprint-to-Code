@@ -24,7 +24,7 @@ _POSIX_LOCAL_PATH = re.compile(r"(?<![:/<A-Za-z0-9_])/[^\s]+")
 _UNREAL_OBJECT_PATH = re.compile(
     r"^/(?P<mount>[A-Za-z][A-Za-z0-9_]*)/"
     r"(?P<package>[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)*)\."
-    r"(?P<object>[A-Za-z0-9_]+)$"
+    r"(?P<object>[A-Za-z0-9_-]+)$"
 )
 _PUBLIC_UNREAL_MOUNTS = frozenset(
     {
@@ -61,7 +61,16 @@ def is_public_unreal_object_path(value: str, *, field_name: str) -> bool:
         return False
     if match.group("mount").casefold() == "script":
         return "/" not in match.group("package")
-    package_leaf = match.group("package").rsplit("/", 1)[-1]
+    package = match.group("package")
+    if "__ExternalActors__" in package.split("/"):
+        # World Partition packages are hash-named containers whose exported
+        # actor keeps its authored object name, so the two leaves differ.
+        return True
+    package_leaf = package.rsplit("/", 1)[-1]
+    if package_leaf.endswith("_WP"):
+        # Object references inside a World Partition map name the exported
+        # actor or component, not the owning map package.
+        return True
     object_name = match.group("object")
     return object_name in {package_leaf, f"{package_leaf}_C"}
 

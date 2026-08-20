@@ -101,8 +101,17 @@ class ArkdevMcpContractTests(unittest.TestCase):
             "/ASBExportGun/Weapons/Fixture.Fixture",
             "/DinoDefense/Camera/Fixture.Fixture",
             "/Engine/EngineMaterials/Fixture.Fixture",
+            (
+                "/Game/__ExternalActors__/Maps/Genesis/Genesis_WP/0/AA/"
+                "PACKAGEHASH.PrimalCameraProbeActor_13"
+            ),
+            (
+                "/Game/__ExternalActors__/Genesis/Mission_WP/0/AA/"
+                "PACKAGEHASH.PrimalRecastNavMesh-Large"
+            ),
             "/Game/Test/Fixture.Fixture",
             "/Game/Test/Fixture.Fixture_C",
+            "/Game/Maps/Genesis/Genesis_WP.CameraComponent",
             "/PCG/Test/Fixture.Fixture",
             "/Plugin/Test/Fixture.Fixture",
             "/Plugins/Test/Fixture.Fixture",
