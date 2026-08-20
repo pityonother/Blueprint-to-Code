@@ -140,6 +140,28 @@ class ValidateChangeTests(unittest.TestCase):
         self.assertEqual(pytest_commands[0].identifier, "python-full-suite")
         self.assertIn("frontend-build", ids)
 
+    def test_mixed_unknown_and_release_change_keeps_dependency_audit(self):
+        config = validate_change.load_config(CONFIG)
+        changed_files = [
+            ".github/workflows/ci.yml",
+            "schemas/new-release-contract.json",
+        ]
+        classification = validate_change.classify_changed_files(
+            changed_files,
+            config,
+        )
+
+        commands = validate_change.build_command_plan(
+            classification,
+            changed_files=changed_files,
+            base_sha="a" * 40,
+            python_command="python",
+        )
+
+        self.assertEqual(classification.selected_profile, "unknown")
+        self.assertIn("release", classification.affected_profiles)
+        self.assertIn("frontend-audit", [item.identifier for item in commands])
+
     def test_content_identity_cache_requires_all_four_bound_roles(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -257,7 +257,7 @@ def build_command_plan(
                 "Prove the production frontend bundle compiles.",
             )
         )
-    if classification.selected_profile == "release":
+    if "release" in classification.affected_profiles:
         commands.append(
             CommandSpec(
                 "frontend-audit",
