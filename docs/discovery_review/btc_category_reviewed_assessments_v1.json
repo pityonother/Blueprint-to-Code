@@ -401,7 +401,7 @@
       "status": "PARTIAL",
       "claims": [
         {
-          "textZh": "GetNavAreaForLocation 查询当前位置所在导航多边形的 AreaClass；查询失败时回退到默认可行走区域。",
+          "textZh": "GetNavAreaAtLocation 查询当前位置所在导航多边形的 AreaClass；查询失败时回退到默认可行走区域。",
           "evidenceRefs": [
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F8EC0"
           ]
