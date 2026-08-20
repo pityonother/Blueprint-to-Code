@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.invalid/schemas/btc-delivery-manifest-v1.schema.json",
+  "title": "BTC acceptance delivery manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "resultSha256",
+    "primaryArtifacts",
+    "artifacts",
+    "sourceBindings",
+    "compatibilityAliases",
+    "compatibilityPolicy",
+    "checksumCoverage"
+  ],
+  "properties": {
+    "schema": {"const": "ark.btc.delivery-manifest.v1"},
+    "status": {"const": "PASS"},
+    "resultSha256": {"$ref": "#/$defs/sha256"},
+    "primaryArtifacts": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "artifact-manifest.json"},
+        {"const": "result.json"},
+        {"const": "report.md"},
+        {"const": "query-examples.ps1"},
+        {"const": "SHA256SUMS.txt"}
+      ],
+      "items": false,
+      "minItems": 5,
+      "maxItems": 5
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["name", "role", "sha256", "bytes"],
+        "properties": {
+          "name": {"enum": ["result.json", "report.md", "query-examples.ps1"]},
+          "role": {"type": "string", "minLength": 1},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "bytes": {"type": "integer", "minimum": 1},
+          "resultSha256": {"$ref": "#/$defs/sha256"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "sourceBindings": {
+      "type": "object",
+      "required": ["resultInput", "queryTemplate"],
+      "additionalProperties": {"$ref": "#/$defs/fileBinding"}
+    },
+    "compatibilityAliases": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "compatibilityPolicy": {
+      "type": "object",
+      "required": ["status", "removalNotAuthorized", "noteZh"],
+      "properties": {
+        "status": {"const": "PRESERVE_EXISTING_ONE_RELEASE"},
+        "removalNotAuthorized": {"const": true},
+        "noteZh": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "checksumCoverage": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fileBinding": {
+      "type": "object",
+      "required": ["sha256", "bytes"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    }
+  }
+}
