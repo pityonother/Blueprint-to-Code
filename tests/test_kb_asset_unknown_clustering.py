@@ -193,6 +193,33 @@ class UnknownAssetClusteringTests(unittest.TestCase):
             self.assertEqual(clusters[0]["propagationScope"], "CLASS_LEVEL_ONLY")
             self.assertIn("INSTANCE_DEFAULTS", clusters[0]["notPropagated"])
 
+    def test_confirmed_classification_does_not_skip_blueprint_content_read(self) -> None:
+        class_path = "/Game/Buffs/Buff_Confirmed.Buff_Confirmed_C"
+        definition = _known_definition(
+            "/Game/Buffs/Buff_Confirmed",
+            class_path=class_path,
+            confirmed_roles=("GAMEPLAY_EFFECT_BUFF",),
+        )
+        placement = _unknown_package(
+            "/Game/__ExternalActors__/Maps/Test/0/AA/CONFIRMED0000000000000",
+            class_path,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = _write_taxonomy_source(
+                root / "source", [definition, placement]
+            )
+            output = root / "clusters"
+
+            build_unknown_clusters(manifest, output)
+
+            queue = _read_jsonl(output / "unknown_deep_read_queue.jsonl")
+            self.assertEqual(len(queue), 1)
+            self.assertEqual(
+                queue[0]["recommendedAction"],
+                "READ_BLUEPRINT_CLASS_DEFINITION",
+            )
+
     def test_native_category_rules_do_not_call_restriction_volume_a_building(
         self,
     ) -> None:

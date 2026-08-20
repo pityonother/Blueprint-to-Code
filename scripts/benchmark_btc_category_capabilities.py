@@ -37,6 +37,9 @@ from blueprint_translator.evidence_values import project_default_value  # noqa: 
 from blueprint_translator.interpretation_publication import (  # noqa: E402
     inspect_interpretation_health,
 )
+from blueprint_translator.public_paths import (  # noqa: E402
+    public_value_is_path_free,
+)
 
 
 SCHEMA = "ark.btc.category-capability-benchmark.v1"
@@ -769,11 +772,14 @@ def _native_result(
 def _public_profile(profile: Mapping[str, object] | None) -> object:
     if profile is None:
         return None
-    return {
+    public = {
         key: value
         for key, value in profile.items()
-        if not str(key).startswith("_")
+        if not str(key).startswith("_") and str(key) != "assetDir"
     }
+    if not public_value_is_path_free(public):
+        raise ValueError("public Evidence profile contains a machine-local path")
+    return public
 
 
 def build_capability_report(
@@ -829,7 +835,7 @@ def build_capability_report(
         evidence_profile: Mapping[str, object] | None = profile
         effective_reader = "BLUEPRINT_EVIDENCE"
         ready = canonical_profile is not None
-        if action == "SKIP_EXISTING_CONFIRMED_CLASSIFICATION":
+        if action == "SKIP_EXISTING_CONFIRMED_CLASSIFICATION" and profile is None:
             result = {
                 "captureIntegrityStatus": "NOT_RUN",
                 "contentRecoveryStatus": "NOT_RUN",

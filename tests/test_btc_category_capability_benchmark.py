@@ -596,6 +596,7 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
                     _sample(
                         1,
                         code="CONFIG",
+                        action="SKIP_EXISTING_CONFIRMED_CLASSIFICATION",
                         target_path=target_path,
                     )
                 ],
@@ -621,6 +622,33 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
             row["p0"]["evidenceRevisionId"],
             row["evidence"]["asset"]["revisionId"],
         )
+        self.assertEqual(row["result"]["benchmarkClosureStatus"], "PARTIAL")
+
+    def test_public_profile_omits_local_asset_directory_and_fails_closed(self):
+        local_path = r"C:\Users\learner\private\capture"
+
+        public = benchmark._public_profile(
+            {
+                "assetDir": local_path,
+                "asset": {
+                    "objectPath": "/Game/Test/SharedAsset.SharedAsset",
+                    "revisionId": "revision-1",
+                },
+            }
+        )
+
+        self.assertNotIn("assetDir", public)
+        self.assertNotIn(local_path, json.dumps(public))
+        with self.assertRaisesRegex(ValueError, "machine-local path"):
+            benchmark._public_profile(
+                {
+                    "asset": {
+                        "objectPath": "/Game/Test/SharedAsset.SharedAsset",
+                        "revisionId": "revision-1",
+                    },
+                    "unexpected": {"diagnostic": local_path},
+                }
+            )
 
     def test_review_distinguishes_native_identity_from_partial_implementation(self):
         ref = "native://binary/ShooterGame.dll/0x1234"

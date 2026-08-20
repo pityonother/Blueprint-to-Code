@@ -1023,18 +1023,17 @@ def _queue_action(row: Mapping[str, object]) -> tuple[int, str, str]:
     representative = _require_mapping(
         row.get("representative"), "INTERNAL_REPRESENTATIVE_INVALID"
     )
-    if row.get("propagatedClassSemantics"):
-        return (
-            3,
-            "SKIP_EXISTING_CONFIRMED_CLASSIFICATION",
-            "已有定义包 CONFIRMED 类级语义；仅在抽检或补图时读取。",
-        )
     target_kind = representative.get("targetKind")
     if target_kind == "CLASS_DEFINITION":
+        reason = (
+            "已有分类只用于内容读取导航，不能代替这个精确资产的正式内容证据。"
+            if row.get("propagatedClassSemantics")
+            else "读取定义包，不读取 World Partition GUID placement。"
+        )
         return (
             0,
             "READ_BLUEPRINT_CLASS_DEFINITION",
-            "读取定义包，不读取 World Partition GUID placement。",
+            reason,
         )
     if target_kind == "NATIVE_CLASS":
         return (
