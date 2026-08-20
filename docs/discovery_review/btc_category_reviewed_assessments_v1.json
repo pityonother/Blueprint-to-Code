@@ -22,6 +22,35 @@
         "只恢复到白天和夜间 AudioComponent，组件内部 Sound 资产与昼夜切换链未恢复。"
       ]
     },
+    "3": {
+      "questionOverride": {
+        "questionZh": "玩家怎样进入、前后切换并退出该原生镜头探针视角？"
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "PlayFromHere 将本地玩家的 ViewTarget 切到当前镜头探针，并把活动状态设为真。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x7B93E0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x3543D0"
+          ]
+        },
+        {
+          "textZh": "Advance 与 AdvanceInternal 枚举镜头探针，并按前进或后退方向循环选择下一个探针。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x7B9070",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x7B9150"
+          ]
+        },
+        {
+          "textZh": "BackToPlayer 把 ViewTarget 恢复到玩家，并清除活动状态。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x7B9330"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
     "4": {
       "questionOverride": {
         "questionZh": "玩家进入或离开该区域时，会不会强制传送并切换、恢复镜头？"
@@ -340,15 +369,23 @@
       "status": "PARTIAL",
       "claims": [
         {
-          "textZh": "正式 Native Evidence 中存在位置区域查询与区域排序函数身份。",
+          "textZh": "GetNavAreaForLocation 查询当前位置所在导航多边形的 AreaClass；查询失败时回退到默认可行走区域。",
           "evidenceRefs": [
-            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F8EC0",
-            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14FA230"
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F8EC0"
+          ]
+        },
+        {
+          "textZh": "UpdateActiveTiles 会根据运行条件进入并行或串行瓦片维护路径，辅助函数负责收集、更新和移除活动瓦片。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14FAD70",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F4720",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F61E0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F7D70"
           ]
         }
       ],
       "blockingGaps": [
-        "尚未运行聚焦原生分析，函数体、条件和调用关系未恢复，也没有 MCP Native 查询入口。"
+        "并行主体 0x14F4D50 与串行主体 0x14F6500 均达到 40000 字符反编译预算；活动瓦片增、改、删的所有分支尚未穷尽。"
       ]
     },
     "29": {
@@ -612,53 +649,73 @@
       "status": "PARTIAL",
       "claims": [
         {
-          "textZh": "正式 Native Evidence 中存在检查刷新、选择有效点和从全部点生成补给箱的函数身份。",
+          "textZh": "StartCrateSpawning 建立补给箱刷新计时，并使用配置的首次延迟与后续间隔范围。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x10223C0"
+          ]
+        },
+        {
+          "textZh": "检查刷新、选择有效点和从全部点生成的路径会过滤候选点，并在启用时使用刷新点权重。",
           "evidenceRefs": [
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1020770",
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1022FC0",
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x10265B0"
           ]
+        },
+        {
+          "textZh": "该区域另有移除已刷补给箱、启停刷新以及按全部刷新体积生成的独立路径。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1025E70",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1026330",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1027990"
+          ]
         }
       ],
       "blockingGaps": [
-        "合法点条件、计时、选择概率和生成完整流程尚未通过聚焦原生分析恢复。"
+        "CheckCrateSpawn、GetValidSpawnPointEntry 与 SpawnCratesFromAllPoints 均达到 40000 字符反编译预算；所有过滤条件、权重分支和最终生成分支尚未穷尽。"
       ]
     },
     "46": {
       "questionOverride": {
         "questionZh": "这个原生区域怎样参与 NPC 刷新？"
       },
-      "status": "IDENTITY_ONLY",
+      "status": "PARTIAL",
       "claims": [
         {
-          "textZh": "当前只找到该类构造函数身份。",
+          "textZh": "该类自身只恢复出构造函数；构造阶段把碰撞设置为 NoCollisionButQuery，表现为供外部系统查询的空间配置载体。",
           "evidenceRefs": [
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152AAC0"
           ]
         }
       ],
       "blockingGaps": [
-        "没有可解释的业务函数或实现体。"
+        "“本类不自行刷新 NPC”是当前 PDB 类成员发现范围内的否定结论；负责消费该区域配置的外部管理器调用链尚未恢复。"
       ]
     },
     "47": {
       "questionOverride": {
         "questionZh": "这个原生区域怎样处理 NPC 刷新、玩家进入和休眠同步？"
       },
-      "status": "PARTIAL",
+      "status": "CLOSED_EXACT",
       "claims": [
         {
-          "textZh": "可确认刷新计数、进入重叠与休眠管理器同步函数身份。",
+          "textZh": "重叠开始与结束路径维护区域内 NPC 集合；计数路径按 bCountTamedDinos 决定是否计入已驯服生物。",
           "evidenceRefs": [
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152C260",
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152CB90",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152D8E0"
+          ]
+        },
+        {
+          "textZh": "休眠、反序列化与重同步路径会重新登记区域状态，并与休眠管理器恢复同步。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152C800",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152D6A0",
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152DFE0"
           ]
         }
       ],
-      "blockingGaps": [
-        "函数内部条件和相互调用尚未通过聚焦原生分析恢复。"
-      ]
+      "blockingGaps": []
     },
     "48": {
       "questionOverride": {
@@ -774,27 +831,46 @@
       "status": "PARTIAL",
       "claims": [
         {
-          "textZh": "正式 Native Evidence 中存在位置、结构和任意禁建区域判定函数身份。",
+          "textZh": "结构判定会检查全禁建开关、结构类型、标签、队伍、PvE 条件以及对象是否位于区域内。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DE040"
+          ]
+        },
+        {
+          "textZh": "位置、结构和任意禁建区域包装函数复用空间包含检查与统一允许性判定。",
           "evidenceRefs": [
             "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DDE40",
-            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DE040",
-            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DE2F0"
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DE2F0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DC8F0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DCB40"
           ]
         }
       ],
       "blockingGaps": [
-        "判定条件、白名单、结构类型和返回优先级尚未通过聚焦原生分析恢复。"
+        "部分 GameState/GameMode 字节与位域没有符号名；这些服务器状态开关的业务名称及完整优先级矩阵仍不能精确命名。"
       ]
     },
     "60": {
       "questionOverride": {
         "questionZh": "谁使用这个原生样条，样条怎样影响路径和方向？"
       },
-      "status": "IDENTITY_ONLY",
-      "claims": [],
-      "blockingGaps": [
-        "当前没有样条类自身的业务实现，也没有消费者调用链闭环。"
-      ]
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "SplineActor 构造时创建并持有 SplineComponent；该类本身是路径数据载体。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x8A2780"
+          ]
+        },
+        {
+          "textZh": "WaterVolumeWithFlow 的两个消费者读取该样条，分别生成流向目标并计算沿样条的水流强度与方向。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x11B1100",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x11B2000"
+          ]
+        }
+      ],
+      "blockingGaps": []
     },
     "61": {
       "questionOverride": {

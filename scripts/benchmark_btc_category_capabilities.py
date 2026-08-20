@@ -923,6 +923,10 @@ def build_capability_report(
             native_profile = native_by_path.get(target_path)
             evidence_profile = native_profile
             effective_reader = "NATIVE_EVIDENCE"
+            ready = bool(
+                native_profile is not None
+                and native_profile.get("formallyQueryable") is True
+            )
             result = _native_result(
                 native_profile,
                 question_contract=contract,
@@ -967,9 +971,18 @@ def build_capability_report(
                         str(data_by_path[target_path].get("evidenceRevisionId") or "")
                         if ready and target_path in data_by_path
                         else (
-                            str(profile.get("asset", {}).get("revisionId") or "")
-                            if ready and isinstance(profile, Mapping)
-                            else ""
+                            str(
+                                native_by_path[target_path].get(
+                                    "evidenceRevisionId"
+                                )
+                                or ""
+                            )
+                            if ready and effective_reader == "NATIVE_EVIDENCE"
+                            else (
+                                str(profile.get("asset", {}).get("revisionId") or "")
+                                if ready and isinstance(profile, Mapping)
+                                else ""
+                            )
                         )
                     ),
                 },
@@ -1177,6 +1190,19 @@ def profile_native_evidence(
     trust_status = (
         str(trust.get("status") or "UNKNOWN") if isinstance(trust, Mapping) else "UNKNOWN"
     )
+    schema = str(payload.get("schema") or "")
+    evidence_set_id = str(payload.get("evidenceSetId") or "")
+    provenance_value = payload.get("provenance")
+    provenance = provenance_value if isinstance(provenance_value, Mapping) else {}
+    pdb_value = provenance.get("pdb")
+    pdb = pdb_value if isinstance(pdb_value, Mapping) else {}
+    source_is_verified = (
+        schema == "blueprint-to-code-native-evidence-set/v2"
+        and evidence_set_id.startswith("native-set://")
+        and trust_status == "VERIFIED"
+        and pdb.get("loaded") is True
+        and pdb.get("matchesBinary") is True
+    )
     targets_value = payload.get("targets")
     targets = targets_value if isinstance(targets_value, Sequence) else []
     result: dict[str, dict[str, object]] = {}
@@ -1210,6 +1236,8 @@ def profile_native_evidence(
             "trustStatus": trust_status,
             "symbolCount": len(evidence_rows),
             "evidenceRefs": list(evidence_rows.values())[:50],
+            "formallyQueryable": source_is_verified and bool(evidence_rows),
+            "evidenceRevisionId": evidence_set_id,
         }
     return result
 

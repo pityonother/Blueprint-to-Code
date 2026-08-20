@@ -165,6 +165,91 @@ def _sample(
 
 
 class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
+    def test_verified_native_evidence_is_formally_queryable_and_revision_bound(self):
+        target_path = "/Script/ShooterGame.PrimalCameraProbeActor"
+        evidence_ref = (
+            "native://binary-sha/ShooterGameEditor-ShooterGame.dll/0x7B93E0"
+        )
+        evidence_set_id = "native-set://binary-sha/recipe-sha"
+        payload = {
+            "schema": "blueprint-to-code-native-evidence-set/v2",
+            "evidenceSetId": evidence_set_id,
+            "trust": {"status": "VERIFIED"},
+            "provenance": {
+                "pdb": {"loaded": True, "matchesBinary": True},
+            },
+            "targets": [
+                {
+                    "qualifiedName": "APrimalCameraProbeActor::PlayFromHere",
+                    "evidenceId": evidence_ref,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_path = Path(temp_dir) / "native-evidence.json"
+            evidence_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            profiles = benchmark.profile_native_evidence(
+                evidence_path,
+                [target_path],
+            )
+            payload["provenance"]["pdb"]["matchesBinary"] = False
+            evidence_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            mismatched_profiles = benchmark.profile_native_evidence(
+                evidence_path,
+                [target_path],
+            )
+
+        native_profile = profiles[target_path]
+        self.assertTrue(native_profile["formallyQueryable"])
+        self.assertEqual(native_profile["evidenceRevisionId"], evidence_set_id)
+        self.assertFalse(mismatched_profiles[target_path]["formallyQueryable"])
+
+        report = benchmark.build_capability_report(
+            sample_plan={
+                "sampleCount": 1,
+                "samples": [
+                    _sample(
+                        3,
+                        code="NATIVE_CAMERA",
+                        target_kind="NATIVE_CLASS",
+                        action="ROUTE_NATIVE_CLASS_EVIDENCE",
+                        target_path=target_path,
+                    )
+                ],
+            },
+            question_contracts={
+                "NATIVE_CAMERA:CANDIDATE": {
+                    "questionZh": "镜头如何切换？",
+                    "requiredSignalGroups": [],
+                    "requiresExactFlow": False,
+                }
+            },
+            blueprint_profiles={},
+            native_profiles=profiles,
+            reviewed_assessments={
+                "3": {
+                    "status": "CLOSED_EXACT",
+                    "claims": [
+                        {
+                            "textZh": "PlayFromHere 切换镜头。",
+                            "evidenceRefs": [evidence_ref],
+                        }
+                    ],
+                    "blockingGaps": [],
+                }
+            },
+        )
+
+        row = report["samples"][0]
+        self.assertTrue(row["p0"]["ready"])
+        self.assertEqual(row["p0"]["evidenceRevisionId"], evidence_set_id)
+        self.assertEqual(row["route"]["effectiveReader"], "NATIVE_EVIDENCE")
+        self.assertEqual(row["result"]["benchmarkClosureStatus"], "CLOSED_EXACT")
+
     def test_data_asset_route_requires_confirmed_fields_and_formal_queryability(self):
         target_path = "/Script/ShooterGame.ModDataAsset"
         plan = {
