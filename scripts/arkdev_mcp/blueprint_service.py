@@ -146,6 +146,48 @@ def _is_exact_default_name(name: object, goal: str) -> bool:
     )
 
 
+def _project_asset_field_value(
+    value: object,
+    *,
+    field_name: str = "value",
+) -> tuple[object, bool]:
+    """Keep Unreal object identities typed while withholding machine paths."""
+
+    if isinstance(value, str):
+        try:
+            assert_path_free({field_name: value})
+        except McpExecutionError:
+            try:
+                assert_path_free({"objectPath": value})
+            except McpExecutionError:
+                return {"withheldByPathPolicy": True}, False
+            return {"objectPath": value}, True
+        return value, True
+    if isinstance(value, Mapping):
+        projected: dict[str, object] = {}
+        complete = True
+        for key, item in value.items():
+            projected_item, item_complete = _project_asset_field_value(
+                item,
+                field_name=str(key),
+            )
+            projected[str(key)] = projected_item
+            complete = complete and item_complete
+        return projected, complete
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        projected_items: list[object] = []
+        complete = True
+        for item in value:
+            projected_item, item_complete = _project_asset_field_value(
+                item,
+                field_name=field_name,
+            )
+            projected_items.append(projected_item)
+            complete = complete and item_complete
+        return projected_items, complete
+    return value, True
+
+
 def _dedupe_by_ref(
     items: Iterable[Mapping[str, object]],
     *,
@@ -723,10 +765,13 @@ class BlueprintService:
             # A property name may contain spaces.  Query the complete phrase
             # before its individual terms so the exact row cannot be pushed
             # beyond a bounded term page by many fuzzy matches.
-            searches.append((normalized_goal, ["default"]))
+            searches.append((normalized_goal, ["default", "asset_field"]))
         for term in _goal_terms(goal):
             searches.extend(
-                ((term, ["graph", "node"]), (term, ["default"]))
+                (
+                    (term, ["graph", "node"]),
+                    (term, ["default", "asset_field"]),
+                )
             )
 
         unique_searches: list[tuple[str, list[str]]] = []
@@ -815,7 +860,7 @@ class BlueprintService:
             default_matches = [
                 item
                 for item in search_items
-                if str(item.get("kind") or "") == "default"
+                if str(item.get("kind") or "") in {"default", "asset_field"}
             ]
             exact_default_match = any(
                 _is_exact_default_name(item.get("name"), goal)
@@ -914,6 +959,7 @@ class BlueprintService:
     def _default_entity_item(
         repository: EvidenceRepository,
         ref: str,
+        expected_kind: str = "default",
     ) -> dict[str, object]:
         budget = 1200
         for _attempt in range(4):
@@ -936,12 +982,12 @@ class BlueprintService:
                 item = _mapping(items[0])
                 if (
                     len(items) != 1
-                    or str(item.get("kind") or "") != "default"
+                    or str(item.get("kind") or "") != expected_kind
                     or str(item.get("ref") or "") != ref
                 ):
                     raise McpExecutionError(
                         "INTERNAL_CONTRACT_ERROR",
-                        "The exact class-default Evidence entity did not match "
+                        "The exact field Evidence entity did not match "
                         "the requested reference.",
                     )
                 return item
@@ -993,7 +1039,7 @@ class BlueprintService:
             (
                 item
                 for item in search_items
-                if str(item.get("kind") or "") == "default"
+                if str(item.get("kind") or "") in {"default", "asset_field"}
                 and _is_exact_default_name(item.get("name"), goal)
             ),
             limit=_MAX_DEFAULT_FACT_CANDIDATES,
@@ -1018,8 +1064,13 @@ class BlueprintService:
             ref = str(candidate.get("ref") or "")
             if not ref:
                 continue
-            item = BlueprintService._default_entity_item(repository, ref)
-            if str(item.get("kind") or "") != "default":
+            candidate_kind = str(candidate.get("kind") or "")
+            item = BlueprintService._default_entity_item(
+                repository,
+                ref,
+                candidate_kind,
+            )
+            if str(item.get("kind") or "") != candidate_kind:
                 continue
             name = str(item.get("name") or "")
             type_name = str(item.get("typeName") or "")
@@ -1029,7 +1080,11 @@ class BlueprintService:
             )
             fact: dict[str, object] = {
                 "id": ref,
-                "kind": "CLASS_DEFAULT",
+                "kind": (
+                    "ASSET_FIELD"
+                    if candidate_kind == "asset_field"
+                    else "CLASS_DEFAULT"
+                ),
                 "text": "",
                 "status": source_status,
                 "sourceValueStatus": source_status,
@@ -1161,6 +1216,9 @@ class BlueprintService:
                     )
 
             def expose_value(value: object) -> bool:
+                complete = True
+                if candidate_kind == "asset_field":
+                    value, complete = _project_asset_field_value(value)
                 candidate_fact = {**fact, "value": value}
                 try:
                     assert_path_free(candidate_fact)
@@ -1183,7 +1241,7 @@ class BlueprintService:
                 else:
                     fact["value"] = value
                     fact["valueExposure"] = "RETURNED"
-                    return True
+                    return complete
                 return False
 
             value_returned = False
@@ -1217,9 +1275,12 @@ class BlueprintService:
                 fact["valueUsable"] = False
                 if source_status == "CONFIRMED":
                     fact["status"] = "NOT_RECOVERED"
-            fact["text"] = (
-                f"Class default {name} value has status {fact['status']}."
+            label = (
+                "Asset instance field"
+                if candidate_kind == "asset_field"
+                else "Class default"
             )
+            fact["text"] = f"{label} {name} value has status {fact['status']}."
             assert_path_free(fact)
             facts.append(fact)
         return facts

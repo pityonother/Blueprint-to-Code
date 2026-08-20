@@ -371,6 +371,11 @@ def _database_projection(
             "links": _table_count(connection, "edges"),
             "edgeObservations": _table_count(connection, "edge_observations"),
             "classDefaults": _table_count(connection, "class_defaults"),
+            "assetFields": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM properties WHERE owner_kind = 'asset'"
+                ).fetchone()[0]
+            ),
             "diagnostics": _table_count(connection, "diagnostics"),
         }
         graph_coverage = {
@@ -703,6 +708,8 @@ def _validate_v2_manifest(
         "edgeObservations": "edgeObservations",
         "class_defaults": "classDefaults",
         "classDefaults": "classDefaults",
+        "asset_fields": "assetFields",
+        "assetFields": "assetFields",
         "diagnostics": "diagnostics",
     }
     required_count_groups = (

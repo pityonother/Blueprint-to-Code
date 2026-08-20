@@ -45,6 +45,7 @@ _SEMANTIC_COUNT_FIELDS: Final = (
     "pins",
     "links",
     "classDefaults",
+    "assetFields",
     "edgeObservations",
 )
 

@@ -32,7 +32,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--kind",
         action="append",
         dest="kinds",
-        choices=["graph", "node", "pin", "default", "diagnostic", "edge_observation"],
+        choices=[
+            "graph",
+            "node",
+            "pin",
+            "default",
+            "asset_field",
+            "diagnostic",
+            "edge_observation",
+        ],
     )
     search.add_argument("--page-size", type=int)
     search.add_argument("--cursor")

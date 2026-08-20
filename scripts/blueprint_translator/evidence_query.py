@@ -393,6 +393,7 @@ class EvidenceQueryService:
             "(SELECT COUNT(*) FROM edges) AS wire_count, "
             "(SELECT COUNT(*) FROM edge_observations) AS observation_count, "
             "(SELECT COUNT(*) FROM class_defaults) AS default_count, "
+            "(SELECT COUNT(*) FROM properties WHERE owner_kind = 'asset') AS asset_field_count, "
             "(SELECT COUNT(*) FROM diagnostics) + "
             "(SELECT COUNT(*) FROM edge_observations "
             " WHERE lower(COALESCE(NULLIF(resolution_status, ''), status, '')) <> 'resolved_pin') AS gap_count"
@@ -407,6 +408,7 @@ class EvidenceQueryService:
             "wireCount": int(counts["wire_count"]),
             "linkObservationCount": int(counts["observation_count"]),
             "defaultCount": int(counts["default_count"]),
+            "assetFieldCount": int(counts["asset_field_count"]),
             "gapCount": gap_count,
         }
         self._set_coverage(
@@ -439,12 +441,20 @@ class EvidenceQueryService:
             )
         kinds_value = request.get("kinds")
         if kinds_value is None:
-            kinds = ("graph", "node", "pin", "default", "diagnostic")
+            kinds = ("graph", "node", "pin", "default", "asset_field", "diagnostic")
         elif isinstance(kinds_value, Sequence) and not isinstance(kinds_value, (str, bytes)):
             kinds = tuple(dict.fromkeys(str(value).strip().casefold() for value in kinds_value if str(value).strip()))
         else:
             raise ValueError("kinds must be an array")
-        allowed = {"graph", "node", "pin", "default", "diagnostic", "edge_observation"}
+        allowed = {
+            "graph",
+            "node",
+            "pin",
+            "default",
+            "asset_field",
+            "diagnostic",
+            "edge_observation",
+        }
         if not kinds or any(kind not in allowed for kind in kinds):
             raise ValueError("kinds contains an unsupported entity kind")
         try:
@@ -553,7 +563,9 @@ class EvidenceQueryService:
 
     def _materialized_search_kinds(self, kinds: Sequence[str]) -> set[str]:
         eligible = tuple(
-            kind for kind in kinds if kind in {"graph", "node", "pin", "default"}
+            kind
+            for kind in kinds
+            if kind in {"graph", "node", "pin", "default", "asset_field"}
         )
         if not eligible:
             return set()
@@ -662,6 +674,33 @@ class EvidenceQueryService:
                         "graph_ref": "",
                         "summary": f"{row['type_name']}={_short_text(row['value_json'], 80)}",
                         "search_text": f"{row['name']} {row['type_name']} {row['value_json']}",
+                    }
+                )
+        if "asset_field" in kinds:
+            sql = (
+                "SELECT property_ref, name, type_name, value_json FROM properties "
+                "WHERE owner_kind = 'asset'"
+            )
+            parameters = ()
+            if like is not None:
+                sql += (
+                    " AND lower(name || ' ' || type_name || ' ' || value_json) "
+                    "LIKE ? ESCAPE '\\'"
+                )
+                parameters = (like,)
+            for row in self._connection.execute(sql, parameters):
+                rows.append(
+                    {
+                        "ref": row["property_ref"],
+                        "kind": "asset_field",
+                        "name": row["name"],
+                        "graph_ref": "",
+                        "summary": (
+                            f"{row['type_name']}={_short_text(row['value_json'], 80)}"
+                        ),
+                        "search_text": (
+                            f"{row['name']} {row['type_name']} {row['value_json']}"
+                        ),
                     }
                 )
         if "diagnostic" in kinds:
@@ -1361,16 +1400,36 @@ class EvidenceQueryService:
 
     @classmethod
     def _property_item(cls, row: sqlite3.Row, *, value_offset: int, value_chars: int) -> dict[str, object]:
+        owner_kind = str(row["owner_kind"])
+        paged_value = cls._paged_value(
+            row,
+            value_offset=value_offset,
+            value_chars=value_chars,
+        )
+        extra = _json_value(row["extra_json"], {})
+        confirmed_asset_value = (
+            owner_kind == "asset"
+            and isinstance(extra, Mapping)
+            and extra.get("confirmed_value_usable") is True
+        )
         return {
             "ref": str(row["property_ref"]),
-            "kind": "property",
-            "ownerKind": str(row["owner_kind"]),
+            "kind": "asset_field" if owner_kind == "asset" else "property",
+            "ownerKind": owner_kind,
             "ownerRef": str(row["owner_ref"]),
             "name": str(row["name"]),
             "typeName": str(row["type_name"]),
             "confidence": str(row["confidence"]),
             "source": str(row["source"]),
-            **cls._paged_value(row, value_offset=value_offset, value_chars=value_chars),
+            **(
+                {
+                    "valueStatus": "CONFIRMED",
+                    "valueUsable": True,
+                }
+                if confirmed_asset_value
+                else {}
+            ),
+            **paged_value,
         }
 
     @staticmethod

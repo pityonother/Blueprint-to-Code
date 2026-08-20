@@ -134,6 +134,48 @@ class BlueprintEvidenceCohortPublicationTests(unittest.TestCase):
         self.assertTrue(
             all(item["semanticFactCount"] > 0 for item in result["assets"])
         )
+
+    def test_preflight_accepts_confirmed_data_asset_fields_without_graphs(self) -> None:
+        name = "DataOnlyFixture"
+        source_asset = self.source_root / name
+        source_binary = source_asset / "source" / f"{name}.uasset"
+        source_binary.parent.mkdir(parents=True)
+        source_binary.write_bytes(b"data-only-fixture")
+        write_evidence_artifacts_from_payload(
+            f"/Game/Test/{name}.{name}",
+            source_binary,
+            {
+                "asset_name": name,
+                "asset_path": f"/Game/Test/{name}.{name}",
+                "graphs": [],
+                "asset_fields": {
+                    "loaded": True,
+                    "instance_object": name,
+                    "variables": {
+                        "Units.count": {
+                            "value": 1,
+                            "type": "ArrayCount",
+                            "source": "fixture",
+                            "confidence": "high",
+                            "owner_kind": "asset",
+                            "confirmed_value_usable": True,
+                        }
+                    },
+                    "gaps": [],
+                },
+            },
+            source_asset,
+        )
+        self.write_plan([self.entry(name)])
+
+        result = preflight_evidence_cohort(
+            plan_path=self.plan_path,
+            source_root=self.source_root,
+            capture_root=self.capture_root,
+            budget=32_000,
+        )
+
+        self.assertEqual(result["assets"][0]["semanticFactCount"], 1)
         self.assertTrue(
             all(item["destinationStatus"] == "NEW" for item in result["assets"])
         )

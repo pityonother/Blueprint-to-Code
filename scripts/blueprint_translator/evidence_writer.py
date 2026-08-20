@@ -35,7 +35,9 @@ from .evidence_schema import (
     EVIDENCE_SCHEMA_VERSION,
     LEGACY_CAPTURE_PARSER_VERSION,
     ensure_evidence_schema,
+    make_asset_field_ref,
     make_asset_id,
+    make_asset_ref,
     make_default_ref,
     make_graph_ref,
     make_node_ref,
@@ -54,12 +56,12 @@ _SIDECAR_NAMES = (
     "uasset_failed_graph_queue.json",
 )
 
-DIRECT_PAYLOAD_PARSER_VERSION = "uasset-graph-reader-evidence-v4"
+DIRECT_PAYLOAD_PARSER_VERSION = "uasset-graph-reader-evidence-v6"
 JSON_COMPRESSION_THRESHOLD = 4096
 PUBLISH_REPLACE_ATTEMPTS = 6
 SEARCH_SUMMARY_MAX_CHARS = 160
 SEARCH_TEXT_MAX_CHARS = 384
-SEARCH_MATERIALIZED_KINDS = ("graph", "node", "pin", "default")
+SEARCH_MATERIALIZED_KINDS = ("graph", "node", "pin", "default", "asset_field")
 
 
 def _compact_json(value: object) -> str:
@@ -519,6 +521,13 @@ def _mark_search_materialization(connection: sqlite3.Connection, revision_id: st
         "default": int(
             connection.execute(
                 "SELECT COUNT(*) FROM class_defaults WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()[0]
+        ),
+        "asset_field": int(
+            connection.execute(
+                "SELECT COUNT(*) FROM properties "
+                "WHERE revision_id = ? AND owner_kind = 'asset'",
                 (revision_id,),
             ).fetchone()[0]
         ),
@@ -1152,6 +1161,146 @@ def _insert_defaults(
         )
 
 
+def _insert_asset_fields(
+    connection: sqlite3.Connection,
+    *,
+    payload: dict[str, Any],
+    asset_id: str,
+    revision_id: str,
+) -> int:
+    """Store only confirmed instance-owned values as queryable facts."""
+
+    variables = payload.get("variables")
+    if not isinstance(variables, dict):
+        return 0
+    owner_ref = make_asset_ref(asset_id, revision_id)
+    inserted = 0
+    for name in sorted(str(value) for value in variables):
+        raw = variables.get(name)
+        row = raw if isinstance(raw, dict) else {"value": raw}
+        if row.get("confirmed_value_usable") is not True:
+            continue
+        field_ref = make_asset_field_ref(asset_id, revision_id, name)
+        value = row.get("value")
+        value_json, value_codec, value_blob = _json_storage(value)
+        connection.execute(
+            "INSERT INTO properties(property_ref, revision_id, owner_kind, owner_ref, name, type_name, "
+            "value_json, value_codec, value_blob, confidence, source, raw_offsets_json, extra_json) "
+            "VALUES (?, ?, 'asset', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                field_ref,
+                revision_id,
+                owner_ref,
+                name,
+                _first_text(row.get("type"), row.get("type_name")),
+                value_json,
+                value_codec,
+                value_blob,
+                _first_text(row.get("confidence")),
+                _first_text(row.get("source")),
+                _compact_json(
+                    row.get("raw_offsets")
+                    if isinstance(row.get("raw_offsets"), dict)
+                    else {}
+                ),
+                _compact_json(
+                    _without(
+                        row,
+                        {
+                            "name",
+                            "type",
+                            "type_name",
+                            "value",
+                            "confidence",
+                            "source",
+                            "raw_offsets",
+                            "owner_kind",
+                        },
+                    )
+                ),
+            ),
+        )
+        type_name = _first_text(row.get("type"), row.get("type_name"))
+        _insert_search(
+            connection,
+            ref=field_ref,
+            revision_id=revision_id,
+            kind="asset_field",
+            name=name,
+            summary=type_name,
+            search_text=" ".join((name, type_name, _compact_json(value))),
+        )
+        inserted += 1
+    return inserted
+
+
+def _insert_asset_field_diagnostics(
+    connection: sqlite3.Connection,
+    *,
+    payload: dict[str, Any],
+    asset_id: str,
+    revision_id: str,
+    asset_field_count: int,
+) -> None:
+    owner_ref = make_asset_ref(asset_id, revision_id)
+    gaps = payload.get("gaps") if isinstance(payload.get("gaps"), list) else []
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            continue
+        field_path = _first_text(gap.get("field"), gap.get("field_path"))
+        scope_ref = (
+            make_asset_field_ref(asset_id, revision_id, field_path)
+            if field_path
+            else owner_ref
+        )
+        scope_kind = "asset_field" if field_path else "asset"
+        reason_code = _first_text(
+            gap.get("reason_code"),
+            "ASSET_FIELD_NOT_DECODED",
+        )
+        diagnostic_ref = (
+            f"{scope_ref}/diagnostic/"
+            f"{_short_hash(f'{field_path}|{reason_code}')}"
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO diagnostics(diagnostic_ref, revision_id, scope_kind, scope_ref, status, "
+            "reason_code, severity, title, detail, next_probe, evidence_json, raw_json) "
+            "VALUES (?, ?, ?, ?, 'NOT_RECOVERED', ?, 'warning', ?, ?, ?, '[]', ?)",
+            (
+                diagnostic_ref,
+                revision_id,
+                scope_kind,
+                scope_ref,
+                reason_code,
+                reason_code.replace("_", " "),
+                _first_text(gap.get("detail"), "The instance field was not decoded."),
+                _first_text(
+                    gap.get("next_probe"),
+                    "Inspect the exact serialized field boundaries and native struct layout.",
+                ),
+                _compact_json(gap),
+            ),
+        )
+    if asset_field_count == 0:
+        reason_code = "ASSET_FIELDS_EMPTY"
+        diagnostic_ref = f"{owner_ref}/diagnostic/{_short_hash(reason_code)}"
+        connection.execute(
+            "INSERT OR IGNORE INTO diagnostics(diagnostic_ref, revision_id, scope_kind, scope_ref, status, "
+            "reason_code, severity, title, detail, next_probe, evidence_json, raw_json) "
+            "VALUES (?, ?, 'asset', ?, 'NOT_RECOVERED', ?, 'warning', ?, ?, ?, '[]', ?)",
+            (
+                diagnostic_ref,
+                revision_id,
+                owner_ref,
+                reason_code,
+                "Asset instance fields are empty",
+                "No confirmed usable instance-owned field was materialized.",
+                "Recover at least one exact same-name instance field before treating this route as available.",
+                _compact_json(payload),
+            ),
+        )
+
+
 def _graph_ref_for_diagnostic(graphs: list[dict[str, Any]], row: dict[str, Any]) -> str | None:
     export_index = _as_int(row.get("export_index"), _as_int(row.get("uasset_export_index")))
     if export_index is not None:
@@ -1336,6 +1485,7 @@ def _write_database_components(
     source_metadata: dict[str, tuple[int, str]],
     graph_inputs: Iterable[tuple[dict[str, Any], dict[str, Any]]],
     class_defaults: dict[str, Any],
+    asset_fields: dict[str, Any],
     triage: dict[str, Any],
     failed_queue: dict[str, Any],
     parser_version: str,
@@ -1435,6 +1585,21 @@ def _write_database_components(
                 asset_id=asset_id,
                 revision_id=revision_id,
             )
+            asset_fields_active = bool(asset_fields) and (
+                asset_fields.get("loaded") is True
+                or bool(asset_fields.get("instance_object"))
+                or bool(asset_fields.get("variables"))
+            )
+            asset_field_count = (
+                _insert_asset_fields(
+                    connection,
+                    payload=asset_fields,
+                    asset_id=asset_id,
+                    revision_id=revision_id,
+                )
+                if asset_fields_active
+                else 0
+            )
             _mark_search_materialization(connection, revision_id)
             asset_scope_ref = f"bp://{asset_id}@{revision_id}"
             _insert_diagnostics(
@@ -1450,6 +1615,14 @@ def _write_database_components(
                 revision_id=revision_id,
                 graphs=diagnostic_graphs,
             )
+            if asset_fields_active:
+                _insert_asset_field_diagnostics(
+                    connection,
+                    payload=asset_fields,
+                    asset_id=asset_id,
+                    revision_id=revision_id,
+                    asset_field_count=asset_field_count,
+                )
             connection.execute(
                 "INSERT INTO coverage(scope_ref, revision_id, scope_kind, status, confidence, metrics_json) "
                 "VALUES (?, ?, 'asset', 'AVAILABLE', '', ?)",
@@ -1574,6 +1747,7 @@ def _write_database_components(
         "counts": counts,
         "source_count": len(source_hashes),
         "default_count": default_count,
+        "asset_field_count": asset_field_count,
         "gap_count": gap_count,
         "candidate_count": candidate_count,
         "graph_status_counts": graph_status_counts,
@@ -1627,6 +1801,7 @@ def _build_database(asset_dir: Path, database_path: Path) -> dict[str, Any]:
         source_metadata=source_metadata,
         graph_inputs=graph_inputs,
         class_defaults=sidecars.get("uasset_class_defaults.json", {}),
+        asset_fields={},
         triage=sidecars.get("uasset_partial_graph_triage.json", {}),
         failed_queue=sidecars.get("uasset_failed_graph_queue.json", {}),
         parser_version=LEGACY_CAPTURE_PARSER_VERSION,
@@ -1672,6 +1847,7 @@ def _direct_source_manifest(
         "asset_path": payload.get("asset_path", ""),
         "asset_name": payload.get("asset_name", ""),
         "class_defaults": payload.get("class_defaults", {}),
+        "asset_fields": payload.get("asset_fields", {}),
     }
     encoded = _compact_json(stable_header).encode("utf-8")
     fact_hasher.update(encoded)
@@ -1808,6 +1984,7 @@ def write_evidence_store_from_payload(
         source_metadata=source_metadata,
         graph_inputs=graph_inputs(),
         class_defaults=payload.get("class_defaults") if isinstance(payload.get("class_defaults"), dict) else {},
+        asset_fields=payload.get("asset_fields") if isinstance(payload.get("asset_fields"), dict) else {},
         triage=_direct_triage(payload),
         failed_queue=_direct_failed_queue(payload),
         parser_version=DIRECT_PAYLOAD_PARSER_VERSION,
@@ -1940,6 +2117,7 @@ def _agent_index(result: dict[str, Any]) -> str:
         f"- Graph status counts: {graph_status_text}\n"
         f"- Candidate target Pins retained: {int(result.get('candidate_count') or 0)}\n"
         f"- Class defaults: {int(result.get('default_count') or 0)}\n"
+        f"- Asset fields: {int(result.get('asset_field_count') or 0)}\n"
         f"- Evidence gaps: {int(result.get('gap_count') or 0)}; unresolved/heuristic link observations: {unresolved_links}\n\n"
         "## Selected high-signal entry points\n\n"
         "### Graphs\n\n"
@@ -2060,6 +2238,7 @@ def _agent_index(result: dict[str, Any]) -> str:
         f"- Recovery rates: complete graphs={complete_graphs}/{counts['graphs']} ({graph_complete_rate:.1f}%); "
         f"exact links={confirmed_links}/{counts['edge_observations']} ({exact_link_rate:.1f}%)\n"
         f"- Graph status: {graph_status_text}; Defaults={int(result.get('default_count') or 0)}; "
+        f"Asset fields={int(result.get('asset_field_count') or 0)}; "
         f"Gaps={int(result.get('gap_count') or 0)}\n\n"
         "## Selected entry points\n\n"
         f"{compact_entry_text}\n\n"

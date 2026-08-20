@@ -334,6 +334,128 @@ def _open_rows(database_path: Path) -> Iterator[sqlite3.Connection]:
 
 
 class EvidenceWriterTests(unittest.TestCase):
+    def test_direct_writer_materializes_asset_instance_fields_and_gaps(self):
+        payload = {
+            "asset_name": "ModDataAsset_Test",
+            "asset_path": "/Game/Test/ModDataAsset_Test.ModDataAsset_Test",
+            "graphs": [],
+            "class_defaults": {
+                "variables": {
+                    "NativeDefault": {
+                        "value": 7,
+                        "type": "IntProperty",
+                        "confidence": "high",
+                    }
+                }
+            },
+            "asset_fields": {
+                "loaded": True,
+                "instance_object": "ModDataAsset_Test",
+                "instance_class": "ModDataAsset",
+                "export_index": 0,
+                "business_fact_count": 2,
+                "variables": {
+                    "ModName": {
+                        "value": "Fixture Mod",
+                        "type": "StrProperty",
+                        "source": "uasset_asset_instance",
+                        "confidence": "high",
+                        "owner_kind": "asset",
+                        "confirmed_value_usable": True,
+                    },
+                    "Cosmetics.count": {
+                        "value": 20,
+                        "type": "ArrayCount",
+                        "source": "uasset_asset_instance_array_count",
+                        "confidence": "high",
+                        "owner_kind": "asset",
+                        "confirmed_value_usable": True,
+                    },
+                },
+                "gaps": [
+                    {
+                        "field": "Cosmetics[3].Cosmetic",
+                        "type": "ObjectProperty",
+                        "reason_code": "ASSET_FIELD_NOT_DECODED",
+                        "detail": "PackageIndex was outside package maps.",
+                    }
+                ],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_path = root / "first.sqlite"
+            second_path = root / "second.sqlite"
+            first = write_evidence_store_from_payload(
+                str(payload["asset_path"]), None, payload, first_path
+            )
+            changed = copy.deepcopy(payload)
+            changed["asset_fields"]["variables"]["ModName"]["value"] = (
+                "Changed Mod"
+            )
+            second = write_evidence_store_from_payload(
+                str(payload["asset_path"]), None, changed, second_path
+            )
+            with _open_rows(first_path) as connection:
+                rows = connection.execute(
+                    "SELECT owner_kind, owner_ref, name, value_json, extra_json "
+                    "FROM properties ORDER BY name"
+                ).fetchall()
+                search_rows = connection.execute(
+                    "SELECT kind, name FROM search_entities ORDER BY kind, name"
+                ).fetchall()
+                diagnostic = connection.execute(
+                    "SELECT scope_kind, scope_ref, reason_code, raw_json "
+                    "FROM diagnostics WHERE reason_code = 'ASSET_FIELD_NOT_DECODED'"
+                ).fetchone()
+
+        self.assertEqual(first["asset_field_count"], 2)
+        self.assertNotEqual(first["revision_id"], second["revision_id"])
+        self.assertEqual({row["owner_kind"] for row in rows}, {"asset"})
+        self.assertTrue(all(str(row["owner_ref"]).endswith("/asset") for row in rows))
+        self.assertEqual(
+            [(row["kind"], row["name"]) for row in search_rows],
+            [
+                ("asset_field", "Cosmetics.count"),
+                ("asset_field", "ModName"),
+                ("default", "NativeDefault"),
+            ],
+        )
+        self.assertEqual(diagnostic["scope_kind"], "asset_field")
+        self.assertIn("Cosmetics%5B3%5D.Cosmetic", diagnostic["scope_ref"])
+        self.assertIn("PackageIndex", diagnostic["raw_json"])
+
+    def test_zero_asset_instance_fields_create_an_explicit_gap(self):
+        payload = {
+            "asset_name": "EmptyDataAsset",
+            "asset_path": "/Game/Test/EmptyDataAsset.EmptyDataAsset",
+            "graphs": [],
+            "asset_fields": {
+                "loaded": True,
+                "instance_object": "EmptyDataAsset",
+                "variables": {},
+                "gaps": [],
+                "business_fact_count": 0,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "evidence.sqlite"
+            result = write_evidence_store_from_payload(
+                str(payload["asset_path"]), None, payload, database_path
+            )
+            with _open_rows(database_path) as connection:
+                reason_codes = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT reason_code FROM diagnostics"
+                    )
+                }
+
+        self.assertEqual(result["asset_field_count"], 0)
+        self.assertIn("ASSET_FIELDS_EMPTY", reason_codes)
+
     def test_direct_parser_v4_keeps_heuristic_pin_keys_out_of_authority(self):
         graph_payload = {
             "metadata": {
@@ -473,7 +595,7 @@ class EvidenceWriterTests(unittest.TestCase):
                 ).fetchone()
 
         self.assertEqual(result["parser_version"], DIRECT_PAYLOAD_PARSER_VERSION)
-        self.assertEqual(DIRECT_PAYLOAD_PARSER_VERSION, "uasset-graph-reader-evidence-v4")
+        self.assertEqual(DIRECT_PAYLOAD_PARSER_VERSION, "uasset-graph-reader-evidence-v6")
         self.assertEqual(pin["native_pin_id"], "")
         self.assertEqual(pin["persistent_guid"], "")
         self.assertEqual(authority_pin_count, 0)
@@ -542,6 +664,9 @@ class EvidenceWriterTests(unittest.TestCase):
                     "node": connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
                     "pin": connection.execute("SELECT COUNT(*) FROM pins").fetchone()[0],
                     "default": connection.execute("SELECT COUNT(*) FROM class_defaults").fetchone()[0],
+                    "asset_field": connection.execute(
+                        "SELECT COUNT(*) FROM properties WHERE owner_kind = 'asset'"
+                    ).fetchone()[0],
                 }
                 indexed_counts = {
                     str(row["kind"]): int(row["row_count"])
@@ -559,12 +684,18 @@ class EvidenceWriterTests(unittest.TestCase):
                     "SELECT kind, name, summary, search_text FROM search_entities"
                 ).fetchall()
 
-        self.assertEqual(indexed_counts, canonical_counts)
+        self.assertEqual(
+            indexed_counts,
+            {kind: count for kind, count in canonical_counts.items() if count},
+        )
         self.assertEqual(
             materialized,
             {kind: (count, 1) for kind, count in canonical_counts.items()},
         )
-        self.assertEqual({str(row["kind"]) for row in projection}, set(canonical_counts))
+        self.assertEqual(
+            {str(row["kind"]) for row in projection},
+            {kind for kind, count in canonical_counts.items() if count},
+        )
         self.assertTrue(all(len(str(row["summary"])) <= 160 for row in projection))
         self.assertTrue(all(len(str(row["search_text"])) <= 384 for row in projection))
         copied_projection = "\n".join(

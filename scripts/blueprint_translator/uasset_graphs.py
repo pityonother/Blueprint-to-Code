@@ -33,6 +33,7 @@ UASSET_CLIPBOARD_COMPARE_SCHEMA = "blueprint-translator.uasset-vs-clipboard-comp
 UASSET_PARTIAL_TRIAGE_SCHEMA = "blueprint-translator.uasset-partial-graph-triage.v1"
 UASSET_QUALITY_GATES_SCHEMA = "blueprint-translator.uasset-quality-gates.v1"
 UASSET_CLASS_DEFAULTS_SCHEMA = "blueprint-translator.uasset-class-defaults.v1"
+UASSET_ASSET_FIELDS_SCHEMA = "blueprint-translator.uasset-fields.v1"
 DEFAULT_MAX_CANDIDATES = 1600
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1016,7 +1017,7 @@ def parse_uasset_structure(uasset_path: Path) -> dict[str, object]:
         if class_name:
             class_counts[class_name] = class_counts.get(class_name, 0) + 1
         object_name = str(item.get("object_name") or "")
-        if class_name == "EdGraph" and object_name:
+        if (class_name == "EdGraph" or class_name.endswith("EdGraph")) and object_name:
             graph_exports.append(
                 {
                     "name": object_name,
@@ -1343,7 +1344,12 @@ def object_ref_path(
         name = str(row.get("object_name") or row.get("display_name") or "")
         if name.startswith(("/Game/", "/Script/", "/Engine/")):
             package_path = name.split(".", 1)[0]
-            return f"{package_path}.{leaf}" if leaf and leaf != package_path.rsplit("/", 1)[-1] else package_path
+            # A reference to the package itself has no object suffix. A child
+            # import keeps its object identity even when its name equals the
+            # package leaf (the common DataTable/DataAsset case).
+            if current == value:
+                return package_path
+            return f"{package_path}.{leaf}" if leaf else package_path
         outer = row.get("outer_index")
         if not isinstance(outer, int):
             break
@@ -1879,6 +1885,40 @@ def parse_export_properties(
     return properties, warnings
 
 
+def parse_tagged_export_properties(
+    package: dict[str, object],
+    export_data: bytes,
+) -> tuple[dict[str, dict[str, object]], list[str]]:
+    """Decode an export with the exact, bounded property-tag reader."""
+
+    names = package.get("names", [])
+    imports = package.get("imports", [])
+    exports = package.get("exports", [])
+    soft_object_paths = package.get("soft_object_paths", [])
+    if not isinstance(names, list) or not isinstance(imports, list) or not isinstance(exports, list):
+        return {}, ["Invalid package maps for tagged export properties."]
+    if not isinstance(soft_object_paths, list):
+        soft_object_paths = []
+    properties: dict[str, dict[str, object]] = {}
+    warnings: list[str] = []
+    for block in cdo_property_tag_blocks(export_data, names):
+        name = str(block.get("name") or "")
+        if not name:
+            continue
+        parsed = parse_cdo_property_value(
+            export_data,
+            block,
+            names,
+            imports,
+            exports,
+            [item for item in soft_object_paths if isinstance(item, dict)],
+        )
+        if parsed.get("error"):
+            warnings.append(f"{name}: {parsed.get('error')}")
+        properties[name] = parsed
+    return properties, warnings
+
+
 def cdo_export_for_package(exports: list[dict[str, object]], asset_name: str) -> dict[str, object] | None:
     expected = f"Default__{asset_name}_C"
     for export in exports:
@@ -1956,8 +1996,35 @@ def _ark_cdo_property_tag_at(
         if not struct_info:
             return None
         metadata["struct"] = struct_info[0]
-        metadata["struct_guid_offset"] = pos + 32
-        value_offset = pos + 48
+        # Older UE4 packages serialize StructProperty values immediately after
+        # the struct FName. Newer packages insert a 16-byte StructGuid. Select
+        # the old layout only when its declared end is an exact next-property
+        # boundary; this prevents a value from consuming the following field.
+        legacy_value_offset = pos + 32
+        legacy_end = legacy_value_offset + declared_size
+        next_name = _fname_at(export_data, legacy_end, names)
+        next_type = (
+            _fname_at(export_data, legacy_end + 8, names)
+            if next_name and next_name[0] != "None"
+            else None
+        )
+        legacy_boundary = bool(
+            legacy_end == limit
+            or (next_name and next_name[0] == "None")
+            or (
+                next_name
+                and next_type
+                and next_name[0] not in UOBJECT_PROPERTY_TYPE_NAMES
+                and next_type[0] in UOBJECT_PROPERTY_TYPE_NAMES
+            )
+        )
+        if legacy_boundary:
+            metadata["struct_layout"] = "legacy_no_guid"
+            value_offset = legacy_value_offset
+        else:
+            metadata["struct_guid_offset"] = pos + 32
+            metadata["struct_layout"] = "with_guid"
+            value_offset = pos + 48
     elif type_name in {"ByteProperty", "EnumProperty"}:
         enum_info = _fname_at(export_data, pos + 24, names)
         if not enum_info:
@@ -2509,6 +2576,8 @@ def _parse_cdo_array_value(
         "DoubleProperty": 8,
         "BoolProperty": 1,
         "NameProperty": 8,
+        "ByteProperty": 8,
+        "EnumProperty": 8,
     }
     width = fixed_widths.get(inner_type)
     inline_soft_object_paths = (
@@ -2655,7 +2724,9 @@ def _parse_cdo_array_value(
             ]
             nested_value: dict[str, object] = {}
             for prop in nested_properties:
-                nested_value[str(prop.get("name") or "")] = prop.get("value")
+                nested_value[str(prop.get("name") or "")] = _decoded_property_value(
+                    prop
+                )
             values.append(nested_value)
             elements.append(
                 {
@@ -2691,6 +2762,68 @@ def _parse_cdo_array_value(
             ),
         },
     }
+
+
+def _decoded_property_value(prop: dict[str, object]) -> object:
+    """Project a parsed property without losing resolved object identity."""
+
+    type_name = str(prop.get("type") or "")
+    if type_name in {"ObjectProperty", "SoftObjectProperty"}:
+        return prop.get("object_path") or prop.get("object") or prop.get("value")
+    if type_name == "ArrayProperty" and prop.get("element_kind") in {
+        "ObjectProperty",
+        "SoftObjectProperty",
+    }:
+        paths = prop.get("object_paths")
+        if isinstance(paths, list):
+            return paths
+    return prop.get("value")
+
+
+def _tagged_struct_value(
+    export_data: bytes,
+    *,
+    value_offset: int,
+    value_end: int,
+    tag_layout: str,
+    names: list[str],
+    imports: list[dict[str, object]],
+    exports: list[dict[str, object]],
+    soft_object_paths: list[dict[str, object]],
+) -> tuple[dict[str, object], list[dict[str, object]]] | None:
+    sequence_parser = {
+        "ark_compact": _ark_cdo_property_sequence,
+        "ark_compact_guid_marker": _ark_guid_cdo_property_sequence,
+        "ue5_property_type_name": _ue5_cdo_property_sequence,
+    }.get(tag_layout)
+    if sequence_parser is None:
+        return None
+    blocks, cursor, terminated = sequence_parser(
+        export_data,
+        names,
+        start=value_offset,
+        limit=value_end,
+    )
+    if not terminated or cursor != value_end:
+        return None
+    properties = [
+        parse_cdo_property_value(
+            export_data,
+            nested,
+            names,
+            imports,
+            exports,
+            soft_object_paths,
+        )
+        for nested in blocks
+    ]
+    return (
+        {
+            str(prop.get("name") or ""): _decoded_property_value(prop)
+            for prop in properties
+        },
+        properties,
+    )
 
 
 def parse_cdo_property_value(
@@ -2770,7 +2903,35 @@ def parse_cdo_property_value(
                 struct_name = struct_info[0] if struct_info else ""
             item["struct"] = struct_name
             struct_raw_size = declared_size or max(0, end - value_offset)
-            if struct_name in {"Vector2D", "Vector2d"} and value_offset + 16 <= len(export_data):
+            if (
+                struct_name in {"Guid", "FGuid"}
+                and declared_size == 16
+                and value_offset + 16 <= value_end
+            ):
+                raw_guid = export_data[value_offset : value_offset + 16]
+                guid = guid_to_text(raw_guid) if raw_guid != bytes(16) else ""
+                if guid:
+                    item["value"] = guid
+                    item["guid"] = guid
+                    item["struct_parse"] = {
+                        "parsed": True,
+                        "method": "exact_struct_value",
+                        "struct_name": struct_name,
+                        "raw_size": 16,
+                        "value_offset": value_offset,
+                    }
+                else:
+                    item["value"] = {
+                        "struct": struct_name,
+                        "raw_size": 16,
+                        "parsed": False,
+                    }
+                    item["struct_parse"] = {
+                        "parsed": False,
+                        "struct_name": struct_name,
+                        "raw_size": 16,
+                    }
+            elif struct_name in {"Vector2D", "Vector2d"} and value_offset + 16 <= value_end:
                 item["value"] = {
                     "x": _read_f64(export_data, value_offset),
                     "y": _read_f64(export_data, value_offset + 8),
@@ -2781,26 +2942,65 @@ def parse_cdo_property_value(
                     "raw_size": struct_raw_size,
                     "fields": ["x", "y"],
                 }
-            elif struct_name in {"Vector", "Rotator", "Color"} and value_offset + 24 <= len(export_data):
+            elif struct_name == "Vector" and declared_size in {12, 24}:
+                component_width = declared_size // 3
+                reader = _read_f32 if component_width == 4 else _read_f64
+                if value_offset + declared_size > value_end:
+                    raise ValueError("Vector value exceeds its declared field boundary")
                 item["value"] = {
-                    "x": _read_f64(export_data, value_offset),
-                    "y": _read_f64(export_data, value_offset + 8),
-                    "z": _read_f64(export_data, value_offset + 16),
+                    "x": reader(export_data, value_offset),
+                    "y": reader(export_data, value_offset + component_width),
+                    "z": reader(export_data, value_offset + component_width * 2),
                 }
                 item["struct_parse"] = {
                     "parsed": True,
                     "struct_name": struct_name,
                     "raw_size": struct_raw_size,
                     "fields": ["x", "y", "z"],
-                }
-            elif declared_size:
-                item["value"] = {"struct": struct_name, "raw_size": declared_size, "parsed": False}
-                item["struct_parse"] = {
-                    "parsed": False,
-                    "struct_name": struct_name,
-                    "raw_size": declared_size,
+                    "component_width": component_width,
                 }
             else:
+                tagged = _tagged_struct_value(
+                    export_data,
+                    value_offset=value_offset,
+                    value_end=value_end,
+                    tag_layout=str(block.get("tag_layout") or ""),
+                    names=names,
+                    imports=imports,
+                    exports=exports,
+                    soft_object_paths=soft_object_paths,
+                )
+                if tagged is not None:
+                    tagged_value, tagged_properties = tagged
+                    if struct_name == "DataTableRowHandle":
+                        item["value"] = {
+                            "data_table": tagged_value.get("DataTable"),
+                            "row_name": tagged_value.get("RowName"),
+                        }
+                    else:
+                        item["value"] = tagged_value
+                    item["struct_parse"] = {
+                        "parsed": True,
+                        "method": "tagged_struct_fields",
+                        "struct_name": struct_name,
+                        "raw_size": struct_raw_size,
+                        "properties": tagged_properties,
+                    }
+                elif declared_size:
+                    item["value"] = {"struct": struct_name, "raw_size": declared_size, "parsed": False}
+                    item["struct_parse"] = {
+                        "parsed": False,
+                        "struct_name": struct_name,
+                        "raw_size": declared_size,
+                    }
+                else:
+                    item["value"] = {"struct": struct_name, "raw_size": max(0, end - value_offset), "parsed": False}
+                    item["struct_parse"] = {
+                        "parsed": False,
+                        "struct_name": struct_name,
+                        "raw_size": max(0, end - value_offset),
+                    }
+            if "value" not in item:
                 item["value"] = {"struct": struct_name, "raw_size": max(0, end - value_offset), "parsed": False}
                 item["struct_parse"] = {
                     "parsed": False,
@@ -2865,6 +3065,284 @@ def parse_cdo_property_value(
     else:
         item["confidence"] = "high"
     return item
+
+
+def asset_instance_export_for_package(
+    exports: list[dict[str, object]],
+    asset_name: str,
+) -> dict[str, object] | None:
+    """Return only the exact same-name asset instance export."""
+
+    matches = [
+        export
+        for export in exports
+        if str(export.get("object_name") or export.get("display_name") or "")
+        == asset_name
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _asset_field_gaps(
+    prop: dict[str, object],
+    *,
+    field_path: str,
+) -> list[dict[str, object]]:
+    gaps: list[dict[str, object]] = []
+    value = prop.get("value")
+    parsed = True
+    if prop.get("error") or value is None:
+        parsed = False
+    if isinstance(value, dict) and value.get("parsed") is False:
+        parsed = False
+    if str(prop.get("type") or "") == "ArrayProperty":
+        array_parse = prop.get("array_parse")
+        parsed = isinstance(array_parse, dict) and array_parse.get("parsed") is True
+        if parsed:
+            elements = array_parse.get("elements")
+            for element in elements if isinstance(elements, list) else []:
+                if not isinstance(element, dict):
+                    continue
+                index = int(element.get("index") or 0)
+                nested = element.get("properties")
+                for child in nested if isinstance(nested, list) else []:
+                    if isinstance(child, dict):
+                        gaps.extend(
+                            _asset_field_gaps(
+                                child,
+                                field_path=(
+                                    f"{field_path}[{index}]."
+                                    f"{child.get('name') or 'member'}"
+                                ),
+                            )
+                        )
+    if str(prop.get("type") or "") == "StructProperty":
+        struct_parse = prop.get("struct_parse")
+        parsed = isinstance(struct_parse, dict) and struct_parse.get("parsed") is True
+    if not parsed:
+        gaps.append(
+            {
+                "field": field_path,
+                "type": str(prop.get("type") or ""),
+                "reason_code": "ASSET_FIELD_NOT_DECODED",
+                "detail": str(prop.get("error") or "Declared value was not decoded."),
+                "raw_offsets": raw_offsets(
+                    int(prop.get("offset") or 0),
+                    int(prop.get("end") or 0),
+                ),
+            }
+        )
+    return gaps
+
+
+def _asset_property_usable(prop: dict[str, object]) -> bool:
+    value = _decoded_property_value(prop)
+    usable = value is not None and not (
+        isinstance(value, dict) and value.get("parsed") is False
+    )
+    if str(prop.get("type") or "") == "ArrayProperty":
+        array_parse = prop.get("array_parse")
+        usable = isinstance(array_parse, dict) and array_parse.get("parsed") is True
+    if str(prop.get("type") or "") == "StructProperty":
+        struct_parse = prop.get("struct_parse")
+        usable = isinstance(struct_parse, dict) and struct_parse.get("parsed") is True
+    return usable
+
+
+def _confirmed_asset_variable(prop: dict[str, object]) -> dict[str, object]:
+    return {
+        "value": _decoded_property_value(prop),
+        "type": prop.get("type", ""),
+        "source": "uasset_asset_instance",
+        "confidence": prop.get("confidence", ""),
+        "owner_kind": "asset",
+        "confirmed_value_usable": True,
+        "extra": {
+            key: prop[key]
+            for key in (
+                "object",
+                "object_path",
+                "objects",
+                "object_paths",
+                "array_parse",
+                "struct_parse",
+            )
+            if key in prop
+        },
+    }
+
+
+def asset_field_variables(
+    properties: list[dict[str, object]],
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Project exact instance fields, including usable leaves of mixed structs."""
+
+    variables: dict[str, object] = {}
+    gaps: list[dict[str, object]] = []
+
+    def visit(
+        prop: dict[str, object],
+        field_path: str,
+        *,
+        collect_gaps: bool,
+    ) -> None:
+        field_gaps = _asset_field_gaps(prop, field_path=field_path)
+        if collect_gaps:
+            gaps.extend(field_gaps)
+        if not field_gaps and _asset_property_usable(prop):
+            variables[field_path] = _confirmed_asset_variable(prop)
+
+        array_parse = prop.get("array_parse")
+        if (
+            str(prop.get("type") or "") == "ArrayProperty"
+            and isinstance(array_parse, dict)
+            and array_parse.get("parsed") is True
+        ):
+            variables[f"{field_path}.count"] = {
+                "value": int(array_parse.get("count") or 0),
+                "type": "ArrayCount",
+                "source": "uasset_asset_instance_array_count",
+                "confidence": "high",
+                "owner_kind": "asset",
+                "confirmed_value_usable": True,
+            }
+            elements = array_parse.get("elements")
+            for element in elements if isinstance(elements, list) else []:
+                if not isinstance(element, dict):
+                    continue
+                index = int(element.get("index") or 0)
+                children = element.get("properties")
+                for child in children if isinstance(children, list) else []:
+                    if not isinstance(child, dict):
+                        continue
+                    child_name = str(child.get("name") or "member")
+                    visit(
+                        child,
+                        f"{field_path}[{index}].{child_name}",
+                        collect_gaps=False,
+                    )
+
+        struct_parse = prop.get("struct_parse")
+        if (
+            str(prop.get("type") or "") == "StructProperty"
+            and isinstance(struct_parse, dict)
+            and struct_parse.get("parsed") is True
+        ):
+            children = struct_parse.get("properties")
+            for child in children if isinstance(children, list) else []:
+                if not isinstance(child, dict):
+                    continue
+                child_name = str(child.get("name") or "member")
+                visit(
+                    child,
+                    f"{field_path}.{child_name}",
+                    collect_gaps=False,
+                )
+
+    for prop in properties:
+        name = str(prop.get("name") or "")
+        if name:
+            visit(prop, name, collect_gaps=True)
+    return variables, gaps
+
+
+def read_uasset_asset_fields(
+    package: dict[str, object],
+    asset_name: str,
+) -> dict[str, object]:
+    """Read tagged fields owned by a same-name data-asset instance export."""
+
+    names = package.get("names", [])
+    imports = package.get("imports", [])
+    exports = package.get("exports", [])
+    soft_object_paths = package.get("soft_object_paths", [])
+    if not all(isinstance(value, list) for value in (names, imports, exports)):
+        return {
+            "schema": UASSET_ASSET_FIELDS_SCHEMA,
+            "loaded": False,
+            "variables": {},
+            "properties": [],
+            "gaps": [
+                {
+                    "field": "",
+                    "reason_code": "ASSET_PACKAGE_MAPS_UNAVAILABLE",
+                    "detail": "Package maps were not available.",
+                }
+            ],
+            "business_fact_count": 0,
+        }
+    instance_export = asset_instance_export_for_package(exports, asset_name)
+    if instance_export is None:
+        return {
+            "schema": UASSET_ASSET_FIELDS_SCHEMA,
+            "loaded": False,
+            "variables": {},
+            "properties": [],
+            "gaps": [
+                {
+                    "field": "",
+                    "reason_code": "ASSET_INSTANCE_EXPORT_NOT_UNIQUE",
+                    "detail": "No unique exact same-name instance export was found.",
+                }
+            ],
+            "business_fact_count": 0,
+        }
+    export_data = export_data_bytes(package, instance_export)
+    if not export_data:
+        return {
+            "schema": UASSET_ASSET_FIELDS_SCHEMA,
+            "loaded": False,
+            "instance_object": asset_name,
+            "export_index": instance_export.get("index"),
+            "variables": {},
+            "properties": [],
+            "gaps": [
+                {
+                    "field": "",
+                    "reason_code": "ASSET_INSTANCE_DATA_UNAVAILABLE",
+                    "detail": "The instance export has no available serialized data.",
+                }
+            ],
+            "business_fact_count": 0,
+        }
+
+    soft_paths = [
+        item for item in soft_object_paths if isinstance(item, dict)
+    ] if isinstance(soft_object_paths, list) else []
+    properties = [
+        parse_cdo_property_value(
+            export_data,
+            block,
+            names,
+            imports,
+            exports,
+            soft_paths,
+        )
+        for block in cdo_property_tag_blocks(export_data, names)
+    ]
+    variables, gaps = asset_field_variables(properties)
+    return {
+        "schema": UASSET_ASSET_FIELDS_SCHEMA,
+        "loaded": True,
+        "asset_name": asset_name,
+        "instance_object": str(
+            instance_export.get("object_name")
+            or instance_export.get("display_name")
+            or ""
+        ),
+        "instance_class": str(instance_export.get("class_name") or ""),
+        "export_index": instance_export.get("index"),
+        "property_count": len(properties),
+        "field_count": len(variables),
+        "business_fact_count": sum(
+            1
+            for value in variables.values()
+            if isinstance(value, dict)
+            and value.get("confirmed_value_usable") is True
+        ),
+        "variables": variables,
+        "properties": properties,
+        "gaps": gaps,
+    }
 
 
 def read_uasset_class_defaults(package: dict[str, object], asset_name: str) -> dict[str, object]:
@@ -3824,7 +4302,12 @@ def parse_custom_pins(
 
 def is_blueprint_node_export(export: dict[str, object]) -> bool:
     class_name = str(export.get("class_name") or "")
-    return class_name.startswith(NODE_CLASS_PREFIXES)
+    return class_name.startswith(NODE_CLASS_PREFIXES) or class_name.endswith("EdGraphNode")
+
+
+def is_edgraph_export(export: dict[str, object]) -> bool:
+    class_name = str(export.get("class_name") or "")
+    return class_name == "EdGraph" or class_name.endswith("EdGraph")
 
 
 def node_info_from_export(
@@ -3948,7 +4431,14 @@ def classify_graph_failure(graph: dict[str, object]) -> list[str]:
         categories.append("need_pin_layout_rule")
     if any("unsupported package index" in warning for warning in warnings):
         categories.append("need_cross_graph_resolve")
-    if any(str(node.get("class") or "") not in SUPPORTED_SEMANTIC_NODE_CLASSES for node in nodes[:200]):
+    if any(
+        str(node.get("class") or "") not in SUPPORTED_SEMANTIC_NODE_CLASSES
+        and not (
+            str(node.get("class") or "").endswith("EdGraphNode")
+            and bool(node.get("properties"))
+        )
+        for node in nodes[:200]
+    ):
         categories.append("need_node_reader")
     return list(dict.fromkeys(categories)) or ["need_manual_clipboard"]
 
@@ -4394,7 +4884,10 @@ def parse_graph_export_payload(
     if not isinstance(names, list) or not isinstance(imports, list) or not isinstance(exports, list):
         raise ValueError("Invalid package model.")
     graph_data = export_data_bytes(package, graph_export)
-    graph_properties, graph_warnings = parse_export_properties(graph_data, names, imports, exports)
+    if str(graph_export.get("class_name") or "") == "EdGraph":
+        graph_properties, graph_warnings = parse_export_properties(graph_data, names, imports, exports)
+    else:
+        graph_properties, graph_warnings = parse_tagged_export_properties(package, graph_data)
     raw_node_refs = property_object_refs(graph_properties, "Nodes")
     node_refs = normalize_blueprint_node_refs(raw_node_refs, exports)
     ignored_node_ref_count = len([ref for ref in raw_node_refs if ref not in node_refs])
@@ -4423,7 +4916,10 @@ def parse_graph_export_payload(
         cached = node_cache.get(node_index)
         if cached is None:
             node_data = export_data_bytes(package, node_export)
-            properties, property_warnings = parse_export_properties(node_data, names, imports, exports)
+            if str(node_export.get("class_name") or "").startswith(NODE_CLASS_PREFIXES):
+                properties, property_warnings = parse_export_properties(node_data, names, imports, exports)
+            else:
+                properties, property_warnings = parse_tagged_export_properties(package, node_data)
             pins, pin_warnings = parse_custom_pins(
                 node_data,
                 names,
@@ -4580,6 +5076,7 @@ def read_uasset_graph_content(
     exports = package["exports"]
     summary = package["summary"]
     class_defaults = read_uasset_class_defaults(package, asset_name)
+    asset_fields = read_uasset_asset_fields(package, asset_name)
     structure = parse_uasset_structure(uasset_path)
     graph_exports_by_index: dict[int, dict[str, object]] = {}
     for graph in structure.get("graph_exports", []):
@@ -4588,7 +5085,7 @@ def read_uasset_graph_content(
     graph_exports = [
         export
         for export in exports
-        if isinstance(export, dict) and str(export.get("class_name") or "") == "EdGraph" and str(export.get("object_name") or "")
+        if isinstance(export, dict) and is_edgraph_export(export) and str(export.get("object_name") or "")
     ]
     if max_graphs > 0:
         graph_exports = graph_exports[:max_graphs]
@@ -4709,6 +5206,7 @@ def read_uasset_graph_content(
         "exports": exports,
         "structure": structure,
         "class_defaults": class_defaults,
+        "asset_fields": asset_fields,
         "graph_count": len(graphs),
         "node_count": sum(int(graph.get("node_count") or 0) for graph in graphs),
         "pin_count": sum(int(graph.get("pin_count") or 0) for graph in graphs),

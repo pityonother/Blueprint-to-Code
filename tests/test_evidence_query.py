@@ -16,7 +16,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from blueprint_translator.context_pack import estimate_tokens  # noqa: E402
 from blueprint_translator.evidence_query import EvidenceQueryService  # noqa: E402
 from blueprint_translator.evidence_schema import ensure_evidence_schema  # noqa: E402
-from blueprint_translator.evidence_writer import write_evidence_store_from_capture  # noqa: E402
+from blueprint_translator.evidence_writer import (  # noqa: E402
+    write_evidence_store_from_capture,
+    write_evidence_store_from_payload,
+)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -1197,6 +1200,100 @@ class EvidenceQueryContractTests(unittest.TestCase):
             self.fail("connection pagination did not terminate")
         self.assertEqual(len(pin_refs), 30)
         self.assertEqual(len(pin_refs), len(set(pin_refs)))
+
+
+class AssetFieldEvidenceQueryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.database_path = Path(self._temporary.name) / "asset-fields.sqlite"
+        payload = {
+            "asset_name": "DataAssetFixture",
+            "asset_path": "/Game/Test/DataAssetFixture.DataAssetFixture",
+            "graphs": [],
+            "asset_fields": {
+                "loaded": True,
+                "instance_object": "DataAssetFixture",
+                "business_fact_count": 3,
+                "variables": {
+                    f"SharedField{index}": {
+                        "value": (
+                            {
+                                "data_table": "/Game/Test/Skills.Skills",
+                                "row_name": "RootSkill",
+                            }
+                            if index == 0
+                            else index
+                        ),
+                        "type": "StructProperty" if index == 0 else "IntProperty",
+                        "source": "uasset_asset_instance",
+                        "confidence": "high",
+                        "owner_kind": "asset",
+                        "confirmed_value_usable": True,
+                    }
+                    for index in range(3)
+                },
+                "gaps": [],
+            },
+        }
+        write_evidence_store_from_payload(
+            str(payload["asset_path"]),
+            None,
+            payload,
+            self.database_path,
+        )
+        self.service = EvidenceQueryService.open(self.database_path)
+        self.addCleanup(self.service.close)
+
+    def test_overview_and_entity_expose_instance_fields_separately(self):
+        overview = self.service.query(
+            {"operation": "overview", "budgetTokens": 1200}
+        )
+        search = self.service.query(
+            {
+                "operation": "search",
+                "query": "RootSkill",
+                "kinds": ["asset_field"],
+                "pageSize": 10,
+                "budgetTokens": 1600,
+            }
+        )
+        entity = self.service.query(
+            {
+                "operation": "entity",
+                "selector": {"ref": search["items"][0]["ref"]},
+                "budgetTokens": 1600,
+            }
+        )
+
+        self.assertEqual(overview["summary"]["assetFieldCount"], 3)
+        self.assertEqual(overview["summary"]["defaultCount"], 0)
+        self.assertEqual(search["items"][0]["kind"], "asset_field")
+        self.assertEqual(entity["items"][0]["kind"], "asset_field")
+        self.assertEqual(entity["items"][0]["ownerKind"], "asset")
+        self.assertEqual(entity["items"][0]["value"]["row_name"], "RootSkill")
+
+    def test_asset_field_search_cursor_has_no_gaps_or_duplicates(self):
+        refs: list[str] = []
+        cursor: str | None = None
+        while True:
+            request: dict[str, object] = {
+                "operation": "search",
+                "query": "SharedField",
+                "kinds": ["asset_field"],
+                "pageSize": 1,
+                "budgetTokens": 1200,
+            }
+            if cursor:
+                request["cursor"] = cursor
+            result = self.service.query(request)
+            refs.extend(str(item["ref"]) for item in result["items"])
+            cursor = result["page"]["nextCursor"]
+            if cursor is None:
+                break
+
+        self.assertEqual(len(refs), 3)
+        self.assertEqual(len(set(refs)), 3)
 
 
 class EvidenceSearchIndexScaleTests(unittest.TestCase):

@@ -36,6 +36,438 @@ from blueprint_translator import uasset_graphs as uasset_graphs_module  # noqa: 
 
 
 class UAssetGraphCandidateTests(unittest.TestCase):
+    def test_asset_instance_fields_select_only_the_exact_same_name_export(self):
+        names = ["None", "Fixture", "ModName", "StrProperty"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        encoded_name = struct.pack("<i", 5) + b"Demo\x00"
+        instance_data = (
+            fname("ModName")
+            + fname("StrProperty")
+            + struct.pack("<ii", len(encoded_name), 0)
+            + encoded_name
+            + fname("None")
+        )
+        decoy_data = b"decoy-default-object"
+        package = {
+            "uasset_data": decoy_data + instance_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "index": 0,
+                    "object_name": "Default__Fixture_C",
+                    "class_name": "Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(decoy_data),
+                        "available": True,
+                    },
+                },
+                {
+                    "index": 1,
+                    "object_name": "Fixture",
+                    "class_name": "ModDataAsset",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": len(decoy_data),
+                        "size": len(instance_data),
+                        "available": True,
+                    },
+                },
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = uasset_graphs_module.read_uasset_asset_fields(
+            package,
+            "Fixture",
+        )
+
+        self.assertTrue(payload["loaded"])
+        self.assertEqual(payload["instance_object"], "Fixture")
+        self.assertEqual(payload["export_index"], 1)
+        self.assertEqual(payload["variables"]["ModName"]["value"], "Demo")
+        self.assertEqual(payload["variables"]["ModName"]["owner_kind"], "asset")
+
+    def test_asset_instance_unparsed_field_becomes_gap_not_business_fact(self):
+        names = ["None", "Fixture", "RawConfig", "MapProperty"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        instance_data = (
+            fname("RawConfig")
+            + fname("MapProperty")
+            + struct.pack("<ii", 4, 0)
+            + b"RAW!"
+            + fname("None")
+        )
+        package = {
+            "uasset_data": instance_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "index": 0,
+                    "object_name": "Fixture",
+                    "class_name": "DataAsset",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(instance_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = uasset_graphs_module.read_uasset_asset_fields(
+            package,
+            "Fixture",
+        )
+
+        self.assertEqual(payload["variables"], {})
+        self.assertEqual(payload["business_fact_count"], 0)
+        self.assertEqual(payload["gaps"][0]["field"], "RawConfig")
+        self.assertEqual(
+            payload["gaps"][0]["reason_code"],
+            "ASSET_FIELD_NOT_DECODED",
+        )
+
+    def test_mixed_struct_array_materializes_only_confirmed_member_fields(self):
+        properties = [
+            {
+                "name": "Units",
+                "type": "ArrayProperty",
+                "value": [
+                    {
+                        "DinoType": None,
+                        "DinoLevel": 30,
+                        "SpawnOffset": {"x": 1.0, "y": 0.0, "z": 0.0},
+                    }
+                ],
+                "array_parse": {
+                    "parsed": True,
+                    "count": 1,
+                    "elements": [
+                        {
+                            "index": 0,
+                            "properties": [
+                                {
+                                    "name": "DinoType",
+                                    "type": "SoftObjectProperty",
+                                    "value": None,
+                                    "error": "path index unavailable",
+                                    "confidence": "low",
+                                },
+                                {
+                                    "name": "DinoLevel",
+                                    "type": "IntProperty",
+                                    "value": 30,
+                                    "confidence": "high",
+                                },
+                                {
+                                    "name": "SpawnOffset",
+                                    "type": "StructProperty",
+                                    "value": {
+                                        "x": 1.0,
+                                        "y": 0.0,
+                                        "z": 0.0,
+                                    },
+                                    "struct_parse": {"parsed": True},
+                                    "confidence": "high",
+                                },
+                            ],
+                        }
+                    ],
+                },
+                "confidence": "medium",
+            }
+        ]
+
+        variables, gaps = uasset_graphs_module.asset_field_variables(
+            properties
+        )
+
+        self.assertNotIn("Units", variables)
+        self.assertEqual(variables["Units.count"]["value"], 1)
+        self.assertEqual(variables["Units[0].DinoLevel"]["value"], 30)
+        self.assertEqual(
+            variables["Units[0].SpawnOffset"]["value"],
+            {"x": 1.0, "y": 0.0, "z": 0.0},
+        )
+        self.assertNotIn("Units[0].DinoType", variables)
+        self.assertEqual(gaps[0]["field"], "Units[0].DinoType")
+
+    def test_vector_struct_respects_12_and_24_byte_declared_boundaries(self):
+        twelve = struct.pack("<fff", 1.25, -2.5, 3.75)
+        twenty_four = struct.pack("<ddd", 4.5, -5.5, 6.5)
+
+        def parse(raw: bytes, declared_size: int) -> dict[str, object]:
+            return uasset_graphs_module.parse_cdo_property_value(
+                raw,
+                {
+                    "name": "SpawnOffset",
+                    "type": "StructProperty",
+                    "struct": "Vector",
+                    "offset": 0,
+                    "end": declared_size,
+                    "value_offset": 0,
+                    "declared_size": declared_size,
+                    "tag_layout": "ark_compact",
+                },
+                [],
+                [],
+                [],
+                [],
+            )
+
+        single = parse(twelve + twenty_four, 12)
+        double = parse(twenty_four, 24)
+
+        self.assertEqual(single["value"], {"x": 1.25, "y": -2.5, "z": 3.75})
+        self.assertEqual(single["struct_parse"]["component_width"], 4)
+        self.assertEqual(double["value"], {"x": 4.5, "y": -5.5, "z": 6.5})
+        self.assertEqual(double["struct_parse"]["component_width"], 8)
+
+    def test_data_table_row_handle_recovers_table_and_row_name(self):
+        names = [
+            "None",
+            "DataTable",
+            "ObjectProperty",
+            "RowName",
+            "NameProperty",
+            "SkillRow",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def ue5_property(name: str, type_name: str, value: bytes) -> bytes:
+            return (
+                fname(name)
+                + fname(type_name)
+                + struct.pack("<i", 0)
+                + struct.pack("<iB", len(value), 0)
+                + value
+            )
+
+        nested = (
+            ue5_property("DataTable", "ObjectProperty", struct.pack("<i", -2))
+            + ue5_property("RowName", "NameProperty", fname("SkillRow"))
+            + fname("None")
+        )
+        imports = [
+            {
+                "object_name": "/Game/Test/Skills",
+                "class_name": "Package",
+                "outer_index": 0,
+            },
+            {
+                "object_name": "Skills",
+                "class_name": "DataTable",
+                "outer_index": -1,
+            },
+        ]
+
+        parsed = uasset_graphs_module.parse_cdo_property_value(
+            nested,
+            {
+                "name": "NodeHandle",
+                "type": "StructProperty",
+                "struct": "DataTableRowHandle",
+                "offset": 0,
+                "end": len(nested),
+                "value_offset": 0,
+                "declared_size": len(nested),
+                "tag_layout": "ue5_property_type_name",
+            },
+            names,
+            imports,
+            [],
+            [],
+        )
+
+        self.assertEqual(
+            parsed["value"],
+            {"data_table": "/Game/Test/Skills.Skills", "row_name": "SkillRow"},
+        )
+        self.assertTrue(parsed["struct_parse"]["parsed"])
+
+    def test_legacy_struct_array_recovers_each_vector_without_crossing_fields(self):
+        names = [
+            "None",
+            "Units",
+            "ArrayProperty",
+            "StructProperty",
+            "DinoLevel",
+            "IntProperty",
+            "SpawnOffset",
+            "Vector",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def scalar(name: str, type_name: str, value: bytes) -> bytes:
+            return (
+                fname(name)
+                + fname(type_name)
+                + struct.pack("<ii", len(value), 0)
+                + value
+            )
+
+        def unit(level: int, vector: tuple[float, float, float]) -> bytes:
+            return (
+                scalar("DinoLevel", "IntProperty", struct.pack("<i", level))
+                + fname("SpawnOffset")
+                + fname("StructProperty")
+                + struct.pack("<ii", 12, 0)
+                + fname("Vector")
+                + struct.pack("<fff", *vector)
+                + fname("None")
+            )
+
+        array_value = struct.pack("<i", 2) + unit(30, (1.0, 2.0, 3.0)) + unit(
+            40,
+            (-4.0, 5.0, 6.0),
+        )
+        encoded = (
+            fname("Units")
+            + fname("ArrayProperty")
+            + struct.pack("<ii", len(array_value), 0)
+            + fname("StructProperty")
+            + array_value
+            + fname("None")
+        )
+        block = uasset_graphs_module.cdo_property_tag_blocks(encoded, names)[0]
+
+        parsed = uasset_graphs_module.parse_cdo_property_value(
+            encoded,
+            block,
+            names,
+            [],
+            [],
+            [],
+        )
+
+        self.assertTrue(parsed["array_parse"]["parsed"], parsed)
+        self.assertEqual(parsed["array_parse"]["count"], 2)
+        self.assertEqual(parsed["value"][0]["DinoLevel"], 30)
+        self.assertEqual(
+            parsed["value"][1]["SpawnOffset"],
+            {"x": -4.0, "y": 5.0, "z": 6.0},
+        )
+
+    def test_progression_graph_treats_custom_edgraph_nodes_as_exact_exports(self):
+        names = [
+            "None",
+            "Nodes",
+            "ArrayProperty",
+            "ObjectProperty",
+            "NodePosX",
+            "NodePosY",
+            "IntProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        graph_array = struct.pack("<ii", 1, 2)
+        graph_data = (
+            fname("Nodes")
+            + fname("ArrayProperty")
+            + struct.pack("<ii", len(graph_array), 0)
+            + fname("ObjectProperty")
+            + graph_array
+            + fname("None")
+        )
+
+        def scalar(name: str, value: int) -> bytes:
+            return (
+                fname(name)
+                + fname("IntProperty")
+                + struct.pack("<iii", 4, 0, value)
+            )
+
+        node_data = scalar("NodePosX", 320) + scalar("NodePosY", -128) + fname(
+            "None"
+        )
+        all_data = graph_data + node_data
+        graph_export = {
+            "index": 0,
+            "package_index": 1,
+            "object_name": "ProgressionTreeEdGraph",
+            "display_name": "ProgressionTreeEdGraph",
+            "class_name": "ProgressionTreeEdGraph",
+            "serial_location": {
+                "file": "uasset",
+                "offset": 0,
+                "size": len(graph_data),
+                "available": True,
+            },
+        }
+        node_export = {
+            "index": 1,
+            "package_index": 2,
+            "outer_index": 1,
+            "object_name": "ProgressionTreeEdGraphNode",
+            "display_name": "ProgressionTreeEdGraphNode",
+            "class_name": "ProgressionTreeEdGraphNode",
+            "serial_location": {
+                "file": "uasset",
+                "offset": len(graph_data),
+                "size": len(node_data),
+                "available": True,
+            },
+        }
+
+        parsed = uasset_graphs_module.parse_graph_export_payload(
+            {
+                "uasset_data": all_data,
+                "uexp_data": b"",
+                "names": names,
+                "imports": [],
+                "exports": [graph_export, node_export],
+                "soft_object_paths": [],
+            },
+            graph_export,
+            asset_path="/Game/Test/Progression.Progression",
+            asset_name="Progression",
+            node_cache={},
+        )
+
+        self.assertEqual(parsed["node_count"], 1)
+        self.assertEqual(parsed["nodes"][0]["export_index"], 1)
+        self.assertEqual(parsed["nodes"][0]["package_index"], 2)
+        self.assertEqual(parsed["nodes"][0]["x"], 320)
+        self.assertEqual(parsed["nodes"][0]["y"], -128)
+
+    def test_custom_edgraph_node_with_exact_properties_is_not_a_reader_gap(self):
+        categories = uasset_graphs_module.classify_graph_failure(
+            {
+                "node_count": 1,
+                "pin_count": 0,
+                "link_count": 0,
+                "warnings": [],
+                "nodes": [
+                    {
+                        "class": "ProgressionTreeEdGraphNode",
+                        "properties": ["NodeHandle", "NodeGuid"],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(categories, ["need_pin_layout_rule"])
+
     def test_script_import_path_and_member_parent_are_preserved(self):
         imports = [
             {

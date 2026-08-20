@@ -80,7 +80,7 @@ class BlueprintServiceTests(unittest.TestCase):
         self.assertEqual(
             repository.calls,
             [
-                ("DefaultThreshold", ("default",)),
+                ("DefaultThreshold", ("default", "asset_field")),
                 ("DefaultThreshold", ("graph", "node")),
             ],
         )
@@ -518,6 +518,61 @@ class BlueprintServiceTests(unittest.TestCase):
         self.assertEqual(fact["status"], "CONFIRMED")
         self.assertEqual(fact["evidenceRefs"], [fact["id"]])
         self.assertTrue(fact["id"].startswith("bp://"))
+        _assert_path_free(self, result, self.capture_root)
+
+    def test_context_can_answer_exact_asset_field_with_typed_object_paths(
+        self,
+    ) -> None:
+        name = "AssetFieldFixture"
+        payload = interpretation_payload(name)
+        payload["asset_fields"] = {
+            "loaded": True,
+            "instance_object": name,
+            "instance_class": "ModDataAsset",
+            "business_fact_count": 1,
+            "variables": {
+                "ModCustomCosmeticEntries": {
+                    "value": [
+                        {
+                            "Cosmetic": (
+                                "/Game/Test/CosmeticOne.CosmeticOne"
+                            ),
+                            "DisplayName": "Cosmetic One",
+                        }
+                    ],
+                    "type": "ArrayProperty",
+                    "source": "uasset_asset_instance",
+                    "confidence": "high",
+                    "owner_kind": "asset",
+                    "confirmed_value_usable": True,
+                }
+            },
+            "gaps": [],
+        }
+        asset_dir, _source, _payload = publish_interpretation_fixture(
+            self.capture_root,
+            name=name,
+            payload=payload,
+        )
+        publish_interpretation(asset_dir, budget=32_000)
+
+        result = self.context(
+            asset=name,
+            goal="ModCustomCosmeticEntries",
+        )
+
+        self.assertEqual(result["graphTargets"], [])
+        self.assertEqual(result["nodes"], [])
+        self.assertEqual(len(result["facts"]), 1)
+        fact = result["facts"][0]
+        self.assertEqual(fact["kind"], "ASSET_FIELD")
+        self.assertEqual(fact["name"], "ModCustomCosmeticEntries")
+        self.assertEqual(fact["status"], "CONFIRMED")
+        self.assertTrue(fact["valueUsable"])
+        self.assertEqual(
+            fact["value"][0]["Cosmetic"]["objectPath"],
+            "/Game/Test/CosmeticOne.CosmeticOne",
+        )
         _assert_path_free(self, result, self.capture_root)
 
     def test_context_can_answer_exact_default_name_containing_spaces(self) -> None:

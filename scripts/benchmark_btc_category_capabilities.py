@@ -194,6 +194,19 @@ def _search_records(connection: sqlite3.Connection) -> list[dict[str, str]]:
                     "text": " | ".join(values[1:]),
                 }
             )
+    for row in _rows(
+        connection,
+        "properties",
+        "property_ref, owner_kind, name, type_name, value_json, source, confidence",
+    ):
+        owner_kind = str(row["owner_kind"] or "")
+        records.append(
+            {
+                "kind": "asset_field" if owner_kind == "asset" else "property",
+                "ref": str(row["property_ref"] or ""),
+                "text": " | ".join(str(value or "") for value in row[2:]),
+            }
+        )
     return records
 
 
@@ -236,6 +249,26 @@ def _evidence_truth_index(
             "valueStatus": str(projection.get("valueStatus") or "NOT_RECOVERED"),
             "valueUsable": projection.get("valueUsable") is True,
         }
+    for row in _rows(
+        connection,
+        "properties",
+        "property_ref, owner_kind, extra_json",
+    ):
+        if str(row["owner_kind"] or "") != "asset":
+            continue
+        try:
+            extra = json.loads(str(row["extra_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+        usable = (
+            isinstance(extra, Mapping)
+            and extra.get("confirmed_value_usable") is True
+        )
+        index[str(row["property_ref"])] = {
+            "kind": "asset_field",
+            "valueStatus": "CONFIRMED" if usable else "NOT_RECOVERED",
+            "valueUsable": usable,
+        }
     for row in _rows(connection, "edges", "edge_ref, resolution_status"):
         index[str(row["edge_ref"])] = {
             "kind": "edge",
@@ -270,6 +303,10 @@ def profile_blueprint_evidence(asset_dir: str | Path) -> dict[str, object]:
                 connection, "SELECT COUNT(*) FROM class_defaults"
             ),
             "propertyCount": _scalar(connection, "SELECT COUNT(*) FROM properties"),
+            "assetFieldCount": _scalar(
+                connection,
+                "SELECT COUNT(*) FROM properties WHERE owner_kind = 'asset'",
+            ),
             "referenceCount": _scalar(connection, 'SELECT COUNT(*) FROM "references"'),
             "diagnosticCount": _scalar(
                 connection, "SELECT COUNT(*) FROM diagnostics"
@@ -850,6 +887,12 @@ def build_capability_report(
             evidence_profile = data_profile
             effective_reader = "DATA_ASSET_EVIDENCE"
             has_facts = int(data_profile.get("businessFactCount") or 0) > 0
+            formally_queryable = (
+                has_facts
+                and data_profile.get("formallyQueryable") is True
+                and data_profile.get("captureIntegrityStatus") == "PASS"
+            )
+            ready = formally_queryable
             status = "PARTIAL" if has_facts else "IDENTITY_ONLY"
             result = {
                 "captureIntegrityStatus": str(
@@ -862,7 +905,13 @@ def build_capability_report(
                 "question": {"questionZh": contract.get("questionZh", "")},
                 "claims": [],
                 "blockingGaps": (
-                    [] if has_facts else ["GENERIC_DATA_ASSET_FIELDS_NOT_RECOVERED"]
+                    (
+                        []
+                        if formally_queryable
+                        else ["DATA_ASSET_EVIDENCE_NOT_CANONICAL"]
+                    )
+                    if has_facts
+                    else ["GENERIC_DATA_ASSET_FIELDS_NOT_RECOVERED"]
                 ),
                 "blockerCodes": (
                     ["QUESTION_ASSESSMENT_NOT_REVIEWED"]
@@ -915,9 +964,13 @@ def build_capability_report(
                 "p0": {
                     "ready": ready,
                     "evidenceRevisionId": (
-                        str(profile.get("asset", {}).get("revisionId") or "")
-                        if ready and isinstance(profile, Mapping)
-                        else ""
+                        str(data_by_path[target_path].get("evidenceRevisionId") or "")
+                        if ready and target_path in data_by_path
+                        else (
+                            str(profile.get("asset", {}).get("revisionId") or "")
+                            if ready and isinstance(profile, Mapping)
+                            else ""
+                        )
                     ),
                 },
                 "result": result,
@@ -1163,8 +1216,12 @@ def profile_native_evidence(
 
 def discover_data_asset_profiles(
     capture_roots: Iterable[str | Path],
+    *,
+    canonical_ready_profiles: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:
-    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    canonical = canonical_ready_profiles or {}
+    planned: dict[str, list[str]] = defaultdict(list)
+    batch_profiles: dict[str, dict[str, object]] = {}
     for raw_root in capture_roots:
         plan_path = Path(raw_root).expanduser().resolve() / "batch_plan.json"
         if not plan_path.exists():
@@ -1178,30 +1235,122 @@ def discover_data_asset_profiles(
         if not any(isinstance(item, Mapping) and item.get("sourceClass") for item in samples):
             continue
         profiles = discover_blueprint_profiles([plan_path.parent])
+        batch_profiles.update(profiles)
+        plan_targets: dict[str, list[str]] = defaultdict(list)
         for item in samples:
             if not isinstance(item, Mapping):
                 continue
             source_class = str(item.get("sourceClass") or "")
             target_path = str(item.get("targetPath") or "")
-            profile = profiles.get(target_path)
-            if source_class and profile is not None:
-                grouped[source_class].append(profile)
+            if (
+                source_class
+                and target_path
+                and target_path not in plan_targets[source_class]
+            ):
+                plan_targets[source_class].append(target_path)
+        for source_class, target_paths in plan_targets.items():
+            planned[source_class] = target_paths
     result: dict[str, dict[str, object]] = {}
-    for source_class, profiles in grouped.items():
+    for source_class, target_paths in planned.items():
+        objects: list[dict[str, object]] = []
+        for target_path in target_paths:
+            is_canonical = target_path in canonical
+            profile = canonical.get(target_path) or batch_profiles.get(target_path)
+            if profile is None:
+                continue
+            asset_value = profile.get("asset")
+            asset = asset_value if isinstance(asset_value, Mapping) else {}
+            authority_value = profile.get("authority")
+            authority = (
+                authority_value if isinstance(authority_value, Mapping) else {}
+            )
+            content_value = profile.get("content")
+            content = content_value if isinstance(content_value, Mapping) else {}
+            gaps_value = profile.get("gaps")
+            gaps = gaps_value if isinstance(gaps_value, Mapping) else {}
+            object_path = str(asset.get("objectPath") or "")
+            revision_id = str(asset.get("revisionId") or "")
+            identity_bound = object_path == target_path and bool(revision_id)
+            asset_field_count = int(content.get("assetFieldCount") or 0)
+            records_value = profile.get("_searchRecords")
+            records = (
+                records_value
+                if isinstance(records_value, Sequence)
+                and not isinstance(records_value, (str, bytes))
+                else []
+            )
+            evidence_refs = sorted(
+                {
+                    str(record.get("ref") or "")
+                    for record in records
+                    if isinstance(record, Mapping)
+                    and str(record.get("kind") or "")
+                    in {"asset_field", "graph", "node", "property"}
+                    and str(record.get("ref") or "").startswith("bp://")
+                }
+            )
+            canonical_ready = (
+                is_canonical
+                and identity_bound
+                and authority.get("captureIntegrityStatus") == "PASS"
+                and asset_field_count > 0
+            )
+            objects.append(
+                {
+                    "objectPath": target_path,
+                    "revisionId": revision_id,
+                    "assetFieldCount": asset_field_count,
+                    "graphCount": int(content.get("graphCount") or 0),
+                    "nodeCount": int(content.get("nodeCount") or 0),
+                    "pinCount": int(content.get("pinCount") or 0),
+                    "linkCount": int(content.get("edgeCount") or 0),
+                    "blockingGapCount": int(
+                        gaps.get("blockingStatusCount") or 0
+                    ),
+                    "canonicalCurrent": canonical_ready,
+                    "evidenceRefs": evidence_refs[:50],
+                }
+            )
+        ready_objects = [
+            item for item in objects if item.get("canonicalCurrent") is True
+        ]
+        revision_ids = sorted(
+            str(item.get("revisionId") or "")
+            for item in ready_objects
+            if str(item.get("revisionId") or "")
+        )
+        aggregate_revision = (
+            "aggregate-"
+            + hashlib.sha256(
+                json.dumps(
+                    revision_ids,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+            if revision_ids
+            else ""
+        )
+        formally_queryable = bool(target_paths) and (
+            len(ready_objects) == len(target_paths)
+        )
         result[source_class] = {
             "captureIntegrityStatus": (
                 "PASS"
-                if all(
-                    item.get("authority", {}).get("captureIntegrityStatus") == "PASS"
-                    for item in profiles
-                )
+                if formally_queryable
                 else "DEGRADED"
             ),
-            "objectSampleCount": len(profiles),
+            "sourceClassObjectPath": source_class,
+            "plannedObjectCount": len(target_paths),
+            "objectSampleCount": len(objects),
+            "readyObjectCount": len(ready_objects),
             "businessFactCount": sum(
-                int(item.get("content", {}).get("businessFactCount") or 0)
-                for item in profiles
+                int(item.get("assetFieldCount") or 0) for item in objects
             ),
+            "formallyQueryable": formally_queryable,
+            "evidenceRevisionId": aggregate_revision,
+            "revisionIds": revision_ids,
+            "objects": objects,
         }
     return result
 
@@ -1464,7 +1613,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.native_evidence_json is not None
         else {}
     )
-    data_profiles = discover_data_asset_profiles(args.capture_root)
+    data_profiles = discover_data_asset_profiles(
+        args.capture_root,
+        canonical_ready_profiles=ready_profiles,
+    )
     reviewed_payload = (
         _load_json(args.reviewed_assessments)
         if args.reviewed_assessments is not None

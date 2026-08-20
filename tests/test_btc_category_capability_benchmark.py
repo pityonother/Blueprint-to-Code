@@ -165,6 +165,202 @@ def _sample(
 
 
 class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
+    def test_data_asset_route_requires_confirmed_fields_and_formal_queryability(self):
+        target_path = "/Script/ShooterGame.ModDataAsset"
+        plan = {
+            "sampleCount": 1,
+            "samples": [
+                _sample(
+                    27,
+                    code="DATA_CONFIGURATION",
+                    target_kind="NATIVE_CLASS",
+                    action="ROUTE_NATIVE_CLASS_EVIDENCE",
+                    target_path=target_path,
+                )
+            ],
+        }
+        contracts = {
+            "DATA_CONFIGURATION:CANDIDATE": {
+                "questionZh": "模组配置字段是什么？",
+                "requiredSignalGroups": [],
+                "requiresExactFlow": False,
+            }
+        }
+
+        empty = benchmark.build_capability_report(
+            sample_plan=plan,
+            question_contracts=contracts,
+            blueprint_profiles={},
+            data_asset_profiles={
+                target_path: {
+                    "captureIntegrityStatus": "PASS",
+                    "businessFactCount": 0,
+                    "formallyQueryable": True,
+                    "evidenceRevisionId": "aggregate-empty",
+                }
+            },
+        )
+        recovered = benchmark.build_capability_report(
+            sample_plan=plan,
+            question_contracts=contracts,
+            blueprint_profiles={},
+            data_asset_profiles={
+                target_path: {
+                    "captureIntegrityStatus": "PASS",
+                    "businessFactCount": 22,
+                    "formallyQueryable": True,
+                    "evidenceRevisionId": "aggregate-fields",
+                    "objectSampleCount": 2,
+                    "readyObjectCount": 2,
+                }
+            },
+        )
+
+        self.assertFalse(empty["samples"][0]["p0"]["ready"])
+        self.assertEqual(
+            empty["samples"][0]["result"]["benchmarkClosureStatus"],
+            "IDENTITY_ONLY",
+        )
+        row = recovered["samples"][0]
+        self.assertTrue(row["p0"]["ready"])
+        self.assertEqual(row["p0"]["evidenceRevisionId"], "aggregate-fields")
+        self.assertEqual(row["route"]["evidenceOrigin"], "CANONICAL_CURRENT")
+        self.assertEqual(row["result"]["benchmarkClosureStatus"], "PARTIAL")
+
+    def test_data_asset_discovery_requires_every_planned_object_to_be_canonical(self):
+        source_class = "/Script/ShooterGame.VRBattleGroupDataAsset"
+        first_path = "/Game/Test/VRGroupA.VRGroupA"
+        second_path = "/Game/Test/VRGroupB.VRGroupB"
+
+        def profile(object_path: str, revision: str, fields: int) -> dict[str, object]:
+            return {
+                "asset": {
+                    "assetId": object_path.rsplit(".", 1)[-1],
+                    "name": object_path.rsplit(".", 1)[-1],
+                    "objectPath": object_path,
+                    "revisionId": revision,
+                },
+                "authority": {"captureIntegrityStatus": "PASS"},
+                "content": {
+                    "assetFieldCount": fields,
+                    "businessFactCount": fields,
+                },
+                "gaps": {"blockingStatusCount": 0},
+                "_searchRecords": [
+                    {
+                        "kind": "asset_field",
+                        "ref": f"bp://asset@{revision}/asset/field/Units.count",
+                        "text": "Units.count",
+                    }
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "batch_plan.json").write_text(
+                json.dumps(
+                    {
+                        "samples": [
+                            {
+                                "sampleIndex": 1,
+                                "sourceClass": source_class,
+                                "targetPath": first_path,
+                            },
+                            {
+                                "sampleIndex": 2,
+                                "sourceClass": source_class,
+                                "targetPath": second_path,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            incomplete = benchmark.discover_data_asset_profiles(
+                [root],
+                canonical_ready_profiles={
+                    first_path: profile(first_path, "revision-a", 2),
+                },
+            )
+            complete = benchmark.discover_data_asset_profiles(
+                [root],
+                canonical_ready_profiles={
+                    first_path: profile(first_path, "revision-a", 2),
+                    second_path: profile(second_path, "revision-b", 3),
+                },
+            )
+
+        self.assertFalse(incomplete[source_class]["formallyQueryable"])
+        self.assertEqual(incomplete[source_class]["businessFactCount"], 2)
+        self.assertTrue(complete[source_class]["formallyQueryable"])
+        self.assertEqual(complete[source_class]["businessFactCount"], 5)
+        self.assertEqual(complete[source_class]["readyObjectCount"], 2)
+        self.assertEqual(
+            complete[source_class]["revisionIds"],
+            ["revision-a", "revision-b"],
+        )
+
+    def test_newer_data_asset_plan_supersedes_obsolete_plan_for_same_class(self):
+        source_class = "/Script/ShooterGame.ModDataAsset"
+        obsolete_path = "/ASBExportGun/Old.Old"
+        current_path = "/DinoDefense/Current.Current"
+
+        def profile(object_path, revision, field_count):
+            return {
+                "asset": {"objectPath": object_path, "revisionId": revision},
+                "authority": {"captureIntegrityStatus": "PASS"},
+                "content": {"assetFieldCount": field_count},
+                "gaps": {"blockingStatusCount": 0},
+                "_searchRecords": [],
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_root = root / "old"
+            current_root = root / "current"
+            old_root.mkdir()
+            current_root.mkdir()
+            (old_root / "batch_plan.json").write_text(
+                json.dumps(
+                    {
+                        "samples": [
+                            {
+                                "sourceClass": source_class,
+                                "targetPath": obsolete_path,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (current_root / "batch_plan.json").write_text(
+                json.dumps(
+                    {
+                        "samples": [
+                            {
+                                "sourceClass": source_class,
+                                "targetPath": current_path,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            discovered = benchmark.discover_data_asset_profiles(
+                [old_root, current_root],
+                canonical_ready_profiles={
+                    current_path: profile(current_path, "revision-current", 4)
+                },
+            )
+
+        self.assertTrue(discovered[source_class]["formallyQueryable"])
+        self.assertEqual(discovered[source_class]["plannedObjectCount"], 1)
+        self.assertEqual(
+            [item["objectPath"] for item in discovered[source_class]["objects"]],
+            [current_path],
+        )
+
     def test_plan_validation_rejects_duplicate_sample_indices(self):
         plan = {"sampleCount": 2, "samples": [_sample(1, code="A"), _sample(1, code="B")]}
 
@@ -649,6 +845,21 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
                     "unexpected": {"diagnostic": local_path},
                 }
             )
+
+    def test_public_profile_allows_bound_cosmo_mod_object_path(self):
+        object_path = (
+            "/CosmoCarCosmetic/ModDataAsset_CosmoCarCosmetic."
+            "ModDataAsset_CosmoCarCosmetic"
+        )
+
+        public = benchmark._public_profile(
+            {
+                "sourceClassObjectPath": "/Script/ShooterGame.ModDataAsset",
+                "objects": [{"objectPath": object_path}],
+            }
+        )
+
+        self.assertEqual(public["objects"][0]["objectPath"], object_path)
 
     def test_review_distinguishes_native_identity_from_partial_implementation(self):
         ref = "native://binary/ShooterGame.dll/0x1234"

@@ -1058,6 +1058,10 @@ _INDEX_COUNT_PATTERNS: dict[str, tuple[str, ...]] = {
         r"(?im)^-\s*Class defaults\s*[:=]\s*(\d+)",
         r"(?im)(?:^-\s*|;\s*)Defaults\s*=\s*(\d+)",
     ),
+    "assetFieldCount": (
+        r"(?im)^-\s*Asset fields\s*[:=]\s*(\d+)",
+        r"(?im)(?:^-\s*|;\s*)Asset fields\s*=\s*(\d+)",
+    ),
     "gapCount": (
         r"(?im)^-\s*Evidence gaps\s*[:=]\s*(\d+)",
         r"(?im)(?:^-\s*|;\s*)Gaps\s*=\s*(\d+)",

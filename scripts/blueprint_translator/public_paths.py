@@ -29,6 +29,7 @@ _UNREAL_OBJECT_PATH = re.compile(
 _PUBLIC_UNREAL_MOUNTS = frozenset(
     {
         "asbexportgun",
+        "cosmocarcosmetic",
         "dinodefense",
         "engine",
         "game",
