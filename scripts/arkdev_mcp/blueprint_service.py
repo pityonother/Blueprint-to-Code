@@ -285,7 +285,7 @@ def _error_from_exception(exc: Exception) -> McpExecutionError:
             )
         if code == "EVIDENCE_EMPTY":
             return McpExecutionError(
-                "EVIDENCE_EMPTY",
+                "EVIDENCE_NOT_AUTHORITATIVE",
                 "Current Blueprint evidence identifies the asset but has no semantic facts.",
             )
         if code in {
@@ -301,7 +301,7 @@ def _error_from_exception(exc: Exception) -> McpExecutionError:
                 "Current Blueprint evidence is not authoritative.",
             )
         return McpExecutionError(
-            "EVIDENCE_INVALID",
+            "EVIDENCE_NOT_AUTHORITATIVE",
             "Current Blueprint evidence has an invalid binding.",
         )
     if isinstance(exc, ApiProblem):

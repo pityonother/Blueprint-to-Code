@@ -14,8 +14,15 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from arkdev_mcp.blueprint_service import BlueprintService  # noqa: E402
+from arkdev_mcp.blueprint_service import (  # noqa: E402
+    BlueprintService,
+    _error_from_exception,
+)
 from arkdev_mcp.contracts import McpExecutionError  # noqa: E402
+from blueprint_translator.evidence_policy import (  # noqa: E402
+    EvidenceDecision,
+    EvidencePolicyError,
+)
 from blueprint_translator.interpretation_publication import (  # noqa: E402
     publish_interpretation,
 )
@@ -59,6 +66,25 @@ class BlueprintServiceTests(unittest.TestCase):
         }
         arguments.update(overrides)
         return self.service.get_context(**arguments)
+
+    def test_policy_refusals_map_only_to_declared_mcp_error_codes(self) -> None:
+        for reason_code in ("EVIDENCE_EMPTY", "DATABASE_BINDING_INVALID"):
+            with self.subTest(reason_code=reason_code):
+                decision = EvidenceDecision(
+                    allowed=False,
+                    purpose="formal_query",
+                    reason_code=reason_code,
+                    reason_codes=(reason_code,),
+                    binding_digest="a" * 64,
+                    binding_summary={},
+                    evidence_availability="UNAVAILABLE",
+                    public_status_zh="当前工具无法读取",
+                    non_upgradeable_gaps=(),
+                )
+
+                mapped = _error_from_exception(EvidencePolicyError(decision))
+
+                self.assertEqual(mapped.code, "EVIDENCE_NOT_AUTHORITATIVE")
 
     def test_single_term_goal_deduplicates_identical_default_search(self) -> None:
         class RecordingRepository:
