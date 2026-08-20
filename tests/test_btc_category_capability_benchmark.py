@@ -848,6 +848,10 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
             ["NOT_REVIEWED", "PARTIAL", "NOT_REVIEWED"],
         )
         self.assertEqual(
+            [item["statusZh"] for item in report["samples"]],
+            ["尚未测试", "当前工具无法读取", "尚未测试"],
+        )
+        self.assertEqual(
             report["counts"]["answerClosure"],
             {"NOT_REVIEWED": 2, "PARTIAL": 1},
         )

@@ -141,6 +141,7 @@ class BtcCategoryDefaultFactVerifierTests(unittest.TestCase):
                 "answerClosure": "COMPLETE",
             },
         )
+        self.assertEqual(receipt["cases"][0]["statusZh"], "可正式查询")
         self.assertEqual(
             receipt["inputBindings"]["benchmarkArtifact"]["sha256"],
             "benchmark-sha",

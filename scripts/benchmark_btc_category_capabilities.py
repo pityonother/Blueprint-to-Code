@@ -30,6 +30,9 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from blueprint_translator.evidence_policy import evaluate_evidence  # noqa: E402
+from blueprint_translator.evidence_status import (  # noqa: E402
+    project_sample_status_zh,
+)
 from blueprint_translator.evidence_repository import (  # noqa: E402
     resolve_asset_evidence_state,
 )
@@ -1040,6 +1043,10 @@ def build_capability_report(
                     ),
                 },
                 "axes": axes,
+                "statusZh": project_sample_status_zh(
+                    axes["evidenceAvailability"],
+                    axes["answerClosure"],
+                ),
                 "result": result,
             }
         )

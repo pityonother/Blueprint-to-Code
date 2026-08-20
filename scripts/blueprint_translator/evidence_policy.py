@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Final, Literal, Protocol
 
+from .evidence_status import project_query_status_zh
+
 
 POLICY_VERSION: Final = "1"
 EvidencePurpose = Literal["formal_query", "publish", "benchmark", "draft_query"]
@@ -173,16 +175,17 @@ def evaluate_evidence(
     allowed = not normalized_reasons
     if allowed and purpose in _STRICT_PURPOSES and state.semantic_fact_count > 0:
         availability = "FORMAL_QUERY"
-        public_status = "可正式查询"
     elif allowed and purpose == "draft_query":
         availability = "UNAVAILABLE"
-        public_status = "只能回答一部分"
     elif state.semantic_fact_count <= 0:
         availability = "IDENTITY_ONLY"
-        public_status = "只识别资产身份"
     else:
         availability = "UNAVAILABLE"
-        public_status = "当前工具无法读取"
+    public_status = project_query_status_zh(
+        availability,
+        purpose=purpose,
+        allowed=allowed,
+    )
 
     summary = _binding_summary(state)
     return EvidenceDecision(

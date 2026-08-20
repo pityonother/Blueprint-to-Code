@@ -23,6 +23,9 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from arkdev_mcp.blueprint_service import BlueprintService  # noqa: E402
 from arkdev_mcp.contracts import McpExecutionError, assert_path_free  # noqa: E402
+from blueprint_translator.evidence_status import (  # noqa: E402
+    project_sample_status_zh,
+)
 
 
 CONTRACT_SCHEMA = "ark.btc.category-default-fact-regression-contract.v1"
@@ -267,7 +270,7 @@ def run_regression(
         goal = str(case["goal"])
         reasons: list[str] = []
         fact: dict[str, object] | None = None
-        evidence_availability = "UNKNOWN"
+        evidence_availability = "UNAVAILABLE"
         try:
             response = service.get_context(asset=asset, goal=goal)
         except McpExecutionError as exc:
@@ -319,6 +322,10 @@ def run_regression(
                 "evidenceAvailability": evidence_availability,
                 "answerClosure": answer_closure,
             },
+            "statusZh": project_sample_status_zh(
+                evidence_availability,
+                answer_closure,
+            ),
         }
         assert_path_free(row)
         rows.append(row)
