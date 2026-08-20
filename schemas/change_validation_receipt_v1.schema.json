@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.invalid/schemas/change-validation-receipt-v1.schema.json",
+  "title": "Blueprint to Code change validation receipt v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "baseSha",
+    "headSha",
+    "requestedProfile",
+    "selectedProfile",
+    "riskLevel",
+    "changedFiles",
+    "commands",
+    "fullRunRequired",
+    "fullRun",
+    "contentIdentityCache"
+  ],
+  "properties": {
+    "schema": {
+      "const": "blueprint-to-code.change-validation-receipt.v1"
+    },
+    "status": {
+      "enum": ["PLANNED", "PASS", "FAIL"]
+    },
+    "startedAt": {"type": "string"},
+    "finishedAt": {"type": "string"},
+    "durationSeconds": {"type": "number", "minimum": 0},
+    "baseSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "requestedProfile": {"type": "string"},
+    "selectedProfile": {"type": "string"},
+    "riskLevel": {"enum": ["L0", "L1", "L2", "L3"]},
+    "affectedProfiles": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "classificationReasons": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "changedFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "bytes"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {
+            "oneOf": [
+              {"type": "null"},
+              {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            ]
+          },
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "argv",
+          "reason",
+          "status",
+          "durationSeconds",
+          "exitCode"
+        ],
+        "properties": {
+          "id": {"type": "string"},
+          "argv": {"type": "array", "items": {"type": "string"}},
+          "reason": {"type": "string"},
+          "status": {
+            "enum": ["PLANNED", "PASS", "FAIL", "SKIPPED_AFTER_FAILURE"]
+          },
+          "durationSeconds": {"type": "number", "minimum": 0},
+          "exitCode": {"type": ["integer", "null"]},
+          "errorCode": {"type": "string"}
+        }
+      }
+    },
+    "fullRunRequired": {"type": "boolean"},
+    "fullRun": {"type": "boolean"},
+    "contentIdentityCache": {
+      "type": "object",
+      "required": ["enabled", "hit", "scope", "usedToSkipCommands"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "hit": {"type": "boolean"},
+        "scope": {"const": "CONTENT_IDENTICAL_ASSET_INTEGRITY_ONLY"},
+        "usedToSkipCommands": {"type": "array", "maxItems": 0}
+      }
+    },
+    "cacheHits": {"type": "integer", "minimum": 0}
+  }
+}

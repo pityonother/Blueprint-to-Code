@@ -1,0 +1,83 @@
+{
+  "schema": "blueprint-to-code.validation-profiles.v1",
+  "profiles": {
+    "docs": {
+      "risk": "L0",
+      "capabilities": ["docs"],
+      "patterns": ["*.md", "docs/**", "CHANGELOG.md", "README.md"]
+    },
+    "query": {
+      "risk": "L1",
+      "capabilities": ["query"],
+      "patterns": [
+        "scripts/query_blueprint_evidence.py",
+        "scripts/arkdev_mcp/**",
+        "scripts/blueprint_translator/evidence_query.py",
+        "tests/test_evidence_cli.py",
+        "tests/test_arkdev_mcp*.py"
+      ]
+    },
+    "frontend": {
+      "risk": "L1",
+      "capabilities": ["frontend"],
+      "patterns": ["src/**", "index.html", "vite.config.ts", "tsconfig.json"]
+    },
+    "parser": {
+      "risk": "L2",
+      "capabilities": ["full-python"],
+      "patterns": [
+        "scripts/blueprint_translator/evidence_policy.py",
+        "scripts/blueprint_translator/evidence_repository.py",
+        "scripts/blueprint_translator/evidence_schema.py",
+        "scripts/blueprint_translator/evidence_writer.py",
+        "scripts/blueprint_translator/uasset_*.py",
+        "scripts/validate_evidence_store.py",
+        "tests/test_evidence_policy.py",
+        "tests/test_evidence_repository.py",
+        "tests/test_evidence_schema.py",
+        "tests/test_evidence_writer.py",
+        "tests/test_uasset_*.py"
+      ]
+    },
+    "publication": {
+      "risk": "L3",
+      "capabilities": ["full-python"],
+      "patterns": [
+        "scripts/blueprint_translator/*publication.py",
+        "scripts/publish_*.py",
+        "tests/test_*publication*.py",
+        "tests/test_publish_*.py"
+      ]
+    },
+    "native": {
+      "risk": "L3",
+      "capabilities": ["full-python"],
+      "patterns": [
+        "scripts/blueprint_translator/native_*.py",
+        "scripts/native_analysis/**",
+        "scripts/query_native_evidence.py",
+        "scripts/validate_native_evidence.py",
+        "tests/test_native_*.py"
+      ]
+    },
+    "release": {
+      "risk": "L3",
+      "capabilities": ["full-python", "frontend"],
+      "patterns": [
+        ".github/workflows/**",
+        "package.json",
+        "package-lock.json",
+        "scripts/validate_change.py",
+        "scripts/validation_profiles.json",
+        "scripts/check_release_content.py",
+        "scripts/package_*.py",
+        "tests/test_ci_contract.py",
+        "tests/test_release_*.py"
+      ]
+    }
+  },
+  "unknown": {
+    "risk": "L3",
+    "capabilities": ["full-python"]
+  }
+}
