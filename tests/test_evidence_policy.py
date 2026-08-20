@@ -115,6 +115,22 @@ class EvidencePolicyTests(unittest.TestCase):
         self.assertFalse(evaluate_evidence(state, purpose="formal_query").allowed)
         self.assertFalse(evaluate_evidence(state, purpose="publish").allowed)
 
+    def test_v2_compatibility_is_draft_query_only(self):
+        state = _state(
+            source_kind="INDEXED_V2_COMPATIBILITY",
+            release_authority=False,
+            migration_required=True,
+            manifest_sha256=None,
+            pointer_sha256=None,
+        )
+
+        draft = evaluate_evidence(state, purpose="draft_query")
+
+        self.assertTrue(draft.allowed)
+        self.assertEqual(draft.evidence_availability, "UNAVAILABLE")
+        self.assertEqual(draft.public_status_zh, "只能回答一部分")
+        self.assertFalse(evaluate_evidence(state, purpose="formal_query").allowed)
+
     def test_binding_digest_is_path_independent_and_content_sensitive(self):
         first = evaluate_evidence(_state(), purpose="formal_query")
         moved = evaluate_evidence(

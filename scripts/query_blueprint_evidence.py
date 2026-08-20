@@ -154,9 +154,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(argv if argv is not None else sys.argv[1:]))
     try:
         state = resolve_asset_evidence_state(args.asset_dir, allow_stale=True)
+        purpose = (
+            "formal_query"
+            if state.source_kind == "INDEXED_V3_CURRENT"
+            else "draft_query"
+        )
         with open_resolved_asset_repository(
             state,
-            purpose="formal_query",
+            purpose=purpose,
         ) as repository:
             request = request_from_args(args)
             if args.operation == "gaps" and str(args.scope or "").startswith("graph:"):
@@ -193,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
                     "pointerSha256": repository.pointer_sha256,
                     "evidenceDecision": {
                         "allowed": repository.evidence_decision.allowed,
+                        "purpose": repository.evidence_decision.purpose,
                         "reasonCode": repository.evidence_decision.reason_code,
                         "reasonCodes": list(repository.evidence_decision.reason_codes),
                         "bindingDigest": repository.evidence_decision.binding_digest,

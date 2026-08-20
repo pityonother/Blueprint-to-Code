@@ -174,6 +174,9 @@ def evaluate_evidence(
     if allowed and purpose in _STRICT_PURPOSES and state.semantic_fact_count > 0:
         availability = "FORMAL_QUERY"
         public_status = "可正式查询"
+    elif allowed and purpose == "draft_query":
+        availability = "UNAVAILABLE"
+        public_status = "只能回答一部分"
     elif state.semantic_fact_count <= 0:
         availability = "IDENTITY_ONLY"
         public_status = "只识别资产身份"
