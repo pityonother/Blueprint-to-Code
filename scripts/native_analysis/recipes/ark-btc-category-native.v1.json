@@ -39,6 +39,30 @@
       "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
     },
     {
+      "id": "structure-build-restriction-actor-filter",
+      "selector": { "rva": "0x14DC8F0" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-point-actor-filter",
+      "selector": { "rva": "0x14DCB40" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-allowed-actor-filter",
+      "selector": { "rva": "0x14DD270" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-within-actor-filter",
+      "selector": { "rva": "0x14DD7C0" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
       "id": "supply-begin-play",
       "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::BeginPlay" },
       "expectedMatches": 1,
@@ -179,6 +203,36 @@
     {
       "id": "nav-update-active-tiles",
       "selector": { "qualifiedName": "APrimalRecastNavMesh::UpdateActiveTiles" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-parallel-body",
+      "selector": { "rva": "0x14F4D50" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-serial-body",
+      "selector": { "rva": "0x14F6500" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-parallel-step-1",
+      "selector": { "rva": "0x14F4720" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-parallel-step-2",
+      "selector": { "rva": "0x14F61E0" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-parallel-step-3",
+      "selector": { "rva": "0x14F7D70" },
       "expectedMatches": 1,
       "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
     },
