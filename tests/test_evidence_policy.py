@@ -24,12 +24,13 @@ from blueprint_translator.evidence_repository import (  # noqa: E402
 def _state(**overrides: object) -> ResolvedEvidenceState:
     manifest_raw = b'{"schema":"fixture"}\n'
     index_raw = b"# fixture\n"
+    private_root = Path("private") / "Fixture_BP"
     values: dict[str, object] = {
-        "asset_dir": Path("C:/private/Fixture_BP"),
-        "database_path": Path("C:/private/Fixture_BP/evidence.sqlite"),
-        "agent_index_path": Path("C:/private/Fixture_BP/agent_index.md"),
-        "manifest_path": Path("C:/private/Fixture_BP/manifest.json"),
-        "pointer_path": Path("C:/private/Fixture_BP/current.json"),
+        "asset_dir": private_root,
+        "database_path": private_root / "evidence.sqlite",
+        "agent_index_path": private_root / "agent_index.md",
+        "manifest_path": private_root / "manifest.json",
+        "pointer_path": private_root / "current.json",
         "source_kind": "INDEXED_V3_CURRENT",
         "release_authority": True,
         "freshness_status": "FRESH",
@@ -65,7 +66,7 @@ class EvidencePolicyTests(unittest.TestCase):
                 self.assertEqual(decision.evidence_availability, "FORMAL_QUERY")
                 self.assertEqual(decision.public_status_zh, "可正式查询")
                 self.assertEqual(len(decision.binding_digest), 64)
-                self.assertNotIn("C:/private", str(decision.binding_summary))
+                self.assertNotIn("Fixture_BP", str(decision.binding_summary))
 
     def test_strict_policy_blocks_each_legacy_predicate_failure(self):
         cases = (
@@ -135,10 +136,10 @@ class EvidencePolicyTests(unittest.TestCase):
         first = evaluate_evidence(_state(), purpose="formal_query")
         moved = evaluate_evidence(
             _state(
-                asset_dir=Path("D:/moved/Fixture_BP"),
-                database_path=Path("D:/moved/evidence.sqlite"),
-                manifest_path=Path("D:/moved/manifest.json"),
-                pointer_path=Path("D:/moved/current.json"),
+                asset_dir=Path("moved") / "Fixture_BP",
+                database_path=Path("moved") / "evidence.sqlite",
+                manifest_path=Path("moved") / "manifest.json",
+                pointer_path=Path("moved") / "current.json",
             ),
             purpose="formal_query",
         )
@@ -176,7 +177,7 @@ class EvidencePolicyTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "EVIDENCE_STALE")
         self.assertEqual(raised.exception.decision.public_status_zh, "当前工具无法读取")
-        self.assertNotIn("C:/private", str(raised.exception))
+        self.assertNotIn("Fixture_BP", str(raised.exception))
 
 
 if __name__ == "__main__":

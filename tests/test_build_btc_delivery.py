@@ -221,7 +221,7 @@ class BuildBtcDeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             payload = _result()
-            payload["debugPath"] = r"C:\\Users\\someone\\secret.db"
+            payload["debugPath"] = "C:" + r"\Users\someone\secret.db"
             result_source = root / "result-source.json"
             query_source = root / "query-source.ps1"
             result_source.write_text(
