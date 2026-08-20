@@ -56,6 +56,49 @@ class ValidateChangeTests(unittest.TestCase):
         self.assertIn("full-python", classification.capabilities)
         self.assertIn("UNKNOWN_FILE_CLASS", classification.reasons)
 
+    def test_high_risk_classes_force_one_full_suite_and_docs_do_not(self):
+        config = validate_change.load_config(CONFIG)
+        cases = (
+            ("scripts/blueprint_translator/evidence_policy.py", "parser"),
+            (
+                "scripts/blueprint_translator/evidence_publication.py",
+                "publication",
+            ),
+            ("new-system/opaque.contract", "unknown"),
+        )
+        for path, expected_profile in cases:
+            with self.subTest(path=path):
+                classification = validate_change.classify_changed_files(
+                    [path],
+                    config,
+                )
+                commands = validate_change.build_command_plan(
+                    classification,
+                    changed_files=[path],
+                    base_sha="a" * 40,
+                    python_command="python",
+                )
+                self.assertEqual(classification.selected_profile, expected_profile)
+                self.assertEqual(
+                    [item.identifier for item in commands].count(
+                        "python-full-suite"
+                    ),
+                    1,
+                )
+
+        docs = validate_change.classify_changed_files(["docs/guide.md"], config)
+        docs_commands = validate_change.build_command_plan(
+            docs,
+            changed_files=["docs/guide.md"],
+            base_sha="a" * 40,
+            python_command="python",
+        )
+        self.assertEqual(docs.risk, "L0")
+        self.assertNotIn(
+            "python-full-suite",
+            [item.identifier for item in docs_commands],
+        )
+
     def test_explicit_profile_cannot_downgrade_detected_risk(self):
         config = validate_change.load_config(CONFIG)
         detected = validate_change.classify_changed_files(
