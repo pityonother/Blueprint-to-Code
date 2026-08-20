@@ -234,6 +234,38 @@
       ],
       "blockingGaps": []
     },
+    "18": {
+      "questionOverride": {
+        "questionZh": "这个区域默认最多维持多少泡泡、多久检查一次玩家、检查多远、无人附近多久后清理？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "区域默认最多维持 10 个泡泡。",
+          "evidenceRefs": [
+            "bp://24824046ce3d8879f4b9d1cc@43f26143699dd57eec3be831/default/MaxBubblesNumInBox"
+          ]
+        },
+        {
+          "textZh": "每 5 秒检查一次玩家，检查半径为 45000。",
+          "evidenceRefs": [
+            "bp://24824046ce3d8879f4b9d1cc@43f26143699dd57eec3be831/default/CheckPlayerInterval",
+            "bp://24824046ce3d8879f4b9d1cc@43f26143699dd57eec3be831/default/CheckPlayerRadius"
+          ]
+        },
+        {
+          "textZh": "无人附近时泡泡默认保留 120 秒。",
+          "evidenceRefs": [
+            "bp://24824046ce3d8879f4b9d1cc@43f26143699dd57eec3be831/default/BubbleDurationWithoutPlayerNearby"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "生成、重叠检查、销毁和结束清理图已经收录，但仍有未恢复的接口与连线，不能把完整执行顺序写成精确闭环。"
+      ]
+    },
     "19": {
       "questionOverride": {
         "questionZh": "滑坡危险区默认两次触发至少隔多久，预警间隔是多少？",
@@ -740,6 +772,60 @@
         }
       ],
       "blockingGaps": []
+    },
+    "49": {
+      "questionOverride": {
+        "questionZh": "Pillar 的精确父类、消耗物品、结构规则和破坏几何是什么，能否证明玩家可制作或放置？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "Pillar 的精确父类为 Floor_Base_SM_C，消耗物品引用解析为 PrimalItemStructure_WoodFloor_C。",
+          "evidenceRefs": [
+            "bp://24b0ede3b1e5501308ab1741@de69bd72216d97656eb9bde5/asset/field/ParentClass",
+            "bp://24b0ede3b1e5501308ab1741@de69bd72216d97656eb9bde5/default/ConsumesPrimalItem"
+          ]
+        },
+        {
+          "textZh": "结构规则类为 StructureSettings_BrokenByMetal_C；破坏几何只指向 Pillar 自己的 Steamboat_Willie_Pillar_3_GeometryCollection。",
+          "evidenceRefs": [
+            "bp://24b0ede3b1e5501308ab1741@de69bd72216d97656eb9bde5/default/StructureSettingsClass",
+            "bp://24b0ede3b1e5501308ab1741@de69bd72216d97656eb9bde5/default/SoftDestructionGeoCollectionAsset"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "没有恢复 Engram、物品获得入口或完整放置链；这些引用不能证明玩家可正常制作或放置，伤害阈值和父类破坏实现也未闭合。"
+      ]
+    },
+    "50": {
+      "questionOverride": {
+        "questionZh": "Dock 的精确父类、消耗物品、结构规则和破坏几何是什么，能否证明玩家可制作或放置？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "Dock 的精确父类为 Floor_Base_SM_C，消耗物品引用解析为 PrimalItemStructure_WoodFloor_C。",
+          "evidenceRefs": [
+            "bp://d71cb3f46e14942d4c41f6bf@2026357e4660b7f059d13033/asset/field/ParentClass",
+            "bp://d71cb3f46e14942d4c41f6bf@2026357e4660b7f059d13033/default/ConsumesPrimalItem"
+          ]
+        },
+        {
+          "textZh": "结构规则类为 StructureSettings_BrokenByMetal_C；破坏几何只指向 Dock 自己的 Steamboat_Willie_Dock_GeometryCollection。",
+          "evidenceRefs": [
+            "bp://d71cb3f46e14942d4c41f6bf@2026357e4660b7f059d13033/default/StructureSettingsClass",
+            "bp://d71cb3f46e14942d4c41f6bf@2026357e4660b7f059d13033/default/SoftDestructionGeoCollectionAsset"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "没有恢复 Engram、物品获得入口或完整放置链；这些引用不能证明玩家可正常制作或放置，伤害阈值和父类破坏实现也未闭合。"
+      ]
     },
     "51": {
       "questionOverride": {
