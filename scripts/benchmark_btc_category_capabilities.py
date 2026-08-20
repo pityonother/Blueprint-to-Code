@@ -29,8 +29,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from blueprint_translator.evidence_policy import evaluate_evidence  # noqa: E402
 from blueprint_translator.evidence_repository import (  # noqa: E402
-    is_release_ready_evidence,
     resolve_asset_evidence_state,
 )
 from blueprint_translator.evidence_values import project_default_value  # noqa: E402
@@ -280,7 +280,8 @@ def _evidence_truth_index(
 def profile_blueprint_evidence(asset_dir: str | Path) -> dict[str, object]:
     root = Path(asset_dir).expanduser().resolve()
     state = resolve_asset_evidence_state(root, allow_stale=True)
-    authority_ready = is_release_ready_evidence(state)
+    decision = evaluate_evidence(state, purpose="benchmark")
+    authority_ready = decision.allowed
     uri = f"file:{state.database_path.as_posix()}?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
@@ -379,6 +380,13 @@ def profile_blueprint_evidence(asset_dir: str | Path) -> dict[str, object]:
             "manifestSha256": state.manifest_sha256,
             "pointerSha256": state.pointer_sha256,
             "captureIntegrityStatus": "PASS" if authority_ready else "DEGRADED",
+            "evidenceDecision": {
+                "reasonCode": decision.reason_code,
+                "reasonCodes": list(decision.reason_codes),
+                "bindingDigest": decision.binding_digest,
+                "evidenceAvailability": decision.evidence_availability,
+                "nonUpgradeableGaps": list(decision.non_upgradeable_gaps),
+            },
         },
         "content": {
             **counts,
@@ -819,6 +827,43 @@ def _public_profile(profile: Mapping[str, object] | None) -> object:
     return public
 
 
+def _evidence_availability(
+    profile: Mapping[str, object] | None,
+    result: Mapping[str, object],
+    *,
+    ready: bool,
+) -> str:
+    if profile is not None:
+        authority = profile.get("authority")
+        authority_map = authority if isinstance(authority, Mapping) else {}
+        decision = authority_map.get("evidenceDecision")
+        decision_map = decision if isinstance(decision, Mapping) else {}
+        projected = str(decision_map.get("evidenceAvailability") or "")
+        if projected in {"FORMAL_QUERY", "IDENTITY_ONLY", "UNAVAILABLE"}:
+            return projected
+        if ready and profile.get("formallyQueryable") is True:
+            return "FORMAL_QUERY"
+    if str(result.get("contentRecoveryStatus") or "") == "IDENTITY_ONLY":
+        return "IDENTITY_ONLY"
+    return "FORMAL_QUERY" if ready else "UNAVAILABLE"
+
+
+def _answer_closure(result: Mapping[str, object]) -> str:
+    status = str(result.get("benchmarkClosureStatus") or "NOT_RUN")
+    blockers_value = result.get("blockerCodes")
+    blockers = (
+        {str(value) for value in blockers_value}
+        if isinstance(blockers_value, Sequence)
+        and not isinstance(blockers_value, (str, bytes))
+        else set()
+    )
+    if status == "CLOSED_EXACT":
+        return "COMPLETE"
+    if status == "NOT_RUN" or "QUESTION_ASSESSMENT_NOT_REVIEWED" in blockers:
+        return "NOT_REVIEWED"
+    return "PARTIAL"
+
+
 def build_capability_report(
     *,
     sample_plan: Mapping[str, object],
@@ -948,6 +993,14 @@ def build_capability_report(
                 question_contract=contract,
                 reviewed_assessment=assessments.get(str(sample["sampleIndex"])),
             )
+        axes = {
+            "evidenceAvailability": _evidence_availability(
+                evidence_profile,
+                result,
+                ready=ready,
+            ),
+            "answerClosure": _answer_closure(result),
+        }
         rows.append(
             {
                 "sampleIndex": int(sample["sampleIndex"]),
@@ -986,6 +1039,7 @@ def build_capability_report(
                         )
                     ),
                 },
+                "axes": axes,
                 "result": result,
             }
         )
@@ -1006,6 +1060,12 @@ def build_capability_report(
         for row in rows
         if bool(row["p0"]["ready"])
         and row["result"]["benchmarkClosureStatus"] == "PARTIAL"
+    )
+    availability_counts = Counter(
+        str(row["axes"]["evidenceAvailability"]) for row in rows
+    )
+    answer_closure_counts = Counter(
+        str(row["axes"]["answerClosure"]) for row in rows
     )
     return {
         "schema": SCHEMA,
@@ -1050,9 +1110,12 @@ def build_capability_report(
             "unsupported": statuses.get("UNSUPPORTED", 0),
             "failed": statuses.get("FAILED", 0),
             "notRun": statuses.get("NOT_RUN", 0),
+            "evidenceAvailability": dict(sorted(availability_counts.items())),
+            "answerClosure": dict(sorted(answer_closure_counts.items())),
         },
         "boundariesZh": [
             "READY 只证明权威发布链，不等于内容闭环。",
+            "证据可用性与问题闭环是两条独立轴；可正式查询不会自动提升为完整回答。",
             "validator PASS 只证明证据容器完整，不等于恢复了业务字段。",
             "没有逐问题人工复核且引用重查通过时，内容不得自动提升为 CLOSED。",
             "相似类名只用于抽样导航；结论仅允许在 exact class 范围传播。",

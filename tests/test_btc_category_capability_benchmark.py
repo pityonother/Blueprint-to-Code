@@ -471,6 +471,10 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
         self.assertEqual(profile["identity"]["persistentGuidExactCount"], 2)
         self.assertEqual(profile["identity"]["exactLinkCount"], 1)
         self.assertEqual(profile["identity"]["heuristicLinkCount"], 0)
+        self.assertEqual(
+            profile["authority"]["evidenceDecision"]["evidenceAvailability"],
+            "FORMAL_QUERY",
+        )
 
     def test_silent_empty_evidence_is_identity_only_even_when_authoritative(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -495,6 +499,10 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
 
         self.assertTrue(profile["content"]["silentEmpty"])
         self.assertEqual(profile["authority"]["captureIntegrityStatus"], "PASS")
+        self.assertEqual(
+            profile["authority"]["evidenceDecision"]["evidenceAvailability"],
+            "IDENTITY_ONLY",
+        )
         self.assertEqual(result["contentRecoveryStatus"], "IDENTITY_ONLY")
         self.assertEqual(result["benchmarkClosureStatus"], "IDENTITY_ONLY")
         self.assertIn("SILENT_EMPTY", result["blockerCodes"])
@@ -835,6 +843,14 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
         self.assertEqual(report["counts"]["closedExact"], 0)
         statuses = [item["result"]["benchmarkClosureStatus"] for item in report["samples"]]
         self.assertEqual(statuses, ["NOT_RUN", "UNSUPPORTED", "NOT_RUN"])
+        self.assertEqual(
+            [item["axes"]["answerClosure"] for item in report["samples"]],
+            ["NOT_REVIEWED", "PARTIAL", "NOT_REVIEWED"],
+        )
+        self.assertEqual(
+            report["counts"]["answerClosure"],
+            {"NOT_REVIEWED": 2, "PARTIAL": 1},
+        )
         self.assertEqual(report["samples"][1]["evidence"]["trustStatus"], "VERIFIED")
         self.assertEqual(
             report["classificationLineage"]["selectionAlgorithm"],

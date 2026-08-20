@@ -156,10 +156,19 @@ def _validate_benchmark_bindings(
         p0_map = p0 if isinstance(p0, Mapping) else {}
         result = sample.get("result")
         result_map = result if isinstance(result, Mapping) else {}
+        axes = sample.get("axes")
+        axes_map = axes if isinstance(axes, Mapping) else {}
         if p0_map.get("ready") is not True:
             raise ValueError("benchmark sample is not READY")
         if str(result_map.get("benchmarkClosureStatus") or "") != "CLOSED_EXACT":
             raise ValueError("benchmark sample is not CLOSED_EXACT")
+        if axes_map and (
+            str(axes_map.get("evidenceAvailability") or "") != "FORMAL_QUERY"
+            or str(axes_map.get("answerClosure") or "") != "COMPLETE"
+        ):
+            raise ValueError(
+                "benchmark sample axes are not FORMAL_QUERY and COMPLETE"
+            )
         stratum = sample.get("plannedStratum")
         stratum_map = stratum if isinstance(stratum, Mapping) else {}
         if str(stratum_map.get("code") or "") != str(case["categoryCode"]):
@@ -258,6 +267,7 @@ def run_regression(
         goal = str(case["goal"])
         reasons: list[str] = []
         fact: dict[str, object] | None = None
+        evidence_availability = "UNKNOWN"
         try:
             response = service.get_context(asset=asset, goal=goal)
         except McpExecutionError as exc:
@@ -265,7 +275,24 @@ def run_regression(
         except Exception:
             reasons.append("UNEXPECTED_QUERY_FAILURE")
         else:
-            fact, reasons = _exact_default_fact(response.get("facts"), goal=goal)
+            identity = response.get("identity")
+            identity_map = identity if isinstance(identity, Mapping) else {}
+            evidence = identity_map.get("evidence")
+            evidence_map = evidence if isinstance(evidence, Mapping) else {}
+            decision = evidence_map.get("decision")
+            decision_map = decision if isinstance(decision, Mapping) else {}
+            projected_availability = str(
+                decision_map.get("evidenceAvailability") or ""
+            )
+            if projected_availability:
+                evidence_availability = projected_availability
+                if evidence_availability != "FORMAL_QUERY":
+                    reasons.append("EVIDENCE_NOT_FORMALLY_QUERYABLE")
+            fact, fact_reasons = _exact_default_fact(
+                response.get("facts"),
+                goal=goal,
+            )
+            reasons.extend(fact_reasons)
             if fact is not None:
                 reasons.extend(_fact_reasons(fact, case["expected"]))
                 allowed_refs = benchmark_bindings[
@@ -273,6 +300,11 @@ def run_regression(
                 ]
                 if str(fact.get("id") or "") not in allowed_refs:
                     reasons.append("FACT_REF_DOES_NOT_MATCH_BENCHMARK_CLAIM")
+        answer_closure = (
+            "COMPLETE"
+            if not reasons
+            else ("PARTIAL" if fact is not None else "NOT_REVIEWED")
+        )
         row: dict[str, object] = {
             "sampleIndex": int(case.get("sampleIndex") or 0),
             "categoryCode": str(case.get("categoryCode") or ""),
@@ -283,6 +315,10 @@ def run_regression(
             "expected": dict(case["expected"]),
             "evidenceRef": str(fact.get("id") or "") if fact is not None else "",
             "fact": fact or {},
+            "axes": {
+                "evidenceAvailability": evidence_availability,
+                "answerClosure": answer_closure,
+            },
         }
         assert_path_free(row)
         rows.append(row)

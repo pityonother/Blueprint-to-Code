@@ -78,6 +78,10 @@ def _benchmark_artifact(
                         }
                     ],
                 },
+                "axes": {
+                    "evidenceAvailability": "FORMAL_QUERY",
+                    "answerClosure": "COMPLETE",
+                },
             }
         ],
     }
@@ -100,7 +104,14 @@ class BtcCategoryDefaultFactVerifierTests(unittest.TestCase):
         service = _FakeService(
             {
                 ("BP_SpawnCrate", "AnimLength"): {
-                    "facts": [_fact("AnimLength", 6)]
+                    "identity": {
+                        "evidence": {
+                            "decision": {
+                                "evidenceAvailability": "FORMAL_QUERY"
+                            }
+                        }
+                    },
+                    "facts": [_fact("AnimLength", 6)],
                 }
             }
         )
@@ -123,6 +134,13 @@ class BtcCategoryDefaultFactVerifierTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "PASS")
         self.assertEqual(receipt["counts"], {"cases": 1, "passed": 1, "failed": 0})
         self.assertEqual(receipt["cases"][0]["evidenceRef"], _fact("AnimLength", 6)["id"])
+        self.assertEqual(
+            receipt["cases"][0]["axes"],
+            {
+                "evidenceAvailability": "FORMAL_QUERY",
+                "answerClosure": "COMPLETE",
+            },
+        )
         self.assertEqual(
             receipt["inputBindings"]["benchmarkArtifact"]["sha256"],
             "benchmark-sha",
