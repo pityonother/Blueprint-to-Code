@@ -651,7 +651,15 @@ try {
   assert.match(css, /\.blueprint-load-more \{[\s\S]*max-width: 100%/);
 
   const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /node tests\/blueprint_frontend_contract\.mjs/);
+  assert.match(workflow, /python scripts\/validate_change\.py/);
+  const validator = await readFile(
+    new URL('../scripts/validate_change.py', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    validator,
+    /"frontend-blueprint-contract", "tests\/blueprint_frontend_contract\.mjs"/,
+  );
 } finally {
   await server.close();
 }
