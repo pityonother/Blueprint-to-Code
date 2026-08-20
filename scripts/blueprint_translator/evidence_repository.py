@@ -22,6 +22,7 @@ from .evidence_publication import (
     _require_plain_path_chain,
     _validate_v2_manifest,
 )
+from .evidence_policy import evaluate_evidence, semantic_fact_count
 from .evidence_revision import load_current_evidence_revision
 from .evidence_values import project_default_value
 from .evidence_writer import write_evidence_store_from_capture
@@ -48,6 +49,8 @@ class ResolvedEvidenceState:
     agent_index_sha256: str
     agent_index_bytes: int
     agent_index_raw: bytes
+    semantic_fact_count: int
+    non_upgradeable_gaps: tuple[str, ...] = ()
 
 
 def evidence_state_metadata(
@@ -66,16 +69,14 @@ def evidence_state_metadata(
 
 
 def is_release_ready_evidence(state: ResolvedEvidenceState) -> bool:
-    """Return whether Evidence satisfies the strict READY trust predicate."""
+    """Compatibility adapter for the historical authority-ready predicate.
 
-    return bool(
-        state.source_kind == "INDEXED_V3_CURRENT"
-        and state.freshness_status == "FRESH"
-        and state.release_authority
-        and not state.migration_required
-        and state.manifest_sha256
-        and state.pointer_sha256
-    )
+    Benchmark purpose deliberately permits an authoritative identity-only
+    capture to be inspected and classified; formal query and publication do
+    not permit it.
+    """
+
+    return evaluate_evidence(state, purpose="benchmark").allowed
 
 
 class EvidenceRepository:
@@ -627,6 +628,7 @@ def resolve_asset_evidence_state(
             agent_index_sha256=agent_index_sha256,
             agent_index_bytes=agent_index_bytes,
             agent_index_raw=agent_index_raw,
+            semantic_fact_count=semantic_fact_count(validated.manifest.get("counts")),
         )
 
     indexed_database = root / "evidence" / "evidence.sqlite"
@@ -731,6 +733,7 @@ def resolve_asset_evidence_state(
             agent_index_sha256=agent_index_sha256,
             agent_index_bytes=agent_index_bytes,
             agent_index_raw=agent_index_raw_after,
+            semantic_fact_count=semantic_fact_count(projection.get("counts")),
         )
 
     raise FileNotFoundError(f"NO_EVIDENCE: indexed evidence not found under {root}")
