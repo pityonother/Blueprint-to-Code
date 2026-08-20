@@ -102,6 +102,7 @@ UOBJECT_PROPERTY_TYPE_NAMES = {
     "FloatProperty",
     "IntProperty",
     "Int64Property",
+    "UInt64Property",
     "MapProperty",
     "NameProperty",
     "ObjectProperty",
@@ -294,7 +295,10 @@ def normalize_blueprint_object_path(raw_text: str) -> str:
     quoted = re.search(r"['\"](?P<path>[^'\"]+)['\"]", text)
     if quoted:
         text = quoted.group("path").strip()
-    path_match = re.search(r"(?P<path>/Game/[^\s,'\"]+)", text)
+    path_match = re.search(
+        r"(?<![\w.\-])(?P<path>/[A-Za-z0-9_][\w.\-]*/[^\s,'\"]+)",
+        text,
+    )
     if path_match:
         text = path_match.group("path").strip()
     else:
@@ -311,6 +315,10 @@ def normalize_blueprint_object_path(raw_text: str) -> str:
         text = "/Game" + text
     elif lowered.startswith("mods/"):
         text = "/Game/" + text
+    elif re.match(r"^/[A-Za-z0-9_][\w.\-]*/", text):
+        # Preserve formal plugin mount identity. A path mapping may locate the
+        # file elsewhere, but it must not rewrite /PCG into /Game/Mods/PCG.
+        pass
     elif re.match(r"^[A-Za-z0-9_][\w.\-]*/", text):
         text = "/Game/Mods/" + text.lstrip("/")
     else:
@@ -555,6 +563,10 @@ def _read_i64(data: bytes, offset: int) -> int:
     return struct.unpack_from("<q", data, offset)[0]
 
 
+def _read_u64(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<Q", data, offset)[0]
+
+
 def _read_f32(data: bytes, offset: int) -> float:
     return struct.unpack_from("<f", data, offset)[0]
 
@@ -661,14 +673,17 @@ def parse_uasset_summary(data: bytes) -> tuple[dict[str, object], list[str]]:
     import_count = 0
     import_offset = 0
     depends_offset = 0
+    summary_layout = ""
     try:
         if file_version_ue4 < 500:
+            summary_layout = "ue4_legacy"
             export_count = _read_i32(data, offset)
             export_offset = _read_i32(data, offset + 4)
             import_count = _read_i32(data, offset + 8)
             import_offset = _read_i32(data, offset + 12)
             depends_offset = _read_i32(data, offset + 16)
         elif legacy_file_version > -8:
+            summary_layout = "ue4_with_soft_package_references"
             localization_id, offset = _read_fstring(data, offset)
             gatherable_text_data_count = _read_i32(data, offset)
             gatherable_text_data_offset = _read_i32(data, offset + 4)
@@ -680,12 +695,14 @@ def parse_uasset_summary(data: bytes) -> tuple[dict[str, object], list[str]]:
             soft_object_paths_count = _read_i32(data, offset + 28)
             soft_object_paths_offset = _read_i32(data, offset + 32)
         else:
-            soft_object_paths_count = _read_i32(data, offset)
-            soft_object_paths_offset = _read_i32(data, offset + 4)
-            offset += 8
-            maybe_length = _read_i32(data, offset)
-            if 0 < maybe_length < 512 and offset + 4 + maybe_length <= len(data):
-                localization_id, offset = _read_fstring(data, offset)
+            if file_version_ue5 >= 1008:
+                summary_layout = "ue5_with_soft_object_paths"
+                soft_object_paths_count = _read_i32(data, offset)
+                soft_object_paths_offset = _read_i32(data, offset + 4)
+                offset += 8
+            else:
+                summary_layout = "ue5_pre_soft_object_paths"
+            localization_id, offset = _read_fstring(data, offset)
             gatherable_text_data_count = _read_i32(data, offset)
             gatherable_text_data_offset = _read_i32(data, offset + 4)
             export_count = _read_i32(data, offset + 8)
@@ -706,6 +723,7 @@ def parse_uasset_summary(data: bytes) -> tuple[dict[str, object], list[str]]:
             "total_header_size": total_header_size,
             "package_name": package_name,
             "package_flags": package_flags,
+            "summary_layout": summary_layout,
             "name_count": name_count,
             "name_offset": name_offset,
             "soft_object_paths_count": soft_object_paths_count,
@@ -720,6 +738,81 @@ def parse_uasset_summary(data: bytes) -> tuple[dict[str, object], list[str]]:
             "depends_offset": depends_offset,
         },
         warnings,
+    )
+
+
+def validate_uasset_summary_layout(
+    summary: dict[str, object],
+    *,
+    file_size: int,
+) -> None:
+    """Fail closed when package-map counts, offsets, or strides disagree."""
+
+    header_size = int(summary.get("total_header_size") or 0)
+    if header_size <= 0 or header_size > file_size:
+        raise ValueError(
+            f"Invalid package header size {header_size} for file size {file_size}."
+        )
+
+    def validate_count_offset(name: str, minimum_stride: int = 1) -> None:
+        count = int(summary.get(f"{name}_count") or 0)
+        offset = int(summary.get(f"{name}_offset") or 0)
+        if count < 0:
+            raise ValueError(f"Invalid {name} count: {count}.")
+        if count == 0:
+            return
+        if offset <= 0 or offset >= file_size:
+            raise ValueError(f"Invalid {name} offset: {offset}.")
+        if count > file_size // minimum_stride:
+            raise ValueError(f"Invalid {name} count for file boundary: {count}.")
+
+    validate_count_offset("name", 4)
+    validate_count_offset("soft_object_paths", 16)
+    validate_count_offset("gatherable_text_data", 1)
+    validate_count_offset("import", 28)
+    validate_count_offset("export", 40)
+
+    def validate_map_stride(
+        label: str,
+        count_key: str,
+        offset_key: str,
+        end_key: str,
+        minimum_stride: int,
+    ) -> None:
+        count = int(summary.get(count_key) or 0)
+        if count == 0:
+            return
+        offset = int(summary.get(offset_key) or 0)
+        end = int(summary.get(end_key) or 0)
+        span = end - offset
+        if end <= offset or end > file_size:
+            raise ValueError(
+                f"Invalid {label} boundary: start {offset}, end {end}."
+            )
+        if span % count:
+            raise ValueError(
+                f"Invalid {label} stride: span {span} is not divisible by "
+                f"count {count}."
+            )
+        stride = span // count
+        if stride < minimum_stride:
+            raise ValueError(
+                f"Invalid {label} stride {stride}; minimum is {minimum_stride}."
+            )
+
+    validate_map_stride(
+        "ImportMap",
+        "import_count",
+        "import_offset",
+        "export_offset",
+        28,
+    )
+    validate_map_stride(
+        "ExportMap",
+        "export_count",
+        "export_offset",
+        "depends_offset",
+        40,
     )
 
 
@@ -1096,6 +1189,7 @@ def parse_uasset_package(uasset_path: Path) -> dict[str, object]:
     warnings: list[str] = []
     summary, summary_warnings = parse_uasset_summary(data)
     warnings.extend(summary_warnings)
+    validate_uasset_summary_layout(summary, file_size=len(data))
     names, name_warnings = parse_uasset_name_map(data, summary)
     warnings.extend(name_warnings)
     soft_object_paths, soft_object_warnings = parse_uasset_soft_object_paths(data, summary, names)
@@ -1534,6 +1628,7 @@ def property_parse_source(type_name: str) -> str:
     if type_name in {
         "IntProperty",
         "Int64Property",
+        "UInt64Property",
         "BoolProperty",
         "FloatProperty",
         "DoubleProperty",
@@ -1559,6 +1654,7 @@ def property_parse_confidence(type_name: str, parsed: dict[str, object]) -> str:
     if type_name in {
         "IntProperty",
         "Int64Property",
+        "UInt64Property",
         "BoolProperty",
         "FloatProperty",
         "DoubleProperty",
@@ -1974,6 +2070,7 @@ def _ark_cdo_property_tag_at(
         "ObjectProperty": 4,
         "IntProperty": 4,
         "Int64Property": 8,
+        "UInt64Property": 8,
         "FloatProperty": 4,
         "DoubleProperty": 8,
         "NameProperty": 8,
@@ -2118,6 +2215,7 @@ def _ark_guid_cdo_property_tag_at(
         "ObjectProperty": 4,
         "IntProperty": 4,
         "Int64Property": 8,
+        "UInt64Property": 8,
         "FloatProperty": 4,
         "DoubleProperty": 8,
         "NameProperty": 8,
@@ -2289,6 +2387,7 @@ def _ue5_cdo_property_tag_at(
         "SoftObjectProperty": 4,
         "IntProperty": 4,
         "Int64Property": 8,
+        "UInt64Property": 8,
         "FloatProperty": 4,
         "DoubleProperty": 8,
         "NameProperty": 8,
@@ -2572,6 +2671,7 @@ def _parse_cdo_array_value(
         "SoftObjectProperty": 4,
         "IntProperty": 4,
         "Int64Property": 8,
+        "UInt64Property": 8,
         "FloatProperty": 4,
         "DoubleProperty": 8,
         "BoolProperty": 1,
@@ -2641,6 +2741,8 @@ def _parse_cdo_array_value(
                 value: object = _read_i32(export_data, cursor)
             elif inner_type == "Int64Property":
                 value = _read_i64(export_data, cursor)
+            elif inner_type == "UInt64Property":
+                value = _read_u64(export_data, cursor)
             elif inner_type == "FloatProperty":
                 value = _read_f32(export_data, cursor)
             elif inner_type == "DoubleProperty":
@@ -2764,6 +2866,75 @@ def _parse_cdo_array_value(
     }
 
 
+def _array_struct_type_name(block: dict[str, object]) -> str:
+    descriptor = block.get("type_descriptor")
+    pending = [descriptor] if isinstance(descriptor, dict) else []
+    while pending:
+        current = pending.pop(0)
+        name = str(current.get("name") or "")
+        if name and name not in {"ArrayProperty", "StructProperty"}:
+            if not name.startswith("/"):
+                return name
+        parameters = current.get("parameters")
+        if isinstance(parameters, list):
+            pending.extend(item for item in parameters if isinstance(item, dict))
+    return ""
+
+
+def _bounded_unparsed_struct_array(
+    export_data: bytes,
+    block: dict[str, object],
+) -> dict[str, object] | None:
+    """Recover only an exact array count when struct elements remain opaque."""
+
+    if str(block.get("inner_type") or "") != "StructProperty":
+        return None
+    value_offset = int(block.get("value_offset") or 0)
+    declared_size = int(block.get("declared_size") or 0)
+    value_end = value_offset + declared_size
+    if declared_size < 4 or value_offset < 0 or value_end > len(export_data):
+        return None
+    count = _read_i32(export_data, value_offset)
+    if count < 0 or count > 1_000_000:
+        return None
+    payload_size = declared_size - 4
+    if count == 0:
+        if payload_size != 0:
+            return None
+        element_stride = 0
+    else:
+        if payload_size <= 0 or payload_size % count:
+            return None
+        element_stride = payload_size // count
+        if element_stride <= 0:
+            return None
+    struct_type = _array_struct_type_name(block)
+    reason = (
+        f"F{struct_type} element decoder is not implemented."
+        if struct_type
+        else "Struct array element decoder is not implemented."
+    )
+    return {
+        "value": [],
+        "objects": [],
+        "object_paths": [],
+        "array_offset": value_offset,
+        "element_kind": "StructProperty",
+        "array_parse": {
+            "parsed": False,
+            "count_confirmed": True,
+            "count": count,
+            "element_kind": "StructProperty",
+            "struct_type": struct_type,
+            "element_stride": element_stride,
+            "raw_size": declared_size,
+            "array_offset": value_offset,
+            "reason_code": "ARRAY_ELEMENTS_NOT_DECODED",
+            "reason": reason,
+        },
+    }
+
+
 def _decoded_property_value(prop: dict[str, object]) -> object:
     """Project a parsed property without losing resolved object identity."""
 
@@ -2866,6 +3037,8 @@ def parse_cdo_property_value(
             item["value"] = _read_i32(export_data, value_offset)
         elif type_name == "Int64Property" and value_offset + 8 <= value_end:
             item["value"] = _read_i64(export_data, value_offset)
+        elif type_name == "UInt64Property" and value_offset + 8 <= value_end:
+            item["value"] = _read_u64(export_data, value_offset)
         elif type_name == "BoolProperty" and value_offset < value_end:
             item["value"] = bool(export_data[value_offset])
         elif type_name in {"NameProperty", "ByteProperty", "EnumProperty"}:
@@ -3007,9 +3180,21 @@ def parse_cdo_property_value(
                     "struct_name": struct_name,
                     "raw_size": max(0, end - value_offset),
                 }
-        elif type_name in {"StrProperty", "TextProperty"}:
-            text, _next = _read_fstring(export_data, value_offset)
+        elif type_name == "StrProperty":
+            text, next_offset = _read_fstring(export_data, value_offset)
+            if next_offset != value_end:
+                raise ValueError("String value does not match its declared boundary")
             item["value"] = text
+        elif type_name == "TextProperty":
+            item["value"] = {
+                "raw_size": max(0, value_end - value_offset),
+                "parsed": False,
+            }
+            item["text_parse"] = {
+                "parsed": False,
+                "reason": "Structured FText decoder is not implemented.",
+            }
+            item["error"] = "Structured FText decoder is not implemented."
         elif type_name == "ArrayProperty":
             decoded_array = _parse_cdo_array_value(
                 export_data,
@@ -3021,6 +3206,11 @@ def parse_cdo_property_value(
             )
             if decoded_array is not None:
                 item.update(decoded_array)
+            elif bounded_array := _bounded_unparsed_struct_array(
+                export_data,
+                block,
+            ):
+                item.update(bounded_array)
             elif str(block.get("inner_type") or "") == "SoftObjectProperty":
                 item["value"] = []
                 item["array_offset"] = value_offset
@@ -3090,6 +3280,7 @@ def _asset_field_gaps(
     gaps: list[dict[str, object]] = []
     value = prop.get("value")
     parsed = True
+    array_parse: object = None
     if prop.get("error") or value is None:
         parsed = False
     if isinstance(value, dict) and value.get("parsed") is False:
@@ -3119,12 +3310,15 @@ def _asset_field_gaps(
         struct_parse = prop.get("struct_parse")
         parsed = isinstance(struct_parse, dict) and struct_parse.get("parsed") is True
     if not parsed:
+        detail = str(prop.get("error") or "")
+        if not detail and isinstance(array_parse, dict):
+            detail = str(array_parse.get("reason") or "")
         gaps.append(
             {
                 "field": field_path,
                 "type": str(prop.get("type") or ""),
                 "reason_code": "ASSET_FIELD_NOT_DECODED",
-                "detail": str(prop.get("error") or "Declared value was not decoded."),
+                "detail": detail or "Declared value was not decoded.",
                 "raw_offsets": raw_offsets(
                     int(prop.get("offset") or 0),
                     int(prop.get("end") or 0),
@@ -3195,31 +3389,36 @@ def asset_field_variables(
         if (
             str(prop.get("type") or "") == "ArrayProperty"
             and isinstance(array_parse, dict)
-            and array_parse.get("parsed") is True
         ):
-            variables[f"{field_path}.count"] = {
-                "value": int(array_parse.get("count") or 0),
-                "type": "ArrayCount",
-                "source": "uasset_asset_instance_array_count",
-                "confidence": "high",
-                "owner_kind": "asset",
-                "confirmed_value_usable": True,
-            }
-            elements = array_parse.get("elements")
-            for element in elements if isinstance(elements, list) else []:
-                if not isinstance(element, dict):
-                    continue
-                index = int(element.get("index") or 0)
-                children = element.get("properties")
-                for child in children if isinstance(children, list) else []:
-                    if not isinstance(child, dict):
+            count_confirmed = (
+                array_parse.get("parsed") is True
+                or array_parse.get("count_confirmed") is True
+            )
+            if count_confirmed:
+                variables[f"{field_path}.count"] = {
+                    "value": int(array_parse.get("count") or 0),
+                    "type": "ArrayCount",
+                    "source": "uasset_asset_instance_array_count",
+                    "confidence": "high",
+                    "owner_kind": "asset",
+                    "confirmed_value_usable": True,
+                }
+            if array_parse.get("parsed") is True:
+                elements = array_parse.get("elements")
+                for element in elements if isinstance(elements, list) else []:
+                    if not isinstance(element, dict):
                         continue
-                    child_name = str(child.get("name") or "member")
-                    visit(
-                        child,
-                        f"{field_path}[{index}].{child_name}",
-                        collect_gaps=False,
-                    )
+                    index = int(element.get("index") or 0)
+                    children = element.get("properties")
+                    for child in children if isinstance(children, list) else []:
+                        if not isinstance(child, dict):
+                            continue
+                        child_name = str(child.get("name") or "member")
+                        visit(
+                            child,
+                            f"{field_path}[{index}].{child_name}",
+                            collect_gaps=False,
+                        )
 
         struct_parse = prop.get("struct_parse")
         if (

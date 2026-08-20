@@ -35,7 +35,205 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
 from blueprint_translator import uasset_graphs as uasset_graphs_module  # noqa: E402
 
 
+def _uasset_summary_fixture(
+    *,
+    file_version_ue5: int,
+    include_soft_object_paths: bool,
+    import_count: int = 2,
+) -> bytes:
+    data = bytearray()
+    data.extend(struct.pack("<I", 0x9E2A83C1))
+    data.extend(struct.pack("<iiii", -8, 864, 522, file_version_ue5))
+    data.extend(struct.pack("<ii", 0, 0))
+    data.extend(struct.pack("<i", 1600))
+    data.extend(struct.pack("<i", 5) + b"None\x00")
+    data.extend(struct.pack("<Iii", 0, 1, 400))
+    if include_soft_object_paths:
+        data.extend(struct.pack("<ii", 0, 0))
+    data.extend(struct.pack("<i", 0))
+    data.extend(
+        struct.pack(
+            "<11i",
+            0,
+            0,
+            3,
+            556,
+            import_count,
+            500,
+            892,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+    data.extend(bytes(32))
+    data.extend(bytes(2048 - len(data)))
+    return bytes(data)
+
+
 class UAssetGraphCandidateTests(unittest.TestCase):
+    def test_package_summary_selects_pcg_layout_from_ue5_version(self):
+        legacy, legacy_warnings = uasset_graphs_module.parse_uasset_summary(
+            _uasset_summary_fixture(
+                file_version_ue5=1004,
+                include_soft_object_paths=False,
+            )
+        )
+        current, current_warnings = uasset_graphs_module.parse_uasset_summary(
+            _uasset_summary_fixture(
+                file_version_ue5=1012,
+                include_soft_object_paths=True,
+            )
+        )
+
+        self.assertEqual(legacy_warnings, [])
+        self.assertEqual(legacy["summary_layout"], "ue5_pre_soft_object_paths")
+        self.assertEqual(legacy["export_count"], 3)
+        self.assertEqual(legacy["import_count"], 2)
+        self.assertEqual(legacy["soft_object_paths_count"], 0)
+        self.assertEqual(current_warnings, [])
+        self.assertEqual(current["summary_layout"], "ue5_with_soft_object_paths")
+        self.assertEqual(current["export_count"], 3)
+        self.assertEqual(current["import_count"], 2)
+
+    def test_package_summary_rejects_inconsistent_import_stride(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "InvalidStride.uasset"
+            path.write_bytes(
+                _uasset_summary_fixture(
+                    file_version_ue5=1012,
+                    include_soft_object_paths=True,
+                    import_count=3,
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "ImportMap stride"):
+                uasset_graphs_module.parse_uasset_package(path)
+
+    def test_unparsed_pcg_point_array_recovers_only_bounded_count(self):
+        raw = struct.pack("<i", 900) + bytes(900 * 137)
+        block = {
+            "name": "PCGPoints",
+            "type": "ArrayProperty",
+            "offset": 0,
+            "end": len(raw),
+            "value_offset": 0,
+            "declared_size": len(raw),
+            "tag_layout": "ue5_property_type_name",
+            "inner_type": "StructProperty",
+        }
+
+        prop = uasset_graphs_module.parse_cdo_property_value(
+            raw,
+            block,
+            [],
+            [],
+            [],
+            [],
+        )
+        variables, gaps = uasset_graphs_module.asset_field_variables([prop])
+        truncated = uasset_graphs_module.parse_cdo_property_value(
+            raw[:-1],
+            {**block, "end": len(raw) - 1, "declared_size": len(raw) - 1},
+            [],
+            [],
+            [],
+            [],
+        )
+        truncated_variables, _truncated_gaps = (
+            uasset_graphs_module.asset_field_variables([truncated])
+        )
+
+        self.assertFalse(prop["array_parse"]["parsed"])
+        self.assertTrue(prop["array_parse"]["count_confirmed"])
+        self.assertEqual(prop["array_parse"]["count"], 900)
+        self.assertEqual(prop["array_parse"]["element_stride"], 137)
+        self.assertEqual(variables["PCGPoints.count"]["value"], 900)
+        self.assertNotIn("PCGPoints", variables)
+        self.assertEqual(gaps[0]["field"], "PCGPoints")
+        self.assertNotIn("PCGPoints.count", truncated_variables)
+
+    def test_pcg_variable_description_keeps_uint64_property_flags_in_sequence(self):
+        names = ["None", "PropertyFlags", "UInt64Property"]
+        raw = (
+            struct.pack("<ii", 1, 0)
+            + struct.pack("<ii", 2, 0)
+            + struct.pack("<ii", 8, 0)
+            + b"\x00"
+            + struct.pack("<Q", 0x10005)
+            + struct.pack("<ii", 0, 0)
+        )
+
+        blocks, cursor, terminated = (
+            uasset_graphs_module._ark_guid_cdo_property_sequence(
+                raw,
+                names,
+                start=0,
+                limit=len(raw),
+            )
+        )
+        prop = uasset_graphs_module.parse_cdo_property_value(
+            raw,
+            blocks[0],
+            names,
+            [],
+            [],
+            [],
+        )
+
+        self.assertTrue(terminated)
+        self.assertEqual(cursor, len(raw))
+        self.assertEqual(prop["value"], 0x10005)
+
+    def test_structured_text_property_is_not_promoted_from_partial_fstring(self):
+        raw = struct.pack("<i", 5) + b"Fake\x00" + b"structured-ftext"
+        prop = uasset_graphs_module.parse_cdo_property_value(
+            raw,
+            {
+                "name": "Category",
+                "type": "TextProperty",
+                "offset": 0,
+                "end": len(raw),
+                "value_offset": 0,
+                "declared_size": len(raw),
+                "tag_layout": "ark_compact_guid_marker",
+            },
+            [],
+            [],
+            [],
+            [],
+        )
+        variables, gaps = uasset_graphs_module.asset_field_variables([prop])
+
+        self.assertEqual(prop["value"]["parsed"], False)
+        self.assertNotIn("Category", variables)
+        self.assertEqual(gaps[0]["field"], "Category")
+
+    def test_plugin_mount_mapping_preserves_formal_pcg_identity(self):
+        object_path = "/PCG/BP_Elements/Resources/PCGPointList.PCGPointList"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin_root = Path(temp_dir) / "PCGContent"
+            source = plugin_root / "BP_Elements" / "Resources" / "PCGPointList.uasset"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"fixture")
+            environment = {
+                "ARK_DEVKIT_PATH_MAPPINGS": f"/PCG={plugin_root}",
+                "BLUEPRINT_TO_CODE_DEVKIT_PATH_MAPPINGS": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(
+                    uasset_graphs_module,
+                    "DEVKIT_PATH_MAPPINGS_FILE",
+                    plugin_root / "missing-mappings.txt",
+                ),
+            ):
+                found, _attempted = object_path_to_uasset_path(object_path)
+
+        self.assertEqual(normalize_blueprint_object_path(object_path), object_path)
+        self.assertEqual(found, source)
+
     def test_asset_instance_fields_select_only_the_exact_same_name_export(self):
         names = ["None", "Fixture", "ModName", "StrProperty"]
 
