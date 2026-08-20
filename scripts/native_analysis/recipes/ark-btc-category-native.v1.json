@@ -254,7 +254,7 @@
       "id": "camera-primary-vtable-slot",
       "className": "APrimalCameraProbeActor",
       "slotOffset": "0x0",
-      "expectedMatches": 4
+      "expectedMatches": 2
     }
   ],
   "budgets": {

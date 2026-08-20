@@ -275,7 +275,15 @@ class NativeFixtureWorkflowContractTests(unittest.TestCase):
             exporter,
         )
         self.assertIn("expectedVftableName", exporter)
-        self.assertIn(".equals(expectedVftableName)", exporter)
+        self.assertIn("normalizeVftableSymbolName", exporter)
+        self.assertIn(
+            'normalizedSymbolName.startsWith("vftable")',
+            exporter,
+        )
+        self.assertIn(
+            'normalizedSymbolName.equals("vftable")',
+            exporter,
+        )
         self.assertIn("getDefaultOperandRepresentation", exporter)
         self.assertRegex(exporter, r"RSP\|RBP")
         self.assertIn("decompilerReferencesField", exporter)

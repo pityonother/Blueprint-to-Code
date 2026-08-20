@@ -445,7 +445,7 @@ public class ExportNativeRecipe extends GhidraScript {
 			JsonObject query = queryElement.getAsJsonObject();
 			String className = query.get("className").getAsString();
 			String expectedVftableName =
-				normalizeQualifiedName(className) + "/vftable";
+				normalizeQualifiedName(className) + "/";
 			long slotOffset = Long.decode(query.get("slotOffset").getAsString());
 			JsonArray candidates = new JsonArray();
 			List<Function> accepted = new ArrayList<>();
@@ -454,7 +454,10 @@ public class ExportNativeRecipe extends GhidraScript {
 				Symbol symbol = symbols.next();
 				String qualifiedName = symbol.getName(true);
 				String normalized = normalizeQualifiedName(qualifiedName);
-				if (!normalized.equals(expectedVftableName)) {
+				String normalizedSymbolName =
+					normalizeVftableSymbolName(symbol.getName());
+				if (!normalized.startsWith(expectedVftableName) ||
+						!normalizedSymbolName.startsWith("vftable")) {
 					continue;
 				}
 				JsonObject candidate = new JsonObject();
@@ -463,7 +466,7 @@ public class ExportNativeRecipe extends GhidraScript {
 				candidate.addProperty("vtableAddress", symbol.getAddress().toString());
 				Address slotAddress = symbol.getAddress().add(slotOffset);
 				candidate.addProperty("slotAddress", slotAddress.toString());
-				String rejection = symbol.getName().equalsIgnoreCase("vftable")
+				String rejection = normalizedSymbolName.equals("vftable")
 					? ""
 					: "Symbol is vtable metadata rather than the primary vftable.";
 				Function target = null;
@@ -998,6 +1001,12 @@ public class ExportNativeRecipe extends GhidraScript {
 
 	private String normalizeQualifiedName(String name) {
 		return canonicalQualifiedName(name).toLowerCase(Locale.ROOT);
+	}
+
+	private String normalizeVftableSymbolName(String name) {
+		return name.toLowerCase(Locale.ROOT)
+			.replace("`", "")
+			.replace("'", "");
 	}
 
 	private String canonicalQualifiedName(String name) {
