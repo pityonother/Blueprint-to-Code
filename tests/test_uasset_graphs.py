@@ -292,6 +292,29 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(payload["variables"]["ModName"]["value"], "Demo")
         self.assertEqual(payload["variables"]["ModName"]["owner_kind"], "asset")
 
+    def test_asset_instance_fields_accept_exact_numbered_display_name(self):
+        exports = [
+            {
+                "index": 0,
+                "object_name": "SupplyCrateSpawningVolume_UAID_ABC",
+                "display_name": "SupplyCrateSpawningVolume_UAID_ABC_42",
+                "class_name": "SupplyCrateSpawningVolume",
+            },
+            {
+                "index": 1,
+                "object_name": "BrushComponent0",
+                "display_name": "BrushComponent0",
+                "class_name": "BrushComponent",
+            },
+        ]
+
+        selected = uasset_graphs_module.asset_instance_export_for_package(
+            exports,
+            "SupplyCrateSpawningVolume_UAID_ABC_42",
+        )
+
+        self.assertIs(selected, exports[0])
+
     def test_asset_instance_unparsed_field_becomes_gap_not_business_fact(self):
         names = ["None", "Fixture", "RawConfig", "MapProperty"]
 

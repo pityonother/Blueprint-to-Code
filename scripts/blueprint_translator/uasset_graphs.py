@@ -3261,13 +3261,16 @@ def asset_instance_export_for_package(
     exports: list[dict[str, object]],
     asset_name: str,
 ) -> dict[str, object] | None:
-    """Return only the exact same-name asset instance export."""
+    """Return only the uniquely exact object or numbered display-name export."""
 
     matches = [
         export
         for export in exports
-        if str(export.get("object_name") or export.get("display_name") or "")
-        == asset_name
+        if asset_name
+        in {
+            str(export.get("object_name") or ""),
+            str(export.get("display_name") or ""),
+        }
     ]
     return matches[0] if len(matches) == 1 else None
 
