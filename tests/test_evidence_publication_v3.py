@@ -565,6 +565,40 @@ class EvidencePublicationV3ContractTests(unittest.TestCase):
             )
             self.assertEqual(current.freshness_status, "STALE")
 
+    def test_strict_publisher_reopens_and_refuses_stale_post_pointer_state(self):
+        publication = _publication_api()
+        revision_reader = _revision_api()
+        with tempfile.TemporaryDirectory() as temporary:
+            asset_dir, source_path = _make_v2_capture(
+                Path(temporary),
+                "StrictPostPointerFreshness",
+            )
+            database_path = asset_dir / "evidence" / "evidence.sqlite"
+            index_path = asset_dir / "output" / "agent_index.md"
+
+            def change_source_after_pointer(phase: str) -> None:
+                if phase == "after_pointer_replace":
+                    source_path.write_bytes(b"changed-after-strict-pointer")
+
+            with self.assertRaisesRegex(
+                publication.EvidencePublicationUncertain,
+                "final publication policy",
+            ):
+                publication.publish_prepared_evidence_revision(
+                    asset_dir=asset_dir,
+                    database_path=database_path,
+                    agent_index_path=index_path,
+                    expected_pointer_sha256=None,
+                    fault_injector=change_source_after_pointer,
+                    require_fresh=True,
+                )
+
+            current = revision_reader.load_current_evidence_revision(
+                asset_dir,
+                allow_stale=True,
+            )
+            self.assertEqual(current.freshness_status, "STALE")
+
     def test_publisher_drops_authority_when_current_advances_before_compatibility(self):
         publication = _publication_api()
         revision_reader = _revision_api()

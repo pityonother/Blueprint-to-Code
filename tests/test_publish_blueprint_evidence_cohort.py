@@ -21,6 +21,10 @@ from blueprint_translator.cohort_publication import (  # noqa: E402
     publish_evidence_cohort,
 )
 import blueprint_translator.cohort_publication as cohort_publication  # noqa: E402
+from blueprint_translator.evidence_policy import evaluate_evidence  # noqa: E402
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    resolve_asset_evidence_state,
+)
 from blueprint_translator.evidence_writer import (  # noqa: E402
     write_evidence_artifacts_from_payload,
 )
@@ -106,6 +110,13 @@ class BlueprintEvidenceCohortPublicationTests(unittest.TestCase):
         self.assertTrue((destination / "evidence" / "current.json").is_file())
         self.assertTrue((destination / "interpretation" / "current.json").is_file())
         self.assertFalse((source_asset / "interpretation" / "current.json").exists())
+        final_state = resolve_asset_evidence_state(destination)
+        final_decision = evaluate_evidence(final_state, purpose="publish")
+        self.assertEqual(published["evidenceDecision"]["reasonCode"], "ALLOWED")
+        self.assertEqual(
+            published["evidenceDecision"]["bindingDigest"],
+            final_decision.binding_digest,
+        )
 
     def test_preflight_proves_the_cohort_without_creating_destinations(self) -> None:
         publish_interpretation_fixture(self.source_root, name="FirstFixture")
@@ -133,6 +144,18 @@ class BlueprintEvidenceCohortPublicationTests(unittest.TestCase):
         )
         self.assertTrue(
             all(item["semanticFactCount"] > 0 for item in result["assets"])
+        )
+        self.assertTrue(
+            all(
+                item["sourceEvidenceDecision"]["reasonCode"] == "ALLOWED"
+                for item in result["assets"]
+            )
+        )
+        self.assertTrue(
+            all(
+                len(item["sourceEvidenceDecision"]["bindingDigest"]) == 64
+                for item in result["assets"]
+            )
         )
 
     def test_preflight_accepts_confirmed_data_asset_fields_without_graphs(self) -> None:

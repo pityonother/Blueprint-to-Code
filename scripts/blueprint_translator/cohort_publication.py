@@ -14,7 +14,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Final
+from typing import Final
 
 from .evidence_publication import (
     _lexical_absolute,
@@ -22,6 +22,11 @@ from .evidence_publication import (
     _require_plain_path_chain,
     evidence_publication_lock,
     publish_prepared_evidence_revision,
+)
+from .evidence_policy import (
+    EvidenceDecision,
+    EvidencePolicyError,
+    require_evidence,
 )
 from .evidence_repository import (
     ResolvedEvidenceState,
@@ -40,14 +45,6 @@ PREFLIGHT_SCHEMA: Final = "blueprint-to-code.evidence-cohort-preflight/v1"
 RECEIPT_SCHEMA: Final = "blueprint-to-code.evidence-cohort-publication/v1"
 _CATEGORY_RE: Final = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 _COHORT_ID_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_SEMANTIC_COUNT_FIELDS: Final = (
-    "nodes",
-    "pins",
-    "links",
-    "classDefaults",
-    "assetFields",
-    "edgeObservations",
-)
 
 
 class CohortPublicationError(RuntimeError):
@@ -73,6 +70,7 @@ class _PreparedAsset:
     source_dir: Path
     destination_dir: Path
     state: ResolvedEvidenceState
+    decision: EvidenceDecision
     destination_was_present: bool
     destination_pointer_sha256: str | None
     semantic_fact_count: int
@@ -208,18 +206,6 @@ def _load_plan(path: Path) -> tuple[str, tuple[_PlanAsset, ...]]:
     return cohort_id, tuple(assets)
 
 
-def _manifest_semantic_fact_count(manifest: dict[str, Any]) -> int:
-    counts = manifest.get("counts")
-    if not isinstance(counts, dict):
-        return 0
-    total = 0
-    for key in _SEMANTIC_COUNT_FIELDS:
-        value = counts.get(key, 0)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            total += value
-    return total
-
-
 def _destination_identity(destination: Path) -> tuple[str | None, str | None]:
     if not destination.exists():
         return None, None
@@ -255,34 +241,30 @@ def _prepare_assets(
         source_dir = source_root.joinpath(*asset.source_relative.parts)
         destination = capture_root / asset.asset
         try:
-            state = resolve_asset_evidence_state(source_dir)
+            state = resolve_asset_evidence_state(source_dir, allow_stale=True)
+            decision = require_evidence(state, purpose="publish")
             manifest = evidence_manifest_payload(state)
+        except EvidencePolicyError as exc:
+            if exc.code == "EVIDENCE_EMPTY":
+                raise CohortPublicationError(
+                    "COHORT_SOURCE_HAS_NO_SEMANTIC_FACTS",
+                    f"{asset.asset} is an identity-only capture",
+                ) from exc
+            raise CohortPublicationError(
+                "COHORT_SOURCE_NOT_AUTHORITATIVE",
+                f"{asset.asset} requires publish-authorized current Evidence",
+            ) from exc
         except Exception as exc:
             raise CohortPublicationError(
                 "COHORT_SOURCE_INVALID",
                 f"{asset.asset} source Evidence did not validate",
             ) from exc
-        if (
-            state.source_kind != "INDEXED_V3_CURRENT"
-            or not state.release_authority
-            or state.migration_required
-            or state.freshness_status != "FRESH"
-        ):
-            raise CohortPublicationError(
-                "COHORT_SOURCE_NOT_AUTHORITATIVE",
-                f"{asset.asset} requires FRESH current v3 release authority",
-            )
         if str(manifest.get("objectPath") or "") != asset.object_path:
             raise CohortPublicationError(
                 "COHORT_SOURCE_IDENTITY_MISMATCH",
                 f"{asset.asset} source objectPath differs from the reviewed plan",
             )
-        semantic_fact_count = _manifest_semantic_fact_count(manifest)
-        if semantic_fact_count <= 0:
-            raise CohortPublicationError(
-                "COHORT_SOURCE_HAS_NO_SEMANTIC_FACTS",
-                f"{asset.asset} is an identity-only capture",
-            )
+        semantic_fact_count = state.semantic_fact_count
         destination_object_path, destination_pointer_sha256 = _destination_identity(
             destination
         )
@@ -308,6 +290,7 @@ def _prepare_assets(
                 source_dir=source_dir,
                 destination_dir=destination,
                 state=state,
+                decision=decision,
                 destination_was_present=destination_object_path is not None,
                 destination_pointer_sha256=destination_pointer_sha256,
                 semantic_fact_count=semantic_fact_count,
@@ -395,6 +378,11 @@ def _preflight_payload(
                 ),
                 "sourceManifestSha256": item.state.manifest_sha256,
                 "sourcePointerSha256": item.state.pointer_sha256,
+                "sourceEvidenceDecision": {
+                    "reasonCode": item.decision.reason_code,
+                    "bindingDigest": item.decision.binding_digest,
+                    "evidenceAvailability": item.decision.evidence_availability,
+                },
                 "interpretationSemanticDigest": item.interpretation_digest,
                 "destinationStatus": (
                     "EXISTING_COMPATIBLE"
@@ -456,8 +444,12 @@ def publish_evidence_cohort(
     for item in prepared:
         try:
             with evidence_publication_lock(item.source_dir):
-                live_state = resolve_asset_evidence_state(item.source_dir)
-                if _source_generation(live_state) != _source_generation(item.state):
+                live_state = resolve_asset_evidence_state(
+                    item.source_dir,
+                    allow_stale=True,
+                )
+                live_decision = require_evidence(live_state, purpose="publish")
+                if live_decision.binding_digest != item.decision.binding_digest:
                     raise CohortPublicationError(
                         "COHORT_SOURCE_GENERATION_CHANGED",
                         f"{item.plan.asset} source Evidence changed after preflight",
@@ -478,6 +470,19 @@ def publish_evidence_cohort(
                 bounded_selection=True,
                 expected_semantic_digest=item.interpretation_digest,
             )
+            final_state = resolve_asset_evidence_state(
+                item.destination_dir,
+                allow_stale=True,
+            )
+            final_decision = require_evidence(final_state, purpose="publish")
+            if (
+                final_state.manifest_sha256 != evidence.manifest_sha256
+                or final_state.pointer_sha256 != evidence.pointer_sha256
+            ):
+                raise CohortPublicationError(
+                    "COHORT_ASSET_NOT_READY",
+                    f"{item.plan.asset} final Evidence generation changed",
+                )
             health = inspect_interpretation_health(item.destination_dir)
         except CohortPublicationError:
             raise
@@ -486,11 +491,7 @@ def publish_evidence_cohort(
                 "COHORT_ASSET_PUBLICATION_FAILED",
                 f"{item.plan.asset} did not reach READY",
             ) from exc
-        if (
-            health.get("status") != "READY"
-            or health.get("evidence", {}).get("freshnessStatus") != "FRESH"
-            or health.get("evidence", {}).get("releaseAuthority") is not True
-        ):
+        if health.get("status") != "READY":
             raise CohortPublicationError(
                 "COHORT_ASSET_NOT_READY",
                 f"{item.plan.asset} failed the final authoritative health gate",
@@ -508,6 +509,11 @@ def publish_evidence_cohort(
                 "evidenceRevisionId": evidence.revision_id,
                 "evidenceManifestSha256": evidence.manifest_sha256,
                 "evidencePointerSha256": evidence.pointer_sha256,
+                "evidenceDecision": {
+                    "reasonCode": final_decision.reason_code,
+                    "bindingDigest": final_decision.binding_digest,
+                    "evidenceAvailability": final_decision.evidence_availability,
+                },
                 "evidenceReused": evidence.reused_existing,
                 "interpretationRevisionId": interpretation.revision_id,
                 "interpretationManifestSha256": interpretation.manifest_sha256,
@@ -527,23 +533,6 @@ def publish_evidence_cohort(
         ),
         "assets": receipts,
     }
-
-
-def _source_generation(state: ResolvedEvidenceState) -> tuple[object, ...]:
-    return (
-        state.source_kind,
-        state.release_authority,
-        state.freshness_status,
-        state.migration_required,
-        state.manifest_sha256,
-        state.pointer_sha256,
-        state.database_sha256,
-        state.database_bytes,
-        state.manifest_content_sha256,
-        state.manifest_bytes,
-        state.agent_index_sha256,
-        state.agent_index_bytes,
-    )
 
 
 __all__ = [

@@ -35,6 +35,7 @@ from .evidence_schema import (
     EVIDENCE_SCHEMA_VERSION,
     make_asset_id,
 )
+from .evidence_policy import semantic_fact_count
 from .context_pack import estimate_tokens
 from .bound_database import materialize_bound_database_snapshot
 
@@ -942,6 +943,11 @@ def publish_prepared_evidence_revision(
         staged_projection = _database_projection(staged_database)
         if staged_projection["revisionId"] != projection["revisionId"]:
             raise ValueError("staged database revision changed during publication")
+        if require_fresh and semantic_fact_count(staged_projection.get("counts")) <= 0:
+            raise EvidenceArtifactInvalid(
+                "EVIDENCE_EMPTY",
+                "strict publication requires at least one semantic fact",
+            )
         intended_manifest = _manifest_payload(
             staged_projection,
             database_path=staged_database,
@@ -1123,6 +1129,30 @@ def publish_prepared_evidence_revision(
                 manifest_sha256=manifest_sha,
             )
         )
+        if require_fresh:
+            if not current_still_intended:
+                raise EvidencePublicationUncertain(
+                    "current pointer advanced before the final publication policy gate"
+                )
+            try:
+                from .evidence_policy import require_evidence
+                from .evidence_repository import resolve_asset_evidence_state
+
+                final_state = resolve_asset_evidence_state(root, allow_stale=True)
+                require_evidence(final_state, purpose="publish")
+            except Exception as exc:
+                raise EvidencePublicationUncertain(
+                    "final publication policy rejected the reopened current Evidence"
+                ) from exc
+            if (
+                final_state.manifest_sha256 != manifest_sha
+                or final_state.pointer_sha256 != pointer_sha256
+                or final_state.database_sha256
+                != str(intended_manifest["artifacts"]["database"]["sha256"])
+            ):
+                raise EvidencePublicationUncertain(
+                    "final publication policy reopened a different Evidence generation"
+                )
         return PublishedEvidenceRevision(
             schema=PUBLICATION_SCHEMA,
             asset_dir=str(root),
