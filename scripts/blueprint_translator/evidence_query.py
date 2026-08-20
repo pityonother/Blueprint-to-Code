@@ -21,6 +21,12 @@ from urllib.parse import urlsplit
 
 from .context_pack import estimate_tokens
 from .bound_database import materialize_bound_database_snapshot
+from .evidence_policy import (
+    EvidenceDecision,
+    EvidencePurpose,
+    EvidenceState,
+    require_evidence,
+)
 from .evidence_values import default_parse_gap, project_default_value
 
 
@@ -157,10 +163,13 @@ class EvidenceQueryService:
         self,
         database_path: Path,
         connection: sqlite3.Connection,
+        *,
+        evidence_decision: EvidenceDecision | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         self._connection = connection
         self._closed = False
+        self.evidence_decision = evidence_decision
         row = connection.execute(
             "SELECT asset_id, asset_name, object_path, revision_id, source_fingerprint "
             "FROM asset_revisions ORDER BY rowid DESC LIMIT 1"
@@ -204,6 +213,24 @@ class EvidenceQueryService:
                 connection.close()
             snapshot.close()
             raise
+
+    @classmethod
+    def open_resolved(
+        cls,
+        state: EvidenceState,
+        *,
+        purpose: EvidencePurpose = "formal_query",
+    ) -> "EvidenceQueryService":
+        """Open bound bytes only after the shared policy permits the purpose."""
+
+        decision = require_evidence(state, purpose=purpose)
+        service = cls.open(
+            state.database_path,
+            expected_sha256=state.database_sha256,
+            expected_size=state.database_bytes,
+        )
+        service.evidence_decision = decision
+        return service
 
     def close(self) -> None:
         if not self._closed:

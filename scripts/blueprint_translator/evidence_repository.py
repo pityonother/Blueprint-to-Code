@@ -22,7 +22,7 @@ from .evidence_publication import (
     _require_plain_path_chain,
     _validate_v2_manifest,
 )
-from .evidence_policy import evaluate_evidence, semantic_fact_count
+from .evidence_policy import EvidencePurpose, evaluate_evidence, semantic_fact_count
 from .evidence_revision import load_current_evidence_revision
 from .evidence_values import project_default_value
 from .evidence_writer import write_evidence_store_from_capture
@@ -103,6 +103,7 @@ class EvidenceRepository:
         self.migration_required = bool(migration_required)
         self.manifest_sha256 = manifest_sha256
         self.pointer_sha256 = pointer_sha256
+        self.evidence_decision = service.evidence_decision
         self.agent_index_path = state.agent_index_path if state is not None else None
         self.manifest_path = state.manifest_path if state is not None else None
         self.pointer_path = state.pointer_path if state is not None else None
@@ -800,6 +801,8 @@ def open_asset_repository(
 
 def open_resolved_asset_repository(
     state: ResolvedEvidenceState,
+    *,
+    purpose: EvidencePurpose | None = None,
 ) -> EvidenceRepository:
     """Open exactly the immutable evidence generation represented by ``state``.
 
@@ -809,12 +812,17 @@ def open_resolved_asset_repository(
     combine metadata from one revision with query results from another.
     """
 
-    return EvidenceRepository(
-        EvidenceQueryService.open(
+    service = (
+        EvidenceQueryService.open_resolved(state, purpose=purpose)
+        if purpose is not None
+        else EvidenceQueryService.open(
             state.database_path,
             expected_sha256=state.database_sha256,
             expected_size=state.database_bytes,
-        ),
+        )
+    )
+    return EvidenceRepository(
+        service,
         source_kind=state.source_kind,
         release_authority=state.release_authority,
         freshness_status=state.freshness_status,

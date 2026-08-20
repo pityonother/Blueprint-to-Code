@@ -11,7 +11,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.evidence_repository import open_asset_repository  # noqa: E402
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    open_resolved_asset_repository,
+    resolve_asset_evidence_state,
+)
+
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
 
 
 def _add_budget(parser: argparse.ArgumentParser, default: int = 1000) -> None:
@@ -140,9 +150,14 @@ def request_from_args(args: argparse.Namespace) -> dict[str, object]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     args = parse_args(list(argv if argv is not None else sys.argv[1:]))
     try:
-        with open_asset_repository(args.asset_dir) as repository:
+        state = resolve_asset_evidence_state(args.asset_dir, allow_stale=True)
+        with open_resolved_asset_repository(
+            state,
+            purpose="formal_query",
+        ) as repository:
             request = request_from_args(args)
             if args.operation == "gaps" and str(args.scope or "").startswith("graph:"):
                 graph_name = str(args.scope)[len("graph:") :].strip()
@@ -176,6 +191,19 @@ def main(argv: list[str] | None = None) -> int:
                     "migrationRequired": repository.migration_required,
                     "manifestSha256": repository.manifest_sha256,
                     "pointerSha256": repository.pointer_sha256,
+                    "evidenceDecision": {
+                        "allowed": repository.evidence_decision.allowed,
+                        "reasonCode": repository.evidence_decision.reason_code,
+                        "reasonCodes": list(repository.evidence_decision.reason_codes),
+                        "bindingDigest": repository.evidence_decision.binding_digest,
+                        "evidenceAvailability": (
+                            repository.evidence_decision.evidence_availability
+                        ),
+                        "nonUpgradeableGaps": list(
+                            repository.evidence_decision.non_upgradeable_gaps
+                        ),
+                    },
+                    "statusZh": repository.evidence_decision.public_status_zh,
                 }
             )
     except Exception as exc:

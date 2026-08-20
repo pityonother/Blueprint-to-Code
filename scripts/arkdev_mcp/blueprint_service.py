@@ -24,6 +24,11 @@ from blueprint_translator.evidence_repository import (
     open_resolved_asset_repository,
     resolve_asset_evidence_state,
 )
+from blueprint_translator.evidence_policy import (
+    EvidenceDecision,
+    EvidencePolicyError,
+    require_evidence,
+)
 from blueprint_translator.evidence_schema import parse_evidence_ref
 from blueprint_translator.interpretation_publication import (
     LoadedInterpretation,
@@ -271,6 +276,34 @@ def _mapping(value: object) -> dict[str, object]:
 def _error_from_exception(exc: Exception) -> McpExecutionError:
     if isinstance(exc, McpExecutionError):
         return exc
+    if isinstance(exc, EvidencePolicyError):
+        code = exc.code
+        if code == "EVIDENCE_STALE":
+            return McpExecutionError(
+                "EVIDENCE_STALE",
+                "Current Blueprint evidence is stale.",
+            )
+        if code == "EVIDENCE_EMPTY":
+            return McpExecutionError(
+                "EVIDENCE_EMPTY",
+                "Current Blueprint evidence identifies the asset but has no semantic facts.",
+            )
+        if code in {
+            "SOURCE_UNAVAILABLE",
+            "SOURCE_KIND_NOT_CURRENT",
+            "RELEASE_AUTHORITY_MISSING",
+            "MIGRATION_REQUIRED",
+            "MANIFEST_BINDING_MISSING",
+            "POINTER_BINDING_MISSING",
+        }:
+            return McpExecutionError(
+                "EVIDENCE_NOT_AUTHORITATIVE",
+                "Current Blueprint evidence is not authoritative.",
+            )
+        return McpExecutionError(
+            "EVIDENCE_INVALID",
+            "Current Blueprint evidence has an invalid binding.",
+        )
     if isinstance(exc, ApiProblem):
         code = str(exc.payload.get("code") or "")
         if code == "BLUEPRINT_ASSET_NOT_FOUND":
@@ -375,19 +408,18 @@ class BlueprintService:
 
         try:
             asset_name, asset_dir = self._asset_dir(asset)
-            evidence_state, interpretation = self._load_bound_state(asset_dir)
-            with open_resolved_asset_repository(evidence_state) as repository:
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
                 identity = self._identity(
                     asset_name,
                     evidence_state,
                     interpretation,
                     repository,
+                    decision,
                 )
-                if evidence_state.freshness_status != "FRESH":
-                    raise McpExecutionError(
-                        "EVIDENCE_STALE",
-                        "Current Blueprint evidence is stale.",
-                    )
                 evidence = dict(identity["evidence"])
                 asset_identity = dict(identity["asset"])
                 payload: dict[str, object] = {
@@ -436,13 +468,17 @@ class BlueprintService:
         )
         try:
             asset_name, asset_dir = self._asset_dir(asset)
-            evidence_state, interpretation = self._load_bound_state(asset_dir)
-            with open_resolved_asset_repository(evidence_state) as repository:
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
                 identity = self._identity(
                     asset_name,
                     evidence_state,
                     interpretation,
                     repository,
+                    decision,
                 )
                 signature = self._context_signature(
                     evidence_state=evidence_state,
@@ -543,14 +579,18 @@ class BlueprintService:
             )
         try:
             asset_name, asset_dir = self._asset_dir(asset)
-            evidence_state, interpretation = self._load_bound_state(asset_dir)
-            with open_resolved_asset_repository(evidence_state) as repository:
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
                 self._require_current_ref(node_ref, repository)
                 identity = self._identity(
                     asset_name,
                     evidence_state,
                     interpretation,
                     repository,
+                    decision,
                 )
                 try:
                     entity = repository.query(
@@ -692,8 +732,9 @@ class BlueprintService:
     @staticmethod
     def _load_bound_state(
         asset_dir: Path,
-    ) -> tuple[ResolvedEvidenceState, LoadedInterpretation]:
-        evidence_state = resolve_asset_evidence_state(asset_dir)
+    ) -> tuple[ResolvedEvidenceState, LoadedInterpretation, EvidenceDecision]:
+        evidence_state = resolve_asset_evidence_state(asset_dir, allow_stale=True)
+        decision = require_evidence(evidence_state, purpose="formal_query")
         interpretation = load_current_interpretation(asset_dir)
         evidence_manifest = evidence_manifest_payload(evidence_state)
         expected_revision = str(interpretation.manifest.get("evidenceRevisionId") or "")
@@ -708,7 +749,7 @@ class BlueprintService:
                 "EVIDENCE_REVISION_MISMATCH",
                 "Interpretation and Evidence bindings changed during the query.",
             )
-        return evidence_state, interpretation
+        return evidence_state, interpretation, decision
 
     @staticmethod
     def _identity(
@@ -716,6 +757,7 @@ class BlueprintService:
         evidence_state: ResolvedEvidenceState,
         interpretation: LoadedInterpretation,
         repository: EvidenceRepository,
+        decision: EvidenceDecision,
     ) -> dict[str, object]:
         evidence_identity = repository.identity()
         interpretation_payload = interpretation.interpretation
@@ -731,6 +773,14 @@ class BlueprintService:
                 "pointerSha256": str(evidence_state.pointer_sha256 or ""),
                 "sourceKind": evidence_state.source_kind,
                 "releaseAuthority": evidence_state.release_authority,
+                "decision": {
+                    "reasonCode": decision.reason_code,
+                    "reasonCodes": list(decision.reason_codes),
+                    "bindingDigest": decision.binding_digest,
+                    "evidenceAvailability": decision.evidence_availability,
+                    "statusZh": decision.public_status_zh,
+                    "nonUpgradeableGaps": list(decision.non_upgradeable_gaps),
+                },
             },
             "interpretation": {
                 "revisionId": interpretation.revision_id,

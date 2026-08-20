@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Final, Literal, Protocol
 
 
@@ -28,6 +29,7 @@ SEMANTIC_COUNT_FIELDS: Final = (
 class EvidenceState(Protocol):
     """Structural input accepted by :func:`evaluate_evidence`."""
 
+    database_path: Path
     source_kind: str
     release_authority: bool
     freshness_status: str
@@ -42,6 +44,15 @@ class EvidenceState(Protocol):
     agent_index_bytes: int
     semantic_fact_count: int
     non_upgradeable_gaps: tuple[str, ...]
+
+
+class EvidencePolicyError(ValueError):
+    """Fail-closed policy refusal carrying one stable machine reason."""
+
+    def __init__(self, decision: "EvidenceDecision") -> None:
+        self.code = decision.reason_code
+        self.decision = decision
+        super().__init__(f"{self.code}: {decision.public_status_zh}")
 
 
 @dataclass(frozen=True)
@@ -184,11 +195,25 @@ def evaluate_evidence(
     )
 
 
+def require_evidence(
+    state: EvidenceState,
+    purpose: EvidencePurpose = "formal_query",
+) -> EvidenceDecision:
+    """Return the decision or raise its stable, path-free refusal."""
+
+    decision = evaluate_evidence(state, purpose=purpose)
+    if not decision.allowed:
+        raise EvidencePolicyError(decision)
+    return decision
+
+
 __all__ = [
     "EvidenceDecision",
+    "EvidencePolicyError",
     "EvidencePurpose",
     "POLICY_VERSION",
     "SEMANTIC_COUNT_FIELDS",
     "evaluate_evidence",
+    "require_evidence",
     "semantic_fact_count",
 ]

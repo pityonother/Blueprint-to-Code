@@ -398,6 +398,18 @@ class BlueprintServiceTests(unittest.TestCase):
             first["schema"], "blueprint-to-code.mcp-blueprint-context/v1"
         )
         self.assertEqual(first["freshness"], "FRESH")
+        self.assertEqual(
+            first["identity"]["evidence"]["decision"]["reasonCode"],
+            "ALLOWED",
+        )
+        self.assertEqual(
+            first["identity"]["evidence"]["decision"]["evidenceAvailability"],
+            "FORMAL_QUERY",
+        )
+        self.assertEqual(
+            first["identity"]["evidence"]["decision"]["statusZh"],
+            "可正式查询",
+        )
         self.assertEqual(first["goal"], "ReceiveBeginPlay")
         self.assertEqual(len(first["querySignature"]), 64)
         self.assertGreaterEqual(len(first["graphTargets"]), 1)

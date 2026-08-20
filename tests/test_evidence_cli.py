@@ -309,6 +309,15 @@ class EvidenceCliTests(unittest.TestCase):
             self.assertEqual(search[key], expected_search[key], key)
         self.assertLessEqual(_compact_token_count(overview), budget)
         self.assertLessEqual(_compact_token_count(search), budget)
+        for payload in (overview, search):
+            self.assertEqual(payload["evidenceDecision"]["reasonCode"], "ALLOWED")
+            self.assertEqual(
+                payload["evidenceDecision"]["evidenceAvailability"],
+                "FORMAL_QUERY",
+            )
+            self.assertEqual(payload["statusZh"], "可正式查询")
+            self.assertEqual(len(payload["evidenceDecision"]["bindingDigest"]), 64)
+            self.assertNotIn(str(asset_dir), json.dumps(payload, ensure_ascii=False))
 
     def test_entity_neighborhood_trace_and_gaps_subcommands_map_to_service_operations(self):
         with tempfile.TemporaryDirectory() as temp_dir:

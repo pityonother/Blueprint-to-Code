@@ -10,8 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from blueprint_translator.evidence_policy import (  # noqa: E402
+    EvidencePolicyError,
     POLICY_VERSION,
     evaluate_evidence,
+    require_evidence,
 )
 from blueprint_translator.evidence_repository import (  # noqa: E402
     ResolvedEvidenceState,
@@ -149,6 +151,16 @@ class EvidencePolicyTests(unittest.TestCase):
     def test_unknown_purpose_is_rejected_instead_of_defaulting_to_query(self):
         with self.assertRaisesRegex(ValueError, "unsupported evidence purpose"):
             evaluate_evidence(_state(), purpose="release")  # type: ignore[arg-type]
+
+    def test_requirement_raises_stable_reason_without_private_paths(self):
+        state = _state(freshness_status="STALE")
+
+        with self.assertRaises(EvidencePolicyError) as raised:
+            require_evidence(state, purpose="formal_query")
+
+        self.assertEqual(raised.exception.code, "EVIDENCE_STALE")
+        self.assertEqual(raised.exception.decision.public_status_zh, "当前工具无法读取")
+        self.assertNotIn("C:/private", str(raised.exception))
 
 
 if __name__ == "__main__":
