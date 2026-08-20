@@ -1992,6 +1992,12 @@ def write_evidence_store_from_payload(
 
 
 def _agent_index(result: dict[str, Any]) -> str:
+    def within_portable_budget(text: str) -> bool:
+        # A user or editor can normalize LF output to CRLF on Windows.  Keep
+        # enough headroom that the same bounded index remains valid afterward.
+        crlf_text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+        return estimate_tokens(text) <= 1500 and estimate_tokens(crlf_text) <= 1500
+
     counts = result["counts"]
     node_rows = result.get("node_summaries") if isinstance(result.get("node_summaries"), list) else []
     node_rows = sorted(
@@ -2143,7 +2149,7 @@ def _agent_index(result: dict[str, Any]) -> str:
         "\n"
         "Indexed generation never deletes legacy files; only an explicit user-run `--prune-legacy` may remove them.\n"
     )
-    if estimate_tokens(content) <= 1500:
+    if within_portable_budget(content):
         return content
 
     # Long object paths and refs must not be allowed to break the index budget.
@@ -2159,14 +2165,14 @@ def _agent_index(result: dict[str, Any]) -> str:
     search_command = "    & $py $cli --asset-dir $asset search --query $term --kind node --page-size 10 --budget 600\n"
     content = content.replace(search_command, "", 1)
     content = content.replace(f"    $term = {selected_node_name}\n", "", 1)
-    if estimate_tokens(content) > 1500:
+    if not within_portable_budget(content):
         content = content.replace(f"- Graph status counts: {graph_status_text}\n", "", 1)
         content = content.replace(
             f"- Candidate target Pins retained: {int(result.get('candidate_count') or 0)}\n",
             "",
             1,
         )
-    if estimate_tokens(content) <= 1500:
+    if within_portable_budget(content):
         return content
 
     # Last-resort navigation card for deliberately hostile or filesystem-invalid
@@ -2249,7 +2255,13 @@ def _agent_index(result: dict[str, Any]) -> str:
         f"{compact_commands}\n\n"
         "Indexed generation never deletes legacy files; `--prune-legacy` is explicit only.\n"
     )
-    if estimate_tokens(content) > 1500:
+    if not within_portable_budget(content):
+        content = content.replace(
+            compact_entry_text,
+            "- Use the exact bounded overview, entity, neighborhood, and gaps commands below.",
+            1,
+        )
+    if not within_portable_budget(content):
         raise ValueError("agent_index.md cannot be rendered within the 1500-token contract")
     return content
 
