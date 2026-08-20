@@ -22,6 +22,17 @@ RECEIPT_SCHEMA: Final = "blueprint-to-code.change-validation-receipt.v1"
 CACHE_SCHEMA: Final = "blueprint-to-code.content-identity-cache.v1"
 RISK_ORDER: Final = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
 INTEGRITY_ROLES: Final = frozenset({"source", "database", "manifest", "pointer"})
+ARKDEV_MCP_QUERY_TESTS: Final = (
+    "tests/test_arkdev_mcp_blueprint_tools.py",
+    "tests/test_arkdev_mcp_contracts.py",
+    "tests/test_arkdev_mcp_patch_plan.py",
+    "tests/test_arkdev_mcp_server.py",
+    "tests/test_arkdev_mcp_stdio.py",
+    "tests/test_arkdev_mcp_task_context.py",
+    "tests/test_arkdev_mcp_task_research.py",
+    "tests/test_arkdev_mcp_task_stdio.py",
+    "tests/test_arkdev_mcp_windows.py",
+)
 
 
 @dataclass(frozen=True)
@@ -220,8 +231,7 @@ def build_command_plan(
                     "tests/test_evidence_policy.py",
                     "tests/test_evidence_query.py",
                     "tests/test_evidence_cli.py",
-                    "tests/test_arkdev_mcp_blueprint_tools.py",
-                    "tests/test_arkdev_mcp_contracts.py",
+                    *ARKDEV_MCP_QUERY_TESTS,
                 ),
                 "Exercise the real query CLI and MCP contract without a full-suite duplicate.",
             )

@@ -13,6 +13,7 @@ if str(SCRIPTS) not in sys.path:
 
 from arkdev_mcp.contracts import TOOL_NAMES  # noqa: E402
 from print_codex_mcp_config import render_config  # noqa: E402
+import validate_change  # noqa: E402
 
 
 class ArkdevMcpWindowsSetupTests(unittest.TestCase):
@@ -68,7 +69,31 @@ class ArkdevMcpWindowsSetupTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("python -m pip install -r requirements-mcp.txt", ci)
-        self.assertIn("tests/test_arkdev_mcp*.py", ci)
+        self.assertIn("python scripts/validate_change.py", ci)
+        config = validate_change.load_config(
+            ROOT / "scripts" / "validation_profiles.json"
+        )
+        classification = validate_change.classify_changed_files(
+            ["scripts/query_blueprint_evidence.py"],
+            config,
+        )
+        commands = validate_change.build_command_plan(
+            classification,
+            changed_files=["scripts/query_blueprint_evidence.py"],
+            base_sha="a" * 40,
+            python_command="python",
+        )
+        query_command = next(
+            command
+            for command in commands
+            if command.identifier == "python-query-contracts"
+        )
+        expected_mcp_tests = {
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "tests").glob("test_arkdev_mcp*.py")
+        }
+        self.assertTrue(expected_mcp_tests)
+        self.assertLessEqual(expected_mcp_tests, set(query_command.argv))
         self.assertIn("python -m pip install -r requirements-mcp.txt", release)
         self.assertIn("tests/test_arkdev_mcp_stdio.py", release)
 
