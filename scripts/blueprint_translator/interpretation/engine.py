@@ -807,6 +807,20 @@ class _BoundedSelectionRetry(Exception):
         self.selection_limit = selection_limit
 
 
+def _next_bounded_selection_limit(
+    *,
+    selected_work_units: int,
+    estimated_tokens: int,
+    budget: int,
+) -> int:
+    """Scale the next graph-atomic selection to the observed output overage."""
+
+    if selected_work_units <= 0 or budget <= 0 or estimated_tokens <= budget:
+        raise AssertionError("bounded output retry requires a positive over-budget build")
+    proportional_limit = selected_work_units * budget // estimated_tokens
+    return max(0, min(selected_work_units - 1, proportional_limit))
+
+
 def _build_from_source_once(
     source: InterpretationSource,
     *,
@@ -967,11 +981,14 @@ def _build_from_source_once(
             else []
         )
         if selected_refs:
-            # The initial graph-atomic pass is bounded by source work.  If its
-            # rendered projection is still too large, lower that limit and
-            # deterministically replay the same greedy ordering until both the
-            # source and rendered-output budgets are satisfied.
-            next_limit = int(selection["selectedWorkUnits"]) - 1
+            # Source work and rendered output are correlated but not equal.
+            # Scale by the measured overage so a large asset drops a meaningful
+            # graph-atomic slice instead of rebuilding once per work unit.
+            next_limit = _next_bounded_selection_limit(
+                selected_work_units=int(selection["selectedWorkUnits"]),
+                estimated_tokens=estimated_tokens,
+                budget=effective_budget,
+            )
             raise _BoundedSelectionRetry(next_limit)
         raise ValueError(
             "INTERPRETATION_BUDGET_EXCEEDED: "

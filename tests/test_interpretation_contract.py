@@ -678,6 +678,40 @@ class InterpretationContractTests(unittest.TestCase):
             "graph-atomic-output-bounded/v1",
         )
 
+    def test_bounded_output_retry_scales_to_the_observed_oversize_ratio(self) -> None:
+        self.assertEqual(
+            engine_module._next_bounded_selection_limit(
+                selected_work_units=1_000_000,
+                estimated_tokens=2_000_000,
+                budget=1_000_000,
+            ),
+            500_000,
+        )
+        self.assertEqual(
+            engine_module._next_bounded_selection_limit(
+                selected_work_units=100,
+                estimated_tokens=101,
+                budget=100,
+            ),
+            99,
+        )
+
+        source = load_interpretation_source(self.asset_dir)
+        real_scaler = engine_module._next_bounded_selection_limit
+        with patch.object(
+            engine_module,
+            "_next_bounded_selection_limit",
+            wraps=real_scaler,
+        ) as scaler:
+            built = engine_module._build_from_source(
+                source,
+                budget=5_000,
+                bounded_selection=True,
+            )
+        self.assertGreaterEqual(scaler.call_count, 1)
+        self.assertLessEqual(scaler.call_count, 3)
+        self.assertFalse(built.interpretation["selection"]["complete"])
+
     def test_deep_control_graph_scc_is_iterative(self) -> None:
         nodes = [f"bp://fixture/deep/{index:04d}" for index in range(5_000)]
         successors = {
