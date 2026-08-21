@@ -17,7 +17,7 @@ import sqlite3
 import tempfile
 import time
 import zlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -56,7 +56,7 @@ _SIDECAR_NAMES = (
     "uasset_failed_graph_queue.json",
 )
 
-DIRECT_PAYLOAD_PARSER_VERSION = "uasset-graph-reader-evidence-v6"
+DIRECT_PAYLOAD_PARSER_VERSION = "uasset-graph-reader-evidence-v7"
 JSON_COMPRESSION_THRESHOLD = 4096
 PUBLISH_REPLACE_ATTEMPTS = 6
 SEARCH_SUMMARY_MAX_CHARS = 160
@@ -398,6 +398,7 @@ def _parser_local_pin_key(raw_pin: dict[str, Any]) -> str:
 
 def _parser_local_target_pin_key(raw_link: dict[str, Any]) -> str:
     return _first_text(
+        raw_link.get("target_pin_internal_key"),
         raw_link.get("target_native_pin_id"),
         raw_link.get("target_pin_id"),
     )
@@ -807,10 +808,17 @@ def _insert_nodes_and_pins(
                 ),
             )
 
+    native_pin_counts = Counter(
+        pin["native_pin_id"]
+        for node in node_records
+        for pin in node["pins"]
+        if pin["native_pin_id"]
+    )
     return {
         "records": node_records,
         "by_name": nodes_by_name,
         "by_package": nodes_by_package,
+        "native_pin_counts": native_pin_counts,
     }
 
 
@@ -840,6 +848,7 @@ def _find_target_node(
     if len(candidates) == 1:
         return candidates[0], False
     native_pin_id = _authoritative_target_pin_id(link)
+    source = _first_text(link.get("source"), link.get("link_source"))
     pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
     if native_pin_id:
         id_matches = _unique_records(
@@ -853,19 +862,8 @@ def _find_target_node(
         if len(id_matches) == 1:
             return id_matches[0], False
         if len(id_matches) > 1:
-            if pin_name:
-                named_id_matches = _unique_records(
-                    (
-                        node
-                        for node in id_matches
-                        if any(pin["name"] == pin_name for pin in node["pins"])
-                    ),
-                    "node_ref",
-                )
-                if len(named_id_matches) == 1:
-                    return named_id_matches[0], False
             return None, True
-    if pin_name:
+    if pin_name and not source.startswith("uasset_"):
         name_matches = _unique_records(
             (
                 node
@@ -894,11 +892,6 @@ def _find_target_pin(
         if len(matches) == 1:
             return matches[0], False, False
         if len(matches) > 1:
-            pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
-            if pin_name:
-                named_matches = [pin for pin in matches if pin["name"] == pin_name]
-                if len(named_matches) == 1:
-                    return named_matches[0], False, False
             return None, True, False
     source = _first_text(link.get("source"), link.get("link_source"))
     if source.startswith("uasset_") and not native_pin_id:
@@ -951,7 +944,6 @@ def _insert_edges(
                     raw_link,
                     target_node,
                 )
-                ambiguous = target_node_ambiguous or target_pin_ambiguous
                 target_node_name = _first_text(raw_link.get("target_node"), raw_link.get("target_node_name"))
                 target_pin_id = _authoritative_target_pin_id(raw_link)
                 target_pin_name = _first_text(raw_link.get("target_pin"), raw_link.get("target_pin_name"))
@@ -960,12 +952,46 @@ def _insert_edges(
                     kind = "exec" if source_pin["category"].casefold() == "exec" else "data"
                 status = _first_text(raw_link.get("status"))
                 resolution_status = _first_text(raw_link.get("resolution_status"), status)
-                if ambiguous:
-                    resolution_status = "ambiguous"
+                source_native_pin_id = _first_text(
+                    source_pin.get("native_pin_id")
+                )
+                target_native_pin_id = (
+                    _first_text(target_pin.get("native_pin_id"))
+                    if target_pin is not None
+                    else ""
+                )
+                native_pin_counts = lookup.get("native_pin_counts", {})
+                source_identity_count = int(
+                    native_pin_counts.get(source_native_pin_id, 0)
+                ) if source_native_pin_id else 0
+                target_identity_count = int(
+                    native_pin_counts.get(target_native_pin_id, 0)
+                ) if target_native_pin_id else 0
+                if target_node_ambiguous:
+                    resolution_status = "ambiguous_target_node_identity"
+                elif target_pin_ambiguous:
+                    resolution_status = "ambiguous_target_pin_identity"
+                elif not source_native_pin_id:
+                    resolution_status = "source_pin_identity_unavailable"
+                elif source_identity_count != 1:
+                    resolution_status = "ambiguous_source_pin_identity"
                 elif heuristic_pin_match:
                     resolution_status = "resolved_pin_heuristic"
                 elif target_pin is not None and not resolution_status:
                     resolution_status = "resolved_pin"
+                if (
+                    target_pin is not None
+                    and not target_node_ambiguous
+                    and not target_pin_ambiguous
+                    and source_native_pin_id
+                    and source_identity_count == 1
+                ):
+                    if not target_pin_id or not target_native_pin_id:
+                        resolution_status = "target_pin_identity_unavailable"
+                    elif target_pin_id != target_native_pin_id:
+                        resolution_status = "target_pin_identity_mismatch"
+                    elif target_identity_count != 1:
+                        resolution_status = "ambiguous_target_pin_identity"
                 edge_confidence = _first_text(
                     raw_link.get("confidence"),
                     raw_link.get("link_confidence"),
@@ -1016,7 +1042,19 @@ def _insert_edges(
                         "INSERT INTO edge_candidate_sets(observation_id, candidates_json) VALUES (?, ?)",
                         (observation_id, _compact_json(packed_candidates)),
                     )
-                if target_pin is None:
+                identities_are_unique = (
+                    target_pin is not None
+                    and bool(source_native_pin_id)
+                    and bool(target_native_pin_id)
+                    and source_identity_count == 1
+                    and target_identity_count == 1
+                    and target_pin_id == target_native_pin_id
+                    and not target_node_ambiguous
+                    and not target_pin_ambiguous
+                    and not heuristic_pin_match
+                    and resolution_status == "resolved_pin"
+                )
+                if not identities_are_unique:
                     continue
                 source_ref, target_ref = _canonical_edge(source_pin, target_pin)
                 edge_key = (source_ref, target_ref, kind)
@@ -1822,6 +1860,22 @@ def write_evidence_store_from_capture(asset_dir: str | Path, database_path: str 
     return _build_database(source, destination)
 
 
+def _stable_direct_graph_payload(payload: object) -> object:
+    """Remove capture-clock metadata without hiding semantic graph changes."""
+
+    if not isinstance(payload, dict):
+        return payload
+    stable = dict(payload)
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        stable["metadata"] = {
+            key: value
+            for key, value in metadata.items()
+            if key != "generated"
+        }
+    return stable
+
+
 def _direct_source_manifest(
     uasset_path: Path | None,
     payload: dict[str, Any],
@@ -1868,7 +1922,9 @@ def _direct_source_manifest(
             "link_count": graph.get("link_count", 0),
             "coverage": graph.get("coverage", {}),
             "warnings": graph.get("warnings", []),
-            "payload": graph.get("payload", {}),
+            "payload": _stable_direct_graph_payload(
+                graph.get("payload", {})
+            ),
         }
         encoded = _compact_json(evidence).encode("utf-8")
         fact_hasher.update(b"\x1e")

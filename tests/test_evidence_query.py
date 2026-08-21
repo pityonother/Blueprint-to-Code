@@ -34,6 +34,7 @@ def _pin(
     category: str,
     *,
     default: str = "",
+    persistent_guid: str = "",
     links: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     return {
@@ -45,7 +46,7 @@ def _pin(
         "pin_type": {"PinCategory": category, "ContainerType": "None"},
         "default": default,
         "default_object": "",
-        "persistent_guid": "",
+        "persistent_guid": persistent_guid,
         "linked_to_raw": "",
         "links": links or [],
         "source": "uasset_exported_pin_object",
@@ -56,6 +57,9 @@ def _pin(
             "status": "resolved_pin",
             "link_count": len(links or []),
             "native_pin_id_authority": "EXACT",
+            "persistent_guid_method": (
+                "exact_struct_value" if persistent_guid else "UNAVAILABLE"
+            ),
         },
     }
 
@@ -215,7 +219,16 @@ class EvidenceQueryContractTests(unittest.TestCase):
                 "Entry",
                 "K2Node_FunctionEntry",
                 event="TimingEntry",
-                pins=[_pin("P_ENTRY_THEN", "then", "EGPD_Output", "exec", links=[entry_to_branch])],
+                pins=[
+                    _pin(
+                        "P_ENTRY_THEN",
+                        "then",
+                        "EGPD_Output",
+                        "exec",
+                        persistent_guid="A" * 32,
+                        links=[entry_to_branch],
+                    )
+                ],
             ),
             _node(
                 1002,
@@ -796,6 +809,40 @@ class EvidenceQueryContractTests(unittest.TestCase):
             self.assertEqual(len(bundle["pins"]), bundle["bundleCoverage"]["pins"]["returned"])
             self.assertEqual(len(bundle["edges"]), bundle["bundleCoverage"]["edges"]["available"])
             self.assertEqual(len(bundle["edges"]), bundle["bundleCoverage"]["edges"]["returned"])
+            for edge in bundle["edges"]:
+                self.assertTrue(edge["sourceNativePinId"])
+                self.assertTrue(edge["targetNativePinId"])
+
+        entry_pin_ref = self._ref_for(
+            "P_ENTRY_THEN",
+            kind="pin",
+            name="then",
+        )
+        entry_pin = self.service.query(
+            {
+                "operation": "entity",
+                "selector": {"ref": entry_pin_ref},
+                "budgetTokens": 1200,
+            }
+        )["items"][0]
+        self.assertEqual(entry_pin["persistentGuid"], "A" * 32)
+
+        entry_edge = next(
+            edge
+            for bundle in result["items"]
+            for edge in bundle["edges"]
+            if edge["sourceNativePinId"] == "P_ENTRY_THEN"
+        )
+        edge_ref = str(entry_edge["ref"])
+        edge = self.service.query(
+            {
+                "operation": "entity",
+                "selector": {"ref": edge_ref},
+                "budgetTokens": 1200,
+            }
+        )["items"][0]
+        self.assertEqual(edge["sourceNativePinId"], "P_ENTRY_THEN")
+        self.assertEqual(edge["targetNativePinId"], "P_BRANCH_EXEC")
 
     def test_trace_follows_only_the_requested_edge_kind_and_direction(self):
         entry_ref = self._ref_for("TimingEntry", kind="node", name="Entry")
@@ -1108,7 +1155,13 @@ class EvidenceQueryContractTests(unittest.TestCase):
             }
         )["items"][0]
         self.assertEqual(observation["status"], "NOT_RECOVERED")
+        self.assertEqual(
+            observation["resolutionStatus"],
+            "cross_graph_or_missing_node",
+        )
         self.assertEqual(observation["rawEvidence"]["raw_marker"], "must-round-trip")
+        self.assertEqual(observation["sourceNativePinId"], "P_INCOMPLETE")
+        self.assertEqual(observation["targetNativePinId"], "")
 
         pin_ref = self._ref_for("P_INCOMPLETE", kind="pin", name="ReturnValue")
         pin = self.service.query(

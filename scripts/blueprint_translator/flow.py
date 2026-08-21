@@ -459,6 +459,7 @@ def pin_to_dict(pin: PinInfo) -> dict[str, object]:
 def node_to_dict(node: NodeInfo, include_raw: bool = False) -> dict[str, object]:
     data: dict[str, object] = {
         "index": node.index,
+        "package_index": node.package_index,
         "key": node_key(node),
         "label": node.label,
         "name": node.name,
@@ -503,16 +504,40 @@ def all_links(nodes: list[NodeInfo]) -> list[dict[str, object]]:
                         "source_node_guid": node.node_guid,
                         "source_label": node.label,
                         "source_pin_id": pin.id,
+                        "source_pin_id_authority": (
+                            pin.resolution.get("native_pin_id_authority", "UNAVAILABLE")
+                            if pin.source.startswith("uasset_")
+                            else "EXACT"
+                        ),
+                        "source_persistent_guid": pin.persistent_guid,
                         "source_pin": pin.name,
                         "source_pin_category": pin.category,
                         "source_pin_direction": pin.direction,
                         "target_node": link.get("target_node", ""),
                         "target_pin_id": link.get("target_pin_id", ""),
+                        "target_pin_id_authority": link.get(
+                            "target_pin_id_authority",
+                            "",
+                        ),
+                        "target_pin": link.get("target_pin", ""),
+                        "target_pin_internal_key": link.get(
+                            "target_pin_internal_key",
+                            "",
+                        ),
+                        "target_pin_id_candidates": link.get(
+                            "target_pin_id_candidates",
+                            [],
+                        ),
+                        "target_pin_id_candidate_method": link.get(
+                            "target_pin_id_candidate_method",
+                            "",
+                        ),
                         "target_package_index": link.get("target_package_index", ""),
                         "target_node_guid": link.get("target_node_guid", ""),
                         "link_source": link.get("source", ""),
                         "link_confidence": link.get("confidence", ""),
                         "resolution_status": link.get("resolution_status", ""),
+                        "resolution_method": link.get("resolution_method", ""),
                     }
                 )
     return links

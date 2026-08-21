@@ -277,6 +277,17 @@ def _evidence_truth_index(
             "kind": "edge",
             "resolutionStatus": str(row["resolution_status"] or ""),
         }
+    for row in _rows(
+        connection,
+        "edge_observations",
+        "observation_ref, resolution_status, status",
+    ):
+        index[str(row["observation_ref"])] = {
+            "kind": "edge_observation",
+            "resolutionStatus": str(
+                row["resolution_status"] or row["status"] or ""
+            ),
+        }
     return index
 
 
@@ -344,18 +355,25 @@ def profile_blueprint_evidence(asset_dir: str | Path) -> dict[str, object]:
         )
         heuristic_link_count = _scalar(
             connection,
-            "SELECT COUNT(*) FROM edges WHERE lower(resolution_status) LIKE '%heuristic%'",
+            "SELECT COUNT(*) FROM edge_observations "
+            "WHERE lower(COALESCE(NULLIF(resolution_status,''), status, '')) "
+            "LIKE '%heuristic%'",
         )
         ambiguous_link_count = _scalar(
             connection,
             "SELECT COUNT(*) FROM edge_observations "
-            "WHERE lower(COALESCE(NULLIF(resolution_status,''), status, '')) = 'ambiguous'",
+            "WHERE lower(COALESCE(NULLIF(resolution_status,''), status, '')) "
+            "LIKE '%ambiguous%'",
         )
         unresolved_link_count = _scalar(
             connection,
             "SELECT COUNT(*) FROM edge_observations "
             "WHERE lower(COALESCE(NULLIF(resolution_status,''), status, '')) "
-            "NOT IN ('resolved_pin','resolved_pin_exact','resolved_pin_heuristic','ambiguous')",
+            "NOT IN ('resolved_pin','resolved_pin_exact') "
+            "AND lower(COALESCE(NULLIF(resolution_status,''), status, '')) "
+            "NOT LIKE '%heuristic%' "
+            "AND lower(COALESCE(NULLIF(resolution_status,''), status, '')) "
+            "NOT LIKE '%ambiguous%'",
         )
         diagnostic_statuses = Counter(
             str(row[0] or "UNKNOWN").upper()

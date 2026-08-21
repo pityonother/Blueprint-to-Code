@@ -648,7 +648,7 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
             heuristic_edge_ref = next(
                 ref
                 for ref in profile["_availableEvidenceRefs"]
-                if "/edge/" in ref
+                if "/observation/" in ref
             )
             diagnostic_ref = next(
                 ref

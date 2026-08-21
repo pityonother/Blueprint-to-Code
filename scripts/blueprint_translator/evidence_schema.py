@@ -15,7 +15,7 @@ EVIDENCE_SCHEMA_USER_VERSION = 2
 # them separate from the SQLite schema version: normalization can change while
 # the public v2 schema remains compatible, and such a change must not reuse an
 # older revision ID.
-LEGACY_CAPTURE_PARSER_VERSION = "legacy-capture-evidence-v3"
+LEGACY_CAPTURE_PARSER_VERSION = "legacy-capture-evidence-v4"
 
 
 def _stable_json(value: object) -> str:

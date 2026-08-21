@@ -143,8 +143,8 @@ class InterpretationContractTests(unittest.TestCase):
             )
         self.assertEqual(duplicate_names, 2)
         self.assertEqual(duplicate_pin_ids, 2)
-        self.assertTrue(heuristic_edge_targets)
-        self.assertLess(len(exact_edge_refs), all_edge_count)
+        self.assertEqual(heuristic_edge_targets, set())
+        self.assertEqual(len(exact_edge_refs), all_edge_count)
         self.assertEqual(
             interpretation["assetSummary"]["edgeCount"],
             len(exact_edge_refs),

@@ -645,6 +645,36 @@ def build_asset_diagnostics(asset_payload: dict[str, object]) -> dict[str, objec
                     "Use uasset_link_resolution_report.md and clipboard compare fixtures to validate exact pin-level behavior.",
                 )
             )
+        identity_unavailable = sum(
+            int(resolution_counts.get(status) or 0)
+            for status in (
+                "source_pin_identity_unavailable",
+                "target_pin_identity_unavailable",
+                "target_pin_identity_mismatch",
+            )
+        ) if isinstance(resolution_counts, dict) else 0
+        identity_ambiguous = sum(
+            int(resolution_counts.get(status) or 0)
+            for status in (
+                "ambiguous_source_pin_identity",
+                "ambiguous_target_node_identity",
+                "ambiguous_target_pin_identity",
+            )
+        ) if isinstance(resolution_counts, dict) else 0
+        if identity_unavailable or identity_ambiguous:
+            findings.append(
+                diagnostic_finding(
+                    "UASSET022",
+                    "warning",
+                    "Pin identity prevented exact link publication",
+                    "A canonical link is emitted only when both native PinIds are present and unique; missing, mismatched, or duplicate identities remain observations.",
+                    [
+                        f"identity_unavailable={identity_unavailable}",
+                        f"identity_ambiguous={identity_ambiguous}",
+                    ],
+                    "Inspect the edge observation and recover structural PinId/LinkedTo evidence; do not select a target Pin by name, direction, or GUID scan.",
+                )
+            )
         if isinstance(failure_counts, dict) and failure_counts.get("need_node_reader"):
             findings.append(
                 diagnostic_finding(

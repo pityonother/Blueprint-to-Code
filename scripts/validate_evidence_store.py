@@ -150,6 +150,7 @@ def _parser_local_pin_key(raw_pin: Mapping[str, object]) -> str:
 
 def _parser_local_target_pin_key(raw_link: Mapping[str, object]) -> str:
     return _first_text(
+        raw_link.get("target_pin_internal_key"),
         raw_link.get("target_native_pin_id"),
         raw_link.get("target_pin_id"),
     )
@@ -260,6 +261,7 @@ def _find_target_node(
         return candidates[0]
 
     native_pin_id = _authoritative_target_pin_id(link)
+    source = _first_text(link.get("source"), link.get("link_source"))
     pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
     if native_pin_id:
         id_matches = unique_nodes(
@@ -270,16 +272,8 @@ def _find_target_node(
         if len(id_matches) == 1:
             return id_matches[0]
         if len(id_matches) > 1:
-            if pin_name:
-                named_id_matches = unique_nodes(
-                    node
-                    for node in id_matches
-                    if any(pin["name"] == pin_name for pin in node["pins"])
-                )
-                if len(named_id_matches) == 1:
-                    return named_id_matches[0]
             return None
-    if pin_name:
+    if pin_name and not source.startswith("uasset_"):
         name_matches = unique_nodes(
             node
             for node in candidates
@@ -316,11 +310,6 @@ def _find_target_pin(
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
-            if pin_name:
-                named_matches = [pin for pin in matches if pin["name"] == pin_name]
-                if len(named_matches) == 1:
-                    return named_matches[0]
             return None
     source = _first_text(link.get("source"), link.get("link_source"))
     if source.startswith("uasset_") and not native_pin_id:
@@ -481,6 +470,12 @@ def _legacy_model(asset_dir: Path) -> dict[str, Any]:
                     )
                 ] += 1
 
+        native_pin_counts = Counter(
+            str(pin["native_pin_id"])
+            for node in node_records
+            for pin in node["pins"]
+            if str(pin["native_pin_id"])
+        )
         graph_edges: set[tuple[object, ...]] = set()
         for node in node_records:
             for source_pin in node["pins"]:
@@ -545,7 +540,24 @@ def _legacy_model(asset_dir: Path) -> dict[str, Any]:
                                 candidate_pin["ordinal"] if candidate_pin else -1,
                             )
                         ] += 1
-                    if target_pin is not None:
+                    source_native_pin_id = str(
+                        source_pin["native_pin_id"] or ""
+                    )
+                    resolved_target_native_pin_id = (
+                        str(target_pin["native_pin_id"] or "")
+                        if target_pin is not None
+                        else ""
+                    )
+                    if (
+                        target_pin is not None
+                        and source_native_pin_id
+                        and resolved_target_native_pin_id
+                        and target_native_pin_id
+                        == resolved_target_native_pin_id
+                        and native_pin_counts[source_native_pin_id] == 1
+                        and native_pin_counts[resolved_target_native_pin_id]
+                        == 1
+                    ):
                         source_key, target_key = _canonical_endpoints(source_pin, target_pin)
                         graph_edges.add((export_index, *source_key, *target_key, kind))
         associations["edges"].update(graph_edges)
@@ -798,6 +810,105 @@ def _sqlite_check(connection: sqlite3.Connection) -> dict[str, object]:
         "ok": integrity_rows == ["ok"] and not foreign_key_rows,
         "integrity": integrity_rows,
         "foreignKeyErrors": foreign_key_rows,
+    }
+
+
+def _pin_link_identity_check(
+    connection: sqlite3.Connection,
+) -> dict[str, object]:
+    """Require every canonical edge to use unique native Pin IDs at both ends."""
+
+    rows = connection.execute(
+        "WITH native_counts AS ("
+        "  SELECT n.graph_ref, p.native_pin_id, COUNT(*) AS pin_count "
+        "  FROM pins p JOIN nodes n ON n.node_ref = p.node_ref "
+        "  WHERE p.native_pin_id <> '' "
+        "  GROUP BY n.graph_ref, p.native_pin_id"
+        ") "
+        "SELECT e.edge_ref, e.source_pin_ref, e.target_pin_ref, "
+        "e.resolution_status, "
+        "sp.native_pin_id AS source_native_pin_id, "
+        "tp.native_pin_id AS target_native_pin_id, "
+        "COALESCE(sc.pin_count, 0) AS source_identity_count, "
+        "COALESCE(tc.pin_count, 0) AS target_identity_count "
+        "FROM edges e "
+        "JOIN pins sp ON sp.pin_ref = e.source_pin_ref "
+        "JOIN pins tp ON tp.pin_ref = e.target_pin_ref "
+        "LEFT JOIN native_counts sc "
+        "ON sc.graph_ref = e.graph_ref "
+        "AND sc.native_pin_id = sp.native_pin_id "
+        "LEFT JOIN native_counts tc "
+        "ON tc.graph_ref = e.graph_ref "
+        "AND tc.native_pin_id = tp.native_pin_id "
+        "ORDER BY e.edge_ref"
+    ).fetchall()
+    authoritative_observations = Counter(
+        (
+            str(row["source_pin_ref"] or ""),
+            str(row["target_pin_ref"] or ""),
+            str(row["target_native_pin_id"] or ""),
+        )
+        for row in connection.execute(
+            "SELECT source_pin_ref, target_pin_ref, target_native_pin_id "
+            "FROM edge_observations "
+            "WHERE resolution_status = 'resolved_pin'"
+        )
+    )
+    invalid: list[dict[str, object]] = []
+    for row in rows:
+        source_pin_ref = str(row["source_pin_ref"] or "")
+        target_pin_ref = str(row["target_pin_ref"] or "")
+        source_native_pin_id = str(row["source_native_pin_id"] or "")
+        target_native_pin_id = str(row["target_native_pin_id"] or "")
+        source_identity_count = int(row["source_identity_count"] or 0)
+        target_identity_count = int(row["target_identity_count"] or 0)
+        authoritative_observation_count = (
+            authoritative_observations[
+                (
+                    source_pin_ref,
+                    target_pin_ref,
+                    target_native_pin_id,
+                )
+            ]
+            + authoritative_observations[
+                (
+                    target_pin_ref,
+                    source_pin_ref,
+                    source_native_pin_id,
+                )
+            ]
+        )
+        resolution_status = str(row["resolution_status"] or "")
+        if (
+            source_native_pin_id
+            and target_native_pin_id
+            and source_identity_count == 1
+            and target_identity_count == 1
+            and authoritative_observation_count > 0
+            and resolution_status == "resolved_pin"
+        ):
+            continue
+        invalid.append(
+            {
+                "edgeRef": str(row["edge_ref"]),
+                "sourceNativePinId": source_native_pin_id,
+                "targetNativePinId": target_native_pin_id,
+                "sourceIdentityCount": source_identity_count,
+                "targetIdentityCount": target_identity_count,
+                "authoritativeObservationCount": (
+                    authoritative_observation_count
+                ),
+                "resolutionStatus": resolution_status,
+            }
+        )
+    return {
+        "ok": not invalid,
+        "canonicalEdgeCount": len(rows),
+        "invalidEdgeCount": len(invalid),
+        "invalidEdges": invalid[:100],
+        "contract": (
+            "unique_native_pin_id_at_both_endpoints_with_resolved_observation"
+        ),
     }
 
 
@@ -1517,6 +1628,8 @@ def validate_asset(
             connection.execute("PRAGMA query_only = ON")
             sqlite_result = _sqlite_check(connection)
             checks["sqlite"] = sqlite_result
+            pin_link_identity = _pin_link_identity_check(connection)
+            checks["pinLinkIdentity"] = pin_link_identity
             database = _database_model(connection)
         report["identity"] = database["identity"]
     except Exception as exc:
@@ -1526,6 +1639,10 @@ def validate_asset(
 
     if not checks["sqlite"]["ok"]:  # type: ignore[index]
         hard_failures.append("sqlite: integrity or foreign-key check failed")
+    if not checks["pinLinkIdentity"]["ok"]:  # type: ignore[index]
+        hard_failures.append(
+            "pinLinkIdentity: canonical edges lack unique native endpoint identities"
+        )
 
     parser_version = str(database["identity"].get("parserVersion") or "")
     if parser_version == DIRECT_PAYLOAD_PARSER_VERSION:
@@ -1766,8 +1883,10 @@ def validate_index_consistency(asset_dir: str | Path) -> dict[str, object]:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA query_only = ON")
             sqlite_result = _sqlite_check(connection)
+            pin_link_identity = _pin_link_identity_check(connection)
             database = _database_model(connection)
         checks["sqlite"] = sqlite_result
+        checks["pinLinkIdentity"] = pin_link_identity
         report["identity"] = database["identity"]
     except Exception as exc:
         checks["sqlite"] = _failed_check(f"{type(exc).__name__}: {exc}")
@@ -1776,6 +1895,10 @@ def validate_index_consistency(asset_dir: str | Path) -> dict[str, object]:
 
     if not checks["sqlite"]["ok"]:  # type: ignore[index]
         hard_failures.append("sqlite: integrity or foreign-key check failed")
+    if not checks["pinLinkIdentity"]["ok"]:  # type: ignore[index]
+        hard_failures.append(
+            "pinLinkIdentity: canonical edges lack unique native endpoint identities"
+        )
     revision_id = str(database["identity"].get("revisionId") or "")
     agent_index = _agent_index_check(
         root,

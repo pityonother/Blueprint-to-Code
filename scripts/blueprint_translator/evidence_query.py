@@ -117,6 +117,9 @@ def _status(value: object, default: str = "CONFIRMED") -> str:
         "MISSING_TARGET_PIN_ID": "NOT_RECOVERED",
         "AMBIGUOUS_TARGET_NODE": "AMBIGUOUS",
         "AMBIGUOUS_TARGET_PIN": "AMBIGUOUS",
+        "SOURCE_PIN_IDENTITY_UNAVAILABLE": "SOURCE_NOT_AVAILABLE",
+        "TARGET_PIN_IDENTITY_UNAVAILABLE": "NOT_RECOVERED",
+        "TARGET_PIN_IDENTITY_MISMATCH": "NOT_RECOVERED",
     }
     if normalized in aliases:
         return aliases[normalized]
@@ -1108,12 +1111,20 @@ class EvidenceQueryService:
             return self._diagnostic_item(row)
         row = self._connection.execute("SELECT * FROM edges WHERE edge_ref = ?", (ref,)).fetchone()
         if row is not None:
+            source_native_pin_id = self._native_pin_id_for_ref(
+                str(row["source_pin_ref"])
+            )
+            target_native_pin_id = self._native_pin_id_for_ref(
+                str(row["target_pin_ref"])
+            )
             item = {
                 "ref": str(row["edge_ref"]),
                 "kind": "edge",
                 "graphRef": str(row["graph_ref"]),
                 "sourcePinRef": str(row["source_pin_ref"]),
                 "targetPinRef": str(row["target_pin_ref"]),
+                "sourceNativePinId": source_native_pin_id,
+                "targetNativePinId": target_native_pin_id,
                 "edgeKind": str(row["kind"]),
                 "confidence": str(row["confidence"]),
                 "status": _status(row["resolution_status"]),
@@ -1142,6 +1153,15 @@ class EvidenceQueryService:
                 candidate_limit=candidate_limit,
             )
         return None
+
+    def _native_pin_id_for_ref(self, pin_ref: str) -> str:
+        if not pin_ref:
+            return ""
+        row = self._connection.execute(
+            "SELECT native_pin_id FROM pins WHERE pin_ref = ?",
+            (pin_ref,),
+        ).fetchone()
+        return str(row["native_pin_id"] or "") if row is not None else ""
 
     def _candidate_dictionary(self) -> list[str]:
         row = self._connection.execute(
@@ -1187,12 +1207,16 @@ class EvidenceQueryService:
                     **({"pinRef": str(candidate["candidate_pin_ref"])} if candidate["candidate_pin_ref"] else {}),
                 }
             )
+        source_native_pin_id = self._native_pin_id_for_ref(
+            str(row["source_pin_ref"] or "")
+        )
         return {
             "ref": str(row["observation_ref"]),
             "kind": "edge_observation",
             "graphRef": str(row["graph_ref"]),
             "sourceNodeRef": str(row["source_node_ref"] or ""),
             "sourcePinRef": str(row["source_pin_ref"] or ""),
+            "sourceNativePinId": source_native_pin_id,
             "targetNodeRef": str(row["target_node_ref"] or ""),
             "targetPinRef": str(row["target_pin_ref"] or ""),
             "targetNodeName": str(row["target_node_name"] or ""),
@@ -1200,6 +1224,9 @@ class EvidenceQueryService:
             "targetPinName": str(row["target_pin_name"] or ""),
             "edgeKind": str(row["kind"]),
             "status": _status(row["resolution_status"] or row["status"]),
+            "resolutionStatus": str(
+                row["resolution_status"] or row["status"] or ""
+            ),
             "confidence": str(row["confidence"] or ""),
             "source": str(row["source"] or ""),
             "rawEvidence": _json_value(row["raw_json"], {}),
@@ -1329,6 +1356,9 @@ class EvidenceQueryService:
             "defaultObject": str(row["default_object"]),
             "confidence": str(row["confidence"]),
         }
+        persistent_guid = str(row["persistent_guid"] or "")
+        if persistent_guid:
+            item["persistentGuid"] = persistent_guid
         observations, observation_total = self._observation_summaries(
             "source_pin_ref = ? OR target_pin_ref = ?",
             (row["pin_ref"], row["pin_ref"]),
@@ -1742,6 +1772,9 @@ class EvidenceQueryService:
         native_pin_id = str(row["native_pin_id"] or "")
         if native_pin_id:
             item["nativePinId"] = native_pin_id
+        persistent_guid = str(row["persistent_guid"] or "")
+        if persistent_guid:
+            item["persistentGuid"] = persistent_guid
         subcategory = str(row["subcategory"] or "")
         if subcategory:
             item["subcategory"] = subcategory
@@ -1774,7 +1807,9 @@ class EvidenceQueryService:
             parameters.append(node_ref)
         rows = self._connection.execute(
             "SELECT e.edge_ref, e.source_pin_ref, e.target_pin_ref, e.kind, e.confidence, e.resolution_status, "
-            "source_node.node_ref AS source_node_ref, target_node.node_ref AS target_node_ref "
+            "source_node.node_ref AS source_node_ref, target_node.node_ref AS target_node_ref, "
+            "source_pin.native_pin_id AS source_native_pin_id, "
+            "target_pin.native_pin_id AS target_native_pin_id "
             "FROM edges e "
             "JOIN pins source_pin ON source_pin.pin_ref = e.source_pin_ref "
             "JOIN nodes source_node ON source_node.node_ref = source_pin.node_ref "
@@ -1795,6 +1830,8 @@ class EvidenceQueryService:
                 "ref": str(row["edge_ref"]),
                 "sourcePinRef": str(row["source_pin_ref"]),
                 "targetPinRef": str(row["target_pin_ref"]),
+                "sourceNativePinId": str(row["source_native_pin_id"] or ""),
+                "targetNativePinId": str(row["target_native_pin_id"] or ""),
                 "kind": str(row["kind"]),
         }
         status = _status(row["resolution_status"])
@@ -1931,7 +1968,10 @@ class EvidenceQueryService:
         ).fetchall()
         items: list[dict[str, object]] = []
         for row in rows:
-            status = _status(row["resolution_status"] or row["status"])
+            raw_resolution_status = str(
+                row["resolution_status"] or row["status"] or ""
+            )
+            status = _status(raw_resolution_status)
             if status not in _GAP_STATUSES:
                 continue
             reason = {
@@ -1939,6 +1979,19 @@ class EvidenceQueryService:
                 "AMBIGUOUS": "ambiguous_link_target",
                 "SOURCE_NOT_AVAILABLE": "link_source_not_available",
             }.get(status, "unresolved_link_target")
+            if raw_resolution_status == "source_pin_identity_unavailable":
+                reason = "source_pin_identity_unavailable"
+            elif raw_resolution_status in {
+                "target_pin_identity_unavailable",
+                "target_pin_identity_mismatch",
+            }:
+                reason = raw_resolution_status
+            elif raw_resolution_status in {
+                "ambiguous_source_pin_identity",
+                "ambiguous_target_node_identity",
+                "ambiguous_target_pin_identity",
+            }:
+                reason = raw_resolution_status
             target = _first_text(row["target_node_name"], row["target_pin_name"], row["target_native_pin_id"])
             items.append(
                 {

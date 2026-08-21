@@ -99,7 +99,7 @@ agent_index.md    CLI 查询        HTTP API
 | `graphs` | Graph 身份、类型、export index、状态、置信度和计数 |
 | `nodes` | Node 身份、类、函数/变量/事件、坐标、语义和来源 |
 | `pins` | Pin 方向、类型、默认值、原生 ID、置信度和来源 |
-| `edges` | 去重后的规范化 Wire，只保存一次 source→target 关系 |
+| `edges` | 去重后的规范化 Wire；仅当两端原生 PinId 均存在且在 Graph 内唯一时保存 |
 | `edge_observations` | 原始方向化 Link 观察、解析状态和启发式证据 |
 | `edge_candidates` | 启发式 target Pin 候选；逐行关联，不再复制候选数组 |
 | `properties` | Asset/Graph/Node/Pin Property 的类型、值、置信度和原始偏移 |
@@ -118,6 +118,17 @@ agent_index.md    CLI 查询        HTTP API
 - Node 只保存一次。
 - Pin 只保存一次，通过 `node_ref` 关联。
 - Wire 只保存一次；原始双向观察保留在 `edge_observations`。
+- `edges` 是权威连线层：source/target 两端都必须有结构化恢复的原生 PinId，且每个
+  PinId 在所属 Graph 中只命中一个 Pin，并且至少有一条 `resolved_pin` 原始观察能
+  用目标原生 PinId 回指同一对端点。Pin 名、方向、类型、export object 名或 GUID
+  扫描候选都不能消除 PinId 歧义。
+- 身份缺失、冲突或重复时只保留 `edge_observations` 与候选证据，并使用
+  `source_pin_identity_unavailable`、`target_pin_identity_unavailable`、
+  `target_pin_identity_mismatch`、`ambiguous_source_pin_identity`、
+  `ambiguous_target_node_identity` 或 `ambiguous_target_pin_identity` 明确降级。
+- Pin 查询在可用时返回 `nativePinId` 与 `persistentGuid`；canonical edge 和
+  neighborhood 查询同时返回 `sourceNativePinId` 与 `targetNativePinId`，使调用方
+  不必从显示名反推施工连接。
 - Function/Event/Variable 分类保存 Node ref 或建立索引，不复制 Node。
 - `exec_flow` / `data_flow` 按 ID 查询或生成精简派生事实。
 - 静态 glossary/semantic map 每个 schema 版本只引用一次。
@@ -135,7 +146,8 @@ bp://<asset-hash>@<revision-id>/default/<encoded-property-path>
 ```
 
 - `asset-hash`：规范化 Object Path 的 hash。
-- `revision-id`：`.uasset + .uexp + .ubulk` 内容 hash，加解析器和 schema 版本。
+- `revision-id`：`.uasset + .uexp + .ubulk` 内容 hash、规范化图事实 hash、解析器和
+  schema 版本；捕获时间戳不参与语义 revision。
 - Graph 使用 export index；同名 Graph 返回多个 ref，不静默选一个。
 - Node 优先使用 package/export index，否则使用 revision 内 local index。
 - Pin 使用 Node ref + ordinal；原生 Pin ID/Persistent GUID 只作属性和搜索键。

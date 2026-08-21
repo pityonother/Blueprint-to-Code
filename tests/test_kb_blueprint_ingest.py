@@ -26,6 +26,7 @@ from blueprint_translator.evidence_repository import (  # noqa: E402
     resolve_asset_evidence_state,
 )
 from blueprint_translator.evidence_schema import (  # noqa: E402
+    LEGACY_CAPTURE_PARSER_VERSION,
     ensure_evidence_schema,
     make_asset_id,
     make_default_ref,
@@ -52,7 +53,7 @@ from blueprint_translator.kb_vnext.storage import (  # noqa: E402
 
 
 DIRECT_PARSER = DIRECT_PAYLOAD_PARSER_VERSION
-LEGACY_PARSER = "legacy-capture-evidence-v3"
+LEGACY_PARSER = LEGACY_CAPTURE_PARSER_VERSION
 EVIDENCE_SCHEMA = "ark.blueprint.evidence.v2"
 OBJECT_PATH = "/Game/Test/BP_Test.BP_Test"
 ASSET_ID = make_asset_id(OBJECT_PATH)
