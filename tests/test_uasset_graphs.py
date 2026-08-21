@@ -2525,6 +2525,274 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         )
         self.assertIn(pins[0].confidence, {"medium", "low"})
 
+    def test_inline_pin_layout_recovers_native_pin_ids_and_exact_link(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "NodePosX",
+            "IntProperty",
+            "None",
+            "execute",
+            "then",
+            "exec",
+        ]
+        source_pin_id = "DA52DF5A46CB31C5F1217180F18C5D6E"
+        target_pin_id = "5146D58D460CED4847A72FBD89FEADBD"
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def node_data(
+            node_ref: int,
+            pin_id: str,
+            pin_name: str,
+            *,
+            target_ref: int = 0,
+            linked_pin_id: str = "",
+        ) -> bytes:
+            prop = (
+                fname("NodePosX")
+                + fname("IntProperty")
+                + struct.pack("<iiB", 0, 4, 0)
+                + struct.pack("<i", 12)
+            )
+            inline_pin = (
+                struct.pack("<i", node_ref)
+                + uasset_graphs_module.guid_text_to_raw(pin_id)
+                + fname(pin_name)
+                + b"A" * 8
+                + fname("exec")
+                + b"B" * 12
+            )
+            if target_ref:
+                inline_pin += (
+                    struct.pack("<i", target_ref)
+                    + uasset_graphs_module.guid_text_to_raw(linked_pin_id)
+                    + b"C" * 16
+                )
+            return (
+                b"\x00"
+                + prop
+                + fname("None")
+                + struct.pack("<i", 0)
+                + struct.pack("<i", 1)
+                + inline_pin
+            )
+
+        exports = [
+            {
+                "display_name": "Source",
+                "class_name": "K2Node_CallFunction",
+                "package_index": 1,
+            },
+            {
+                "display_name": "Target",
+                "class_name": "K2Node_CallFunction",
+                "package_index": 2,
+            },
+        ]
+        source_data = node_data(
+            1,
+            source_pin_id,
+            "then",
+            target_ref=2,
+            linked_pin_id=target_pin_id,
+        )
+        target_data = node_data(2, target_pin_id, "execute")
+        source_properties, _source_warnings = parse_export_properties(
+            source_data,
+            names,
+            [],
+            exports,
+        )
+        target_properties, _target_warnings = parse_export_properties(
+            target_data,
+            names,
+            [],
+            exports,
+        )
+
+        source_pins, _source_pin_warnings = parse_custom_pins(
+            source_data,
+            names,
+            source_properties,
+            node_export=exports[0],
+            graph_refset={1, 2},
+            imports=[],
+            exports=exports,
+        )
+        target_pins, _target_pin_warnings = parse_custom_pins(
+            target_data,
+            names,
+            target_properties,
+            node_export=exports[1],
+            graph_refset={1, 2},
+            imports=[],
+            exports=exports,
+        )
+
+        from blueprint_translator.models import NodeInfo
+
+        source = NodeInfo(
+            index=1,
+            class_name="K2Node_CallFunction",
+            node_type="K2Node_CallFunction",
+            name="Source",
+            pins=source_pins,
+        )
+        target = NodeInfo(
+            index=2,
+            class_name="K2Node_CallFunction",
+            node_type="K2Node_CallFunction",
+            name="Target",
+            pins=target_pins,
+        )
+        counts = resolve_graph_link_target_pins([source, target])
+
+        self.assertEqual(source_pins[0].id, source_pin_id)
+        self.assertEqual(
+            source_pins[0].resolution["native_pin_id_authority"],
+            "EXACT",
+        )
+        self.assertEqual(target_pins[0].id, target_pin_id)
+        self.assertEqual(
+            source_pins[0].links[0]["target_pin_id"],
+            target_pin_id,
+        )
+        self.assertEqual(
+            source_pins[0].links[0]["resolution_method"],
+            "exact_target_pin_id_candidate",
+        )
+        self.assertEqual(counts["resolved_pin"], 1)
+        self.assertEqual(counts["resolved_pin_heuristic"], 0)
+
+    def test_inline_pin_layout_recovers_dynamic_array_pin_names(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "NodePosX",
+            "IntProperty",
+            "None",
+            "Array",
+            "[0]",
+            "real",
+        ]
+        array_pin_id = "D1AD53EF40A7B24DEEB92E8086FFBCC3"
+        item_pin_id = "9BBB9EAD448C811C58BB29B37EE55BD9"
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def inline_pin(pin_id: str, pin_name: str) -> bytes:
+            return (
+                struct.pack("<i", 1)
+                + uasset_graphs_module.guid_text_to_raw(pin_id)
+                + fname(pin_name)
+                + b"A" * 8
+                + fname("real")
+                + b"B" * 32
+            )
+
+        prop = (
+            fname("NodePosX")
+            + fname("IntProperty")
+            + struct.pack("<iiB", 0, 4, 0)
+            + struct.pack("<i", 12)
+        )
+        data = (
+            b"\x00"
+            + prop
+            + fname("None")
+            + struct.pack("<i", 0)
+            + struct.pack("<i", 2)
+            + inline_pin(array_pin_id, "Array")
+            + inline_pin(item_pin_id, "[0]")
+        )
+        exports = [
+            {
+                "display_name": "MakeArray",
+                "class_name": "K2Node_MakeArray",
+                "package_index": 1,
+            }
+        ]
+        properties, _warnings = parse_export_properties(data, names, [], exports)
+
+        pins, pin_warnings = parse_custom_pins(
+            data,
+            names,
+            properties,
+            node_export=exports[0],
+            graph_refset={1},
+            imports=[],
+            exports=exports,
+        )
+
+        self.assertEqual(pin_warnings, [])
+        self.assertEqual([pin.name for pin in pins], ["Array", "[0]"])
+        self.assertEqual([pin.id for pin in pins], [array_pin_id, item_pin_id])
+        self.assertTrue(
+            all(
+                pin.resolution["native_pin_id_authority"] == "EXACT"
+                for pin in pins
+            )
+        )
+
+    def test_inline_pin_layout_accepts_structurally_anchored_internal_name(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "NodePosX",
+            "IntProperty",
+            "None",
+            "CustomDataNames",
+            "name",
+        ]
+        pin_id = "68DE285B435DF3B3A13A11B154F293BA"
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        prop = (
+            fname("NodePosX")
+            + fname("IntProperty")
+            + struct.pack("<iiB", 0, 4, 0)
+            + struct.pack("<i", 12)
+        )
+        data = (
+            b"\x00"
+            + prop
+            + fname("None")
+            + struct.pack("<i", 0)
+            + struct.pack("<i", 1)
+            + struct.pack("<i", 1)
+            + uasset_graphs_module.guid_text_to_raw(pin_id)
+            + fname("CustomDataNames")
+            + b"A" * 8
+            + fname("name")
+            + b"B" * 32
+        )
+        exports = [
+            {
+                "display_name": "MakeStruct",
+                "class_name": "K2Node_MakeStruct",
+                "package_index": 1,
+            }
+        ]
+        properties, _warnings = parse_export_properties(data, names, [], exports)
+
+        pins, pin_warnings = parse_custom_pins(
+            data,
+            names,
+            properties,
+            node_export=exports[0],
+            graph_refset={1},
+            imports=[],
+            exports=exports,
+        )
+
+        self.assertEqual(pin_warnings, [])
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(pins[0].name, "CustomDataNames")
+        self.assertEqual(pins[0].id, pin_id)
+        self.assertEqual(
+            pins[0].resolution["native_pin_id_authority"],
+            "EXACT",
+        )
+
     def test_legacy_exported_edgraphpin_objects_recover_links(self):
         names = [f"Filler{i}" for i in range(100)] + [
             "Pins",

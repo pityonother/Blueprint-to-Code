@@ -4326,6 +4326,96 @@ def build_graph_pin_owner_index(package: dict[str, object], node_refs: Iterable[
     return owners
 
 
+def inline_native_pin_id(
+    export_data: bytes,
+    *,
+    pin_name_pos: int,
+    owner_package_index: int,
+) -> tuple[str, int]:
+    """Decode the owner reference plus FGuid that precede an inline PinName."""
+
+    owner_pos = pin_name_pos - 20
+    if owner_pos < 0 or pin_name_pos > len(export_data):
+        return "", -1
+    if _read_i32(export_data, owner_pos) != owner_package_index:
+        return "", -1
+    raw_guid = export_data[owner_pos + 4 : pin_name_pos]
+    if len(raw_guid) != 16 or raw_guid == b"\x00" * 16:
+        return "", -1
+    return guid_to_text(raw_guid), owner_pos + 4
+
+
+def inline_link_target_pin_id(
+    export_data: bytes,
+    *,
+    target_node_pos: int,
+    region_end: int,
+) -> tuple[str, int]:
+    """Decode the FGuid immediately following an inline LinkedTo node ref."""
+
+    guid_pos = target_node_pos + 4
+    if guid_pos < 0 or guid_pos + 16 > min(region_end, len(export_data)):
+        return "", -1
+    raw_guid = export_data[guid_pos : guid_pos + 16]
+    if raw_guid == b"\x00" * 16:
+        return "", -1
+    return guid_to_text(raw_guid), guid_pos
+
+
+def inline_pin_markers(
+    export_data: bytes,
+    names: list[str],
+    *,
+    search_start: int,
+    owner_package_index: int,
+    pin_count: int,
+) -> list[tuple[int, str, str, int]]:
+    """Find inline pins from their owner ref, native PinId, PinName, and type."""
+
+    markers: list[tuple[int, str, str, int]] = []
+    for owner_pos in range(max(0, search_start), max(0, len(export_data) - 27)):
+        if _read_i32(export_data, owner_pos) != owner_package_index:
+            continue
+        raw_guid = export_data[owner_pos + 4 : owner_pos + 20]
+        if len(raw_guid) != 16 or raw_guid == b"\x00" * 16:
+            continue
+        name_pos = owner_pos + 20
+        name_item = _fname_at(export_data, name_pos, names)
+        if not name_item or name_item[2] != 0:
+            continue
+        pin_name = str(name_item[0] or "")
+        numeric_pin_name = re.fullmatch(r"\[?\d+\]?", pin_name) is not None
+        structurally_anchored_internal_name = (
+            pin_name.casefold() in INTERNAL_PIN_PROPERTY_NAMES
+        )
+        if not (
+            _is_pin_name_candidate(pin_name)
+            or numeric_pin_name
+            or structurally_anchored_internal_name
+        ):
+            continue
+        category_row = next(
+            (
+                (category_pos, category.lower())
+                for category_pos, category in _all_fname_candidates(
+                    export_data,
+                    names,
+                    name_pos + 8,
+                    min(len(export_data), name_pos + 264),
+                )
+                if category.lower() in PIN_CATEGORY_NAMES
+            ),
+            None,
+        )
+        if category_row is None:
+            continue
+        category_pos, category = category_row
+        markers.append((name_pos, pin_name, category, category_pos))
+        if len(markers) >= pin_count:
+            break
+    return markers
+
+
 def parse_custom_pins(
     export_data: bytes,
     names: list[str],
@@ -4366,33 +4456,60 @@ def parse_custom_pins(
         return [], []
 
     search_start = count_offset + 4
-    candidates = _all_fname_candidates(export_data, names, search_start, len(export_data))
-    category_positions = [(pos, name.lower()) for pos, name in candidates if name.lower() in PIN_CATEGORY_NAMES]
-    used_name_positions: set[int] = set()
-    pin_markers: list[tuple[int, str, str, int]] = []
-    for category_pos, category in category_positions:
-        previous = [
-            (pos, name)
+    self_package_index = int(node_export.get("package_index") or 0)
+    pin_markers = inline_pin_markers(
+        export_data,
+        names,
+        search_start=search_start,
+        owner_package_index=self_package_index,
+        pin_count=pin_count,
+    )
+    if len(pin_markers) != pin_count:
+        candidates = _all_fname_candidates(
+            export_data,
+            names,
+            search_start,
+            len(export_data),
+        )
+        category_positions = [
+            (pos, name.lower())
             for pos, name in candidates
-            if pos < category_pos and pos not in used_name_positions and category_pos - pos <= 96 and _is_pin_name_candidate(name)
+            if name.lower() in PIN_CATEGORY_NAMES
         ]
-        if not previous:
-            continue
-        pin_name_pos, pin_name = previous[-1]
-        used_name_positions.add(pin_name_pos)
-        pin_markers.append((pin_name_pos, pin_name, category, category_pos))
-        if len(pin_markers) >= pin_count:
-            break
+        used_name_positions: set[int] = set()
+        pin_markers = []
+        for category_pos, category in category_positions:
+            previous = [
+                (pos, name)
+                for pos, name in candidates
+                if pos < category_pos
+                and pos not in used_name_positions
+                and category_pos - pos <= 96
+                and _is_pin_name_candidate(name)
+            ]
+            if not previous:
+                continue
+            pin_name_pos, pin_name = previous[-1]
+            used_name_positions.add(pin_name_pos)
+            pin_markers.append(
+                (pin_name_pos, pin_name, category, category_pos)
+            )
+            if len(pin_markers) >= pin_count:
+                break
     pin_markers.sort(key=lambda item: item[0])
     if not pin_markers:
         return [], [f"Pin count is {pin_count}, but no pin names could be recovered."]
 
     pins: list[PinInfo] = []
-    self_package_index = int(node_export.get("package_index") or 0)
     node_type = str(node_export.get("class_name") or "")
     for index, (name_pos, pin_name, category, category_pos) in enumerate(pin_markers):
         region_end = pin_markers[index + 1][0] if index + 1 < len(pin_markers) else len(export_data)
         region = export_data[name_pos:region_end]
+        native_pin_id, native_pin_id_offset = inline_native_pin_id(
+            export_data,
+            pin_name_pos=name_pos,
+            owner_package_index=self_package_index,
+        )
         links: list[dict[str, object]] = []
         seen_link_markers: set[tuple[int, str]] = set()
         for pos in range(name_pos, max(name_pos, region_end - 4)):
@@ -4406,13 +4523,40 @@ def parse_custom_pins(
                     if marker in seen_link_markers:
                         continue
                     seen_link_markers.add(marker)
+                    target_pin_id, target_pin_id_offset = inline_link_target_pin_id(
+                        export_data,
+                        target_node_pos=pos,
+                        region_end=region_end,
+                    )
                     candidate = {
                         "target_node": target_name,
                         "target_pin_id": "",
                         "target_package_index": value,
                         "source_offset": pos,
-                        "target_pin_id_candidates": guid_candidates_from_region(export_data[max(name_pos, pos - 32) : min(region_end, pos + 128)], limit=160),
-                        "source": "uasset_pin_package_index_scan",
+                        "target_pin_id_candidates": (
+                            [target_pin_id]
+                            if target_pin_id
+                            else guid_candidates_from_region(
+                                export_data[
+                                    max(name_pos, pos - 32) : min(
+                                        region_end,
+                                        pos + 128,
+                                    )
+                                ],
+                                limit=160,
+                            )
+                        ),
+                        "target_pin_id_candidate_method": (
+                            "inline_target_node_ref_followed_by_guid"
+                            if target_pin_id
+                            else "heuristic_guid_scan"
+                        ),
+                        "target_pin_id_raw_offset": target_pin_id_offset,
+                        "source": (
+                            "uasset_inline_pin_reference"
+                            if target_pin_id
+                            else "uasset_pin_package_index_scan"
+                        ),
                         "confidence": "medium",
                         "resolution_status": "resolved_node" if target_name else "unresolved",
                         "resolution_method": "node_only" if target_name else "unresolved",
@@ -4428,13 +4572,16 @@ def parse_custom_pins(
         direction = infer_pin_direction(pin_name, category, node_type)
         pin_confidence = "medium"
         pin_warnings: list[str] = []
-        pin_warnings.append(
-            "PinId/PersistentGuid was not structurally decoded; a stable synthetic id is used."
-        )
-        pin_id = (
-            f"{node_export.get('display_name') or node_export.get('object_name')}"
-            f"_pin_{index + 1}"
-        )
+        if native_pin_id:
+            pin_id = native_pin_id
+        else:
+            pin_warnings.append(
+                "PinId/PersistentGuid was not structurally decoded; a stable synthetic id is used."
+            )
+            pin_id = (
+                f"{node_export.get('display_name') or node_export.get('object_name')}"
+                f"_pin_{index + 1}"
+            )
         subcategory = infer_pin_subcategory(region, names, category_pos, name_pos)
         container_type = infer_pin_container_type(region, names)
         pin_type_object = extract_pin_type_object_reference(
@@ -4482,12 +4629,24 @@ def parse_custom_pins(
             raw_offsets=raw_offsets(name_pos, region_end),
             resolution={
                 **pin_resolution,
-                "native_pin_id_authority": "UNAVAILABLE",
+                "native_pin_id_authority": (
+                    "EXACT" if native_pin_id else "UNAVAILABLE"
+                ),
+                "native_pin_id_method": (
+                    "inline_owner_ref_and_pin_guid"
+                    if native_pin_id
+                    else "UNAVAILABLE"
+                ),
+                "native_pin_id_raw_offset": native_pin_id_offset,
                 "persistent_guid_method": "UNAVAILABLE",
-                "internal_pin_key_method": "deterministic_ordinal",
+                "internal_pin_key_method": (
+                    "native_pin_id"
+                    if native_pin_id
+                    else "deterministic_ordinal"
+                ),
                 **(
                     {"heuristic_guid_candidate": heuristic_guid_candidate}
-                    if heuristic_guid_candidate
+                    if heuristic_guid_candidate and not native_pin_id
                     else {}
                 ),
             },
