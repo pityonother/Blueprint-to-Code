@@ -56,6 +56,62 @@ class ArkdevSolverMcpContractTests(unittest.IsolatedAsyncioTestCase):
         asset_dir, _source, _payload = publish_interpretation_fixture(self.capture_root)
         publish_interpretation(asset_dir, budget=32_000)
 
+    async def test_create_preserves_typed_ranking_division_in_raw_request(self) -> None:
+        server = create_server(
+            self.capture_root,
+            task_root=self.task_root,
+            solver_root=self.solver_root,
+        )
+        raw_request = "生物体重/死神体重=K如果>1"
+        proposal = {
+            "schema": "blueprint-to-code.requirement-proposal/v1",
+            "rawRequest": raw_request,
+            "language": "zh-CN",
+            "subproblems": [
+                {
+                    "sourceStart": 0,
+                    "sourceEnd": len(raw_request),
+                    "sourceText": raw_request,
+                    "intent": "ANSWER_CURRENT_BEHAVIOR",
+                    "outputKind": "RANKING",
+                    "completeness": "REQUIRED",
+                    "targetHints": [],
+                    "constraints": {
+                        "topK": 10,
+                        "userFormula": "penaltyCoefficient = min(K, 1 / K)",
+                        "formulaVariables": {
+                            "candidateWeight": "候选生物体重",
+                            "reaperWeight": "死神体重",
+                        },
+                    },
+                    "acceptanceCriteria": ["按用户公式返回前十名"],
+                }
+            ],
+        }
+
+        async with Client(server) as client:
+            prompt = await client.get_prompt(
+                "solve_ark_blueprint_requirement",
+                {"rawRequest": raw_request, "language": "zh-CN"},
+            )
+            created = await client.call_tool(
+                "blueprint_solver_create",
+                {
+                    "rawRequest": raw_request,
+                    "language": "zh-CN",
+                    "proposal": proposal,
+                },
+            )
+
+        self.assertIn(raw_request, prompt.messages[0].content.text)
+        self.assertFalse(created.is_error, created.content)
+        opaque = created.structured_content["solverId"].removeprefix("solver://")
+        stored = json.loads(
+            (self.solver_root / opaque / "requirement.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(stored["rawRequest"], raw_request)
+        self.assertEqual(stored["subproblems"][0]["sourceText"], raw_request)
+
     async def test_surface_appends_exactly_five_metadata_tools_and_one_resource(
         self,
     ) -> None:
@@ -223,7 +279,10 @@ class ArkdevSolverMcpContractTests(unittest.IsolatedAsyncioTestCase):
             task_root=self.task_root,
             solver_root=self.solver_root,
         )
-        raw_request = "Cap the server-side value while preserving existing behavior"
+        raw_request = (
+            "Cap the server-side value while preserving existing behavior using "
+            "生物体重/死神体重=K如果>1"
+        )
         proposal = {
             "schema": "blueprint-to-code.requirement-proposal/v1",
             "rawRequest": raw_request,
@@ -282,6 +341,11 @@ class ArkdevSolverMcpContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(resumed.is_error, resumed.content)
         self.assertEqual(resumed.structured_content["taskId"], task_id)
         self.assertEqual(resumed.structured_content["phase"], "DISCOVERY")
+        task_goal = resumed.structured_content["goal"]
+        self.assertNotIn(raw_request, task_goal)
+        self.assertNotIn("生物体重/死神体重", task_goal)
+        self.assertIn(problem_id, task_goal)
+        self.assertIn("BLUEPRINT_CHANGE", task_goal)
 
     async def test_fourth_prompt_has_fixed_solver_flow_and_boundaries(self) -> None:
         server = create_server(

@@ -40,6 +40,7 @@ _TARGET_HINT_FIELDS = frozenset(
     {"text", "role", "aliases", "expectedKind", "userSupplied"}
 )
 _SOLVER_ID = re.compile(r"^solver://[0-9a-f]{32}$")
+_PRIVATE_SOURCE_SENTINEL = "USER_PROVIDED_REQUIREMENT_TEXT"
 
 
 def _fail(message: str, **details: object) -> None:
@@ -249,7 +250,11 @@ def _validate_target_hint(value: object, location: str) -> None:
         )
 
 
-def validate_requirement_proposal(proposal: object) -> dict[str, object]:
+def validate_requirement_proposal(
+    proposal: object,
+    *,
+    explicit_raw_request: str | None = None,
+) -> dict[str, object]:
     """Validate and defensively copy an untrusted Requirement Proposal."""
 
     if not isinstance(proposal, Mapping):
@@ -262,6 +267,11 @@ def validate_requirement_proposal(proposal: object) -> dict[str, object]:
         "rawRequest",
         maximum=MAX_RAW_REQUEST_CHARS,
     )
+    if explicit_raw_request is not None and raw_request != explicit_raw_request:
+        _fail(
+            "Proposal rawRequest must match the explicit request text.",
+            location="rawRequest",
+        )
     _require_string(proposal["language"], "language", minimum=2, maximum=32)
     subproblems = proposal["subproblems"]
     if (
@@ -333,8 +343,13 @@ def validate_requirement_proposal(proposal: object) -> dict[str, object]:
             maximum_items=MAX_ACCEPTANCE_CRITERIA,
         )
 
+    guard_value = copy.deepcopy(dict(proposal))
+    if explicit_raw_request is not None:
+        guard_value["rawRequest"] = _PRIVATE_SOURCE_SENTINEL
+        for guarded_subproblem in guard_value["subproblems"]:
+            guarded_subproblem["sourceText"] = _PRIVATE_SOURCE_SENTINEL
     try:
-        assert_path_free(proposal)
+        assert_path_free(guard_value)
     except Exception as exc:
         _fail("Requirement Proposal must be path-free.", errorType=type(exc).__name__)
     return copy.deepcopy(dict(proposal))

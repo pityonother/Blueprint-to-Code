@@ -5,6 +5,7 @@ from __future__ import annotations
 from mcp.server import MCPServer
 
 from .contracts import assert_path_free
+from .solver.contracts import MAX_RAW_REQUEST_CHARS
 
 
 def register_prompts(server: MCPServer) -> None:
@@ -63,7 +64,14 @@ def register_prompts(server: MCPServer) -> None:
         rawRequest: str,  # noqa: N803
         language: str = "zh-CN",
     ) -> str:
-        assert_path_free({"rawRequest": rawRequest, "language": language})
+        if (
+            not 1 <= len(rawRequest) <= MAX_RAW_REQUEST_CHARS
+            or not 2 <= len(language) <= 32
+        ):
+            raise ValueError("Solver prompt input is outside the request bounds.")
+        # rawRequest is explicit caller text echoed into a private prompt. All
+        # model-authored Proposal fields remain subject to the strict path guard.
+        assert_path_free({"language": language})
         return f"""处理以下 ARK Blueprint requirement（language={language}）：
 {rawRequest}
 

@@ -36,10 +36,14 @@ def compile_requirement(
     proposal: object,
     *,
     solver_id: str,
+    explicit_raw_request: str | None = None,
 ) -> dict[str, object]:
     """Compile one validated Proposal without interpreting its natural language."""
 
-    normalized = validate_requirement_proposal(proposal)
+    normalized = validate_requirement_proposal(
+        proposal,
+        explicit_raw_request=explicit_raw_request,
+    )
     validate_solver_id(solver_id)
     raw_request = str(normalized["rawRequest"])
     compiled_subproblems: list[dict[str, object]] = []

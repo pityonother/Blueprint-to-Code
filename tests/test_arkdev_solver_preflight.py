@@ -176,7 +176,9 @@ class FakeTasks:
         try:
             context = self.contexts[task_id]
         except KeyError as exc:
-            raise McpExecutionError("TASK_NOT_FOUND", "Task metadata was not found.") from exc
+            raise McpExecutionError(
+                "TASK_NOT_FOUND", "Task metadata was not found."
+            ) from exc
         return copy.deepcopy(context), {"taskId": task_id, "phase": "DISCOVERY"}
 
 
@@ -665,7 +667,9 @@ class SolverPreflightTests(unittest.TestCase):
                 service.update(SOLVER_ID, update=update)
             self.assertEqual(raised.exception.code, "SOLVER_UPDATE_INVALID")
 
-    def test_descriptor_update_rejects_nested_path_data_and_oversized_shapes(self) -> None:
+    def test_descriptor_update_rejects_nested_path_data_and_oversized_shapes(
+        self,
+    ) -> None:
         self.store.create_solver(
             SOLVER_ID,
             _documents(
@@ -678,18 +682,13 @@ class SolverPreflightTests(unittest.TestCase):
         service = self.service(FakeBlueprint({}))
 
         for descriptor in (
-            {
-                "source": "C:"
-                + chr(92)
-                + "private"
-                + chr(92)
-                + "dataset.json"
-            },
+            {"source": "C:" + chr(92) + "private" + chr(92) + "dataset.json"},
             {f"field{index}": "value" for index in range(33)},
         ):
-            with self.subTest(descriptor=descriptor), self.assertRaises(
-                McpExecutionError
-            ) as raised:
+            with (
+                self.subTest(descriptor=descriptor),
+                self.assertRaises(McpExecutionError) as raised,
+            ):
                 service.update(
                     SOLVER_ID,
                     update={
@@ -929,7 +928,9 @@ class SolverPreflightTests(unittest.TestCase):
                 )
             real_save(solver_id, documents, **kwargs)
 
-        with patch.object(self.store, "save_solver", side_effect=fail_final_binding_save):
+        with patch.object(
+            self.store, "save_solver", side_effect=fail_final_binding_save
+        ):
             with self.assertRaises(McpExecutionError):
                 service.materialize_task(SOLVER_ID, problem_id=PROBLEM_ID)
 
@@ -1003,7 +1004,9 @@ class SolverPreflightTests(unittest.TestCase):
         self.assertEqual(blueprint.authority_calls, [])
         self.assertEqual(self.tasks.calls, [])
 
-    def test_answer_problem_with_primary_asset_materializes_knowledge_task(self) -> None:
+    def test_answer_problem_with_primary_asset_materializes_knowledge_task(
+        self,
+    ) -> None:
         blueprint = FakeBlueprint({"TargetAsset": _health("TargetAsset")})
         service = self.service(blueprint)
         raw_request = "Explain the current Blueprint behavior"
@@ -1018,15 +1021,17 @@ class SolverPreflightTests(unittest.TestCase):
         problem_id = created["problemSummaries"][0]["problemId"]
         service.preflight(created["solverId"])
 
-        result = service.materialize_task(
-            created["solverId"], problem_id=problem_id
-        )
+        result = service.materialize_task(created["solverId"], problem_id=problem_id)
 
         self.assertEqual(result["status"], "TASKS_MATERIALIZED")
         self.assertEqual(self.tasks.calls[0]["mode"], "KNOWLEDGE_QUERY")
-        self.assertEqual(self.tasks.calls[0]["goal"], raw_request)
+        self.assertNotIn(raw_request, self.tasks.calls[0]["goal"])
+        self.assertIn(problem_id, self.tasks.calls[0]["goal"])
+        self.assertIn("CURRENT_BEHAVIOR", self.tasks.calls[0]["goal"])
 
-    def test_materialization_rejects_source_text_beyond_task_goal_limit(self) -> None:
+    def test_materialization_does_not_copy_oversized_private_source_into_task_goal(
+        self,
+    ) -> None:
         blueprint = FakeBlueprint({"TargetAsset": _health("TargetAsset")})
         service = self.service(blueprint)
         raw_request = "x" * 1001
@@ -1038,11 +1043,84 @@ class SolverPreflightTests(unittest.TestCase):
         problem_id = created["problemSummaries"][0]["problemId"]
         service.preflight(created["solverId"])
 
-        with self.assertRaises(McpExecutionError) as raised:
-            service.materialize_task(created["solverId"], problem_id=problem_id)
+        result = service.materialize_task(created["solverId"], problem_id=problem_id)
 
-        self.assertEqual(raised.exception.code, "SOLVER_LIMIT_EXCEEDED")
+        self.assertEqual(result["status"], "TASKS_MATERIALIZED")
+        self.assertNotIn(raw_request, self.tasks.calls[0]["goal"])
+        self.assertLessEqual(len(self.tasks.calls[0]["goal"]), 1000)
+
+    def test_private_source_does_not_exempt_other_solver_documents_from_path_guard(
+        self,
+    ) -> None:
+        blueprint = FakeBlueprint({"TargetAsset": _health("TargetAsset")})
+        service = self.service(blueprint)
+        raw_request = "生物体重/死神体重=K如果>1"
+        created = service.create(
+            raw_request=raw_request,
+            language="en",
+            proposal=_solver_proposal(raw_request),
+        )
+        problem_id = created["problemSummaries"][0]["problemId"]
+        service.preflight(created["solverId"])
+        real_load = self.store.load_solver
+
+        def load_with_tainted_binding(
+            solver_id: str,
+        ) -> dict[str, dict[str, object]]:
+            documents = real_load(solver_id)
+            documents["bindings"]["aliases"] = {problem_id: [raw_request]}
+            return documents
+
+        with patch.object(
+            self.store, "load_solver", side_effect=load_with_tainted_binding
+        ):
+            with self.assertRaises(McpExecutionError) as raised:
+                service.materialize_task(created["solverId"], problem_id=problem_id)
+
+        self.assertEqual(raised.exception.code, "INTERNAL_CONTRACT_ERROR")
         self.assertEqual(self.tasks.calls, [])
+
+    def test_ranking_task_goal_keeps_safe_formula_without_copying_private_source(
+        self,
+    ) -> None:
+        blueprint = FakeBlueprint({"TargetAsset": _health("TargetAsset")})
+        service = self.service(blueprint)
+        raw_request = "生物体重/死神体重=K如果>1"
+        documents = _documents(
+            target_hints=[
+                {
+                    "text": "TargetAsset",
+                    "role": "PRIMARY_BLUEPRINT",
+                    "aliases": [],
+                    "expectedKind": "BLUEPRINT",
+                    "userSupplied": False,
+                }
+            ],
+            requirements=[_requirement("ASSET_IDENTITY")],
+        )
+        documents["requirement"]["rawRequest"] = raw_request
+        problem = documents["requirement"]["subproblems"][0]
+        problem["sourceStart"] = 0
+        problem["sourceEnd"] = len(raw_request)
+        problem["sourceText"] = raw_request
+        problem["outputKind"] = "RANKING"
+        problem["constraints"] = {
+            "topK": 10,
+            "userFormula": "penaltyCoefficient = min(K, 1 / K)",
+            "formulaVariables": {
+                "candidateWeight": "candidateWeight",
+                "reaperWeight": "reaperWeight",
+            },
+        }
+        self.store.create_solver(SOLVER_ID, documents)
+        service.preflight(SOLVER_ID)
+
+        service.materialize_task(SOLVER_ID, problem_id=PROBLEM_ID)
+
+        goal = self.tasks.calls[0]["goal"]
+        self.assertNotIn(raw_request, goal)
+        self.assertIn('"topK":10', goal)
+        self.assertIn("penaltyCoefficient = min(K, 1 / K)", goal)
 
     def test_materialization_rejects_criteria_beyond_task_limit(self) -> None:
         blueprint = FakeBlueprint({"TargetAsset": _health("TargetAsset")})

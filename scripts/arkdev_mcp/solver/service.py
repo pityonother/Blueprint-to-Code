@@ -13,6 +13,7 @@ from ..contracts import McpExecutionError, assert_path_free
 from .acquisition_planner import build_acquisition_plan
 from .asset_discovery import discover_candidates, merge_problem_candidates
 from .canonical import semantic_digest
+from .contracts import MAX_RAW_REQUEST_CHARS, MAX_SUBPROBLEMS
 from .renderer import render_solver_state
 from .store import SolverStore
 
@@ -55,6 +56,7 @@ _FORBIDDEN_UPDATE_KEYS = frozenset(
     }
 )
 _TASK_ID = re.compile(r"^task://[0-9a-f]{32}$")
+_PRIVATE_SOURCE_SENTINEL = "USER_PROVIDED_REQUIREMENT_TEXT"
 
 
 def _now() -> str:
@@ -80,6 +82,66 @@ def _mapping(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _assert_private_solver_documents_safe(
+    documents: Mapping[str, Mapping[str, object]],
+) -> None:
+    """Mask only proven caller-source copies, then scan every other field strictly."""
+
+    guarded = copy.deepcopy(dict(documents))
+    requirement = _mapping(guarded.get("requirement"))
+    raw_request = requirement.get("rawRequest")
+    if (
+        not isinstance(raw_request, str)
+        or not 1 <= len(raw_request) <= MAX_RAW_REQUEST_CHARS
+    ):
+        raise McpExecutionError(
+            "INTERNAL_CONTRACT_ERROR",
+            "Solver private source metadata is invalid.",
+        )
+    subproblems = requirement.get("subproblems")
+    if (
+        not isinstance(subproblems, list)
+        or not 1 <= len(subproblems) <= MAX_SUBPROBLEMS
+    ):
+        raise McpExecutionError(
+            "INTERNAL_CONTRACT_ERROR",
+            "Solver private source metadata is invalid.",
+        )
+    guarded_subproblems = []
+    for subproblem in subproblems:
+        if not isinstance(subproblem, Mapping):
+            raise McpExecutionError(
+                "INTERNAL_CONTRACT_ERROR",
+                "Solver private source metadata is invalid.",
+            )
+        guarded_subproblem = dict(subproblem)
+        start = guarded_subproblem.get("sourceStart")
+        end = guarded_subproblem.get("sourceEnd")
+        source_text = guarded_subproblem.get("sourceText")
+        source_is_bound = (
+            isinstance(start, int)
+            and not isinstance(start, bool)
+            and isinstance(end, int)
+            and not isinstance(end, bool)
+            and 0 <= start < end <= len(raw_request)
+            and source_text == raw_request[start:end]
+        )
+        if source_is_bound:
+            guarded_subproblem["sourceText"] = _PRIVATE_SOURCE_SENTINEL
+        elif not isinstance(source_text, str):
+            raise McpExecutionError(
+                "INTERNAL_CONTRACT_ERROR",
+                "Solver private source metadata is invalid.",
+            )
+        # Older path-free Solver fixtures may not carry spans. They receive no
+        # exemption: their sourceText remains visible to the strict path guard.
+        guarded_subproblems.append(guarded_subproblem)
+    requirement["rawRequest"] = _PRIVATE_SOURCE_SENTINEL
+    requirement["subproblems"] = guarded_subproblems
+    guarded["requirement"] = requirement
+    assert_path_free(guarded)
+
+
 def _sequence(value: object) -> list[object]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return list(value)
@@ -88,6 +150,37 @@ def _sequence(value: object) -> list[object]:
 
 def _problem_id(problem: Mapping[str, object]) -> str:
     return str(problem.get("problemId") or "")
+
+
+def _task_goal(
+    solver_id: str,
+    problem: Mapping[str, object],
+) -> str:
+    constraints = _mapping(problem.get("constraints"))
+    goal_spec: dict[str, object] = {
+        "intent": str(problem.get("intent") or ""),
+        "outputKind": str(problem.get("outputKind") or ""),
+        "problemId": _problem_id(problem),
+        "solverId": solver_id,
+    }
+    for field in (
+        "localizedNamesOnly",
+        "outputLanguage",
+        "topK",
+        "userFormula",
+        "formulaVariables",
+    ):
+        if field in constraints:
+            goal_spec[field] = copy.deepcopy(constraints[field])
+    goal = "Research validated Solver problem: " + _canonical_json(goal_spec)
+    assert_path_free(goal)
+    if len(goal) > 1000:
+        raise McpExecutionError(
+            "SOLVER_LIMIT_EXCEEDED",
+            "Solver Task goal exceeds the existing Task Context limit.",
+            details={"field": "goal", "length": len(goal), "maximum": 1000},
+        )
+    return goal
 
 
 def _problem_map(requirement_ir: Mapping[str, object]) -> dict[str, dict[str, object]]:
@@ -201,7 +294,10 @@ class SolverService:
         from .requirement_compiler import compile_requirement
         from .research_plan import build_research_plan
 
-        normalized = validate_requirement_proposal(proposal)
+        normalized = validate_requirement_proposal(
+            proposal,
+            explicit_raw_request=str(raw_request),
+        )
         if str(normalized.get("rawRequest") or "") != str(raw_request) or str(
             normalized.get("language") or ""
         ) != str(language):
@@ -211,7 +307,13 @@ class SolverService:
             )
         opaque = _new_opaque_id(self.opaque_id_factory, label="Solver")
         solver_id = f"solver://{opaque}"
-        requirement = dict(compile_requirement(normalized, solver_id=solver_id))
+        requirement = dict(
+            compile_requirement(
+                normalized,
+                solver_id=solver_id,
+                explicit_raw_request=str(raw_request),
+            )
+        )
         research_plan = dict(build_research_plan(requirement))
         research_plan["solverId"] = solver_id
         evidence_matrix = dict(derive_evidence_matrix(requirement, research_plan))
@@ -260,14 +362,16 @@ class SolverService:
             "state": state,
             "bindings": bindings,
         }
-        assert_path_free(documents)
+        _assert_private_solver_documents_safe(documents)
         self.store.create_solver(solver_id, documents)
         return render_solver_state(documents)
 
     def resume(self, solver_id: str) -> dict[str, object]:
         """Return a compact projection without refreshing or writing metadata."""
 
-        return render_solver_state(self.store.load_solver(solver_id))
+        documents = self.store.load_solver(solver_id)
+        _assert_private_solver_documents_safe(documents)
+        return render_solver_state(documents)
 
     def preflight(
         self,
@@ -276,6 +380,7 @@ class SolverService:
         problem_ids: Sequence[str] = (),
     ) -> dict[str, object]:
         documents = copy.deepcopy(self.store.load_solver(solver_id))
+        _assert_private_solver_documents_safe(documents)
         state = documents["state"]
         if str(state.get("status") or "") == "TASKS_MATERIALIZED":
             raise McpExecutionError(
@@ -473,7 +578,7 @@ class SolverService:
         state["updatedAt"] = self.clock()
         for document in (documents["evidenceMatrix"], bindings, state):
             _refresh_digest(document)
-        assert_path_free(documents)
+        _assert_private_solver_documents_safe(documents)
         self.store.save_solver(solver_id, documents)
         return render_solver_state(documents)
 
@@ -509,6 +614,7 @@ class SolverService:
                 "Solver update payload is invalid or outside its bounded contract.",
             ) from exc
         documents = copy.deepcopy(self.store.load_solver(solver_id))
+        _assert_private_solver_documents_safe(documents)
         problems = _problem_map(documents["requirement"])
         bindings = documents["bindings"]
         problem_id = str(payload.get("problemId") or "")
@@ -578,7 +684,7 @@ class SolverService:
         documents["state"]["updatedAt"] = self.clock()
         _refresh_digest(bindings)
         _refresh_digest(documents["state"])
-        assert_path_free(documents)
+        _assert_private_solver_documents_safe(documents)
         self.store.save_solver(solver_id, documents)
         return render_solver_state(documents)
 
@@ -589,6 +695,7 @@ class SolverService:
         problem_id: str,
     ) -> dict[str, object]:
         documents = copy.deepcopy(self.store.load_solver(solver_id))
+        _assert_private_solver_documents_safe(documents)
         if str(documents["state"].get("status") or "") != "READY_FOR_TASKS":
             raise McpExecutionError(
                 "EVIDENCE_ACQUISITION_REQUIRED",
@@ -670,7 +777,11 @@ class SolverService:
             raise McpExecutionError(
                 "SOLVER_LIMIT_EXCEEDED",
                 "Solver completion criteria exceed the existing Task Context limit.",
-                details={"field": "completionCriteria", "count": len(criteria), "maximum": 12},
+                details={
+                    "field": "completionCriteria",
+                    "count": len(criteria),
+                    "maximum": 12,
+                },
             )
         if not criteria:
             criteria = ["Satisfy the requested Blueprint request."]
@@ -685,7 +796,11 @@ class SolverService:
             raise McpExecutionError(
                 "SOLVER_LIMIT_EXCEEDED",
                 "Solver desired behavior exceeds the existing Task Context limit.",
-                details={"field": "allowedChanges", "count": len(desired_values), "maximum": 20},
+                details={
+                    "field": "allowedChanges",
+                    "count": len(desired_values),
+                    "maximum": 20,
+                },
             )
         invariants = list(
             dict.fromkeys(
@@ -698,25 +813,17 @@ class SolverService:
             raise McpExecutionError(
                 "SOLVER_LIMIT_EXCEEDED",
                 "Solver invariants exceed the existing Task Context limit.",
-                details={"field": "forbiddenChanges", "count": len(invariants), "maximum": 20},
+                details={
+                    "field": "forbiddenChanges",
+                    "count": len(invariants),
+                    "maximum": 20,
+                },
             )
-        goal = " ".join(
-            str(
-                problem.get("sourceText")
-                or documents["requirement"].get("rawRequest")
-                or ""
-            ).split()
-        )
-        if len(goal) > 1000:
-            raise McpExecutionError(
-                "SOLVER_LIMIT_EXCEEDED",
-                "Solver source text exceeds the existing Task Context goal limit.",
-                details={"field": "goal", "length": len(goal), "maximum": 1000},
-            )
+        goal = _task_goal(solver_id, problem)
         reserved_task_id = str(pending_tasks.get(problem_id) or "")
         if not reserved_task_id:
-            reserved_task_id = (
-                "task://" + _new_opaque_id(self.opaque_id_factory, label="Task reservation")
+            reserved_task_id = "task://" + _new_opaque_id(
+                self.opaque_id_factory, label="Task reservation"
             )
             expected_bindings_digest = str(bindings.get("semanticDigest") or "")
             pending_tasks[problem_id] = reserved_task_id
@@ -724,7 +831,7 @@ class SolverService:
             documents["state"]["updatedAt"] = self.clock()
             _refresh_digest(bindings)
             _refresh_digest(documents["state"])
-            assert_path_free(documents)
+            _assert_private_solver_documents_safe(documents)
             self.store.save_solver(
                 solver_id,
                 documents,
@@ -746,9 +853,12 @@ class SolverService:
                 str(existing_context.get("taskId") or "") != reserved_task_id
                 or str(existing_context.get("mode") or "") != task_mode
                 or str(existing_context.get("goal") or "") != goal
-                or list(_sequence(existing_context.get("completionCriteria"))) != criteria
-                or list(_sequence(existing_context.get("allowedChanges"))) != desired_values
-                or list(_sequence(existing_context.get("forbiddenChanges"))) != invariants
+                or list(_sequence(existing_context.get("completionCriteria")))
+                != criteria
+                or list(_sequence(existing_context.get("allowedChanges")))
+                != desired_values
+                or list(_sequence(existing_context.get("forbiddenChanges")))
+                != invariants
                 or str(primary.get("name") or "") != asset
                 or str(primary.get("assetId") or "") != actual[0]
                 or str(primary.get("objectPath") or "") != actual[1]
@@ -804,7 +914,7 @@ class SolverService:
         documents["state"]["updatedAt"] = self.clock()
         _refresh_digest(bindings)
         _refresh_digest(documents["state"])
-        assert_path_free(documents)
+        _assert_private_solver_documents_safe(documents)
         self.store.save_solver(
             solver_id,
             documents,

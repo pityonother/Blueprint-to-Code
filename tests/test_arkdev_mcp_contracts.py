@@ -29,7 +29,9 @@ from arkdev_mcp.editor_bridge import (  # noqa: E402
 
 
 class ArkdevMcpContractTests(unittest.TestCase):
-    def test_tool_allowlist_preserves_phase_one_and_adds_exact_phase_two_surface(self) -> None:
+    def test_tool_allowlist_preserves_phase_one_and_adds_exact_phase_two_surface(
+        self,
+    ) -> None:
         self.assertEqual(
             TOOL_NAMES,
             (
@@ -118,6 +120,26 @@ class ArkdevMcpContractTests(unittest.TestCase):
             "C:" + separator + separator.join(("Users", "fixture", "evidence.sqlite")),
             "/" + "home/fixture/evidence.sqlite",
             "failure at /" + "tmp/fixture/evidence.sqlite",
+            "failure at /" + "tmp=secret",
+            "路径/" + "home/fixture/evidence.sqlite",
+            "路径/" + "custom/root/private.db",
+            "路径/" + "custom=secret",
+            "路径/" + "秘密/private.db",
+            "路径/" + ".cache/private.db",
+            "路径/秘密=token/private.db",
+            "路径/秘密=token>1/private.db",
+            "路径/秘密=K如果>1/private.db",
+            "路径/秘密=K如果>1.private",
+            "路径/秘密=K如果>1",
+            "工作目录/秘密文件=K如果>1",
+            "生物体重/死神体重=K如果>1",
+            "/生物体重/死神体重=K如果>1",
+            "生物体重/死神体重=K如果>1/etc/passwd",
+            "生物体重/死神体重=K如果>1\n/etc/passwd",
+            "/" + "var/tmp/fixture/evidence.sqlite",
+            "/" + "root/fixture/evidence.sqlite",
+            "/" + "mnt/c/workspace/evidence.sqlite",
+            "/" + "workspace/repository/evidence.sqlite",
             "open file" + "://fixture/evidence.sqlite",
             "share "
             + separator * 2

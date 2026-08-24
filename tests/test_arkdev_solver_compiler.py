@@ -79,6 +79,102 @@ def evidence_kinds(matrix: dict[str, object]) -> set[str]:
 
 
 class RequirementCompilerTests(unittest.TestCase):
+    def test_explicit_user_source_is_private_but_typed_fields_remain_path_free(
+        self,
+    ) -> None:
+        for raw_request in (
+            "生物体重/死神体重=K如果>1",
+            "路径/秘密=K如果>1",
+        ):
+            with self.subTest(raw_request=raw_request):
+                proposal = proposal_for(
+                    raw_request,
+                    output_kind="RANKING",
+                    constraints={
+                        "topK": 10,
+                        "userFormula": "penaltyCoefficient = min(K, 1 / K)",
+                        "formulaVariables": {
+                            "candidateWeight": "候选生物体重",
+                            "reaperWeight": "死神体重",
+                        },
+                    },
+                )
+                self.assertEqual(
+                    validate_requirement_proposal(
+                        proposal, explicit_raw_request=raw_request
+                    )["rawRequest"],
+                    raw_request,
+                )
+                with self.assertRaises(SolverContractError):
+                    validate_requirement_proposal(proposal)
+
+        raw_request = "生物体重/死神体重=K如果>1"
+        base = proposal_for(
+            raw_request,
+            output_kind="RANKING",
+            constraints={
+                "topK": 10,
+                "userFormula": "penaltyCoefficient = min(K, 1 / K)",
+                "formulaVariables": {
+                    "candidateWeight": "候选生物体重",
+                    "reaperWeight": "死神体重",
+                },
+            },
+        )
+        typed_path_injections = (
+            (
+                "userFormula",
+                lambda proposal: proposal["subproblems"][0]["constraints"].__setitem__(
+                    "userFormula", raw_request
+                ),
+            ),
+            (
+                "acceptanceCriteria",
+                lambda proposal: proposal["subproblems"][0].__setitem__(
+                    "acceptanceCriteria", [raw_request]
+                ),
+            ),
+            (
+                "targetHint",
+                lambda proposal: proposal["subproblems"][0].__setitem__(
+                    "targetHints",
+                    [
+                        {
+                            "text": raw_request,
+                            "role": "OTHER",
+                            "aliases": [],
+                            "expectedKind": "",
+                            "userSupplied": True,
+                        }
+                    ],
+                ),
+            ),
+            (
+                "formulaVariables",
+                lambda proposal: proposal["subproblems"][0]["constraints"][
+                    "formulaVariables"
+                ].__setitem__("candidateWeight", raw_request),
+            ),
+        )
+        for field, inject in typed_path_injections:
+            with self.subTest(field=field):
+                candidate = copy.deepcopy(base)
+                inject(candidate)
+                with self.assertRaises(SolverContractError):
+                    validate_requirement_proposal(
+                        candidate, explicit_raw_request=raw_request
+                    )
+
+        for mismatch in (
+            "different explicit request",
+            raw_request + " extra",
+        ):
+            with self.subTest(mismatch=mismatch):
+                with self.assertRaises(SolverContractError):
+                    validate_requirement_proposal(
+                        copy.deepcopy(base), explicit_raw_request=mismatch
+                    )
+
     def test_validation_errors_preserve_the_public_mcp_error_contract(self) -> None:
         invalid = proposal_for("分析公式")
         invalid["subproblems"][0]["sourceText"] = "不匹配"
@@ -235,9 +331,7 @@ class RequirementCompilerTests(unittest.TestCase):
             proposal_for(
                 "分析公式",
                 constraints={
-                    "candidateScope": [
-                        "C:" + chr(92) + "private" + chr(92) + "asset"
-                    ]
+                    "candidateScope": ["C:" + chr(92) + "private" + chr(92) + "asset"]
                 },
             ),
         )
@@ -470,9 +564,7 @@ class RequirementCompilerTests(unittest.TestCase):
                 for operator in plan["operators"]:
                     self.assertEqual(operator["problemId"], problem_id)
                     self.assertTrue(
-                        set(operator["requiredEvidenceIds"]).issubset(
-                            requirement_ids
-                        ),
+                        set(operator["requiredEvidenceIds"]).issubset(requirement_ids),
                         msg=f"{operator['kind']} has dangling Evidence references",
                     )
 
