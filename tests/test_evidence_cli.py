@@ -319,7 +319,7 @@ class EvidenceCliTests(unittest.TestCase):
             self.assertEqual(len(payload["evidenceDecision"]["bindingDigest"]), 64)
             self.assertNotIn(str(asset_dir), json.dumps(payload, ensure_ascii=False))
 
-    def test_entity_neighborhood_trace_and_gaps_subcommands_map_to_service_operations(self):
+    def test_all_detail_subcommands_map_to_service_operations(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             asset_dir, _legacy_files = _make_legacy_capture(Path(temp_dir))
             migration = migrate_asset_capture(asset_dir)
@@ -363,6 +363,14 @@ class EvidenceCliTests(unittest.TestCase):
                     1600,
                 ),
                 ("gaps", "--budget", 800),
+                ("runtime-signals", "--budget", 1200),
+                (
+                    "loot-rewards",
+                    "--item-query",
+                    "PrimalItemArmor_SpaceWhaleSaddle_Tek",
+                    "--budget",
+                    1200,
+                ),
             )
             for invocation in invocations:
                 with self.subTest(operation=invocation[0]):

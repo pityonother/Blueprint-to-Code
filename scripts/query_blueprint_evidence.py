@@ -94,6 +94,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     gaps.add_argument("--page-size", type=int)
     gaps.add_argument("--cursor")
     _add_budget(gaps, 1000)
+
+    runtime_signals = subparsers.add_parser("runtime-signals")
+    runtime_signals.add_argument("--page-size", type=int)
+    runtime_signals.add_argument("--cursor")
+    _add_budget(runtime_signals, 1200)
+
+    loot_rewards = subparsers.add_parser("loot-rewards")
+    loot_rewards.add_argument("--item-query", required=True)
+    loot_rewards.add_argument("--page-size", type=int)
+    loot_rewards.add_argument("--cursor")
+    _add_budget(loot_rewards, 1600)
     return parser.parse_args(argv)
 
 
@@ -142,6 +153,17 @@ def request_from_args(args: argparse.Namespace) -> dict[str, object]:
     elif args.operation == "gaps" and args.scope and not str(args.scope).startswith("graph:"):
         request["selector"] = {"ref": args.scope}
     if args.operation == "gaps":
+        if args.page_size is not None:
+            request["pageSize"] = args.page_size
+        if args.cursor:
+            request["cursor"] = args.cursor
+    if args.operation == "runtime-signals":
+        if args.page_size is not None:
+            request["pageSize"] = args.page_size
+        if args.cursor:
+            request["cursor"] = args.cursor
+    if args.operation == "loot-rewards":
+        request["itemQuery"] = args.item_query
         if args.page_size is not None:
             request["pageSize"] = args.page_size
         if args.cursor:

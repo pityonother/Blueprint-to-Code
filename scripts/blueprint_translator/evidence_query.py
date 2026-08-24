@@ -28,6 +28,8 @@ from .evidence_policy import (
     require_evidence,
 )
 from .evidence_values import default_parse_gap, project_default_value
+from .loot_rewards import discover_loot_rewards
+from .runtime_signals import discover_runtime_signals
 
 
 DEFAULT_BUDGET_TOKENS = 1000
@@ -259,6 +261,8 @@ class EvidenceQueryService:
             "neighborhood": self._neighborhood,
             "trace": self._trace,
             "gaps": self._gaps,
+            "loot-rewards": self._loot_rewards,
+            "runtime-signals": self._runtime_signals,
         }
         handler = handlers.get(operation)
         if handler is None:
@@ -1938,6 +1942,173 @@ class EvidenceQueryService:
                 return None
             return _cursor_encode(
                 {"v": 1, "revision": self.revision_id, "query": signature, "lastRef": items[position - 1]["ref"]}
+            )
+
+        self._bounded_items(
+            response,
+            page_items,
+            budget,
+            requested=len(items),
+            not_recovered=status_counts.get("NOT_RECOVERED", 0),
+            status_counts=status_counts,
+            cursor_factory=next_cursor,
+        )
+        return response
+
+    def _runtime_signals(
+        self,
+        request: Mapping[str, object],
+        budget: int,
+    ) -> dict[str, object]:
+        items = discover_runtime_signals(self._connection)
+        status_counts: dict[str, int] = {}
+        for item in items:
+            status = _status(item.get("status"), "NOT_RECOVERED")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        try:
+            page_size = min(int(request.get("pageSize", DEFAULT_PAGE_SIZE)), MAX_PAGE_SIZE)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("pageSize must be an integer") from exc
+        if page_size <= 0:
+            raise ValueError("pageSize must be positive")
+        signature = _query_hash("runtime-signals")
+        start = 0
+        cursor = request.get("cursor")
+        if cursor is not None:
+            payload = _cursor_decode(cursor)
+            if str(payload.get("revision")) != self.revision_id:
+                raise ValueError("STALE_CURSOR: cursor belongs to another asset revision")
+            if str(payload.get("query")) != signature:
+                raise ValueError(
+                    "CURSOR_QUERY_MISMATCH: cursor belongs to another runtime-signals query"
+                )
+            last_ref = str(payload.get("lastRef") or "")
+            positions = [
+                index
+                for index, item in enumerate(items)
+                if str(item.get("ref")) == last_ref
+            ]
+            if not positions:
+                raise ValueError(
+                    "INVALID_CURSOR: last runtime signal reference no longer exists"
+                )
+            start = positions[0] + 1
+        page_items = items[start : start + page_size]
+        response = self._base_response("runtime-signals", budget)
+
+        def next_cursor(returned: int) -> str | None:
+            position = start + returned
+            if returned <= 0 or position >= len(items):
+                return None
+            return _cursor_encode(
+                {
+                    "v": 1,
+                    "revision": self.revision_id,
+                    "query": signature,
+                    "lastRef": items[position - 1]["ref"],
+                }
+            )
+
+        self._bounded_items(
+            response,
+            page_items,
+            budget,
+            requested=len(items),
+            not_recovered=status_counts.get("NOT_RECOVERED", 0),
+            status_counts=status_counts,
+            cursor_factory=next_cursor,
+        )
+        return response
+
+    def _loot_rewards(
+        self,
+        request: Mapping[str, object],
+        budget: int,
+    ) -> dict[str, object]:
+        item_query = str(request.get("itemQuery") or "").strip()
+        if not item_query:
+            raise ValueError("itemQuery is required")
+        discovery = discover_loot_rewards(self._connection, item_query)
+        raw_items = discovery["items"]
+        assert isinstance(raw_items, list)
+        items = list(raw_items)
+        if int(discovery["defaultsAvailable"]) == 0:
+            asset_ref = f"bp://{self.asset_id}@{self.revision_id}/asset"
+            items.append(
+                {
+                    "ref": f"{asset_ref}/loot-reward/defaults-gap",
+                    "kind": "lootRewardGap",
+                    "status": "SOURCE_NOT_AVAILABLE",
+                    "reasonCode": "LOOT_DEFAULTS_NOT_AVAILABLE",
+                    "evidenceRefs": [asset_ref],
+                }
+            )
+        matching_entries = int(discovery["matchingEntries"])
+        unreadable_defaults = int(discovery["unreadableDefaults"])
+        if matching_entries:
+            match_status = "MATCHED"
+        elif int(discovery["defaultsAvailable"]) == 0:
+            match_status = "SOURCE_NOT_AVAILABLE"
+        elif unreadable_defaults:
+            match_status = "INCOMPLETE_DEFAULT_COVERAGE"
+        else:
+            match_status = "NOT_FOUND_IN_RECOVERED_DEFAULTS"
+        status_counts: dict[str, int] = {}
+        for item in items:
+            status = _status(item.get("status"), "NOT_RECOVERED")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        try:
+            page_size = min(int(request.get("pageSize", DEFAULT_PAGE_SIZE)), MAX_PAGE_SIZE)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("pageSize must be an integer") from exc
+        if page_size <= 0:
+            raise ValueError("pageSize must be positive")
+        signature = _query_hash("loot-rewards", itemQuery=item_query.casefold())
+        start = 0
+        cursor = request.get("cursor")
+        if cursor is not None:
+            payload = _cursor_decode(cursor)
+            if str(payload.get("revision")) != self.revision_id:
+                raise ValueError("STALE_CURSOR: cursor belongs to another asset revision")
+            if str(payload.get("query")) != signature:
+                raise ValueError(
+                    "CURSOR_QUERY_MISMATCH: cursor belongs to another loot-rewards query"
+                )
+            last_ref = str(payload.get("lastRef") or "")
+            positions = [
+                index
+                for index, item in enumerate(items)
+                if str(item.get("ref")) == last_ref
+            ]
+            if not positions:
+                raise ValueError(
+                    "INVALID_CURSOR: last loot reward reference no longer exists"
+                )
+            start = positions[0] + 1
+        page_items = items[start : start + page_size]
+        response = self._base_response("loot-rewards", budget)
+        response["match"] = {
+            "query": item_query,
+            "status": match_status,
+            "matchingEntries": matching_entries,
+            "defaultsAvailable": int(discovery["defaultsAvailable"]),
+            "searchedDefaults": int(discovery["searchedDefaults"]),
+            "unreadableDefaults": unreadable_defaults,
+            "searchedEntries": int(discovery["searchedEntries"]),
+            "scope": "CURRENT_ASSET_CLASS_DEFAULTS_ONLY",
+        }
+
+        def next_cursor(returned: int) -> str | None:
+            position = start + returned
+            if returned <= 0 or position >= len(items):
+                return None
+            return _cursor_encode(
+                {
+                    "v": 1,
+                    "revision": self.revision_id,
+                    "query": signature,
+                    "lastRef": items[position - 1]["ref"],
+                }
             )
 
         self._bounded_items(

@@ -1255,6 +1255,333 @@ class EvidenceQueryContractTests(unittest.TestCase):
         self.assertEqual(len(pin_refs), len(set(pin_refs)))
 
 
+class RuntimeSignalEvidenceQueryTests(unittest.TestCase):
+    def _open_service(
+        self,
+        nodes: list[dict[str, object]],
+        *,
+        links: list[dict[str, object]] | None = None,
+    ) -> EvidenceQueryService:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database_path = Path(temporary.name) / "runtime-signals.sqlite"
+        graph_payload = {
+            "metadata": {
+                "asset_name": "RuntimeSignalFixture",
+                "graph_name": "GiveKillExperience",
+                "graph_type": "Function",
+                "uasset_export_index": 8,
+                "uasset_read_status": "complete",
+                "confidence": "high",
+            },
+            "nodes": nodes,
+            "links": links or [],
+        }
+        payload = {
+            "asset_name": "RuntimeSignalFixture",
+            "asset_path": "/Game/Test/RuntimeSignalFixture.RuntimeSignalFixture",
+            "graphs": [
+                {
+                    "graph": "GiveKillExperience",
+                    "graph_type": "Function",
+                    "export_index": 8,
+                    "status": "complete",
+                    "confidence": "high",
+                    "payload": graph_payload,
+                }
+            ],
+        }
+        write_evidence_store_from_payload(
+            str(payload["asset_path"]),
+            None,
+            payload,
+            database_path,
+        )
+        service = EvidenceQueryService.open(database_path)
+        self.addCleanup(service.close)
+        return service
+
+    def test_runtime_signals_exposes_exact_unlinked_global_event_name(self):
+        service = self._open_service(
+            [
+                _node(
+                    14,
+                    "CallGlobalLevelEvent_0",
+                    "K2Node_CallFunction",
+                    function="CallGlobalLevelEvent",
+                    pins=[
+                        _pin(
+                            "38B7494A47883CA9D5F4E1988DC4875B",
+                            "EventName",
+                            "EGPD_Input",
+                            "name",
+                            default="Ice Queen is Killed",
+                        )
+                    ],
+                )
+            ]
+        )
+
+        result = service.query(
+            {"operation": "runtime-signals", "budgetTokens": 1200}
+        )
+
+        self.assertEqual(result["operation"], "runtime-signals")
+        self.assertEqual(len(result["items"]), 1)
+        signal = result["items"][0]
+        self.assertEqual(signal["kind"], "runtimeSignal")
+        self.assertEqual(signal["signalKind"], "global_level_event_emit")
+        self.assertEqual(signal["status"], "CONFIRMED")
+        self.assertEqual(signal["eventName"], "Ice Queen is Killed")
+        self.assertEqual(signal["valueSource"], "UNLINKED_PIN_DEFAULT")
+        self.assertEqual(signal["pinIdentityAuthority"], "EXACT")
+        self.assertEqual(
+            signal["evidenceRefs"],
+            [signal["nodeRef"], signal["valuePinRef"]],
+        )
+        self.assertEqual(result["coverage"]["byStatus"]["CONFIRMED"], 1)
+
+    def test_runtime_signals_does_not_upgrade_a_linked_event_pin_default(self):
+        producer = _node(
+            13,
+            "EventNameSource",
+            "K2Node_VariableGet",
+            variable="RuntimeEventName",
+            pins=[
+                _pin(
+                    "EVENT_NAME_OUTPUT",
+                    "RuntimeEventName",
+                    "EGPD_Output",
+                    "name",
+                )
+            ],
+        )
+        call = _node(
+            14,
+            "CallGlobalLevelEvent_0",
+            "K2Node_CallFunction",
+            function="CallGlobalLevelEvent",
+            pins=[
+                _pin(
+                    "EVENT_NAME_INPUT",
+                    "EventName",
+                    "EGPD_Input",
+                    "name",
+                    default="Stale Editor Default",
+                )
+            ],
+        )
+        link = _edge(
+            "EventNameSource",
+            "EVENT_NAME_OUTPUT",
+            "RuntimeEventName",
+            "CallGlobalLevelEvent_0",
+            "EVENT_NAME_INPUT",
+            "data",
+        )
+        producer["pins"][0]["links"] = [link]
+        service = self._open_service([producer, call], links=[link])
+
+        result = service.query(
+            {"operation": "runtime-signals", "budgetTokens": 1200}
+        )
+
+        self.assertEqual(len(result["items"]), 1)
+        gap = result["items"][0]
+        self.assertEqual(gap["kind"], "runtimeSignalGap")
+        self.assertEqual(gap["signalKind"], "global_level_event_emit")
+        self.assertEqual(gap["status"], "NOT_RECOVERED")
+        self.assertEqual(gap["reasonCode"], "DYNAMIC_EVENT_NAME_NOT_RESOLVED")
+        self.assertNotIn("eventName", gap)
+        self.assertEqual(result["coverage"]["notRecovered"], 1)
+
+    def test_runtime_signals_reports_missing_spawn_class_identity(self):
+        service = self._open_service(
+            [
+                _node(
+                    15,
+                    "K2Node_SpawnActorFromClass_16",
+                    "K2Node_SpawnActorFromClass",
+                    pins=[
+                        _pin(
+                            "MISPARSED_CLASS_PIN",
+                            "bHidden",
+                            "EGPD_Input",
+                            "class",
+                            default="Ragnarok_WP_C",
+                        )
+                    ],
+                )
+            ]
+        )
+
+        result = service.query(
+            {"operation": "runtime-signals", "budgetTokens": 1200}
+        )
+
+        self.assertEqual(len(result["items"]), 1)
+        gap = result["items"][0]
+        self.assertEqual(gap["kind"], "runtimeSignalGap")
+        self.assertEqual(gap["signalKind"], "spawn_actor")
+        self.assertEqual(gap["status"], "NOT_RECOVERED")
+        self.assertEqual(
+            gap["reasonCode"], "SPAWN_CLASS_PIN_IDENTITY_UNAVAILABLE"
+        )
+        self.assertEqual(result["coverage"]["notRecovered"], 1)
+
+
+class LootRewardEvidenceQueryTests(unittest.TestCase):
+    ITEM = (
+        "/Game/Genesis/Dinos/SpaceWhale/PrimalItemArmor_SpaceWhaleSaddle_Tek."
+        "PrimalItemArmor_SpaceWhaleSaddle_Tek_C"
+    )
+
+    def _open_service(self, class_default_value: object) -> EvidenceQueryService:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database_path = Path(temporary.name) / "loot-rewards.sqlite"
+        payload = {
+            "asset_name": "LootFixture",
+            "asset_path": "/Game/Test/LootFixture.LootFixture",
+            "graphs": [],
+            "class_defaults": {
+                "variables": {
+                    "ItemSets": {
+                        "value": class_default_value,
+                        "type": "ArrayProperty",
+                        "source": "uasset_cdo_property_tag",
+                        "confidence": "high",
+                    }
+                }
+            },
+        }
+        write_evidence_store_from_payload(
+            str(payload["asset_path"]),
+            None,
+            payload,
+            database_path,
+        )
+        service = EvidenceQueryService.open(database_path)
+        self.addCleanup(service.close)
+        return service
+
+    def test_loot_rewards_classifies_finished_item_without_calling_tek_an_unlock(self):
+        service = self._open_service(
+            [
+                {
+                    "ItemSetName": "Genesis Loot Crate Base",
+                    "SetWeight": 1.0,
+                    "ItemEntries": [
+                        {
+                            "ItemEntryName": "Epic",
+                            "Items": [self.ITEM],
+                            "EntryWeight": 1.0,
+                            "ChanceToActuallyGiveItem": 1.0,
+                            "ChanceToBeBlueprintOverride": 0.0,
+                            "bForceBlueprint": False,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        result = service.query(
+            {
+                "operation": "loot-rewards",
+                "itemQuery": "PrimalItemArmor_SpaceWhaleSaddle_Tek",
+                "budgetTokens": 1600,
+            }
+        )
+
+        self.assertEqual(result["operation"], "loot-rewards")
+        self.assertEqual(result["match"]["status"], "MATCHED")
+        self.assertEqual(len(result["items"]), 1)
+        reward = result["items"][0]
+        self.assertEqual(reward["kind"], "lootRewardEntry")
+        self.assertEqual(reward["status"], "CONFIRMED")
+        self.assertEqual(reward["itemClass"], self.ITEM)
+        self.assertEqual(reward["rewardType"], "PHYSICAL_ITEM_ONLY")
+        self.assertEqual(reward["finishedItemChanceConditional"], 1.0)
+        self.assertEqual(reward["physicalBlueprintChanceConditional"], 0.0)
+        self.assertEqual(reward["tekgramUnlock"]["status"], "NOT_EVIDENCED")
+        self.assertNotIn("overallDropChance", reward)
+        self.assertEqual(
+            reward["entrySelection"]["probabilityStatus"], "NOT_COMPUTED"
+        )
+
+    def test_loot_rewards_keeps_blueprint_chance_conditional_on_entry_selection(self):
+        service = self._open_service(
+            {
+                "ItemEntries": [
+                    {
+                        "ItemEntryName": "Missions - never BP - with quality",
+                        "Items": [self.ITEM],
+                        "EntryWeight": 1.0,
+                        "ChanceToActuallyGiveItem": 1.0,
+                        "ChanceToBeBlueprintOverride": 0.0,
+                        "bForceBlueprint": False,
+                    },
+                    {
+                        "ItemEntryName": "Missions - with BP - with quality",
+                        "Items": [self.ITEM],
+                        "EntryWeight": 0.033,
+                        "ChanceToActuallyGiveItem": 1.0,
+                        "ChanceToBeBlueprintOverride": 0.75,
+                        "bForceBlueprint": False,
+                    },
+                ]
+            }
+        )
+
+        result = service.query(
+            {
+                "operation": "loot-rewards",
+                "itemQuery": self.ITEM,
+                "budgetTokens": 2400,
+            }
+        )
+
+        self.assertEqual(len(result["items"]), 2)
+        blueprint_branch = next(
+            item
+            for item in result["items"]
+            if item["entryName"] == "Missions - with BP - with quality"
+        )
+        self.assertEqual(
+            blueprint_branch["rewardType"], "ITEM_OR_PHYSICAL_BLUEPRINT"
+        )
+        self.assertEqual(
+            blueprint_branch["physicalBlueprintChanceConditional"], 0.75
+        )
+        self.assertEqual(
+            blueprint_branch["probabilityScope"],
+            "CONDITIONAL_ON_ENTRY_SELECTION_AND_ITEM_GRANT",
+        )
+        self.assertEqual(blueprint_branch["entrySelection"]["weight"], 0.033)
+        self.assertNotIn("overallDropChance", blueprint_branch)
+
+    def test_loot_rewards_reports_a_scoped_negative_without_claiming_global_absence(self):
+        service = self._open_service(
+            [{"ItemEntries": [{"Items": ["/Game/Test/AnotherItem_C"]}]}]
+        )
+
+        result = service.query(
+            {
+                "operation": "loot-rewards",
+                "itemQuery": "SpaceWhaleSaddle",
+                "budgetTokens": 1200,
+            }
+        )
+
+        self.assertEqual(result["items"], [])
+        self.assertEqual(
+            result["match"]["status"], "NOT_FOUND_IN_RECOVERED_DEFAULTS"
+        )
+        self.assertEqual(result["match"]["searchedDefaults"], 1)
+        self.assertEqual(result["match"]["unreadableDefaults"], 0)
+        self.assertNotIn("globalAbsence", result["match"])
+
+
 class AssetFieldEvidenceQueryTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
