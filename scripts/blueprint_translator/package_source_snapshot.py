@@ -18,7 +18,7 @@ from .evidence_publication import (
 
 
 SOURCE_CHANGED_CODE = "EVIDENCE_SOURCE_CHANGED_DURING_CAPTURE"
-_COMPANION_SUFFIXES = (".uasset", ".uexp", ".ubulk")
+_COMPANION_SUFFIXES = (".uexp", ".ubulk")
 
 
 class EvidenceSourceChangedDuringCapture(RuntimeError):
@@ -129,12 +129,13 @@ def _hash_plain_file(path: Path) -> SourceFileObservation:
 
 def _observe_package(uasset_path: Path) -> tuple[SourceFileObservation, ...]:
     observations: list[SourceFileObservation] = []
-    for suffix in _COMPANION_SUFFIXES:
+    primary_suffix = ".umap" if uasset_path.suffix.casefold() == ".umap" else ".uasset"
+    for suffix in (primary_suffix, *_COMPANION_SUFFIXES):
         candidate = uasset_path.with_suffix(suffix)
         try:
             candidate.lstat()
         except FileNotFoundError:
-            if suffix == ".uasset":
+            if suffix == primary_suffix:
                 raise
             continue
         observations.append(_hash_plain_file(candidate))

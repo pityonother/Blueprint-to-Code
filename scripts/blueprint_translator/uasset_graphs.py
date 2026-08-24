@@ -525,15 +525,22 @@ def object_path_to_uasset_path(
         attempted.append(str(candidate))
         return candidate if candidate.is_file() else None
 
+    def try_package_candidate(candidate: Path) -> Path | None:
+        for package_candidate in (candidate, candidate.with_suffix(".umap")):
+            found = try_candidate(package_candidate)
+            if found:
+                return found
+        return None
+
     for mount, root in path_mappings(extra_roots):
         candidate = _path_under_mount(package_path, mount, root)
         if candidate:
-            found = try_candidate(candidate)
+            found = try_package_candidate(candidate)
             if found:
                 return found, attempted
     for root in content_roots(extra_roots):
         for candidate in _content_root_candidates(package_path, root):
-            found = try_candidate(candidate)
+            found = try_package_candidate(candidate)
             if found:
                 return found, attempted
     return None, attempted

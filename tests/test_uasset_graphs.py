@@ -791,6 +791,22 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(found, asset)
         self.assertIn(str(asset), attempted)
 
+    def test_object_path_falls_back_to_umap_for_world_package(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir) / "Content"
+            world = content_root / "Mods" / "Ragnarok" / "Ragnarok_WP.umap"
+            world.parent.mkdir(parents=True)
+            world.write_bytes(b"LevelScriptBlueprint\x00")
+
+            found, attempted = object_path_to_uasset_path(
+                "/Game/Mods/Ragnarok/Ragnarok_WP.Ragnarok_WP",
+                extra_roots=[content_root],
+            )
+
+        expected_uasset = world.with_suffix(".uasset")
+        self.assertEqual(found, world)
+        self.assertLess(attempted.index(str(expected_uasset)), attempted.index(str(world)))
+
     def test_epic_manifest_discovers_custom_akd_devkit_install(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)

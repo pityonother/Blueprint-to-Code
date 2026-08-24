@@ -83,6 +83,24 @@ def _payload(object_path: str, uasset_path: Path) -> dict[str, object]:
 
 
 class PackageSourceSnapshotTests(unittest.TestCase):
+    def test_snapshot_preserves_umap_as_the_primary_package_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "Ragnarok_WP.umap"
+            source.write_bytes(b"world-package")
+            source.with_suffix(".uexp").write_bytes(b"world-exports")
+
+            with snapshot_package_source(source) as snapshot:
+                self.assertEqual(snapshot.snapshot_uasset_path.suffix, ".umap")
+                self.assertEqual(
+                    {item.suffix for item in snapshot.observations},
+                    {".umap", ".uexp"},
+                )
+                self.assertEqual(
+                    snapshot.snapshot_uasset_path.read_bytes(),
+                    b"world-package",
+                )
+                snapshot.assert_original_unchanged()
+
     def test_snapshot_detects_content_or_companion_set_changes(self):
         for suffix in (".uasset", ".uexp", ".ubulk"):
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temporary:
