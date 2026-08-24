@@ -105,6 +105,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     loot_rewards.add_argument("--page-size", type=int)
     loot_rewards.add_argument("--cursor")
     _add_budget(loot_rewards, 1600)
+
+    runtime_routes = subparsers.add_parser("runtime-routes")
+    runtime_routes.add_argument("--event-name", required=True)
+    runtime_routes.add_argument("--page-size", type=int)
+    runtime_routes.add_argument("--cursor")
+    _add_budget(runtime_routes, 1800)
     return parser.parse_args(argv)
 
 
@@ -164,6 +170,12 @@ def request_from_args(args: argparse.Namespace) -> dict[str, object]:
             request["cursor"] = args.cursor
     if args.operation == "loot-rewards":
         request["itemQuery"] = args.item_query
+        if args.page_size is not None:
+            request["pageSize"] = args.page_size
+        if args.cursor:
+            request["cursor"] = args.cursor
+    if args.operation == "runtime-routes":
+        request["eventName"] = args.event_name
         if args.page_size is not None:
             request["pageSize"] = args.page_size
         if args.cursor:

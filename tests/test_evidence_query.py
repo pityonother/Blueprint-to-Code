@@ -34,6 +34,7 @@ def _pin(
     category: str,
     *,
     default: str = "",
+    default_object: str = "",
     persistent_guid: str = "",
     links: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
@@ -45,7 +46,7 @@ def _pin(
         "subcategory": "",
         "pin_type": {"PinCategory": category, "ContainerType": "None"},
         "default": default,
-        "default_object": "",
+        "default_object": default_object,
         "persistent_guid": persistent_guid,
         "linked_to_raw": "",
         "links": links or [],
@@ -1428,6 +1429,203 @@ class RuntimeSignalEvidenceQueryTests(unittest.TestCase):
             gap["reasonCode"], "SPAWN_CLASS_PIN_IDENTITY_UNAVAILABLE"
         )
         self.assertEqual(result["coverage"]["notRecovered"], 1)
+
+
+class RuntimeRouteEvidenceQueryTests(unittest.TestCase):
+    EVENT_NAME = "Ice Queen is Killed"
+    CRATE_CLASS = (
+        "/Game/Mods/Ragnarok/Loot/SupplyCrate_IceQueen."
+        "SupplyCrate_IceQueen_C"
+    )
+
+    def _open_service(
+        self,
+        nodes: list[dict[str, object]],
+    ) -> EvidenceQueryService:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database_path = Path(temporary.name) / "runtime-routes.sqlite"
+        payload = {
+            "asset_name": "RagnarokRouteFixture",
+            "asset_path": "/Game/Test/RagnarokRouteFixture.RagnarokRouteFixture",
+            "graphs": [
+                {
+                    "graph": "EventGraph",
+                    "graph_type": "EventGraph",
+                    "export_index": 12,
+                    "status": "complete",
+                    "confidence": "high",
+                    "payload": {
+                        "metadata": {
+                            "asset_name": "RagnarokRouteFixture",
+                            "graph_name": "EventGraph",
+                            "graph_type": "EventGraph",
+                            "uasset_export_index": 12,
+                            "uasset_read_status": "complete",
+                            "confidence": "high",
+                        },
+                        "nodes": nodes,
+                    },
+                }
+            ],
+        }
+        write_evidence_store_from_payload(
+            str(payload["asset_path"]),
+            None,
+            payload,
+            database_path,
+        )
+        service = EvidenceQueryService.open(database_path)
+        self.addCleanup(service.close)
+        return service
+
+    def _connected_route_nodes(self, *, exact_class_pin: bool = True):
+        event_to_spawn = {
+            "target_node": "K2Node_SpawnActorFromClass_0",
+            "target_pin_id": "SPAWN_EXECUTE",
+            "target_pin_id_authority": "EXACT",
+            "source": "uasset_exported_pin_linked_to",
+            "confidence": "high",
+            "resolution_status": "resolved_pin",
+            "kind": "exec",
+        }
+        event_node = _node(
+            20,
+            "K2Node_CustomEvent_0",
+            "K2Node_CustomEvent",
+            event=self.EVENT_NAME,
+            pins=[
+                _pin(
+                    "EVENT_THEN",
+                    "then",
+                    "EGPD_Output",
+                    "exec",
+                    links=[event_to_spawn],
+                )
+            ],
+        )
+        spawn_pins = [
+            _pin("SPAWN_EXECUTE", "execute", "EGPD_Input", "exec")
+        ]
+        if exact_class_pin:
+            spawn_pins.append(
+                _pin(
+                    "SPAWN_CLASS",
+                    "Class",
+                    "EGPD_Input",
+                    "class",
+                    default_object=self.CRATE_CLASS,
+                )
+            )
+        else:
+            spawn_pins.append(
+                _pin(
+                    "MISPARSED_CLASS",
+                    "bHidden",
+                    "EGPD_Input",
+                    "class",
+                    default_object="Ragnarok_WP_C",
+                )
+            )
+        spawn_node = _node(
+            21,
+            "K2Node_SpawnActorFromClass_0",
+            "K2Node_SpawnActorFromClass",
+            pins=spawn_pins,
+        )
+        return [event_node, spawn_node]
+
+    def test_runtime_routes_confirms_custom_event_to_spawn_over_exact_exec_edges(self):
+        service = self._open_service(self._connected_route_nodes())
+
+        result = service.query(
+            {
+                "operation": "runtime-routes",
+                "eventName": self.EVENT_NAME,
+                "budgetTokens": 2000,
+            }
+        )
+
+        self.assertEqual(result["operation"], "runtime-routes")
+        self.assertEqual(result["match"]["status"], "MATCHED")
+        self.assertEqual(result["match"]["receiverNodes"], 1)
+        self.assertEqual(result["match"]["confirmedReceiverNodes"], 1)
+        self.assertEqual(result["match"]["confirmedRoutes"], 1)
+        self.assertEqual(len(result["items"]), 1)
+        route = result["items"][0]
+        self.assertEqual(route["kind"], "runtimeRoute")
+        self.assertEqual(route["status"], "CONFIRMED")
+        self.assertEqual(route["routeKind"], "global_event_receiver_to_spawn")
+        self.assertEqual(route["eventName"], self.EVENT_NAME)
+        self.assertEqual(route["actorClass"], self.CRATE_CLASS)
+        self.assertEqual(route["pathAuthority"], "EXACT_NORMALIZED_EXEC_EDGES")
+        self.assertEqual(len(route["execPath"]["edgeRefs"]), 1)
+        self.assertEqual(
+            route["evidenceRefs"],
+            [
+                route["receiverNodeRef"],
+                *route["execPath"]["edgeRefs"],
+                route["spawnNodeRef"],
+                route["classPinRef"],
+            ],
+        )
+
+    def test_runtime_routes_keeps_spawn_class_identity_failure_as_a_gap(self):
+        service = self._open_service(
+            self._connected_route_nodes(exact_class_pin=False)
+        )
+
+        result = service.query(
+            {
+                "operation": "runtime-routes",
+                "eventName": self.EVENT_NAME,
+                "budgetTokens": 1600,
+            }
+        )
+
+        self.assertEqual(
+            result["match"]["status"], "RECEIVER_FOUND_ROUTE_INCOMPLETE"
+        )
+        self.assertEqual(len(result["items"]), 1)
+        gap = result["items"][0]
+        self.assertEqual(gap["kind"], "runtimeRouteGap")
+        self.assertEqual(gap["status"], "NOT_RECOVERED")
+        self.assertEqual(
+            gap["reasonCode"], "SPAWN_CLASS_PIN_IDENTITY_UNAVAILABLE"
+        )
+
+    def test_runtime_routes_reports_receiver_not_indexed_for_missing_custom_event(self):
+        service = self._open_service(
+            [
+                _node(
+                    20,
+                    "K2Node_CustomEvent_0",
+                    "K2Node_CustomEvent",
+                    event="Another Event",
+                )
+            ]
+        )
+
+        result = service.query(
+            {
+                "operation": "runtime-routes",
+                "eventName": self.EVENT_NAME,
+                "budgetTokens": 1200,
+            }
+        )
+
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(
+            result["items"][0]["reasonCode"],
+            "GLOBAL_EVENT_RECEIVER_NOT_INDEXED",
+        )
+        self.assertEqual(
+            result["match"]["status"], "GLOBAL_EVENT_RECEIVER_NOT_INDEXED"
+        )
+        self.assertEqual(result["match"]["receiverNodes"], 0)
+        self.assertEqual(result["match"]["confirmedReceiverNodes"], 0)
+        self.assertEqual(result["coverage"]["notRecovered"], 1)
+        self.assertNotIn("eventAbsentGlobally", result["match"])
 
 
 class LootRewardEvidenceQueryTests(unittest.TestCase):

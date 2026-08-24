@@ -29,6 +29,7 @@ from .evidence_policy import (
 )
 from .evidence_values import default_parse_gap, project_default_value
 from .loot_rewards import discover_loot_rewards
+from .runtime_routes import discover_runtime_routes
 from .runtime_signals import discover_runtime_signals
 
 
@@ -262,6 +263,7 @@ class EvidenceQueryService:
             "trace": self._trace,
             "gaps": self._gaps,
             "loot-rewards": self._loot_rewards,
+            "runtime-routes": self._runtime_routes,
             "runtime-signals": self._runtime_signals,
         }
         handler = handlers.get(operation)
@@ -2096,6 +2098,110 @@ class EvidenceQueryService:
             "unreadableDefaults": unreadable_defaults,
             "searchedEntries": int(discovery["searchedEntries"]),
             "scope": "CURRENT_ASSET_CLASS_DEFAULTS_ONLY",
+        }
+
+        def next_cursor(returned: int) -> str | None:
+            position = start + returned
+            if returned <= 0 or position >= len(items):
+                return None
+            return _cursor_encode(
+                {
+                    "v": 1,
+                    "revision": self.revision_id,
+                    "query": signature,
+                    "lastRef": items[position - 1]["ref"],
+                }
+            )
+
+        self._bounded_items(
+            response,
+            page_items,
+            budget,
+            requested=len(items),
+            not_recovered=status_counts.get("NOT_RECOVERED", 0),
+            status_counts=status_counts,
+            cursor_factory=next_cursor,
+        )
+        return response
+
+    def _runtime_routes(
+        self,
+        request: Mapping[str, object],
+        budget: int,
+    ) -> dict[str, object]:
+        event_name = str(request.get("eventName") or "").strip()
+        if not event_name:
+            raise ValueError("eventName is required")
+        discovery = discover_runtime_routes(self._connection, event_name)
+        raw_items = discovery["items"]
+        assert isinstance(raw_items, list)
+        items = list(raw_items)
+        confirmed_routes = int(discovery["confirmedRoutes"])
+        receiver_nodes = int(discovery["receiverNodes"])
+        confirmed_receiver_nodes = int(discovery["confirmedReceiverNodes"])
+        route_gaps = int(discovery["routeGaps"])
+        if confirmed_routes:
+            match_status = "MATCHED"
+        elif receiver_nodes:
+            match_status = "RECEIVER_FOUND_ROUTE_INCOMPLETE"
+        else:
+            match_status = "GLOBAL_EVENT_RECEIVER_NOT_INDEXED"
+            asset_ref = f"bp://{self.asset_id}@{self.revision_id}/asset"
+            items.append(
+                {
+                    "ref": f"{asset_ref}/runtime-route/receiver-gap",
+                    "kind": "runtimeRouteGap",
+                    "routeKind": "global_event_receiver_to_spawn",
+                    "status": "NOT_RECOVERED",
+                    "reasonCode": "GLOBAL_EVENT_RECEIVER_NOT_INDEXED",
+                    "eventName": event_name,
+                    "scopeRef": asset_ref,
+                    "evidenceRefs": [asset_ref],
+                }
+            )
+            route_gaps += 1
+        status_counts: dict[str, int] = {}
+        for item in items:
+            status = _status(item.get("status"), "NOT_RECOVERED")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        try:
+            page_size = min(int(request.get("pageSize", DEFAULT_PAGE_SIZE)), MAX_PAGE_SIZE)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("pageSize must be an integer") from exc
+        if page_size <= 0:
+            raise ValueError("pageSize must be positive")
+        signature = _query_hash("runtime-routes", eventName=event_name.casefold())
+        start = 0
+        cursor = request.get("cursor")
+        if cursor is not None:
+            payload = _cursor_decode(cursor)
+            if str(payload.get("revision")) != self.revision_id:
+                raise ValueError("STALE_CURSOR: cursor belongs to another asset revision")
+            if str(payload.get("query")) != signature:
+                raise ValueError(
+                    "CURSOR_QUERY_MISMATCH: cursor belongs to another runtime-routes query"
+                )
+            last_ref = str(payload.get("lastRef") or "")
+            positions = [
+                index
+                for index, item in enumerate(items)
+                if str(item.get("ref")) == last_ref
+            ]
+            if not positions:
+                raise ValueError(
+                    "INVALID_CURSOR: last runtime route reference no longer exists"
+                )
+            start = positions[0] + 1
+        page_items = items[start : start + page_size]
+        response = self._base_response("runtime-routes", budget)
+        response["match"] = {
+            "eventName": event_name,
+            "status": match_status,
+            "receiverNodes": receiver_nodes,
+            "confirmedReceiverNodes": confirmed_receiver_nodes,
+            "confirmedRoutes": confirmed_routes,
+            "routeGaps": route_gaps,
+            "scope": "CURRENT_ASSET_ONLY",
         }
 
         def next_cursor(returned: int) -> str | None:

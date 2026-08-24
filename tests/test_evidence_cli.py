@@ -365,6 +365,13 @@ class EvidenceCliTests(unittest.TestCase):
                 ("gaps", "--budget", 800),
                 ("runtime-signals", "--budget", 1200),
                 (
+                    "runtime-routes",
+                    "--event-name",
+                    "Ice Queen is Killed",
+                    "--budget",
+                    1200,
+                ),
+                (
                     "loot-rewards",
                     "--item-query",
                     "PrimalItemArmor_SpaceWhaleSaddle_Tek",

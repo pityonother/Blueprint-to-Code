@@ -204,7 +204,16 @@ runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captu
 runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SnowDragon_Character_BP" search --query "AttackDamage" --budget 800
 runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SnowDragon_Character_BP" neighborhood --id "bp://..." --hops 2 --budget 1500
 runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SnowDragon_Character_BP" gaps --budget 1000
+runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\Iceworm_Queen_Character_BP" runtime-signals --budget 1200
+runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\Ragnarok_WP" runtime-routes --event-name "Ice Queen is Killed" --budget 1800
+runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SupplyCrate_Base_Horde_Easy" loot-rewards --item-query "PrimalItemArmor_UmbraSaddle" --budget 1600
 ```
+
+跨资产的事件发射、地图接收、`SpawnActor` 与奖励默认值组合使用
+`scripts\query_runtime_loot_chain.py`。它会保留 `GLOBAL_EVENT_RECEIVER_NOT_INDEXED`、
+`SPAWN_CLASS_PIN_IDENTITY_UNAVAILABLE` 和 `REWARD_SOURCE_NOT_AVAILABLE` 等断点，
+不会把独立奖励池命中冒充完整地图掉落路线。合同见
+[运行时掉落链 P0](docs/RUNTIME_LOOT_CHAIN_P0_zh.md)。
 
 从当前、fresh、release-authority Evidence v3 生成不可变 Interpretation Contract v1：
 
