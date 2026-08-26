@@ -195,8 +195,8 @@ class NativeClassProbeTests(unittest.TestCase):
         with self.assertRaises(NativeClassProbeError) as raised:
             run_native_class_probe(
                 "/Game/Test/BP_Test.BP_Test",
-                devkit_root=Path("C:/missing"),
-                probe_script=Path("C:/missing/probe.py"),
+                devkit_root=Path("missing"),
+                probe_script=Path("missing/probe.py"),
                 process_runner=fake_run,
             )
 
