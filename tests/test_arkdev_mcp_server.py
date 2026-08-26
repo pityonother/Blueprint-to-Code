@@ -176,7 +176,7 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(editor.structured_content["connected"])
         self.assertEqual(
             editor.structured_content["reasonCode"],
-            "EDITOR_BRIDGE_NOT_INSTALLED",
+            "EDITOR_BRIDGE_STATE_NOT_FOUND",
         )
         self.assertEqual(
             assets.structured_content["schema"],
@@ -283,7 +283,11 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status.structured_content["capabilities"]["editorBridge"])
         self.assertEqual(
             status.structured_content["editorBridge"],
-            {"status": "CONNECTED", "reasonCode": ""},
+            {
+                "status": "CONNECTED",
+                "stateStatus": "CONNECTED",
+                "reasonCode": "",
+            },
         )
         self.assertFalse(editor_state.is_error)
         self.assertEqual(

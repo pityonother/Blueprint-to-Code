@@ -26,6 +26,9 @@ _UNREAL_OBJECT_PATH = re.compile(
     r"(?P<package>[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)*)\."
     r"(?P<object>[A-Za-z0-9_-]+)$"
 )
+_UNREAL_SUBOBJECT_NAME = re.compile(
+    r"^[A-Za-z0-9_-]+(?:[.:][A-Za-z0-9_-]+)*$"
+)
 _PUBLIC_UNREAL_MOUNTS = frozenset(
     {
         "asbexportgun",
@@ -40,14 +43,17 @@ _PUBLIC_UNREAL_MOUNTS = frozenset(
     }
 )
 _UNREAL_OBJECT_PATH_FIELDS = frozenset({"activeasset"})
+_UNREAL_SUBOBJECT_PATH_FIELDS = frozenset({"activegraph", "pathname"})
 
 
 def is_unreal_object_path_field(field_name: str) -> bool:
     """Return whether a public field is explicitly typed as an Object Path."""
 
     normalized = field_name.casefold()
-    return normalized in _UNREAL_OBJECT_PATH_FIELDS or normalized.endswith(
-        ("objectpath", "objectpaths")
+    return (
+        normalized in _UNREAL_OBJECT_PATH_FIELDS
+        or normalized in _UNREAL_SUBOBJECT_PATH_FIELDS
+        or normalized.endswith(("objectpath", "objectpaths"))
     )
 
 
@@ -56,6 +62,18 @@ def is_public_unreal_object_path(value: str, *, field_name: str) -> bool:
 
     if not is_unreal_object_path_field(field_name):
         return False
+    normalized_field = field_name.casefold()
+    if normalized_field in _UNREAL_SUBOBJECT_PATH_FIELDS:
+        object_path, separator, subobject = value.partition(":")
+        if (
+            not separator
+            or _UNREAL_SUBOBJECT_NAME.fullmatch(subobject) is None
+        ):
+            return False
+        return is_public_unreal_object_path(
+            object_path,
+            field_name="activeAsset",
+        )
     match = _UNREAL_OBJECT_PATH.fullmatch(value)
     if match is None or match.group("mount").casefold() not in _PUBLIC_UNREAL_MOUNTS:
         return False

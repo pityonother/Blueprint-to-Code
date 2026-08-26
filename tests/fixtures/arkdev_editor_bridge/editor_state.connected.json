@@ -1,0 +1,68 @@
+{
+  "schema": "blueprint-to-code.arkdev-editor-snapshot/v1",
+  "protocolVersion": "arkdev-editor-snapshot/v1",
+  "bridgeVersion": "blueprint-to-code-exporter/editor-bridge-v1",
+  "bridgeInstanceId": "11111111111111111111111111111111",
+  "sequence": 7,
+  "writtenAtUtc": "2026-01-01T00:00:00Z",
+  "engineVersion": "5.5.4-fixture",
+  "buildVersion": "fixture-build",
+  "connected": true,
+  "activityStatus": "ACTIVE_BLUEPRINT",
+  "graphStatus": "FOCUSED_GRAPH",
+  "capabilities": [
+    "READ_ACTIVE_ASSET",
+    "READ_ACTIVE_GRAPH",
+    "READ_GRAPH_POSITIONS",
+    "READ_DIRTY_STATE",
+    "READ_COMPILE_STATE"
+  ],
+  "activeBlueprint": {
+    "name": "InterpretationFixture",
+    "objectPath": "/Game/Test/InterpretationFixture.InterpretationFixture",
+    "dirty": true,
+    "compileStatus": "DIRTY"
+  },
+  "focusedGraph": {
+    "name": "EventGraph",
+    "pathName": "/Game/Test/InterpretationFixture.InterpretationFixture:EventGraph",
+    "schemaClass": "EdGraphSchema_K2",
+    "graphType": "EventGraph",
+    "nodeCount": 4,
+    "nodesTruncated": false,
+    "nodesOmitted": 0,
+    "nodes": [
+      {
+        "nodeGuid": "11111111111111111111111111111111",
+        "name": "EventEntry",
+        "className": "K2Node_Event",
+        "x": 0,
+        "y": 0
+      },
+      {
+        "nodeGuid": "22222222222222222222222222222222",
+        "name": "Sequence",
+        "className": "K2Node_ExecutionSequence",
+        "x": 100,
+        "y": 0
+      },
+      {
+        "nodeGuid": "33333333333333333333333333333333",
+        "name": "Branch",
+        "className": "K2Node_IfThenElse",
+        "x": 0,
+        "y": 100
+      },
+      {
+        "nodeGuid": "44444444444444444444444444444444",
+        "name": "MacroCall",
+        "className": "K2Node_MacroInstance",
+        "x": 100,
+        "y": 100
+      }
+    ]
+  },
+  "selectionStatus": "UNSUPPORTED_BY_DEVKIT_BUILD",
+  "selectedNodeGuids": [],
+  "reasonCode": ""
+}

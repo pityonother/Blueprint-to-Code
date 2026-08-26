@@ -25,6 +25,9 @@ INTEGRITY_ROLES: Final = frozenset({"source", "database", "manifest", "pointer"}
 ARKDEV_MCP_QUERY_TESTS: Final = (
     "tests/test_arkdev_mcp_blueprint_tools.py",
     "tests/test_arkdev_mcp_contracts.py",
+    "tests/test_arkdev_mcp_editor_binding.py",
+    "tests/test_arkdev_mcp_editor_bridge_file.py",
+    "tests/test_arkdev_mcp_editor_stdio.py",
     "tests/test_arkdev_mcp_patch_plan.py",
     "tests/test_arkdev_mcp_server.py",
     "tests/test_arkdev_mcp_stdio.py",
@@ -32,6 +35,7 @@ ARKDEV_MCP_QUERY_TESTS: Final = (
     "tests/test_arkdev_mcp_task_research.py",
     "tests/test_arkdev_mcp_task_stdio.py",
     "tests/test_arkdev_mcp_windows.py",
+    "tests/test_devkit_editor_bridge_source_contract.py",
 )
 
 

@@ -1,10 +1,12 @@
 # Deferred Follow-ups
 
-以下项目有意延期，不属于 Phase 2 / Phase 3B 范围：
+以下项目有意延期，不属于 Phase 2 / Phase 3B / Phase 3 read-only bridge 的已验证范围：
 
-- 持续的 ARK DevKit Editor Bridge、active/focused editor tracking 与启动脚本。Phase 3B 只探测官方 scripting surfaces，并允许一次显式目标、one-shot、read-only Graph Snapshot。
+- 当前 DevKit build 的稳定公开 selection API；现阶段明确返回 `UNSUPPORTED_BY_DEVKIT_BUILD`。
+- 用户侧真实 DevKit plugin compile 与 live runtime acceptance；fixture/source contract 不能代替。
+- 持续的 active/focused editor tracking 与自动启动脚本。Phase 3B 只探测官方 scripting surfaces，并允许一次显式目标、one-shot、read-only Graph Snapshot；source bridge 仍需上述真实编译与运行验收。
 - Patch Executor、Graph Diff 执行、compile/save、rollback receipt 与 runtime correctness 验证。
-- HTTP/SSE transport、OAuth、远程服务和 plugin packaging。
+- Named Pipe、socket、HTTP/SSE transport、OAuth、远程服务和 precompiled plugin packaging。
 - portable runtime 内置 MCP 依赖。
 - Computer Use、截图识别、视觉模板和蓝图施工图。
 - `blueprint_service.py` 拆分与 query planner 优化；Phase 2 有意只复用现有领域函数。
@@ -12,7 +14,7 @@
 - Editor Utility Blueprint/Widget fallback asset；2026-08-12 bounded ObjectIterator closure 为 `PARTIAL_NO_NODE_ENUMERATION`，下一阶段若继续，必须作为独立 capability spike 设计。本轮只反射 `BlueprintGraphEditor` / `BlueprintGraphPinLibrary`，不创建或运行 Utility asset。
 - 将 Phase 3B one-shot snapshot 接入现有 EditorBridge protocol；Phase 3B 的 2026-08-12 结果未达到该门。后续 Gate B 的 WC reflection 成功是独立路线，不追溯改变 Phase 3B 结论，也不扩展现有 MCP tool list。
 
-Phase 2 只证明 proposed-node 的声明、唯一 CREATE_NODE 与 operation dependency closure 完整；它不把该结构性检查扩张为 Unreal 类型、factory、compile、save 或 runtime correctness 声明。
+Phase 3 只证明 bounded snapshot、freshness、公开 Editor state 与 exact Evidence/Task binding；它不把 live match 扩张为 mutation approval、Unreal 类型、factory、compile、save 或 runtime correctness 声明。
 
 任何未来 mutation 工具必须使用新名称、独立审批和可验证 rollback，不能改变五个 Evidence 只读工具或六个本地 metadata 工具的语义。
 

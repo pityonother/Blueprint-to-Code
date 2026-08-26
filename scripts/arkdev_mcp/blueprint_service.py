@@ -477,14 +477,17 @@ class BlueprintService:
             )
         try:
             asset_name, asset_dir = self._asset_dir(asset)
-            evidence_state, interpretation = self._load_bound_state(asset_dir)
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
             if evidence_state.freshness_status != "FRESH":
                 raise McpExecutionError(
                     "EVIDENCE_STALE",
                     "Current Blueprint evidence is stale.",
                 )
             manifest_sha256 = str(evidence_state.manifest_sha256 or "")
-            with open_resolved_asset_repository(evidence_state) as repository:
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
                 self._require_current_ref(graph_ref, repository)
                 graph = next(
                     (
@@ -536,6 +539,7 @@ class BlueprintService:
                     evidence_state,
                     interpretation,
                     repository,
+                    decision,
                 )
                 asset_identity = dict(identity["asset"])
                 payload: dict[str, object] = {
@@ -559,6 +563,67 @@ class BlueprintService:
             # This non-MCP application service preserves builder-only fail-closed
             # codes without expanding the stable public MCP error enum.
             raise
+        except Exception as exc:
+            raise _error_from_exception(exc) from exc
+
+    def get_editor_binding_authority(
+        self,
+        *,
+        asset: str,
+        graph_name: str,
+    ) -> dict[str, object]:
+        """Return only exact current graph and NodeGuid binding candidates."""
+
+        if not graph_name or len(graph_name) > 256:
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "Focused graph identity is invalid.",
+            )
+        try:
+            asset_name, asset_dir = self._asset_dir(asset)
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
+                if evidence_state.freshness_status != "FRESH":
+                    raise McpExecutionError(
+                        "EVIDENCE_STALE",
+                        "Current Blueprint evidence is stale.",
+                    )
+                identity = self._identity(
+                    asset_name,
+                    evidence_state,
+                    interpretation,
+                    repository,
+                    decision,
+                )
+                graph_matches: list[dict[str, object]] = []
+                for item in repository.graph_summaries():
+                    if str(item.get("name") or "") != graph_name:
+                        continue
+                    graph_ref = str(item.get("ref") or "")
+                    graph_matches.append(
+                        {
+                            **self._graph_projection(item),
+                            "nodeGuidBindings": repository.node_guid_bindings(
+                                graph_ref
+                            ),
+                        }
+                    )
+                evidence = dict(identity["evidence"])
+                asset_identity = dict(identity["asset"])
+                payload: dict[str, object] = {
+                    "name": asset_identity["name"],
+                    "assetId": asset_identity["assetId"],
+                    "objectPath": asset_identity["objectPath"],
+                    "evidenceRevisionId": evidence["revisionId"],
+                    "evidenceManifestSha256": evidence["manifestSha256"],
+                    "freshness": evidence_state.freshness_status,
+                    "graphMatches": graph_matches,
+                }
+                assert_path_free(payload)
+                return payload
         except Exception as exc:
             raise _error_from_exception(exc) from exc
 

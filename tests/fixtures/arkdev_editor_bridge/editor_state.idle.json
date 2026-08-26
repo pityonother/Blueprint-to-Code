@@ -1,0 +1,25 @@
+{
+  "schema": "blueprint-to-code.arkdev-editor-snapshot/v1",
+  "protocolVersion": "arkdev-editor-snapshot/v1",
+  "bridgeVersion": "blueprint-to-code-exporter/editor-bridge-v1",
+  "bridgeInstanceId": "22222222222222222222222222222222",
+  "sequence": 3,
+  "writtenAtUtc": "2026-01-01T00:00:00Z",
+  "engineVersion": "5.5.4-fixture",
+  "buildVersion": "fixture-build",
+  "connected": true,
+  "activityStatus": "NO_OPEN_BLUEPRINT",
+  "graphStatus": "NO_ACTIVE_BLUEPRINT",
+  "capabilities": [
+    "READ_ACTIVE_ASSET",
+    "READ_ACTIVE_GRAPH",
+    "READ_GRAPH_POSITIONS",
+    "READ_DIRTY_STATE",
+    "READ_COMPILE_STATE"
+  ],
+  "activeBlueprint": null,
+  "focusedGraph": null,
+  "selectionStatus": "UNSUPPORTED_BY_DEVKIT_BUILD",
+  "selectedNodeGuids": [],
+  "reasonCode": ""
+}

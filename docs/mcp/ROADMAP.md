@@ -2,13 +2,13 @@
 
 本文件只记录后续方向，不授权或实现任何下一阶段能力。
 
-## Phase 2：Task Context + Patch Plan（当前）
+## Phase 2：Task Context + Patch Plan（完成）
 
 显式 task handle、resume、revision-bound bounded graph slice cache，以及 exact Node/Pin draft/validate/explicit-confirm Patch Plan。CONFIRMED 仍为本地 metadata，`executionReady=false`。
 
-## Phase 3：Read-only Editor Bridge
+## Phase 3：Read-only Editor Bridge（当前）
 
-从编辑器内部权威接口读取 active asset、active graph、selection、位置、dirty state、compile state 与 capability probe；不使用截图猜测。
+通过 `BlueprintToCodeExporter` 的 bounded atomic file snapshot，从公开 Editor API 读取 active asset、focused graph、NodeGuid/位置、dirty state、compile state 与 capability probe；MCP 以六秒 freshness gate 读取并 exact 绑定 Evidence/Task。selection 在当前 build 无稳定公开接口时显式降级；不使用截图猜测。
 
 ## Phase 4：人工批准的 Patch Executor
 
@@ -18,4 +18,4 @@
 
 视觉仅作为节点外观模板、Computer Use fallback 或人类展示，不取代编辑器内部权威状态。
 
-Phase 2 明确不包含 Phase 3 及之后内容，也不包含真实 DevKit plugin、Named Pipe、Graph mutation、HTTP/SSE/OAuth、远程服务或 portable runtime 内置 MCP。
+Phase 3 明确不包含 Phase 4 及之后内容，也不包含 Named Pipe、Graph mutation、HTTP/SSE/OAuth、远程服务或 portable runtime 内置 MCP。

@@ -21,6 +21,7 @@ public class BlueprintToCodeExporter : ModuleRules
                 "AssetRegistry",
                 "ContentBrowser",
                 "Json",
+                "Kismet",
                 "Projects",
                 "Slate",
                 "SlateCore",

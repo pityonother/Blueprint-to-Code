@@ -70,6 +70,7 @@ class StatusCapabilities(PublicOutput):
 
 class StatusEditorBridge(PublicOutput):
     status: str
+    stateStatus: str
     reasonCode: str
 
 
@@ -102,6 +103,18 @@ class EditorStateOutput(PublicOutput):
     compileStatus: str
     capabilities: list[str]
     reasonCode: str
+    stateStatus: str
+    snapshot: dict[str, Any]
+    activityStatus: str
+    graphStatus: str
+    selectionStatus: str
+    activeAssetDetails: dict[str, Any] | None
+    activeGraphDetails: dict[str, Any] | None
+    activeAssetBinding: dict[str, Any]
+    activeGraphBinding: dict[str, Any]
+    graphNodes: list[dict[str, Any]]
+    graphNodeSummary: dict[str, Any]
+    taskBinding: dict[str, Any]
 
 
 class AssetListOutput(PublicOutput):

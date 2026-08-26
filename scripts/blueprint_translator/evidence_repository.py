@@ -295,6 +295,33 @@ class EvidenceRepository:
             locators.append(locator)
         return locators
 
+    def node_guid_bindings(self, graph_ref: str) -> list[dict[str, str]]:
+        """Return exact persisted NodeGuid values for one current graph."""
+
+        rows = self._service._connection.execute(  # noqa: SLF001
+            "SELECT node_ref, extra_json FROM nodes "
+            "WHERE graph_ref = ? ORDER BY local_index, node_ref",
+            (graph_ref,),
+        ).fetchall()
+        bindings: list[dict[str, str]] = []
+        for row in rows:
+            try:
+                extra = json.loads(str(row["extra_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(extra, dict):
+                continue
+            node_guid = str(extra.get("node_guid") or "").strip()
+            if not node_guid:
+                continue
+            bindings.append(
+                {
+                    "nodeGuid": node_guid,
+                    "evidenceNodeRef": str(row["node_ref"]),
+                }
+            )
+        return bindings
+
     @staticmethod
     def _decode_value(row: Any) -> object:
         codec = str(row["value_codec"] or "json")
