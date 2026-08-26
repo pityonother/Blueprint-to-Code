@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blueprint-to-code.requirement-ir/v1",
+  "title": "Blueprint Requirement IR v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "solverId", "compilerVersion", "rawRequest", "language", "mode",
+    "subproblems", "globalConstraints", "blockingQuestions", "unassignedText", "semanticDigest"
+  ],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.requirement-ir/v1"},
+    "solverId": {"$ref": "#/$defs/solverId"},
+    "compilerVersion": {"type": "string", "minLength": 1, "maxLength": 32},
+    "rawRequest": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "language": {"type": "string", "minLength": 2, "maxLength": 32},
+    "mode": {"enum": ["ANSWER", "CHANGE", "MIXED"]},
+    "subproblems": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/problem"}},
+    "globalConstraints": {"type": "array", "maxItems": 64},
+    "blockingQuestions": {"type": "array", "maxItems": 32, "items": {"type": "object"}},
+    "unassignedText": {"type": "string", "maxLength": 8000},
+    "semanticDigest": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "solverId": {"type": "string", "pattern": "^solver://[0-9a-f]{32}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "problem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "problemId", "sourceStart", "sourceEnd", "sourceText", "intent", "outputKind",
+        "completeness", "targetHints", "constraints", "acceptanceCriteria",
+        "blockingQuestions", "status"
+      ],
+      "properties": {
+        "problemId": {"type": "string", "pattern": "^problem://[0-9a-f]{24}$"},
+        "sourceStart": {"type": "integer", "minimum": 0, "maximum": 8000},
+        "sourceEnd": {"type": "integer", "minimum": 1, "maximum": 8000},
+        "sourceText": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "intent": {"enum": ["ANSWER_CURRENT_BEHAVIOR", "DESIGN_BLUEPRINT_CHANGE"]},
+        "outputKind": {"enum": ["FORMULA", "COMPLETE_ENUMERATION", "INFLUENCE_FACTORS", "RANKING", "CURRENT_BEHAVIOR", "BLUEPRINT_CHANGE"]},
+        "completeness": {"enum": ["REQUIRED", "BEST_EFFORT"]},
+        "targetHints": {"type": "array", "maxItems": 8, "items": {"type": "object"}},
+        "constraints": {"type": "object"},
+        "acceptanceCriteria": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+        "blockingQuestions": {"type": "array", "maxItems": 20, "items": {"type": "object"}},
+        "status": {"enum": ["CREATED", "BLOCKED", "ACQUISITION_REQUIRED", "READY_FOR_TASK", "TASK_MATERIALIZED"]}
+      }
+    }
+  }
+}

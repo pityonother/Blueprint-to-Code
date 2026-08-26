@@ -1,0 +1,23 @@
+{
+  "proposal": {
+    "schema": "blueprint-to-code.requirement-proposal/v1",
+    "rawRequest": "等级输入如何影响档位与最终数量？",
+    "language": "zh-CN",
+    "subproblems": [{
+      "sourceStart": 0,
+      "sourceEnd": 16,
+      "sourceText": "等级输入如何影响档位与最终数量？",
+      "intent": "ANSWER_CURRENT_BEHAVIOR",
+      "outputKind": "FORMULA",
+      "completeness": "REQUIRED",
+      "targetHints": [{"text": "ShoulderDragon", "role": "PRIMARY_BLUEPRINT", "aliases": ["精灵龙"], "expectedKind": "Blueprint", "userSupplied": false}],
+      "constraints": {},
+      "acceptanceCriteria": ["给出档位与数量公式并包含边界示例"]
+    }]
+  },
+  "expected": {
+    "outputKinds": ["FORMULA"],
+    "operators": ["TRACE_VALUE_FORMULA", "EVALUATE_FORMULA_EXAMPLES"],
+    "evidenceKinds": ["GRAPH_STRUCTURE", "DEFAULTS"]
+  }
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 from mcp.server import MCPServer
 
 from .contracts import assert_path_free
+from .solver.contracts import MAX_RAW_REQUEST_CHARS
 
 
 def register_prompts(server: MCPServer) -> None:
@@ -54,6 +55,43 @@ def register_prompts(server: MCPServer) -> None:
 7. 获得明确批准后才以 exact semantic digest 调用 confirm，然后停止。
 
 不得使用 shell 或 Computer Use；不得修改 Evidence；不得执行蓝图、编译或保存；CONFIRMED 仍不是 ARK mutation 授权。"""
+
+    @server.prompt(
+        name="solve_ark_blueprint_requirement",
+        description="Compile a bounded ARK Blueprint requirement and orchestrate Evidence readiness.",
+    )
+    def solve_ark_blueprint_requirement(
+        rawRequest: str,  # noqa: N803
+        language: str = "zh-CN",
+    ) -> str:
+        if (
+            not 1 <= len(rawRequest) <= MAX_RAW_REQUEST_CHARS
+            or not 2 <= len(language) <= 32
+        ):
+            raise ValueError("Solver prompt input is outside the request bounds.")
+        # rawRequest is explicit caller text echoed into a private prompt. All
+        # model-authored Proposal fields remain subject to the strict path guard.
+        assert_path_free({"language": language})
+        return f"""处理以下 ARK Blueprint requirement（language={language}）：
+{rawRequest}
+
+The model is the semantic front-end.
+BTC is the deterministic compiler and orchestrator.
+Never invent an Evidence-ready state.
+
+严格按以下十步执行：
+1. 将用户原文拆成最多 8 个 bounded subproblems。
+2. 为每个 subproblem 保留与原文完全对应的 source spans。
+3. 提交 typed Proposal 并调用 blueprint_solver_create。
+4. 调用 blueprint_solver_preflight。
+5. 有 target 或语义歧义时，只询问一个最小问题，然后停止。
+6. Evidence 缺失时展示 acquisition actions，不执行 acquisition writes。
+7. 条件满足时调用 blueprint_solver_materialize_task 创建 existing Task。
+8. 不直接编造最终答案，也不得伪造 confirmed facts。
+9. 不得自动进入 Patch Plan confirm。
+10. 返回 solverId、当前状态和下一步后停止。
+
+不得使用 shell、网页搜索或 Computer Use；不得修改 Evidence 或 ARK DevKit。"""
 
 
 __all__ = ["register_prompts"]

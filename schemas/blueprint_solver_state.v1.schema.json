@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blueprint-to-code.solver-state/v1",
+  "title": "Blueprint Solver State v1",
+  "oneOf": [
+    {"$ref": "#/$defs/persistedState"},
+    {"$ref": "#/$defs/publicProjection"}
+  ],
+  "$defs": {
+    "solverId": {"type": "string", "pattern": "^solver://[0-9a-f]{32}$"},
+    "problemId": {"type": "string", "pattern": "^problem://[0-9a-f]{24}$"},
+    "taskId": {"type": "string", "pattern": "^task://[0-9a-f]{32}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {
+      "enum": [
+        "CREATED", "PREFLIGHT", "ACQUISITION_REQUIRED", "READY_FOR_TASKS",
+        "TASKS_MATERIALIZED", "BLOCKED"
+      ]
+    },
+    "persistedState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "solverId", "status", "problemStatuses", "materializedTaskIds",
+        "createdAt", "updatedAt", "semanticDigest"
+      ],
+      "properties": {
+        "schema": {"const": "blueprint-to-code.solver-state/v1"},
+        "solverId": {"$ref": "#/$defs/solverId"},
+        "status": {"$ref": "#/$defs/status"},
+        "problemStatuses": {
+          "type": "object", "maxProperties": 8,
+          "propertyNames": {"pattern": "^problem://[0-9a-f]{24}$"},
+          "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "materializedTaskIds": {
+          "type": "object", "maxProperties": 8,
+          "propertyNames": {"pattern": "^problem://[0-9a-f]{24}$"},
+          "additionalProperties": {"$ref": "#/$defs/taskId"}
+        },
+        "createdAt": {"type": "string", "minLength": 1, "maxLength": 64},
+        "updatedAt": {"type": "string", "minLength": 1, "maxLength": 64},
+        "semanticDigest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "publicProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "solverId", "status", "mode", "requirementSummary",
+        "problemSummaries", "coverageSummary", "acquisitionActions",
+        "blockingQuestions", "materializedTasks", "nextRecommendedAction",
+        "nextRecommendedTool", "estimatedTokens", "semanticDigest"
+      ],
+      "properties": {
+        "schema": {"const": "blueprint-to-code.solver-state/v1"},
+        "solverId": {"$ref": "#/$defs/solverId"},
+        "status": {"$ref": "#/$defs/status"},
+        "mode": {"enum": ["ANSWER", "CHANGE", "MIXED"]},
+        "requirementSummary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["total", "byStatus", "byKind"],
+          "properties": {
+            "total": {"type": "integer", "minimum": 0, "maximum": 64},
+            "byStatus": {"type": "object", "maxProperties": 6, "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 64}},
+            "byKind": {"type": "object", "maxProperties": 14, "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 64}}
+          }
+        },
+        "problemSummaries": {
+          "type": "array", "maxItems": 8,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["problemId", "intent", "outputKind", "status"],
+            "properties": {
+              "problemId": {"$ref": "#/$defs/problemId"},
+              "intent": {"enum": ["ANSWER_CURRENT_BEHAVIOR", "DESIGN_BLUEPRINT_CHANGE"]},
+              "outputKind": {"enum": ["FORMULA", "COMPLETE_ENUMERATION", "INFLUENCE_FACTORS", "RANKING", "CURRENT_BEHAVIOR", "BLUEPRINT_CHANGE"]},
+              "status": {"type": "string", "minLength": 1, "maxLength": 64}
+            }
+          }
+        },
+        "coverageSummary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ready", "unresolved", "candidateProblems"],
+          "properties": {
+            "ready": {"type": "integer", "minimum": 0, "maximum": 64},
+            "unresolved": {"type": "integer", "minimum": 0, "maximum": 64},
+            "candidateProblems": {"type": "integer", "minimum": 0, "maximum": 8}
+          }
+        },
+        "acquisitionActions": {
+          "type": "array", "maxItems": 16,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["actionId", "problemId", "actionKind", "sourceKind", "status", "requiresUserAction", "reason"],
+            "properties": {
+              "actionId": {"type": "string", "pattern": "^action://[0-9a-f]{24}$"},
+              "problemId": {"$ref": "#/$defs/problemId"},
+              "actionKind": {"type": "string", "minLength": 1, "maxLength": 64},
+              "sourceKind": {"type": "string", "maxLength": 64},
+              "status": {"type": "string", "minLength": 1, "maxLength": 64},
+              "requiresUserAction": {"type": "boolean"},
+              "reason": {"type": "string", "minLength": 1, "maxLength": 240}
+            }
+          }
+        },
+        "blockingQuestions": {"type": "array", "maxItems": 16, "items": {"type": "object", "maxProperties": 8}},
+        "materializedTasks": {
+          "type": "array", "maxItems": 8,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["problemId", "taskId"],
+            "properties": {
+              "problemId": {"$ref": "#/$defs/problemId"},
+              "taskId": {"$ref": "#/$defs/taskId"}
+            }
+          }
+        },
+        "nextRecommendedAction": {"type": "string", "minLength": 1, "maxLength": 128},
+        "nextRecommendedTool": {"type": "string", "minLength": 1, "maxLength": 128},
+        "estimatedTokens": {"type": "integer", "minimum": 0, "maximum": 1800},
+        "semanticDigest": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

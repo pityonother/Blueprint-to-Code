@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blueprint-to-code.research-plan/v1",
+  "title": "Blueprint Research Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "solverId", "compilerVersion", "operatorRegistryVersion", "subproblems", "operators", "semanticDigest"],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.research-plan/v1"},
+    "solverId": {"type": "string", "pattern": "^solver://[0-9a-f]{32}$"},
+    "compilerVersion": {"type": "string", "minLength": 1, "maxLength": 32},
+    "operatorRegistryVersion": {"type": "string", "minLength": 1, "maxLength": 64},
+    "subproblems": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/problemPlan"}},
+    "operators": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/operator"}},
+    "semanticDigest": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "operatorId": {"type": "string", "pattern": "^operator://[0-9a-f]{24}$"},
+    "problemPlan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["problemId", "operatorIds", "rootOperatorIds", "terminalOperatorIds", "completenessGateOperatorId"],
+      "properties": {
+        "problemId": {"type": "string"},
+        "operatorIds": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/operatorId"}},
+        "rootOperatorIds": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/operatorId"}},
+        "terminalOperatorIds": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/operatorId"}},
+        "completenessGateOperatorId": {"type": "string", "maxLength": 35}
+      }
+    },
+    "operator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["operatorId", "problemId", "kind", "status", "dependsOn", "inputs", "outputs", "budget", "requiredEvidenceIds", "stopCondition"],
+      "properties": {
+        "operatorId": {"$ref": "#/$defs/operatorId"},
+        "problemId": {"type": "string"},
+        "kind": {"type": "string", "pattern": "^[A-Z0-9_]+$"},
+        "status": {"enum": ["PENDING", "READY", "BLOCKED_BY_EVIDENCE", "BLOCKED_BY_USER", "MATERIALIZED_AS_TASK", "NOT_IMPLEMENTED"]},
+        "dependsOn": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/operatorId"}},
+        "inputs": {"type": "array", "maxItems": 16},
+        "outputs": {"type": "array", "maxItems": 16},
+        "budget": {"type": "object"},
+        "requiredEvidenceIds": {"type": "array", "maxItems": 32, "items": {"type": "string"}},
+        "stopCondition": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    }
+  }
+}

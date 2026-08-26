@@ -29,7 +29,9 @@ from arkdev_mcp.editor_bridge import (  # noqa: E402
 
 
 class ArkdevMcpContractTests(unittest.TestCase):
-    def test_tool_allowlist_preserves_phase_one_and_adds_exact_phase_two_surface(self) -> None:
+    def test_tool_allowlist_preserves_phase_one_and_adds_exact_phase_two_surface(
+        self,
+    ) -> None:
         self.assertEqual(
             TOOL_NAMES,
             (
@@ -44,6 +46,11 @@ class ArkdevMcpContractTests(unittest.TestCase):
                 "blueprint_patch_plan_draft",
                 "blueprint_patch_plan_validate",
                 "blueprint_patch_plan_confirm",
+                "blueprint_solver_create",
+                "blueprint_solver_resume",
+                "blueprint_solver_preflight",
+                "blueprint_solver_update",
+                "blueprint_solver_materialize_task",
             ),
         )
 
@@ -75,6 +82,16 @@ class ArkdevMcpContractTests(unittest.TestCase):
                     "PATCH_PLAN_NOT_CONFIRMABLE",
                     "PATCH_PLAN_DIGEST_MISMATCH",
                     "PLAN_CONFIRMATION_REQUIRED",
+                    "SOLVER_NOT_FOUND",
+                    "REQUIREMENT_PROPOSAL_INVALID",
+                    "REQUEST_TEXT_UNASSIGNED",
+                    "SOLVER_PHASE_INVALID",
+                    "SOLVER_UPDATE_INVALID",
+                    "TARGET_SELECTION_REQUIRED",
+                    "TARGET_CANDIDATE_NOT_FOUND",
+                    "EVIDENCE_ACQUISITION_REQUIRED",
+                    "TASK_NOT_APPLICABLE",
+                    "SOLVER_LIMIT_EXCEEDED",
                     "INTERNAL_CONTRACT_ERROR",
                 }
             ),
@@ -210,6 +227,44 @@ class ArkdevMcpContractTests(unittest.TestCase):
                     assert_path_free(private_value)
                 self.assertEqual(raised.exception.code, "INTERNAL_CONTRACT_ERROR")
                 self.assertNotIn("private", json.dumps(raised.exception.as_payload()))
+
+        for private_path in (
+            "C:" + separator + separator.join(("Users", "fixture", "evidence.sqlite")),
+            "/" + "home/fixture/evidence.sqlite",
+            "failure at /" + "tmp/fixture/evidence.sqlite",
+            "failure at /" + "tmp=secret",
+            "路径/" + "home/fixture/evidence.sqlite",
+            "路径/" + "custom/root/private.db",
+            "路径/" + "custom=secret",
+            "路径/" + "秘密/private.db",
+            "路径/" + ".cache/private.db",
+            "路径/秘密=token/private.db",
+            "路径/秘密=token>1/private.db",
+            "路径/秘密=K如果>1/private.db",
+            "路径/秘密=K如果>1.private",
+            "路径/秘密=K如果>1",
+            "工作目录/秘密文件=K如果>1",
+            "生物体重/死神体重=K如果>1",
+            "/生物体重/死神体重=K如果>1",
+            "生物体重/死神体重=K如果>1/etc/passwd",
+            "生物体重/死神体重=K如果>1\n/etc/passwd",
+            "/" + "var/tmp/fixture/evidence.sqlite",
+            "/" + "root/fixture/evidence.sqlite",
+            "/" + "mnt/c/workspace/evidence.sqlite",
+            "/" + "workspace/repository/evidence.sqlite",
+            "open file" + "://fixture/evidence.sqlite",
+            "share "
+            + separator * 2
+            + separator.join(("server", "fixture", "evidence.sqlite")),
+        ):
+            with self.subTest(private_path=private_path):
+                with self.assertRaises(McpExecutionError) as raised:
+                    assert_path_free({"nested": [private_path]})
+                self.assertEqual(raised.exception.code, "INTERNAL_CONTRACT_ERROR")
+                self.assertNotIn(
+                    private_path,
+                    json.dumps(raised.exception.as_payload(), ensure_ascii=False),
+                )
         with self.assertRaises(McpExecutionError):
             assert_path_free({"path": Path("private/evidence.sqlite")})
         with self.assertRaises(McpExecutionError):
