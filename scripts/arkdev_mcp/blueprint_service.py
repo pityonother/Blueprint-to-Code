@@ -439,6 +439,129 @@ class BlueprintService:
         except Exception as exc:
             raise _error_from_exception(exc) from exc
 
+    def get_node_binding_locators(
+        self,
+        *,
+        asset: str,
+        graph_ref: str,
+        node_refs: Sequence[str],
+    ) -> dict[str, object]:
+        """Project exact live-lookup locators from one current Evidence revision.
+
+        This is an application service for the repository-external request
+        builder, not an MCP tool.  It opens one immutable Evidence generation
+        and never returns its database or source paths.
+        """
+
+        if isinstance(node_refs, (str, bytes)):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "nodeRefs must be an array of exact Blueprint node references.",
+            )
+        requested = tuple(str(ref).strip() for ref in node_refs)
+        if (
+            not graph_ref.startswith("bp://")
+            or "/g/" not in graph_ref
+            or len(graph_ref) > 4096
+            or not 1 <= len(requested) <= 12
+            or any(not ref or len(ref) > 4096 for ref in requested)
+        ):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "One exact graphRef and between 1 and 12 nodeRefs are required.",
+            )
+        if len(requested) != len(set(requested)):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "nodeRefs must not contain duplicates.",
+            )
+        try:
+            asset_name, asset_dir = self._asset_dir(asset)
+            evidence_state, interpretation = self._load_bound_state(asset_dir)
+            if evidence_state.freshness_status != "FRESH":
+                raise McpExecutionError(
+                    "EVIDENCE_STALE",
+                    "Current Blueprint evidence is stale.",
+                )
+            manifest_sha256 = str(evidence_state.manifest_sha256 or "")
+            with open_resolved_asset_repository(evidence_state) as repository:
+                self._require_current_ref(graph_ref, repository)
+                graph = next(
+                    (
+                        item
+                        for item in repository.graph_summaries()
+                        if str(item.get("ref") or "") == graph_ref
+                    ),
+                    None,
+                )
+                if graph is None:
+                    raise McpExecutionError(
+                        "INVALID_ARGUMENT",
+                        "graphRef is not an exact graph in current Evidence.",
+                    )
+                for node_ref in requested:
+                    self._require_current_ref(node_ref, repository)
+                    if not node_ref.startswith(f"{graph_ref}/n/"):
+                        raise McpExecutionError(
+                            "INVALID_ARGUMENT",
+                            "Every nodeRef must belong to the exact target graph.",
+                        )
+                try:
+                    locators = repository.node_binding_locators(
+                        graph_ref=graph_ref,
+                        node_refs=requested,
+                    )
+                except KeyError as exc:
+                    raise McpExecutionError(
+                        "NODE_NOT_FOUND",
+                        "One or more exact Blueprint nodes were not found.",
+                    ) from exc
+                except ValueError as exc:
+                    if str(exc) == "NODE_GUID_NOT_AVAILABLE":
+                        raise ValueError("NODE_GUID_NOT_AVAILABLE") from exc
+                    raise
+                if any(not str(locator.get("nodeGuid") or "") for locator in locators):
+                    raise ValueError("NODE_GUID_NOT_AVAILABLE")
+                if (
+                    re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+                    or not evidence_state.release_authority
+                    or evidence_state.migration_required
+                ):
+                    raise McpExecutionError(
+                        "EVIDENCE_NOT_AUTHORITATIVE",
+                        "Current Blueprint evidence has no authoritative manifest binding.",
+                    )
+                identity = self._identity(
+                    asset_name,
+                    evidence_state,
+                    interpretation,
+                    repository,
+                )
+                asset_identity = dict(identity["asset"])
+                payload: dict[str, object] = {
+                    "asset": {
+                        "name": asset_identity["name"],
+                        "objectPath": asset_identity["objectPath"],
+                        "assetId": asset_identity["assetId"],
+                        "evidenceRevisionId": repository.revision_id,
+                        "evidenceManifestSha256": manifest_sha256,
+                        "freshnessStatus": evidence_state.freshness_status,
+                    },
+                    "graph": {
+                        "name": str(graph.get("name") or ""),
+                        "graphRef": graph_ref,
+                    },
+                    "nodes": locators,
+                }
+                assert_path_free(payload)
+                return payload
+        except ValueError:
+            # This non-MCP application service preserves builder-only fail-closed
+            # codes without expanding the stable public MCP error enum.
+            raise
+        except Exception as exc:
+            raise _error_from_exception(exc) from exc
+
     def get_context(
         self,
         *,

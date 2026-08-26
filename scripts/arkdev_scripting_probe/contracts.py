@@ -14,6 +14,8 @@ PROBE_SCHEMA = "blueprint-to-code.arkdev-scripting-probe/v1"
 PROBE_VERSION = "arkdev-official-scripting-probe/v2"
 REQUEST_SCHEMA = "blueprint-to-code.arkdev-scripting-probe-request/v1"
 SNAPSHOT_SCHEMA = "blueprint-to-code.arkdev-explicit-graph-snapshot/v1"
+NODE_BINDING_REQUEST_SCHEMA = "blueprint-to-code.arkdev-node-binding-request/v1"
+NODE_BINDING_RESULT_SCHEMA = "blueprint-to-code.arkdev-node-binding-result/v1"
 STATUS_VALUES = frozenset(
     {
         "AVAILABLE",
@@ -26,6 +28,9 @@ STATUS_VALUES = frozenset(
 VALIDATOR_VALUES = frozenset({"PASS", "UNAVAILABLE", "NOT_TESTED", "ERROR"})
 MAX_GRAPH_NODES = 200
 MAX_OBJECTS_SCANNED = 50_000
+MAX_NODE_BINDING_NODES = 12
+MAX_NODE_BINDING_PINS_PER_NODE = 64
+MAX_NODE_BINDING_PINS_TOTAL = 512
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)(?<![A-Za-z0-9_])[a-z]:[\\/]")
@@ -124,6 +129,11 @@ __all__ = [
     "INSTALLATION_SCHEMA",
     "MAX_GRAPH_NODES",
     "MAX_OBJECTS_SCANNED",
+    "MAX_NODE_BINDING_NODES",
+    "MAX_NODE_BINDING_PINS_PER_NODE",
+    "MAX_NODE_BINDING_PINS_TOTAL",
+    "NODE_BINDING_REQUEST_SCHEMA",
+    "NODE_BINDING_RESULT_SCHEMA",
     "PROBE_SCHEMA",
     "PROBE_VERSION",
     "REQUEST_SCHEMA",

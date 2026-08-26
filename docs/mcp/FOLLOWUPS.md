@@ -18,6 +18,10 @@ Phase 2 只证明 proposed-node 的声明、唯一 CREATE_NODE 与 operation dep
 
 PR #43 保留为需要匹配 C++ source-plugin build 环境的独立 Draft 路线。Phase 3B 不修改、合并、关闭或 retarget 它，也不复制其 C++ bridge 实现。
 
+## Phase 3C initial Evidence-guided spike (2026-08-12)
+
+初始 exact-node lookup spike 已实现合同与只读 probe，但当时检查的 312 个 indexed captures 都没有非空 node `NodeGuid`，v2 compatibility generation 也没有 public authority manifest SHA。因此该次 request builder 正确 fail closed，未安排 DevKit 人工运行；它没有用 UObject name、离线临时解析或全局 ObjectIterator 冒充 authority。随后独立生成的 v4 Cryopod Evidence 补齐了 Gate A 所需的 confirmed NodeGuid 与 current manifest binding，形成下述较新的 Gate A / Gate B 结果。
+
 ## Phase 3C Gate A / Gate B closure (2026-08-12)
 
 - Gate A is `PARTIAL`, not a full pass. The current v4 Cryopod Evidence contains 45 Graphs and exact NodeGuid for 1678/1678 nodes. In the scoped EventGraph, GraphGuid and all 8/8 node identities are exact.
