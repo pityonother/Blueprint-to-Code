@@ -312,7 +312,11 @@ def normalize_blueprint_object_path(raw_text: str) -> str:
             text = shorthand_match.group("path").strip()
     text = text.strip("\"'")
     lowered = text.lower()
-    if lowered.startswith("/game/"):
+    if lowered.startswith("/script/"):
+        text = "/Script/" + text[8:]
+    elif lowered.startswith("script/"):
+        text = "/Script/" + text[7:]
+    elif lowered.startswith("/game/"):
         text = "/Game/" + text[6:]
     elif lowered.startswith("game/"):
         text = "/Game/" + text[5:]
@@ -513,6 +517,10 @@ def object_path_to_uasset_path(
 ) -> tuple[Path | None, list[str]]:
     package_path = package_path_from_object_path(asset_path)
     if not package_path:
+        return None, []
+    # Native classes under /Script are reflection identities. They do not map
+    # to a Content package and must never be guessed as Script/*.uasset.
+    if package_path.casefold().startswith("/script/"):
         return None, []
     attempted: list[str] = []
     seen_attempts: set[str] = set()

@@ -23,6 +23,7 @@ CACHE_SCHEMA: Final = "blueprint-to-code.content-identity-cache.v1"
 RISK_ORDER: Final = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
 INTEGRITY_ROLES: Final = frozenset({"source", "database", "manifest", "pointer"})
 ARKDEV_MCP_QUERY_TESTS: Final = (
+    "tests/test_arkdev_native_class_probe.py",
     "tests/test_arkdev_mcp_blueprint_tools.py",
     "tests/test_arkdev_mcp_contracts.py",
     "tests/test_arkdev_mcp_editor_binding.py",

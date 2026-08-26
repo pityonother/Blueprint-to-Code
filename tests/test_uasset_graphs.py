@@ -974,6 +974,31 @@ class UAssetGraphCandidateTests(unittest.TestCase):
             "/Game/Mods/Kaminan_server/SkinBuff/SkinBuffHuman/MetalShield/BuffSkin_MetalShield.BuffSkin_MetalShield",
         )
 
+    def test_native_script_class_path_is_preserved_instead_of_rewritten_as_mod(self):
+        expected = "/Script/ShooterGame.ShooterCharacter"
+
+        self.assertEqual(normalize_blueprint_object_path(expected), expected)
+        self.assertEqual(
+            normalize_blueprint_object_path(
+                "Class'/Script/ShooterGame.ShooterCharacter'"
+            ),
+            expected,
+        )
+        self.assertEqual(
+            normalize_blueprint_object_path(
+                "/script/ShooterGame.ShooterCharacter"
+            ),
+            expected,
+        )
+
+    def test_native_script_class_path_never_resolves_to_uasset(self):
+        found, attempted = object_path_to_uasset_path(
+            "/Script/ShooterGame.ShooterCharacter"
+        )
+
+        self.assertIsNone(found)
+        self.assertEqual(attempted, [])
+
     def test_object_path_maps_to_external_mod_content(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             shooter_game = Path(temp_dir) / "ShooterGame"

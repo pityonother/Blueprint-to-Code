@@ -154,6 +154,39 @@ def wait_for_job(job_id: str, timeout_seconds: float = 5.0) -> dict[str, object]
 
 
 class ToolServerTests(unittest.TestCase):
+    def test_native_script_class_dispatches_to_reflection_without_uasset_lookup(self):
+        native_result = {
+            "schema": "blueprint-to-code.arkdev-native-class-result/v1",
+            "sourceKind": "native_class_reflection",
+            "assetPath": "/Script/ShooterGame.ShooterCharacter",
+            "classLoaded": True,
+            "classDefaultObjectRead": True,
+            "runtimeStateAvailable": False,
+            "runtimeStateReason": "CLASS_DEFAULT_OBJECT_ONLY",
+            "readOnly": True,
+            "properties": [],
+            "functions": [],
+        }
+        with (
+            patch.object(
+                tool_server,
+                "read_native_class_for_request",
+                return_value=native_result,
+            ) as native_reader,
+            patch.object(tool_server, "object_path_to_uasset_path") as resolver,
+            patch.object(tool_server, "write_devkit_request") as request_writer,
+        ):
+            result = read_uasset_graphs_for_request(
+                "/Script/ShooterGame.ShooterCharacter"
+            )
+
+        self.assertEqual(result, native_result)
+        native_reader.assert_called_once_with(
+            "/Script/ShooterGame.ShooterCharacter"
+        )
+        resolver.assert_not_called()
+        request_writer.assert_not_called()
+
     def test_missing_asset_keeps_discovered_partner_path_in_visible_attempts(self):
         attempted_path = str(
             Path(r"E:\AKD\ARKDevkit\Projects\ShooterGame\Content")
@@ -226,6 +259,19 @@ class ToolServerTests(unittest.TestCase):
         self.assertIn("artifactMode: DEFAULT_ARTIFACT_MODE", workspace_source)
         self.assertIn("if (payload.graphReportPath)", workspace_source)
         self.assertIn("历史/按需报告", workflow_source)
+
+    def test_frontend_exposes_native_class_reflection_and_runtime_boundary(self):
+        workspace_source = (
+            ROOT / "src" / "control-center" / "workspace.ts"
+        ).read_text(encoding="utf-8")
+        workflow_source = (
+            ROOT / "src" / "control-center" / "views" / "workflow.ts"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("/Script/ShooterGame.ShooterCharacter", workflow_source)
+        self.assertIn("sourceKind === 'native_class_reflection'", workspace_source)
+        self.assertIn("不是在线玩家实时值", workspace_source)
+        self.assertIn("类默认对象", workflow_source)
 
     def test_backend_omitted_mode_uses_indexed_and_skips_legacy_analyzer(self):
         fake_paths = {
