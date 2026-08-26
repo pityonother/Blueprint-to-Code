@@ -29,6 +29,11 @@ HISTORICAL_REPORTS = {
     "reports/FEROX_FORCE_FLEE_MECHANISM_2026-07-26.md",
     "reports/TIDES_OF_FORTUNE_COMPLETE_NATIVE_2026-07-26.md",
 }
+INTEGRATED_DIAGNOSTIC_REPORTS = {
+    "reports/Araneo蜘蛛专属属性收益报告.md",
+    "reports/野生巢穴蛋等级与高等级个体保留报告.md",
+    "reports/鹦鹉专属报告.md",
+}
 
 
 def _copy_reports(destination: Path) -> None:
@@ -66,10 +71,10 @@ class ReportRegistryTests(unittest.TestCase):
         self.assertTrue(result["ok"], result["issues"])
         self.assertEqual(result["gate"]["activeFormalErrors"], 0)
         self.assertTrue(result["gate"]["passed"])
-        self.assertEqual(result["summary"]["reports"], 9)
+        self.assertEqual(result["summary"]["reports"], 12)
         self.assertEqual(result["summary"]["activeFormalReports"], 0)
         self.assertEqual(result["summary"]["historicalReports"], 3)
-        self.assertEqual(result["summary"]["diagnosticReports"], 6)
+        self.assertEqual(result["summary"]["diagnosticReports"], 9)
         self.assertEqual(result["summary"]["historicalErrors"], 3)
         self.assertEqual(result["summary"]["historicalWarnings"], 3)
         self.assertEqual(result["summary"]["activeErrors"], 0)
@@ -108,7 +113,10 @@ class ReportRegistryTests(unittest.TestCase):
             by_status[HISTORICAL_PROVENANCE_INCOMPLETE],
             HISTORICAL_REPORTS,
         )
-        self.assertEqual(len(by_status[DIAGNOSTIC]), 6)
+        self.assertEqual(len(by_status[DIAGNOSTIC]), 9)
+        self.assertTrue(
+            INTEGRATED_DIAGNOSTIC_REPORTS.issubset(by_status[DIAGNOSTIC])
+        )
 
     def test_unregistered_report_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

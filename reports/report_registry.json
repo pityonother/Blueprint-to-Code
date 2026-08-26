@@ -11,6 +11,11 @@
       "reason": "Reference analysis retained for diagnostic use; it is not an active formal release claim set."
     },
     {
+      "reportPath": "reports/Araneo蜘蛛专属属性收益报告.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Mechanics research retained as diagnostic reference; it is not an active formal release claim set."
+    },
+    {
       "reportPath": "reports/ARK_PLAYER_VISIBLE_REWARD_MODEL_DEEP_DIVE_2026-07-26.md",
       "status": "HISTORICAL_PROVENANCE_INCOMPLETE",
       "claimManifest": "reports/manifests/ark-player-visible-reward-model-2026-07-26.claims.json",
@@ -52,6 +57,16 @@
       "reportPath": "reports/tides_of_fortune_loot_flow_player_guide_2026-07-25.md",
       "status": "DIAGNOSTIC",
       "reason": "Reference analysis retained for diagnostic use; it is not an active formal release claim set."
+    },
+    {
+      "reportPath": "reports/野生巢穴蛋等级与高等级个体保留报告.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Mechanics research retained as diagnostic reference; it is not an active formal release claim set."
+    },
+    {
+      "reportPath": "reports/鹦鹉专属报告.md",
+      "status": "DIAGNOSTIC",
+      "reason": "Mechanics research retained as diagnostic reference; it is not an active formal release claim set."
     }
   ]
 }
