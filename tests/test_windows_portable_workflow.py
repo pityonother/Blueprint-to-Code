@@ -22,12 +22,12 @@ WORKFLOW = ROOT / ".github" / "workflows" / "windows-portable.yml"
 
 
 def _write_fixture_archive(path: Path, *, tamper_version: bool = False) -> None:
-    version = b"0.3.1\n"
+    version = b"0.3.2\n"
     manifest = (
         json.dumps(
             {
                 "schema": "blueprint-to-code.windows-portable-package.v1",
-                "version": "0.3.1",
+                "version": "0.3.2",
                 "packageType": "windows-portable-user-release",
                 "platform": "windows",
                 "architecture": "x64",
@@ -49,7 +49,7 @@ def _write_fixture_archive(path: Path, *, tamper_version: bool = False) -> None:
         archive.writestr("BlueprintToCode/SHA256SUMS.txt", sums)
         archive.writestr(
             "BlueprintToCode/VERSION",
-            b"0.3.2\n" if tamper_version else version,
+            b"0.3.1\n" if tamper_version else version,
         )
 
 
@@ -65,7 +65,7 @@ class WindowsPortableWorkflowTests(unittest.TestCase):
 
             result = verify_zip_integrity(archive_path)
 
-        self.assertEqual(result["version"], "0.3.1")
+        self.assertEqual(result["version"], "0.3.2")
         self.assertEqual(result["entryCount"], 3)
         self.assertRegex(str(result["sha256"]), r"^[0-9a-f]{64}$")
 
@@ -88,8 +88,10 @@ class WindowsPortableWorkflowTests(unittest.TestCase):
             "npm ci",
             "npm run package:windows",
             "scripts/smoke_test_windows_portable.py",
-            "BlueprintToCode-v0.3.1-windows-x64-portable.zip",
-            "BlueprintToCode-v0.3.1-windows-x64-portable.zip.sha256",
+            "id: package_version",
+            "steps.package_version.outputs.version",
+            "BlueprintToCode-v${{ steps.package_version.outputs.version }}-windows-x64-portable.zip",
+            "BlueprintToCode-v${{ steps.package_version.outputs.version }}-windows-x64-portable.zip.sha256",
             "actions/upload-artifact@v4",
         ):
             with self.subTest(marker=marker):

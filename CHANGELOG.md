@@ -6,6 +6,45 @@ match it.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-26
+
+### Native ARK class inspection
+
+- Added a bounded, read-only `/Script` reflection route for
+  `ShooterCharacter`, including `bIsCrouched` / `is_crouched`, inherited
+  owner identity, and the exposed crouch functions.
+- Kept the runtime boundary explicit: class-default-object results report
+  `runtimeStateAvailable=false` and never claim to monitor a live player.
+- Prevented `/Script` identities from being rewritten or searched as
+  `.uasset` paths, and added a dedicated Control Center result view.
+
+### Evidence and research workflow
+
+- Added reviewed authoritative Evidence cohorts, source-generation and
+  freshness gates, exact pin link identity, bounded deep graph projections,
+  exact class defaults, and runtime loot routes.
+- Added the privacy-safe requirement solver that compiles ARK questions into
+  evidence-backed research plans.
+- Added ARK registry taxonomy/unknown-cluster sampling, bounded native recipes,
+  category navigation, and risk-aware validation receipts.
+
+### Preview and shadow capabilities
+
+- Preserved the read-only ARK DevKit Editor Bridge and evidence-guided node
+  binding as source-contract previews; no local C++ plugin build or live editor
+  acceptance is claimed for the bridge.
+- Integrated additive Knowledge Base rebuild and shadow publication backends
+  while keeping `mode=shadow`, `defaultQuerySource=legacy`, and
+  `cutoverEligible=false`.
+
+### Distribution
+
+- Published the combined feature set as the v0.3.2 Windows x64 portable
+  package, while preserving the existing data-minimal exclusions and bundled
+  Python supply-chain checks.
+- Made the Windows packaging workflow derive artifact names from `VERSION`
+  instead of hard-coding the previous release number.
+
 ## [0.3.1] - 2026-08-04
 
 ### Distribution
