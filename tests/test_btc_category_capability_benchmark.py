@@ -926,7 +926,7 @@ class BtcCategoryCapabilityBenchmarkTests(unittest.TestCase):
         self.assertEqual(row["result"]["benchmarkClosureStatus"], "PARTIAL")
 
     def test_public_profile_omits_local_asset_directory_and_fails_closed(self):
-        local_path = "C:" + r"\Users\learner\private\capture"
+        local_path = "C:" + "\\" + "Users\\learner\\private\\capture"
 
         public = benchmark._public_profile(
             {
