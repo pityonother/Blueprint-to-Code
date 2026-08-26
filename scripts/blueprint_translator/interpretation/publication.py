@@ -20,6 +20,7 @@ from ..evidence_repository import (
     ResolvedEvidenceState,
     _read_bound_file_bytes,
     evidence_manifest_payload,
+    is_release_ready_evidence,
     resolve_asset_evidence_state,
 )
 from .contracts import (
@@ -59,21 +60,20 @@ def _evidence_identity(state: ResolvedEvidenceState) -> tuple[object, ...]:
 
 
 def _require_publishable_evidence(state: ResolvedEvidenceState) -> None:
-    if (
-        state.source_kind != "INDEXED_V3_CURRENT"
-        or not state.release_authority
-        or state.migration_required
-        or not state.manifest_sha256
-        or not state.pointer_sha256
-    ):
-        raise InterpretationPublicationError(
-            "EVIDENCE_NOT_AUTHORITATIVE",
-            "Interpretation publication requires authoritative current v3 Evidence.",
-        )
     if state.freshness_status == "STALE":
         raise InterpretationPublicationError(
             "EVIDENCE_STALE",
             "Stale Evidence can never advance Interpretation current.",
+        )
+    if state.freshness_status == "SOURCE_UNAVAILABLE":
+        raise InterpretationPublicationError(
+            "EVIDENCE_SOURCE_UNAVAILABLE",
+            "Evidence whose source cannot be revalidated cannot advance Interpretation current.",
+        )
+    if not is_release_ready_evidence(state):
+        raise InterpretationPublicationError(
+            "EVIDENCE_NOT_AUTHORITATIVE",
+            "Interpretation publication requires FRESH authoritative current v3 Evidence.",
         )
 
 
@@ -271,6 +271,7 @@ def publish_interpretation(
     asset_dir: str | Path,
     *,
     budget: int = 20_000,
+    bounded_selection: bool = False,
     fail_on_gap: bool = False,
     allow_stale: bool = False,
     allow_legacy_fallback: bool = False,
@@ -284,6 +285,7 @@ def publish_interpretation(
     build = build_interpretation(
         root,
         budget=budget,
+        bounded_selection=bounded_selection,
         allow_stale=allow_stale,
         allow_legacy_fallback=allow_legacy_fallback,
     )
@@ -570,8 +572,13 @@ def inspect_interpretation_health(asset_dir: str | Path) -> dict[str, Any]:
         if state.freshness_status == "STALE":
             result["status"] = "STALE"
             return result
-        if state.migration_required or not state.release_authority:
+        if state.freshness_status == "SOURCE_UNAVAILABLE":
+            result["status"] = "SOURCE_UNAVAILABLE"
+            result["reasonCode"] = "BLUEPRINT_EVIDENCE_SOURCE_UNAVAILABLE"
+            return result
+        if not is_release_ready_evidence(state):
             result["status"] = "MIGRATION_REQUIRED"
+            result["reasonCode"] = "BLUEPRINT_EVIDENCE_NOT_AUTHORITATIVE"
             return result
         loaded = load_current_interpretation(root)
         result["status"] = "READY"

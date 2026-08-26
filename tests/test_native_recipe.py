@@ -501,6 +501,64 @@ class NativeRecipeTests(unittest.TestCase):
                         )
                     )
 
+    def test_btc_category_recipe_keeps_exact_bounded_native_helpers(self):
+        recipe = load_native_recipe(
+            ROOT
+            / "scripts"
+            / "native_analysis"
+            / "recipes"
+            / "ark-btc-category-native.v1.json",
+            formal=True,
+        )["recipe"]
+        selectors = {
+            target["id"]: target["selector"] for target in recipe["targets"]
+        }
+
+        self.assertEqual(len(recipe["targets"]), 44)
+        self.assertEqual(
+            selectors["structure-build-restriction-actor-filter"],
+            {"rva": "0x14DC8F0"},
+        )
+        self.assertEqual(
+            selectors["structure-point-actor-filter"],
+            {"rva": "0x14DCB40"},
+        )
+        self.assertEqual(
+            selectors["structure-allowed-actor-filter"],
+            {"rva": "0x14DD270"},
+        )
+        self.assertEqual(
+            selectors["structure-within-actor-filter"],
+            {"rva": "0x14DD7C0"},
+        )
+        self.assertEqual(
+            selectors["nav-active-tiles-parallel-body"],
+            {"rva": "0x14F4D50"},
+        )
+        self.assertEqual(
+            selectors["nav-active-tiles-serial-body"],
+            {"rva": "0x14F6500"},
+        )
+        self.assertEqual(
+            selectors["nav-active-tiles-parallel-step-1"],
+            {"rva": "0x14F4720"},
+        )
+        self.assertEqual(
+            selectors["nav-active-tiles-parallel-step-2"],
+            {"rva": "0x14F61E0"},
+        )
+        self.assertEqual(
+            selectors["nav-active-tiles-parallel-step-3"],
+            {"rva": "0x14F7D70"},
+        )
+        self.assertTrue(
+            all(
+                target["exports"]["callersDepth"] == 0
+                and target["exports"]["calleesDepth"] == 0
+                for target in recipe["targets"]
+            )
+        )
+
     def test_wrapper_replays_every_formal_selector_against_candidates(self):
         cases = (
             (

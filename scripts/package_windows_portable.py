@@ -53,6 +53,7 @@ PORTABLE_REQUIRED_FILES = frozenset(
         "VERSION",
         "dist/index.html",
         "docs/USER_GUIDE_zh.md",
+        "docs/releases/v0.3.2.md",
         "runtime/PYTHON_RUNTIME_SOURCE.txt",
         "runtime/python/LICENSE.txt",
         "runtime/python/python.exe",
@@ -78,6 +79,7 @@ _DOC_FILES = {
     "docs/LICENSE_POLICY.md",
     "docs/USER_GUIDE_zh.md",
     "docs/releases/v0.3.1.md",
+    "docs/releases/v0.3.2.md",
 }
 _SOURCE_PREFIXES = (
     "devkit_plugins/",

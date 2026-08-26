@@ -15,7 +15,12 @@ import {
   blueprintTabId,
   isBlueprintPrimaryTab,
 } from './routing';
-import { createBlueprintWorkspaceState, type BlueprintWorkspaceState } from './state';
+import {
+  createBlueprintWorkspaceState,
+  isBlueprintReadyHealth,
+  type BlueprintWorkspaceState,
+} from './state';
+export { isBlueprintReadyHealth } from './state';
 import type {
   BlueprintEvidenceHealthResponse,
   BlueprintEvidenceOperation,
@@ -96,7 +101,7 @@ export function blueprintIdentityMatchesHealth(
   if (
     !healthResponse
     || healthResponse.asset !== selectedAsset
-    || health?.status !== 'READY'
+    || !isBlueprintReadyHealth(health)
     || expectedAsset?.name !== selectedAsset
     || identity.asset.name !== selectedAsset
     || !complete(expectedAsset.assetId)
@@ -144,9 +149,12 @@ export function blueprintEvidenceQueryMatchesHealth(
   response: BlueprintEvidenceQueryResponse,
 ): boolean {
   const evidence = healthResponse?.health.evidence;
-  return healthResponse?.health.status === 'READY'
+  return isBlueprintReadyHealth(healthResponse?.health)
     && complete(evidence?.manifestSha256)
     && complete(evidence.pointerSha256)
+    && response.freshnessStatus === 'FRESH'
+    && response.releaseAuthority === true
+    && response.migrationRequired === false
     && response.manifestSha256 === evidence.manifestSha256
     && response.pointerSha256 === evidence.pointerSha256;
 }
@@ -182,6 +190,7 @@ export class BlueprintController {
     private readonly notify: () => void,
     private readonly onAssetSelected: (asset: string) => void = () => {},
     private readonly client: BlueprintApiClient = DEFAULT_API_CLIENT,
+    private readonly onCompatibilityRequested: () => void = () => {},
   ) {}
 
   /** Read-only snapshot used by contract tests and embedding shells. */
@@ -286,6 +295,7 @@ export class BlueprintController {
     this.clearAssetPayload();
     this.state.assets = [];
     this.state.assetsPage = null;
+    this.state.assetsSummary = null;
     this.state.loading = true;
     this.state.error = '';
     this.state.staleCode = '';
@@ -295,6 +305,7 @@ export class BlueprintController {
       if (generation !== this.generation) return;
       this.state.assets = response.items;
       this.state.assetsPage = response.page;
+      this.state.assetsSummary = response.summary;
       const selected = response.items.some((item) => item.asset === preferredAsset)
         ? preferredAsset
         : response.items[0]?.asset || '';
@@ -337,6 +348,7 @@ export class BlueprintController {
       const known = new Set(this.state.assets.map((item) => item.asset));
       this.state.assets.push(...response.items.filter((item) => !known.has(item.asset)));
       this.state.assetsPage = mergedPage(response.page, this.state.assets.length);
+      this.state.assetsSummary = response.summary;
     } catch (error) {
       if (generation === this.generation && epoch === this.assetPageEpoch) this.recordLoadError(error);
     } finally {
@@ -375,7 +387,7 @@ export class BlueprintController {
       const health = await this.client.fetchHealth(asset);
       if (generation !== this.generation || asset !== this.state.selectedAsset) return;
       this.state.health = health;
-      if (health.health.status !== 'READY') {
+      if (!isBlueprintReadyHealth(health.health)) {
         this.clearAssetPayload(true);
         if (health.health.status === 'STALE') this.state.staleCode = BLUEPRINT_CLIENT_STALE_CODE;
         return;
@@ -638,8 +650,11 @@ export class BlueprintController {
   private setTab(tab: BlueprintPrimaryTab): void {
     if (tab === this.state.activeTab) return;
     this.state.activeTab = tab;
+    if (tab === 'legacy' || tab === 'experimental') {
+      this.onCompatibilityRequested();
+    }
     this.announce({ kind: 'tab', value: tab });
-    if (tab === 'evidence' && this.state.health?.health.status === 'READY' && this.state.interpretation) {
+    if (tab === 'evidence' && isBlueprintReadyHealth(this.state.health?.health) && this.state.interpretation) {
       void this.loadTrace();
     }
   }
@@ -671,7 +686,7 @@ export class BlueprintController {
     return `<section class="blueprint-primary-workspace" aria-label="Blueprint Interpretation workspace">
       <nav class="blueprint-primary-tabs" role="tablist" aria-label="Blueprint 数据视图">${this.renderTabs()}</nav>
       <div class="blueprint-primary-layout">
-        ${renderBlueprintAssetList(this.state.assets, this.state.selectedAsset, this.state.assetQuery, this.state.loading, this.state.assetsPage)}
+        ${renderBlueprintAssetList(this.state.assets, this.state.selectedAsset, this.state.assetQuery, this.state.loading, this.state.assetsPage, this.state.assetsSummary)}
         <div class="blueprint-primary-content">
           ${this.state.error ? `<div class="action-notice danger" role="alert">${escapeHtml(this.state.error)}</div>` : ''}
           ${renderBlueprintAssetHealth(this.state)}

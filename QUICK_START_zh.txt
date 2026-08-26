@@ -1,10 +1,10 @@
-Blueprint to Code v0.3.1 Windows 便携版
+Blueprint to Code v0.3.2 Windows 便携版
 ========================================
 
 下载文件
 --------
 
-请下载：BlueprintToCode-v0.3.1-windows-x64-portable.zip
+请下载：BlueprintToCode-v0.3.2-windows-x64-portable.zip
 不要下载 GitHub 自动生成的 Source code (zip)，那个文件只给开发者使用，不能直接运行。
 
 开始使用
@@ -18,6 +18,16 @@ Blueprint to Code v0.3.1 Windows 便携版
 便携包已经包含 Python 和预构建网页，不需要另外安装 Python，也不需要安装 Node.js。
 网页和本地服务可直接启动；要读取并分析你自己的 ARK Blueprint 资产，电脑仍需合法安装
 ARK DevKit。工具会优先自动发现 Epic Games Launcher 安装的 DevKit。
+
+ShooterCharacter 下蹲属性
+-------------------------
+
+1. 在顶部路径框粘贴 /Script/ShooterGame.ShooterCharacter。
+2. 点击“读取原生类属性”；首次启动 DevKit 命令行通常需要约一分钟。
+3. 结果会显示 bIsCrouched / is_crouched 是否可读、默认值和继承来源。
+
+这里显示的是类默认对象，不是在线玩家实时值。要监测游戏中某个玩家此刻是否下蹲，
+仍需在游戏或 PIE 中取得该玩家的运行时实例。
 
 排错
 ----

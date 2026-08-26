@@ -66,6 +66,8 @@ FString JsonObjectToString(const TSharedRef<FJsonObject>& Object)
 
 void FBlueprintToCodeExporterModule::StartupModule()
 {
+    StartEditorBridge();
+
     if (UToolMenus::IsToolMenuUIEnabled())
     {
         UToolMenus::RegisterStartupCallback(
@@ -76,6 +78,8 @@ void FBlueprintToCodeExporterModule::StartupModule()
 
 void FBlueprintToCodeExporterModule::ShutdownModule()
 {
+    StopEditorBridge();
+
     if (UToolMenus::IsToolMenuUIEnabled())
     {
         UToolMenus::UnRegisterStartupCallback(this);
@@ -94,6 +98,20 @@ void FBlueprintToCodeExporterModule::RegisterMenus()
         LOCTEXT("ExportSelectedGraphQueueTooltip", "Export graph page names for selected Blueprint assets into the Blueprint to Code captures folder."),
         FSlateIcon(),
         FToolMenuExecuteAction::CreateRaw(this, &FBlueprintToCodeExporterModule::ExportSelectedBlueprints)
+    );
+    Section.AddMenuEntry(
+        TEXT("BlueprintToCodeShowEditorBridgeStatus"),
+        LOCTEXT("ShowEditorBridgeStatusLabel", "Show Editor Bridge Status"),
+        LOCTEXT("ShowEditorBridgeStatusTooltip", "Show the local read-only Editor state snapshot status."),
+        FSlateIcon(),
+        FToolMenuExecuteAction::CreateRaw(this, &FBlueprintToCodeExporterModule::ShowEditorBridgeStatus)
+    );
+    Section.AddMenuEntry(
+        TEXT("BlueprintToCodeWriteEditorStateSnapshotNow"),
+        LOCTEXT("WriteEditorStateSnapshotNowLabel", "Write Editor State Snapshot Now"),
+        LOCTEXT("WriteEditorStateSnapshotNowTooltip", "Write one bounded read-only Editor state snapshot immediately."),
+        FSlateIcon(),
+        FToolMenuExecuteAction::CreateRaw(this, &FBlueprintToCodeExporterModule::WriteEditorStateSnapshotNow)
     );
 }
 

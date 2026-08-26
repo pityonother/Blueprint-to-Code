@@ -10,7 +10,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from blueprint_translator.evidence_schema import (  # noqa: E402
     ensure_evidence_schema,
+    make_asset_field_ref,
     make_asset_id,
+    make_asset_ref,
     make_graph_ref,
     make_node_ref,
     make_pin_ref,
@@ -20,6 +22,27 @@ from blueprint_translator.evidence_schema import (  # noqa: E402
 
 
 class EvidenceIdTests(unittest.TestCase):
+    def test_asset_instance_refs_are_distinct_from_class_default_refs(self):
+        asset_id = make_asset_id("/Game/Test/DataAsset.DataAsset")
+        revision_id = "revision-asset-fields"
+
+        asset_ref = make_asset_ref(asset_id, revision_id)
+        field_ref = make_asset_field_ref(
+            asset_id,
+            revision_id,
+            "ModCustomCosmeticEntries[0].Cosmetic",
+        )
+
+        self.assertEqual(asset_ref, f"bp://{asset_id}@{revision_id}/asset")
+        self.assertTrue(field_ref.startswith(f"{asset_ref}/field/"))
+        self.assertEqual(parse_evidence_ref(asset_ref)["kind"], "asset")
+        parsed = parse_evidence_ref(field_ref)
+        self.assertEqual(parsed["kind"], "asset_field")
+        self.assertEqual(
+            parsed["field_path"],
+            "ModCustomCosmeticEntries[0].Cosmetic",
+        )
+
     def test_search_projection_has_completeness_metadata_and_revision_kind_index(self):
         connection = sqlite3.connect(":memory:")
         self.addCleanup(connection.close)

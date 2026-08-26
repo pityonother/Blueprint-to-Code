@@ -35,7 +35,660 @@ from blueprint_translator.uasset_graphs import (  # noqa: E402
 from blueprint_translator import uasset_graphs as uasset_graphs_module  # noqa: E402
 
 
+def _uasset_summary_fixture(
+    *,
+    file_version_ue5: int,
+    include_soft_object_paths: bool,
+    import_count: int = 2,
+) -> bytes:
+    data = bytearray()
+    data.extend(struct.pack("<I", 0x9E2A83C1))
+    data.extend(struct.pack("<iiii", -8, 864, 522, file_version_ue5))
+    data.extend(struct.pack("<ii", 0, 0))
+    data.extend(struct.pack("<i", 1600))
+    data.extend(struct.pack("<i", 5) + b"None\x00")
+    data.extend(struct.pack("<Iii", 0, 1, 400))
+    if include_soft_object_paths:
+        data.extend(struct.pack("<ii", 0, 0))
+    data.extend(struct.pack("<i", 0))
+    data.extend(
+        struct.pack(
+            "<11i",
+            0,
+            0,
+            3,
+            556,
+            import_count,
+            500,
+            892,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+    data.extend(bytes(32))
+    data.extend(bytes(2048 - len(data)))
+    return bytes(data)
+
+
 class UAssetGraphCandidateTests(unittest.TestCase):
+    def test_package_summary_selects_pcg_layout_from_ue5_version(self):
+        legacy, legacy_warnings = uasset_graphs_module.parse_uasset_summary(
+            _uasset_summary_fixture(
+                file_version_ue5=1004,
+                include_soft_object_paths=False,
+            )
+        )
+        current, current_warnings = uasset_graphs_module.parse_uasset_summary(
+            _uasset_summary_fixture(
+                file_version_ue5=1012,
+                include_soft_object_paths=True,
+            )
+        )
+
+        self.assertEqual(legacy_warnings, [])
+        self.assertEqual(legacy["summary_layout"], "ue5_pre_soft_object_paths")
+        self.assertEqual(legacy["export_count"], 3)
+        self.assertEqual(legacy["import_count"], 2)
+        self.assertEqual(legacy["soft_object_paths_count"], 0)
+        self.assertEqual(current_warnings, [])
+        self.assertEqual(current["summary_layout"], "ue5_with_soft_object_paths")
+        self.assertEqual(current["export_count"], 3)
+        self.assertEqual(current["import_count"], 2)
+
+    def test_package_summary_rejects_inconsistent_import_stride(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "InvalidStride.uasset"
+            path.write_bytes(
+                _uasset_summary_fixture(
+                    file_version_ue5=1012,
+                    include_soft_object_paths=True,
+                    import_count=3,
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "ImportMap stride"):
+                uasset_graphs_module.parse_uasset_package(path)
+
+    def test_unparsed_pcg_point_array_recovers_only_bounded_count(self):
+        raw = struct.pack("<i", 900) + bytes(900 * 137)
+        block = {
+            "name": "PCGPoints",
+            "type": "ArrayProperty",
+            "offset": 0,
+            "end": len(raw),
+            "value_offset": 0,
+            "declared_size": len(raw),
+            "tag_layout": "ue5_property_type_name",
+            "inner_type": "StructProperty",
+        }
+
+        prop = uasset_graphs_module.parse_cdo_property_value(
+            raw,
+            block,
+            [],
+            [],
+            [],
+            [],
+        )
+        variables, gaps = uasset_graphs_module.asset_field_variables([prop])
+        truncated = uasset_graphs_module.parse_cdo_property_value(
+            raw[:-1],
+            {**block, "end": len(raw) - 1, "declared_size": len(raw) - 1},
+            [],
+            [],
+            [],
+            [],
+        )
+        truncated_variables, _truncated_gaps = (
+            uasset_graphs_module.asset_field_variables([truncated])
+        )
+
+        self.assertFalse(prop["array_parse"]["parsed"])
+        self.assertTrue(prop["array_parse"]["count_confirmed"])
+        self.assertEqual(prop["array_parse"]["count"], 900)
+        self.assertEqual(prop["array_parse"]["element_stride"], 137)
+        self.assertEqual(variables["PCGPoints.count"]["value"], 900)
+        self.assertNotIn("PCGPoints", variables)
+        self.assertEqual(gaps[0]["field"], "PCGPoints")
+        self.assertNotIn("PCGPoints.count", truncated_variables)
+
+    def test_pcg_variable_description_keeps_uint64_property_flags_in_sequence(self):
+        names = ["None", "PropertyFlags", "UInt64Property"]
+        raw = (
+            struct.pack("<ii", 1, 0)
+            + struct.pack("<ii", 2, 0)
+            + struct.pack("<ii", 8, 0)
+            + b"\x00"
+            + struct.pack("<Q", 0x10005)
+            + struct.pack("<ii", 0, 0)
+        )
+
+        blocks, cursor, terminated = (
+            uasset_graphs_module._ark_guid_cdo_property_sequence(
+                raw,
+                names,
+                start=0,
+                limit=len(raw),
+            )
+        )
+        prop = uasset_graphs_module.parse_cdo_property_value(
+            raw,
+            blocks[0],
+            names,
+            [],
+            [],
+            [],
+        )
+
+        self.assertTrue(terminated)
+        self.assertEqual(cursor, len(raw))
+        self.assertEqual(prop["value"], 0x10005)
+
+    def test_structured_text_property_is_not_promoted_from_partial_fstring(self):
+        raw = struct.pack("<i", 5) + b"Fake\x00" + b"structured-ftext"
+        prop = uasset_graphs_module.parse_cdo_property_value(
+            raw,
+            {
+                "name": "Category",
+                "type": "TextProperty",
+                "offset": 0,
+                "end": len(raw),
+                "value_offset": 0,
+                "declared_size": len(raw),
+                "tag_layout": "ark_compact_guid_marker",
+            },
+            [],
+            [],
+            [],
+            [],
+        )
+        variables, gaps = uasset_graphs_module.asset_field_variables([prop])
+
+        self.assertEqual(prop["value"]["parsed"], False)
+        self.assertNotIn("Category", variables)
+        self.assertEqual(gaps[0]["field"], "Category")
+
+    def test_plugin_mount_mapping_preserves_formal_pcg_identity(self):
+        object_path = "/PCG/BP_Elements/Resources/PCGPointList.PCGPointList"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin_root = Path(temp_dir) / "PCGContent"
+            source = plugin_root / "BP_Elements" / "Resources" / "PCGPointList.uasset"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"fixture")
+            environment = {
+                "ARK_DEVKIT_PATH_MAPPINGS": f"/PCG={plugin_root}",
+                "BLUEPRINT_TO_CODE_DEVKIT_PATH_MAPPINGS": "",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(
+                    uasset_graphs_module,
+                    "DEVKIT_PATH_MAPPINGS_FILE",
+                    plugin_root / "missing-mappings.txt",
+                ),
+            ):
+                found, _attempted = object_path_to_uasset_path(object_path)
+
+        self.assertEqual(normalize_blueprint_object_path(object_path), object_path)
+        self.assertEqual(found, source)
+
+    def test_asset_instance_fields_select_only_the_exact_same_name_export(self):
+        names = ["None", "Fixture", "ModName", "StrProperty"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        encoded_name = struct.pack("<i", 5) + b"Demo\x00"
+        instance_data = (
+            fname("ModName")
+            + fname("StrProperty")
+            + struct.pack("<ii", len(encoded_name), 0)
+            + encoded_name
+            + fname("None")
+        )
+        decoy_data = b"decoy-default-object"
+        package = {
+            "uasset_data": decoy_data + instance_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "index": 0,
+                    "object_name": "Default__Fixture_C",
+                    "class_name": "Fixture_C",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(decoy_data),
+                        "available": True,
+                    },
+                },
+                {
+                    "index": 1,
+                    "object_name": "Fixture",
+                    "class_name": "ModDataAsset",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": len(decoy_data),
+                        "size": len(instance_data),
+                        "available": True,
+                    },
+                },
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = uasset_graphs_module.read_uasset_asset_fields(
+            package,
+            "Fixture",
+        )
+
+        self.assertTrue(payload["loaded"])
+        self.assertEqual(payload["instance_object"], "Fixture")
+        self.assertEqual(payload["export_index"], 1)
+        self.assertEqual(payload["variables"]["ModName"]["value"], "Demo")
+        self.assertEqual(payload["variables"]["ModName"]["owner_kind"], "asset")
+
+    def test_asset_instance_fields_accept_exact_numbered_display_name(self):
+        exports = [
+            {
+                "index": 0,
+                "object_name": "SupplyCrateSpawningVolume_UAID_ABC",
+                "display_name": "SupplyCrateSpawningVolume_UAID_ABC_42",
+                "class_name": "SupplyCrateSpawningVolume",
+            },
+            {
+                "index": 1,
+                "object_name": "BrushComponent0",
+                "display_name": "BrushComponent0",
+                "class_name": "BrushComponent",
+            },
+        ]
+
+        selected = uasset_graphs_module.asset_instance_export_for_package(
+            exports,
+            "SupplyCrateSpawningVolume_UAID_ABC_42",
+        )
+
+        self.assertIs(selected, exports[0])
+
+    def test_asset_instance_unparsed_field_becomes_gap_not_business_fact(self):
+        names = ["None", "Fixture", "RawConfig", "MapProperty"]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        instance_data = (
+            fname("RawConfig")
+            + fname("MapProperty")
+            + struct.pack("<ii", 4, 0)
+            + b"RAW!"
+            + fname("None")
+        )
+        package = {
+            "uasset_data": instance_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": [
+                {
+                    "index": 0,
+                    "object_name": "Fixture",
+                    "class_name": "DataAsset",
+                    "serial_location": {
+                        "file": "uasset",
+                        "offset": 0,
+                        "size": len(instance_data),
+                        "available": True,
+                    },
+                }
+            ],
+            "soft_object_paths": [],
+        }
+
+        payload = uasset_graphs_module.read_uasset_asset_fields(
+            package,
+            "Fixture",
+        )
+
+        self.assertEqual(payload["variables"], {})
+        self.assertEqual(payload["business_fact_count"], 0)
+        self.assertEqual(payload["gaps"][0]["field"], "RawConfig")
+        self.assertEqual(
+            payload["gaps"][0]["reason_code"],
+            "ASSET_FIELD_NOT_DECODED",
+        )
+
+    def test_mixed_struct_array_materializes_only_confirmed_member_fields(self):
+        properties = [
+            {
+                "name": "Units",
+                "type": "ArrayProperty",
+                "value": [
+                    {
+                        "DinoType": None,
+                        "DinoLevel": 30,
+                        "SpawnOffset": {"x": 1.0, "y": 0.0, "z": 0.0},
+                    }
+                ],
+                "array_parse": {
+                    "parsed": True,
+                    "count": 1,
+                    "elements": [
+                        {
+                            "index": 0,
+                            "properties": [
+                                {
+                                    "name": "DinoType",
+                                    "type": "SoftObjectProperty",
+                                    "value": None,
+                                    "error": "path index unavailable",
+                                    "confidence": "low",
+                                },
+                                {
+                                    "name": "DinoLevel",
+                                    "type": "IntProperty",
+                                    "value": 30,
+                                    "confidence": "high",
+                                },
+                                {
+                                    "name": "SpawnOffset",
+                                    "type": "StructProperty",
+                                    "value": {
+                                        "x": 1.0,
+                                        "y": 0.0,
+                                        "z": 0.0,
+                                    },
+                                    "struct_parse": {"parsed": True},
+                                    "confidence": "high",
+                                },
+                            ],
+                        }
+                    ],
+                },
+                "confidence": "medium",
+            }
+        ]
+
+        variables, gaps = uasset_graphs_module.asset_field_variables(
+            properties
+        )
+
+        self.assertNotIn("Units", variables)
+        self.assertEqual(variables["Units.count"]["value"], 1)
+        self.assertEqual(variables["Units[0].DinoLevel"]["value"], 30)
+        self.assertEqual(
+            variables["Units[0].SpawnOffset"]["value"],
+            {"x": 1.0, "y": 0.0, "z": 0.0},
+        )
+        self.assertNotIn("Units[0].DinoType", variables)
+        self.assertEqual(gaps[0]["field"], "Units[0].DinoType")
+
+    def test_vector_struct_respects_12_and_24_byte_declared_boundaries(self):
+        twelve = struct.pack("<fff", 1.25, -2.5, 3.75)
+        twenty_four = struct.pack("<ddd", 4.5, -5.5, 6.5)
+
+        def parse(raw: bytes, declared_size: int) -> dict[str, object]:
+            return uasset_graphs_module.parse_cdo_property_value(
+                raw,
+                {
+                    "name": "SpawnOffset",
+                    "type": "StructProperty",
+                    "struct": "Vector",
+                    "offset": 0,
+                    "end": declared_size,
+                    "value_offset": 0,
+                    "declared_size": declared_size,
+                    "tag_layout": "ark_compact",
+                },
+                [],
+                [],
+                [],
+                [],
+            )
+
+        single = parse(twelve + twenty_four, 12)
+        double = parse(twenty_four, 24)
+
+        self.assertEqual(single["value"], {"x": 1.25, "y": -2.5, "z": 3.75})
+        self.assertEqual(single["struct_parse"]["component_width"], 4)
+        self.assertEqual(double["value"], {"x": 4.5, "y": -5.5, "z": 6.5})
+        self.assertEqual(double["struct_parse"]["component_width"], 8)
+
+    def test_data_table_row_handle_recovers_table_and_row_name(self):
+        names = [
+            "None",
+            "DataTable",
+            "ObjectProperty",
+            "RowName",
+            "NameProperty",
+            "SkillRow",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def ue5_property(name: str, type_name: str, value: bytes) -> bytes:
+            return (
+                fname(name)
+                + fname(type_name)
+                + struct.pack("<i", 0)
+                + struct.pack("<iB", len(value), 0)
+                + value
+            )
+
+        nested = (
+            ue5_property("DataTable", "ObjectProperty", struct.pack("<i", -2))
+            + ue5_property("RowName", "NameProperty", fname("SkillRow"))
+            + fname("None")
+        )
+        imports = [
+            {
+                "object_name": "/Game/Test/Skills",
+                "class_name": "Package",
+                "outer_index": 0,
+            },
+            {
+                "object_name": "Skills",
+                "class_name": "DataTable",
+                "outer_index": -1,
+            },
+        ]
+
+        parsed = uasset_graphs_module.parse_cdo_property_value(
+            nested,
+            {
+                "name": "NodeHandle",
+                "type": "StructProperty",
+                "struct": "DataTableRowHandle",
+                "offset": 0,
+                "end": len(nested),
+                "value_offset": 0,
+                "declared_size": len(nested),
+                "tag_layout": "ue5_property_type_name",
+            },
+            names,
+            imports,
+            [],
+            [],
+        )
+
+        self.assertEqual(
+            parsed["value"],
+            {"data_table": "/Game/Test/Skills.Skills", "row_name": "SkillRow"},
+        )
+        self.assertTrue(parsed["struct_parse"]["parsed"])
+
+    def test_legacy_struct_array_recovers_each_vector_without_crossing_fields(self):
+        names = [
+            "None",
+            "Units",
+            "ArrayProperty",
+            "StructProperty",
+            "DinoLevel",
+            "IntProperty",
+            "SpawnOffset",
+            "Vector",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def scalar(name: str, type_name: str, value: bytes) -> bytes:
+            return (
+                fname(name)
+                + fname(type_name)
+                + struct.pack("<ii", len(value), 0)
+                + value
+            )
+
+        def unit(level: int, vector: tuple[float, float, float]) -> bytes:
+            return (
+                scalar("DinoLevel", "IntProperty", struct.pack("<i", level))
+                + fname("SpawnOffset")
+                + fname("StructProperty")
+                + struct.pack("<ii", 12, 0)
+                + fname("Vector")
+                + struct.pack("<fff", *vector)
+                + fname("None")
+            )
+
+        array_value = struct.pack("<i", 2) + unit(30, (1.0, 2.0, 3.0)) + unit(
+            40,
+            (-4.0, 5.0, 6.0),
+        )
+        encoded = (
+            fname("Units")
+            + fname("ArrayProperty")
+            + struct.pack("<ii", len(array_value), 0)
+            + fname("StructProperty")
+            + array_value
+            + fname("None")
+        )
+        block = uasset_graphs_module.cdo_property_tag_blocks(encoded, names)[0]
+
+        parsed = uasset_graphs_module.parse_cdo_property_value(
+            encoded,
+            block,
+            names,
+            [],
+            [],
+            [],
+        )
+
+        self.assertTrue(parsed["array_parse"]["parsed"], parsed)
+        self.assertEqual(parsed["array_parse"]["count"], 2)
+        self.assertEqual(parsed["value"][0]["DinoLevel"], 30)
+        self.assertEqual(
+            parsed["value"][1]["SpawnOffset"],
+            {"x": -4.0, "y": 5.0, "z": 6.0},
+        )
+
+    def test_progression_graph_treats_custom_edgraph_nodes_as_exact_exports(self):
+        names = [
+            "None",
+            "Nodes",
+            "ArrayProperty",
+            "ObjectProperty",
+            "NodePosX",
+            "NodePosY",
+            "IntProperty",
+        ]
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        graph_array = struct.pack("<ii", 1, 2)
+        graph_data = (
+            fname("Nodes")
+            + fname("ArrayProperty")
+            + struct.pack("<ii", len(graph_array), 0)
+            + fname("ObjectProperty")
+            + graph_array
+            + fname("None")
+        )
+
+        def scalar(name: str, value: int) -> bytes:
+            return (
+                fname(name)
+                + fname("IntProperty")
+                + struct.pack("<iii", 4, 0, value)
+            )
+
+        node_data = scalar("NodePosX", 320) + scalar("NodePosY", -128) + fname(
+            "None"
+        )
+        all_data = graph_data + node_data
+        graph_export = {
+            "index": 0,
+            "package_index": 1,
+            "object_name": "ProgressionTreeEdGraph",
+            "display_name": "ProgressionTreeEdGraph",
+            "class_name": "ProgressionTreeEdGraph",
+            "serial_location": {
+                "file": "uasset",
+                "offset": 0,
+                "size": len(graph_data),
+                "available": True,
+            },
+        }
+        node_export = {
+            "index": 1,
+            "package_index": 2,
+            "outer_index": 1,
+            "object_name": "ProgressionTreeEdGraphNode",
+            "display_name": "ProgressionTreeEdGraphNode",
+            "class_name": "ProgressionTreeEdGraphNode",
+            "serial_location": {
+                "file": "uasset",
+                "offset": len(graph_data),
+                "size": len(node_data),
+                "available": True,
+            },
+        }
+
+        parsed = uasset_graphs_module.parse_graph_export_payload(
+            {
+                "uasset_data": all_data,
+                "uexp_data": b"",
+                "names": names,
+                "imports": [],
+                "exports": [graph_export, node_export],
+                "soft_object_paths": [],
+            },
+            graph_export,
+            asset_path="/Game/Test/Progression.Progression",
+            asset_name="Progression",
+            node_cache={},
+        )
+
+        self.assertEqual(parsed["node_count"], 1)
+        self.assertEqual(parsed["nodes"][0]["export_index"], 1)
+        self.assertEqual(parsed["nodes"][0]["package_index"], 2)
+        self.assertEqual(parsed["nodes"][0]["x"], 320)
+        self.assertEqual(parsed["nodes"][0]["y"], -128)
+
+    def test_custom_edgraph_node_with_exact_properties_is_not_a_reader_gap(self):
+        categories = uasset_graphs_module.classify_graph_failure(
+            {
+                "node_count": 1,
+                "pin_count": 0,
+                "link_count": 0,
+                "warnings": [],
+                "nodes": [
+                    {
+                        "class": "ProgressionTreeEdGraphNode",
+                        "properties": ["NodeHandle", "NodeGuid"],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(categories, ["need_pin_layout_rule"])
+
     def test_script_import_path_and_member_parent_are_preserved(self):
         imports = [
             {
@@ -137,6 +790,22 @@ class UAssetGraphCandidateTests(unittest.TestCase):
 
         self.assertEqual(found, asset)
         self.assertIn(str(asset), attempted)
+
+    def test_object_path_falls_back_to_umap_for_world_package(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            content_root = Path(temp_dir) / "Content"
+            world = content_root / "Mods" / "Ragnarok" / "Ragnarok_WP.umap"
+            world.parent.mkdir(parents=True)
+            world.write_bytes(b"LevelScriptBlueprint\x00")
+
+            found, attempted = object_path_to_uasset_path(
+                "/Game/Mods/Ragnarok/Ragnarok_WP.Ragnarok_WP",
+                extra_roots=[content_root],
+            )
+
+        expected_uasset = world.with_suffix(".uasset")
+        self.assertEqual(found, world)
+        self.assertLess(attempted.index(str(expected_uasset)), attempted.index(str(world)))
 
     def test_epic_manifest_discovers_custom_akd_devkit_install(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -304,6 +973,31 @@ class UAssetGraphCandidateTests(unittest.TestCase):
             normalize_blueprint_object_path(raw),
             "/Game/Mods/Kaminan_server/SkinBuff/SkinBuffHuman/MetalShield/BuffSkin_MetalShield.BuffSkin_MetalShield",
         )
+
+    def test_native_script_class_path_is_preserved_instead_of_rewritten_as_mod(self):
+        expected = "/Script/ShooterGame.ShooterCharacter"
+
+        self.assertEqual(normalize_blueprint_object_path(expected), expected)
+        self.assertEqual(
+            normalize_blueprint_object_path(
+                "Class'/Script/ShooterGame.ShooterCharacter'"
+            ),
+            expected,
+        )
+        self.assertEqual(
+            normalize_blueprint_object_path(
+                "/script/ShooterGame.ShooterCharacter"
+            ),
+            expected,
+        )
+
+    def test_native_script_class_path_never_resolves_to_uasset(self):
+        found, attempted = object_path_to_uasset_path(
+            "/Script/ShooterGame.ShooterCharacter"
+        )
+
+        self.assertIsNone(found)
+        self.assertEqual(attempted, [])
 
     def test_object_path_maps_to_external_mod_content(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1872,6 +2566,302 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         )
         self.assertIn(pins[0].confidence, {"medium", "low"})
 
+    def test_inline_pin_layout_recovers_native_pin_ids_and_exact_link(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "NodePosX",
+            "IntProperty",
+            "None",
+            "execute",
+            "self",
+            "then",
+            "exec",
+        ]
+        source_pin_id = "DA52DF5A46CB31C5F1217180F18C5D6E"
+        target_pin_id = "5146D58D460CED4847A72FBD89FEADBD"
+        second_target_pin_id = "17454F5844FB8959D3C6F4A5834B816E"
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def inline_pin(
+            node_ref: int,
+            pin_id: str,
+            pin_name: str,
+            *,
+            links: list[tuple[int, str]] | None = None,
+        ) -> bytes:
+            payload = (
+                struct.pack("<i", node_ref)
+                + uasset_graphs_module.guid_text_to_raw(pin_id)
+                + fname(pin_name)
+                + b"A" * 8
+                + fname("exec")
+                + b"B" * 12
+            )
+            for target_ref, linked_pin_id in links or []:
+                payload += (
+                    struct.pack("<i", target_ref)
+                    + uasset_graphs_module.guid_text_to_raw(linked_pin_id)
+                    + b"C" * 16
+                )
+            return payload
+
+        def node_data(
+            node_ref: int,
+            pins: list[tuple[str, str, list[tuple[int, str]]]],
+        ) -> bytes:
+            prop = (
+                fname("NodePosX")
+                + fname("IntProperty")
+                + struct.pack("<iiB", 0, 4, 0)
+                + struct.pack("<i", 12)
+            )
+            return (
+                b"\x00"
+                + prop
+                + fname("None")
+                + struct.pack("<i", 0)
+                + struct.pack("<i", len(pins))
+                + b"".join(
+                    inline_pin(
+                        node_ref,
+                        pin_id,
+                        pin_name,
+                        links=links,
+                    )
+                    for pin_id, pin_name, links in pins
+                )
+            )
+
+        exports = [
+            {
+                "display_name": "Source",
+                "class_name": "K2Node_CallFunction",
+                "package_index": 1,
+            },
+            {
+                "display_name": "Target",
+                "class_name": "K2Node_CallFunction",
+                "package_index": 2,
+            },
+        ]
+        source_data = node_data(
+            1,
+            [
+                (
+                    source_pin_id,
+                    "then",
+                    [(2, target_pin_id), (2, second_target_pin_id)],
+                )
+            ]
+        )
+        target_data = node_data(
+            2,
+            [
+                (target_pin_id, "execute", []),
+                (second_target_pin_id, "self", []),
+            ]
+        )
+        source_properties, _source_warnings = parse_export_properties(
+            source_data,
+            names,
+            [],
+            exports,
+        )
+        target_properties, _target_warnings = parse_export_properties(
+            target_data,
+            names,
+            [],
+            exports,
+        )
+
+        source_pins, _source_pin_warnings = parse_custom_pins(
+            source_data,
+            names,
+            source_properties,
+            node_export=exports[0],
+            graph_refset={1, 2},
+            imports=[],
+            exports=exports,
+        )
+        target_pins, _target_pin_warnings = parse_custom_pins(
+            target_data,
+            names,
+            target_properties,
+            node_export=exports[1],
+            graph_refset={1, 2},
+            imports=[],
+            exports=exports,
+        )
+
+        from blueprint_translator.models import NodeInfo
+
+        source = NodeInfo(
+            index=1,
+            class_name="K2Node_CallFunction",
+            node_type="K2Node_CallFunction",
+            name="Source",
+            pins=source_pins,
+        )
+        target = NodeInfo(
+            index=2,
+            class_name="K2Node_CallFunction",
+            node_type="K2Node_CallFunction",
+            name="Target",
+            pins=target_pins,
+        )
+        counts = resolve_graph_link_target_pins([source, target])
+
+        self.assertEqual(source_pins[0].id, source_pin_id)
+        self.assertEqual(
+            source_pins[0].resolution["native_pin_id_authority"],
+            "EXACT",
+        )
+        self.assertEqual(target_pins[0].id, target_pin_id)
+        self.assertEqual(
+            source_pins[0].links[0]["target_pin_id"],
+            target_pin_id,
+        )
+        self.assertEqual(
+            source_pins[0].links[0]["resolution_method"],
+            "exact_target_pin_id_candidate",
+        )
+        self.assertEqual(
+            {link["target_pin_id"] for link in source_pins[0].links},
+            {target_pin_id, second_target_pin_id},
+        )
+        self.assertEqual(counts["resolved_pin"], 2)
+        self.assertEqual(counts["resolved_pin_heuristic"], 0)
+
+    def test_inline_pin_layout_recovers_dynamic_array_pin_names(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "NodePosX",
+            "IntProperty",
+            "None",
+            "Array",
+            "[0]",
+            "real",
+        ]
+        array_pin_id = "D1AD53EF40A7B24DEEB92E8086FFBCC3"
+        item_pin_id = "9BBB9EAD448C811C58BB29B37EE55BD9"
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def inline_pin(pin_id: str, pin_name: str) -> bytes:
+            return (
+                struct.pack("<i", 1)
+                + uasset_graphs_module.guid_text_to_raw(pin_id)
+                + fname(pin_name)
+                + b"A" * 8
+                + fname("real")
+                + b"B" * 32
+            )
+
+        prop = (
+            fname("NodePosX")
+            + fname("IntProperty")
+            + struct.pack("<iiB", 0, 4, 0)
+            + struct.pack("<i", 12)
+        )
+        data = (
+            b"\x00"
+            + prop
+            + fname("None")
+            + struct.pack("<i", 0)
+            + struct.pack("<i", 2)
+            + inline_pin(array_pin_id, "Array")
+            + inline_pin(item_pin_id, "[0]")
+        )
+        exports = [
+            {
+                "display_name": "MakeArray",
+                "class_name": "K2Node_MakeArray",
+                "package_index": 1,
+            }
+        ]
+        properties, _warnings = parse_export_properties(data, names, [], exports)
+
+        pins, pin_warnings = parse_custom_pins(
+            data,
+            names,
+            properties,
+            node_export=exports[0],
+            graph_refset={1},
+            imports=[],
+            exports=exports,
+        )
+
+        self.assertEqual(pin_warnings, [])
+        self.assertEqual([pin.name for pin in pins], ["Array", "[0]"])
+        self.assertEqual([pin.id for pin in pins], [array_pin_id, item_pin_id])
+        self.assertTrue(
+            all(
+                pin.resolution["native_pin_id_authority"] == "EXACT"
+                for pin in pins
+            )
+        )
+
+    def test_inline_pin_layout_accepts_structurally_anchored_internal_name(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "NodePosX",
+            "IntProperty",
+            "None",
+            "CustomDataNames",
+            "name",
+        ]
+        pin_id = "68DE285B435DF3B3A13A11B154F293BA"
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        prop = (
+            fname("NodePosX")
+            + fname("IntProperty")
+            + struct.pack("<iiB", 0, 4, 0)
+            + struct.pack("<i", 12)
+        )
+        data = (
+            b"\x00"
+            + prop
+            + fname("None")
+            + struct.pack("<i", 0)
+            + struct.pack("<i", 1)
+            + struct.pack("<i", 1)
+            + uasset_graphs_module.guid_text_to_raw(pin_id)
+            + fname("CustomDataNames")
+            + b"A" * 8
+            + fname("name")
+            + b"B" * 32
+        )
+        exports = [
+            {
+                "display_name": "MakeStruct",
+                "class_name": "K2Node_MakeStruct",
+                "package_index": 1,
+            }
+        ]
+        properties, _warnings = parse_export_properties(data, names, [], exports)
+
+        pins, pin_warnings = parse_custom_pins(
+            data,
+            names,
+            properties,
+            node_export=exports[0],
+            graph_refset={1},
+            imports=[],
+            exports=exports,
+        )
+
+        self.assertEqual(pin_warnings, [])
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(pins[0].name, "CustomDataNames")
+        self.assertEqual(pins[0].id, pin_id)
+        self.assertEqual(
+            pins[0].resolution["native_pin_id_authority"],
+            "EXACT",
+        )
+
     def test_legacy_exported_edgraphpin_objects_recover_links(self):
         names = [f"Filler{i}" for i in range(100)] + [
             "Pins",
@@ -1971,14 +2961,238 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(pins[0].direction, "EGPD_Output")
         self.assertEqual(pins[0].source, "uasset_exported_pin_object")
         self.assertEqual(pins[0].links[0]["target_node"], "Target")
-        self.assertEqual(pins[0].links[0]["target_pin_id"], "TargetExecutePin")
+        self.assertEqual(pins[0].links[0]["target_pin_id"], "")
+        self.assertEqual(
+            pins[0].links[0]["target_pin_internal_key"],
+            "TargetExecutePin",
+        )
+        self.assertEqual(
+            pins[0].links[0]["target_pin_id_candidates"],
+            [],
+        )
         self.assertEqual(
             pins[0].links[0]["resolution_status"],
-            "resolved_pin_heuristic",
+            "target_pin_identity_unavailable",
         )
         self.assertEqual(
             pins[0].links[0]["resolution_method"],
             "export_object_reference_only",
+        )
+
+    def test_exported_edgraphpin_structural_pin_ids_make_link_exact(self):
+        names = [f"Filler{i}" for i in range(100)] + [
+            "Pins",
+            "ArrayProperty",
+            "ObjectProperty",
+            "None",
+            "PinId",
+            "PersistentGuid",
+            "Guid",
+            "StructProperty",
+            "PinName",
+            "StrProperty",
+            "Direction",
+            "ByteProperty",
+            "EEdGraphPinDirection",
+            "EGPD_Output",
+            "PinType",
+            "EdGraphPinType",
+            "LinkedTo",
+        ]
+        source_pin_id = "112233445566778899AABBCCDDEEFF00"
+        target_pin_id = "0123456789ABCDEFFEDCBA9876543210"
+        persistent_guid = "A1A2A3A4B1B2B3B4C1C2C3C4D1D2D3D4"
+
+        def fname(name: str) -> bytes:
+            return struct.pack("<ii", names.index(name), 0)
+
+        def fstring(value: str) -> bytes:
+            raw = value.encode("utf-8") + b"\x00"
+            return struct.pack("<i", len(raw)) + raw
+
+        def str_prop(name: str, value: str) -> bytes:
+            payload = fstring(value)
+            return (
+                fname(name)
+                + fname("StrProperty")
+                + struct.pack("<ii", len(payload), 0)
+                + b"\x00"
+                + payload
+            )
+
+        def byte_prop(name: str, value: str) -> bytes:
+            return (
+                fname(name)
+                + fname("ByteProperty")
+                + struct.pack("<ii", 8, 0)
+                + fname("EEdGraphPinDirection")
+                + b"\x00"
+                + fname(value)
+            )
+
+        def pin_type_prop(category: str) -> bytes:
+            payload = fstring(category)
+            return (
+                fname("PinType")
+                + fname("StructProperty")
+                + struct.pack("<ii", len(payload), 0)
+                + fname("EdGraphPinType")
+                + bytes(16)
+                + b"\x00"
+                + payload
+            )
+
+        def guid_prop(name: str, value: str) -> bytes:
+            return (
+                fname(name)
+                + fname("StructProperty")
+                + struct.pack("<ii", 16, 0)
+                + fname("Guid")
+                + bytes(16)
+                + b"\x00"
+                + uasset_graphs_module.guid_text_to_raw(value)
+            )
+
+        def array_prop(name: str, refs: list[int]) -> bytes:
+            payload = struct.pack("<i", len(refs)) + b"".join(
+                struct.pack("<i", ref) for ref in refs
+            )
+            return (
+                fname(name)
+                + fname("ArrayProperty")
+                + struct.pack("<ii", len(payload), 0)
+                + fname("ObjectProperty")
+                + b"\x00"
+                + payload
+            )
+
+        source_pin_data = (
+            guid_prop("PinId", source_pin_id)
+            + guid_prop("PersistentGuid", persistent_guid)
+            + str_prop("PinName", "then")
+            + byte_prop("Direction", "EGPD_Output")
+            + pin_type_prop("exec")
+            + array_prop("LinkedTo", [4])
+            + fname("None")
+        )
+        target_pin_data = (
+            guid_prop("PinId", target_pin_id)
+            + str_prop("PinName", "execute")
+            + pin_type_prop("exec")
+            + fname("None")
+        )
+        source_node_data = array_prop("Pins", [3]) + fname("None")
+        target_node_data = array_prop("Pins", [4]) + fname("None")
+        source_node_offset = 0
+        target_node_offset = source_node_offset + len(source_node_data)
+        source_pin_offset = target_node_offset + len(target_node_data)
+        target_pin_offset = source_pin_offset + len(source_pin_data)
+        uasset_data = (
+            source_node_data
+            + target_node_data
+            + source_pin_data
+            + target_pin_data
+        )
+        exports = [
+            {
+                "display_name": "Source",
+                "class_name": "K2Node_IfThenElse",
+                "package_index": 1,
+                "serial_location": {
+                    "file": "uasset",
+                    "offset": source_node_offset,
+                    "size": len(source_node_data),
+                    "available": True,
+                },
+            },
+            {
+                "display_name": "Target",
+                "class_name": "K2Node_CallFunction",
+                "package_index": 2,
+                "serial_location": {
+                    "file": "uasset",
+                    "offset": target_node_offset,
+                    "size": len(target_node_data),
+                    "available": True,
+                },
+            },
+            {
+                "display_name": "SourceThenPin",
+                "object_name": "EdGraphPin",
+                "class_name": "EdGraphPin",
+                "package_index": 3,
+                "serial_location": {
+                    "file": "uasset",
+                    "offset": source_pin_offset,
+                    "size": len(source_pin_data),
+                    "available": True,
+                },
+            },
+            {
+                "display_name": "TargetExecutePin",
+                "object_name": "EdGraphPin",
+                "class_name": "EdGraphPin",
+                "package_index": 4,
+                "serial_location": {
+                    "file": "uasset",
+                    "offset": target_pin_offset,
+                    "size": len(target_pin_data),
+                    "available": True,
+                },
+            },
+        ]
+        package = {
+            "uasset_data": uasset_data,
+            "uexp_data": b"",
+            "names": names,
+            "imports": [],
+            "exports": exports,
+        }
+        node_data = source_node_data
+        properties, property_warnings = parse_export_properties(
+            node_data,
+            names,
+            [],
+            exports,
+        )
+        pin_owner_by_ref = uasset_graphs_module.build_graph_pin_owner_index(
+            package,
+            [1, 2],
+        )
+
+        self.assertEqual(pin_owner_by_ref[3]["pin_id"], source_pin_id)
+        self.assertEqual(pin_owner_by_ref[4]["pin_id"], target_pin_id)
+        self.assertEqual(pin_owner_by_ref[3]["pin_id_authority"], "EXACT")
+        self.assertEqual(pin_owner_by_ref[4]["pin_id_authority"], "EXACT")
+
+        pins, pin_warnings = parse_custom_pins(
+            node_data,
+            names,
+            properties,
+            node_export=exports[0],
+            graph_refset={1, 2},
+            imports=[],
+            exports=exports,
+            package=package,
+            pin_owner_by_ref=pin_owner_by_ref,
+        )
+
+        self.assertEqual(property_warnings, [])
+        self.assertEqual(pin_warnings, [])
+        self.assertEqual(pins[0].id, source_pin_id)
+        self.assertEqual(pins[0].persistent_guid, persistent_guid)
+        self.assertEqual(
+            pins[0].resolution["native_pin_id_authority"],
+            "EXACT",
+        )
+        self.assertEqual(
+            pins[0].resolution["persistent_guid_method"],
+            "exact_struct_value",
+        )
+        self.assertEqual(pins[0].links[0]["target_pin_id"], target_pin_id)
+        self.assertEqual(
+            pins[0].links[0]["target_pin_id_authority"],
+            "EXACT",
         )
 
     def test_node_semantic_reader_emits_function_semantics(self):
@@ -1997,6 +3211,7 @@ class UAssetGraphCandidateTests(unittest.TestCase):
             node_export={
                 "class_name": "K2Node_CallFunction",
                 "display_name": "K2Node_CallFunction_1",
+                "package_index": 42,
                 "index": 0,
                 "serial_location": {"offset": 100, "size": 44},
             },
@@ -2006,6 +3221,7 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         )
 
         self.assertEqual(node.function, "DoThing")
+        self.assertEqual(node.package_index, 42)
         self.assertEqual(node.semantic["kind"], "call_function")
         self.assertEqual(node.raw_offsets, {"start": 100, "end": 144})
         self.assertEqual(node.source, "uasset_binary")
@@ -2040,6 +3256,47 @@ class UAssetGraphCandidateTests(unittest.TestCase):
 
         self.assertIn("node_resolved_pin_unknown", report)
         self.assertIn("EventGraph", report)
+
+    def test_pin_link_summary_preserves_explicit_identity_downgrade(self):
+        payload = {
+            "asset_name": "Fixture",
+            "graphs": [
+                {
+                    "graph": "EventGraph",
+                    "payload": {
+                        "nodes": [
+                            {"name": "Source"},
+                            {"name": "Target"},
+                        ],
+                        "links": [
+                            {
+                                "source_node": "Source",
+                                "source_pin_id": "DUPLICATE-SOURCE",
+                                "target_node": "Target",
+                                "target_pin_id": "TARGET-ID",
+                                "resolution_status": (
+                                    "ambiguous_source_pin_identity"
+                                ),
+                                "resolution_method": (
+                                    "ambiguous_source_pin_identity"
+                                ),
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+        summary = uasset_graphs_module.build_pin_link_payload(payload)
+
+        self.assertEqual(
+            summary["summary"]["resolution_counts"],
+            {"ambiguous_source_pin_identity": 1},
+        )
+        self.assertEqual(
+            summary["graphs"][0]["unresolved"][0]["status"],
+            "ambiguous_source_pin_identity",
+        )
 
     def test_uasset_vs_clipboard_compare_matches_by_class_distribution(self):
         clipboard_payload = {
@@ -2127,6 +3384,260 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         self.assertEqual(source_pin.links[0]["resolution_method"], "exact_target_pin_id_candidate")
         self.assertEqual(source_pin.links[0]["confidence"], "high")
 
+    def test_uasset_heuristic_guid_candidate_never_becomes_exact_identity(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        source = NodeInfo(
+            index=1,
+            class_name="K2Node_CallFunction",
+            node_type="K2Node_CallFunction",
+            name="Source",
+        )
+        target = NodeInfo(
+            index=2,
+            class_name="K2Node_CallFunction",
+            node_type="K2Node_CallFunction",
+            name="Target",
+        )
+        source_pin = PinInfo(
+            id="SOURCE-NATIVE",
+            name="then",
+            direction="EGPD_Output",
+            category="exec",
+            source="uasset_custom_pin_scan",
+            resolution={"native_pin_id_authority": "EXACT"},
+        )
+        source_pin.links.append(
+            {
+                "target_node": "Target",
+                "target_pin_id": "",
+                "target_pin_id_candidates": ["TARGET-NATIVE"],
+                "target_pin_id_candidate_method": "heuristic_guid_scan",
+                "source": "uasset_pin_package_index_scan",
+                "confidence": "medium",
+            }
+        )
+        target_pin = PinInfo(
+            id="TARGET-NATIVE",
+            name="execute",
+            direction="EGPD_Input",
+            category="exec",
+            source="uasset_custom_pin_scan",
+            resolution={"native_pin_id_authority": "EXACT"},
+        )
+        source.pins.append(source_pin)
+        target.pins.append(target_pin)
+
+        counts = resolve_graph_link_target_pins([source, target])
+
+        self.assertEqual(counts["resolved_pin"], 0)
+        self.assertEqual(counts["unresolved"], 1)
+        self.assertEqual(source_pin.links[0]["target_pin_id"], "")
+        self.assertEqual(
+            source_pin.links[0]["resolution_status"],
+            "target_pin_identity_unavailable",
+        )
+        self.assertEqual(
+            source_pin.links[0]["resolution_method"],
+            "non_authoritative_target_pin_candidate",
+        )
+        self.assertNotIn("target_pin_id_authority", source_pin.links[0])
+
+    def test_uasset_exact_candidate_requires_authoritative_source_identity(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        source = NodeInfo(index=1, name="Source")
+        target = NodeInfo(index=2, name="Target")
+        source_pin = PinInfo(
+            id="Source_pin_1",
+            name="then",
+            direction="EGPD_Output",
+            category="exec",
+            source="uasset_custom_pin_scan",
+            resolution={"native_pin_id_authority": "UNAVAILABLE"},
+        )
+        source_pin.links.append(
+            {
+                "target_node": "Target",
+                "target_pin_id": "",
+                "target_pin_id_candidates": ["TARGET-NATIVE"],
+                "target_pin_id_candidate_method": (
+                    "inline_target_node_ref_followed_by_guid"
+                ),
+                "source": "uasset_inline_pin_reference",
+            }
+        )
+        target_pin = PinInfo(
+            id="TARGET-NATIVE",
+            name="execute",
+            direction="EGPD_Input",
+            category="exec",
+            source="uasset_custom_pin_scan",
+            resolution={"native_pin_id_authority": "EXACT"},
+        )
+        source.pins.append(source_pin)
+        target.pins.append(target_pin)
+
+        counts = resolve_graph_link_target_pins([source, target])
+
+        self.assertEqual(counts["resolved_pin"], 0)
+        self.assertEqual(counts["unresolved"], 1)
+        self.assertEqual(
+            source_pin.links[0]["resolution_status"],
+            "source_pin_identity_unavailable",
+        )
+        self.assertNotIn("target_pin_id_authority", source_pin.links[0])
+
+    def test_duplicate_native_target_pin_id_is_explicitly_ambiguous(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        source = NodeInfo(index=1, name="Source")
+        target_a = NodeInfo(index=2, name="DuplicateTarget")
+        target_b = NodeInfo(index=3, name="DuplicateTarget")
+        source_pin = PinInfo(
+            id="SOURCE-NATIVE",
+            name="then",
+            direction="EGPD_Output",
+            category="exec",
+        )
+        source_pin.links.append(
+            {
+                "target_node": "DuplicateTarget",
+                "target_pin_id": "DUPLICATE-PIN-ID",
+                "confidence": "high",
+            }
+        )
+        target_a.pins.append(
+            PinInfo(
+                id="DUPLICATE-PIN-ID",
+                name="execute",
+                direction="EGPD_Input",
+                category="exec",
+            )
+        )
+        target_b.pins.append(
+            PinInfo(
+                id="DUPLICATE-PIN-ID",
+                name="execute",
+                direction="EGPD_Input",
+                category="exec",
+            )
+        )
+        source.pins.append(source_pin)
+
+        counts = resolve_graph_link_target_pins([source, target_a, target_b])
+
+        self.assertEqual(counts["resolved_pin"], 0)
+        self.assertEqual(counts["ambiguous"], 1)
+        self.assertEqual(
+            source_pin.links[0]["resolution_status"],
+            "ambiguous_target_pin_identity",
+        )
+        self.assertNotIn("target_pin_id_authority", source_pin.links[0])
+
+    def test_duplicate_native_source_pin_id_is_explicitly_ambiguous(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        source = NodeInfo(index=1, name="Source")
+        other = NodeInfo(index=2, name="Other")
+        target = NodeInfo(index=3, name="Target")
+        source_pin = PinInfo(
+            id="DUPLICATE-SOURCE-ID",
+            name="then",
+            direction="EGPD_Output",
+            category="exec",
+        )
+        source_pin.links.append(
+            {
+                "target_node": "Target",
+                "target_pin_id": "TARGET-ID",
+            }
+        )
+        source.pins.append(source_pin)
+        other.pins.append(
+            PinInfo(
+                id="DUPLICATE-SOURCE-ID",
+                name="other",
+                direction="EGPD_Output",
+                category="exec",
+            )
+        )
+        target.pins.append(
+            PinInfo(
+                id="TARGET-ID",
+                name="execute",
+                direction="EGPD_Input",
+                category="exec",
+            )
+        )
+
+        counts = resolve_graph_link_target_pins([source, other, target])
+
+        self.assertEqual(counts["resolved_pin"], 0)
+        self.assertEqual(counts["ambiguous"], 1)
+        self.assertEqual(
+            source_pin.links[0]["resolution_status"],
+            "ambiguous_source_pin_identity",
+        )
+
+    def test_exact_pin_candidate_uniquely_disambiguates_duplicate_node_names(self):
+        from blueprint_translator.models import NodeInfo, PinInfo
+
+        source = NodeInfo(index=1, name="Source")
+        target_a = NodeInfo(index=2, name="DuplicateTarget")
+        target_b = NodeInfo(index=3, name="DuplicateTarget")
+        source_pin = PinInfo(
+            id="SOURCE-ID",
+            name="then",
+            direction="EGPD_Output",
+            category="exec",
+            source="uasset_custom_pin_scan",
+            resolution={"native_pin_id_authority": "EXACT"},
+        )
+        source_pin.links.append(
+            {
+                "target_node": "DuplicateTarget",
+                "target_pin_id": "",
+                "target_pin_id_candidates": ["TARGET-B"],
+                "target_pin_id_candidate_method": (
+                    "inline_target_node_ref_followed_by_guid"
+                ),
+                "source": "uasset_inline_pin_reference",
+            }
+        )
+        target_a.pins.append(
+            PinInfo(
+                id="TARGET-A",
+                name="execute",
+                source="uasset_custom_pin_scan",
+                resolution={"native_pin_id_authority": "EXACT"},
+            )
+        )
+        target_b.pins.append(
+            PinInfo(
+                id="TARGET-B",
+                name="execute",
+                source="uasset_custom_pin_scan",
+                resolution={"native_pin_id_authority": "EXACT"},
+            )
+        )
+        source.pins.append(source_pin)
+
+        counts = resolve_graph_link_target_pins([source, target_a, target_b])
+        first = dict(source_pin.links[0])
+        second_counts = resolve_graph_link_target_pins(
+            [source, target_a, target_b]
+        )
+
+        self.assertEqual(counts["resolved_pin"], 1)
+        self.assertEqual(second_counts["resolved_pin"], 1)
+        self.assertEqual(source_pin.links[0], first)
+        self.assertEqual(source_pin.links[0]["target_pin_id"], "TARGET-B")
+        self.assertEqual(
+            source_pin.links[0]["target_pin_id_authority"],
+            "EXACT",
+        )
+
     def test_link_resolution_does_not_promote_uasset_internal_pin_key(self):
         from blueprint_translator.models import NodeInfo, PinInfo
 
@@ -2171,10 +3682,16 @@ class UAssetGraphCandidateTests(unittest.TestCase):
         counts = resolve_graph_link_target_pins([source, target])
 
         self.assertEqual(counts["resolved_pin"], 0)
-        self.assertEqual(counts["resolved_pin_heuristic"], 1)
+        self.assertEqual(counts["resolved_pin_heuristic"], 0)
+        self.assertEqual(counts["unresolved"], 1)
         self.assertEqual(
-            source_pin.links[0]["resolution_method"],
-            "non_authoritative_target_pin_key",
+            source_pin.links[0]["resolution_status"],
+            "source_pin_identity_unavailable",
+        )
+        self.assertEqual(source_pin.links[0]["target_pin_id"], "")
+        self.assertEqual(
+            source_pin.links[0]["target_pin_internal_key"],
+            "Target_pin_1",
         )
         self.assertNotEqual(source_pin.links[0]["confidence"], "high")
 

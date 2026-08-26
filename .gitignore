@@ -14,6 +14,7 @@ __pycache__/
 .claude/
 /.runtime/arkdev-mcp/
 /.blueprint-tasks/
+/.blueprint-solvers/
 /.arkdev-probe/
 
 # Generated Blueprint captures and reports
@@ -49,6 +50,7 @@ native_evidence/
 devkit_plugins/**/Binaries/
 devkit_plugins/**/Intermediate/
 devkit_plugins/**/Saved/
+/.arkdev-bridge/
 
 node_modules
 dist

@@ -71,6 +71,8 @@ _COUNT_FIELD_TABLE = {
     "assetRevisions": "asset_revisions",
     "asset_revisions": "asset_revisions",
     "properties": "properties",
+    "assetFields": "properties",
+    "asset_fields": "properties",
     "classDefaults": "class_defaults",
     "class_defaults": "class_defaults",
     "diagnostics": "diagnostics",
@@ -876,7 +878,15 @@ def _validate_database(
         actual_counts = {
             field: int(
                 connection.execute(
-                    f'SELECT COUNT(*) FROM "{_COUNT_FIELD_TABLE[field]}"'
+                    (
+                        "SELECT COUNT(*) FROM properties "
+                        "WHERE owner_kind = 'asset'"
+                        if field in {"assetFields", "asset_fields"}
+                        else (
+                            f'SELECT COUNT(*) FROM '
+                            f'"{_COUNT_FIELD_TABLE[field]}"'
+                        )
+                    )
                 ).fetchone()[0]
             )
             for field in contract.counts

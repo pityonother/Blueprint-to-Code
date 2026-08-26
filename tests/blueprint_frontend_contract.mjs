@@ -15,6 +15,7 @@ try {
     blueprintEvidenceQueryMatchesHealth,
     blueprintIdentitiesMatch,
     blueprintIdentityMatchesHealth,
+    isBlueprintReadyHealth,
   } = await server.ssrLoadModule(
     '/src/blueprint/controller.ts',
   );
@@ -61,12 +62,14 @@ try {
       asset: '<img src=x onerror=alert(1)>',
       health: { status: 'READY', reasonCode: '<script>bad</script>' },
     },
-  ], '', '<svg onload=alert(1)>', false);
+  ], '', '<svg onload=alert(1)>', false, null, { ready: 7, total: 337 });
   assert.match(assetList, /data-blueprint-form="asset-search"/);
   assert.match(assetList, /data-blueprint-asset=/);
   assert.doesNotMatch(assetList, /<img src=x/);
   assert.doesNotMatch(assetList, /<script>bad<\/script>/);
   assert.doesNotMatch(assetList, /<svg onload=/);
+  assert.match(assetList, /权威 Evidence/);
+  assert.match(assetList, /READY 7 \/ 337/);
 
   const healthState = {
     activeTab: 'interpretation',
@@ -215,11 +218,11 @@ try {
       evidence: {
         ...identity.evidence,
         pointerSha256: evidencePointerSha256,
-        freshnessStatus: 'READY',
+        freshnessStatus: 'FRESH',
         releaseAuthority: true,
         migrationRequired: false,
       },
-      interpretation: { status: 'READY', ...identity.interpretation },
+      interpretation: { status: 'CURRENT', ...identity.interpretation },
     },
   };
   const gapsResponse = {
@@ -258,13 +261,16 @@ try {
     items: [{ marker: 'base' }],
     manifestSha256: identity.evidence.manifestSha256,
     pointerSha256: evidencePointerSha256,
-    freshnessStatus: 'READY',
+    freshnessStatus: 'FRESH',
+    releaseAuthority: true,
+    migrationRequired: false,
   };
   const assetResponse = {
     ok: true,
     schema: 'blueprint-to-code.blueprint-asset-list-response/v1',
     items: [{ asset: 'Fixture', health: readyHealth.health }],
     page: { limit: 100, returned: 1, total: 1, nextCursor: null },
+    summary: { ready: 1, total: 337 },
   };
   const clone = (value) => structuredClone(value);
   const makeClient = (overrides = {}) => ({
@@ -277,6 +283,20 @@ try {
     queryEvidence: async () => clone(evidenceQuery),
     ...overrides,
   });
+
+  let compatibilityLoads = 0;
+  const compatibilityController = new BlueprintController(
+    () => {},
+    () => {},
+    makeClient(),
+    () => { compatibilityLoads += 1; },
+  );
+  compatibilityController.setTab('legacy');
+  assert.equal(compatibilityLoads, 1);
+  compatibilityController.setTab('experimental');
+  assert.equal(compatibilityLoads, 2);
+  compatibilityController.setTab('interpretation');
+  assert.equal(compatibilityLoads, 2);
   const deferred = () => {
     let resolve;
     let reject;
@@ -288,6 +308,22 @@ try {
   };
 
   assert.equal(blueprintIdentityMatchesHealth(readyHealth, identity, 'Fixture'), true);
+  assert.equal(isBlueprintReadyHealth(readyHealth.health), true);
+  for (const mutate of [
+    (candidate) => { candidate.evidence.freshnessStatus = 'SOURCE_UNAVAILABLE'; },
+    (candidate) => { candidate.evidence.freshnessStatus = 'STALE'; },
+    (candidate) => { candidate.evidence.releaseAuthority = false; },
+    (candidate) => { candidate.evidence.migrationRequired = true; },
+    (candidate) => { delete candidate.evidence.freshnessStatus; },
+  ]) {
+    const notReady = clone(readyHealth.health);
+    mutate(notReady);
+    assert.equal(isBlueprintReadyHealth(notReady), false);
+    assert.equal(
+      blueprintIdentityMatchesHealth({ ...readyHealth, health: notReady }, identity, 'Fixture'),
+      false,
+    );
+  }
   for (const mutate of [
     (candidate) => { candidate.evidence.revisionId = '9'.repeat(24); },
     (candidate) => { candidate.evidence.manifestSha256 = '9'.repeat(64); },
@@ -323,6 +359,7 @@ try {
   const refreshController = new BlueprintController(() => {}, () => {}, refreshClient);
   await refreshController.refreshAssets('Fixture');
   assert.ok(refreshController.snapshot().interpretation);
+  assert.deepEqual(refreshController.snapshot().assetsSummary, { ready: 1, total: 337 });
   refreshController.snapshot().assetQuery = 'needle';
   currentHealth.health.status = 'STALE';
   const pendingRefresh = refreshController.refreshAssets('Fixture');
@@ -569,15 +606,39 @@ try {
   assert.match(main, /new BlueprintController/);
   assert.match(main, /blueprintController\.render/);
   assert.match(main, /blueprintController\.ensureLoaded/);
+  assert.doesNotMatch(main, /blueprintController\.ensureLoaded\(selectedAsset\)/);
   assert.match(main, /legacy: legacyWorkspace\.renderLegacy\(\)/);
   assert.match(main, /experimental: legacyWorkspace\.renderExperimental\(\)/);
+  assert.match(main, /\(\) => legacyWorkspace\.ensureLoaded\(\)/);
+  assert.doesNotMatch(
+    main,
+    /render\(\);\s*if \(workspaceView === 'blueprint'\) \{\s*legacyWorkspace\.ensureLoaded\(\)/,
+  );
+  assert.doesNotMatch(
+    main,
+    /workspaceView === 'blueprint' && !legacyWorkspace\.isLoaded\(\)[\s\S]{0,120}renderLoading\(\)/,
+  );
   const legacyWorkspaceSource = await readFile(
     new URL('../src/control-center/workspace.ts', import.meta.url),
     'utf8',
   );
   assert.match(
     legacyWorkspaceSource,
-    /renderLegacy\(\): string \{[\s\S]*return renderStepReports\(/,
+    /renderLegacy\(\): string \{[\s\S]*renderStepReports\(/,
+  );
+  assert.match(legacyWorkspaceSource, /private stateLoadError = ''/);
+  assert.match(legacyWorkspaceSource, /private pendingAssetName = ''/);
+  assert.match(
+    legacyWorkspaceSource,
+    /if \(action === 'refresh'\) \{[\s\S]*try \{[\s\S]*await this\.refreshState\(\)[\s\S]*catch \(error\) \{[\s\S]*this\.recordStateLoadError\(error\)/,
+  );
+  assert.match(
+    legacyWorkspaceSource,
+    /selectAssetByName\(assetName: string\): void \{[\s\S]*if \(!this\.state\)[\s\S]*this\.pendingAssetName = assetName/,
+  );
+  assert.match(
+    legacyWorkspaceSource,
+    /renderLegacy\(\): string \{[\s\S]*renderStateLoadError\(\)/,
   );
 
   const css = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
@@ -590,7 +651,15 @@ try {
   assert.match(css, /\.blueprint-load-more \{[\s\S]*max-width: 100%/);
 
   const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /node tests\/blueprint_frontend_contract\.mjs/);
+  assert.match(workflow, /python scripts\/validate_change\.py/);
+  const validator = await readFile(
+    new URL('../scripts/validate_change.py', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    validator,
+    /"frontend-blueprint-contract", "tests\/blueprint_frontend_contract\.mjs"/,
+  );
 } finally {
   await server.close();
 }

@@ -92,6 +92,45 @@ class TaskResearchTests(unittest.TestCase):
             for path in task_root.rglob("*.json")
         }
 
+    def test_unusable_class_default_is_not_promoted_to_confirmed_fact(self) -> None:
+        revision = "a" * 24
+        candidate = {
+            "id": f"bp://asset@{revision}/default/Value",
+            "kind": "CLASS_DEFAULT",
+            "status": "CONFIRMED",
+            "valueUsable": False,
+            "evidenceRefs": [f"bp://asset@{revision}/default/Value"],
+        }
+
+        merged = ResearchService._merge_confirmed_facts(  # noqa: SLF001
+            [],
+            [candidate],
+            revision=revision,
+        )
+
+        self.assertEqual(merged, [])
+
+    def test_partial_object_identity_default_is_not_promoted_to_confirmed_fact(
+        self,
+    ) -> None:
+        revision = "b" * 24
+        candidate = {
+            "id": f"bp://asset@{revision}/default/Values",
+            "kind": "CLASS_DEFAULT",
+            "status": "CONFIRMED",
+            "valueUsable": True,
+            "resolvedObjectIdentityComplete": False,
+            "evidenceRefs": [f"bp://asset@{revision}/default/Values"],
+        }
+
+        merged = ResearchService._merge_confirmed_facts(  # noqa: SLF001
+            [],
+            [candidate],
+            revision=revision,
+        )
+
+        self.assertEqual(merged, [])
+
     def test_identical_signature_hits_cache_without_a_second_context_query(self) -> None:
         first = self.call()
         second = self.call()

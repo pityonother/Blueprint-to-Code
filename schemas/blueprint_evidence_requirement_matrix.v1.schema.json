@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blueprint-to-code.evidence-requirement-matrix/v1",
+  "title": "Blueprint Evidence Requirement Matrix v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "solverId", "compilerVersion", "requirements", "semanticDigest"],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.evidence-requirement-matrix/v1"},
+    "solverId": {"type": "string", "pattern": "^solver://[0-9a-f]{32}$"},
+    "compilerVersion": {"type": "string", "minLength": 1, "maxLength": 32},
+    "requirements": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/requirement"}},
+    "semanticDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requirementId", "problemId", "kind", "scope", "blocking", "reason", "preferredSources", "candidateAssets", "status", "selectedSource", "gaps"],
+      "properties": {
+        "requirementId": {"type": "string", "pattern": "^requirement://[0-9a-f]{24}$"},
+        "problemId": {"type": "string"},
+        "kind": {"enum": ["ASSET_IDENTITY", "GRAPH_STRUCTURE", "NODE_IDENTITY", "PIN_SIGNATURES", "PIN_IDENTITY", "DEFAULTS", "REFERENCE_CLOSURE", "LOCALIZATION", "ENTITY_DATASET", "DATASET_SCHEMA", "USER_FORMULA", "NATIVE_SOURCE", "RUNTIME_STATE", "THIRD_PARTY_MOD_ASSET"]},
+        "scope": {"type": "object"},
+        "blocking": {"type": "boolean"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "preferredSources": {"type": "array", "maxItems": 10, "items": {"type": "string", "pattern": "^[A-Z0-9_]+$"}},
+        "candidateAssets": {"type": "array", "maxItems": 20, "items": {"type": "object"}},
+        "status": {"enum": ["UNRESOLVED", "CANDIDATES_FOUND", "AMBIGUOUS", "READY", "ACQUISITION_REQUIRED", "SOURCE_NOT_AVAILABLE"]},
+        "selectedSource": {"type": "string", "maxLength": 64},
+        "gaps": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 256}}
+      }
+    }
+  }
+}

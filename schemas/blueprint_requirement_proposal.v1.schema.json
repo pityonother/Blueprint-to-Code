@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blueprint-to-code.requirement-proposal/v1",
+  "title": "Blueprint Requirement Proposal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "rawRequest", "language", "subproblems"],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.requirement-proposal/v1"},
+    "rawRequest": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "language": {"type": "string", "minLength": 2, "maxLength": 32},
+    "subproblems": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/subproblem"}
+    }
+  },
+  "$defs": {
+    "targetHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "role", "aliases", "expectedKind", "userSupplied"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1, "maxLength": 256},
+        "role": {
+          "enum": [
+            "PRIMARY_BLUEPRINT", "SUPPORTING_BLUEPRINT", "BUFF", "SUPPLY_CRATE",
+            "LOOT_ITEM_SET", "LOCALIZATION_SOURCE", "ENTITY_DATASET", "MOD_ASSET", "OTHER"
+          ]
+        },
+        "aliases": {
+          "type": "array", "maxItems": 8, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 256}
+        },
+        "expectedKind": {"type": "string", "maxLength": 128},
+        "userSupplied": {"type": "boolean"}
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outputLanguage": {"type": "string", "maxLength": 32},
+        "localizedNamesOnly": {"type": "boolean"},
+        "topK": {"type": "integer", "minimum": 1, "maximum": 100},
+        "userFormula": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "formulaVariables": {
+          "type": "object", "minProperties": 1, "maxProperties": 32,
+          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 128},
+          "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 256}
+        },
+        "candidateScope": {"$ref": "#/$defs/stringList100"},
+        "excludeClasses": {"$ref": "#/$defs/stringList100"},
+        "includeClasses": {"$ref": "#/$defs/stringList100"},
+        "desiredBehavior": {"$ref": "#/$defs/nonEmptyStringList20"},
+        "invariants": {"$ref": "#/$defs/nonEmptyStringList20"},
+        "acceptanceTests": {"$ref": "#/$defs/nonEmptyStringList20"},
+        "noWeb": {"type": "boolean"}
+      }
+    },
+    "stringList100": {
+      "type": "array", "maxItems": 100,
+      "items": {"type": "string", "minLength": 1, "maxLength": 512}
+    },
+    "nonEmptyStringList20": {
+      "type": "array", "minItems": 1, "maxItems": 20,
+      "items": {"type": "string", "minLength": 1, "maxLength": 512}
+    },
+    "subproblem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceStart", "sourceEnd", "sourceText", "intent", "outputKind",
+        "completeness", "targetHints", "constraints", "acceptanceCriteria"
+      ],
+      "properties": {
+        "sourceStart": {"type": "integer", "minimum": 0, "maximum": 8000},
+        "sourceEnd": {"type": "integer", "minimum": 1, "maximum": 8000},
+        "sourceText": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "intent": {"enum": ["ANSWER_CURRENT_BEHAVIOR", "DESIGN_BLUEPRINT_CHANGE"]},
+        "outputKind": {
+          "enum": [
+            "FORMULA", "COMPLETE_ENUMERATION", "INFLUENCE_FACTORS", "RANKING",
+            "CURRENT_BEHAVIOR", "BLUEPRINT_CHANGE"
+          ]
+        },
+        "completeness": {"enum": ["REQUIRED", "BEST_EFFORT"]},
+        "targetHints": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/targetHint"}},
+        "constraints": {"$ref": "#/$defs/constraints"},
+        "acceptanceCriteria": {
+          "type": "array", "maxItems": 20,
+          "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
+    }
+  }
+}

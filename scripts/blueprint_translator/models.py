@@ -28,6 +28,7 @@ class PinInfo:
 @dataclass
 class NodeInfo:
     index: int
+    package_index: int = 0
     class_name: str = ""
     node_type: str = ""
     name: str = ""

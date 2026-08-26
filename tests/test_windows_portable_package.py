@@ -56,6 +56,7 @@ class WindowsPortablePackageTests(unittest.TestCase):
             "src/main.ts",
             "public/favicon.svg",
             "docs/USER_GUIDE_zh.md",
+            "docs/releases/v0.3.2.md",
             "docs/releases/v0.3.1.md",
             "runtime/PYTHON_RUNTIME_SOURCE.txt",
             "runtime/python/python.exe",
@@ -131,7 +132,7 @@ class WindowsPortablePackageTests(unittest.TestCase):
                 "inventorySha256": "c" * 64,
                 "fileCount": 34,
             },
-            version="0.3.1",
+            version="0.3.2",
         )
 
         self.assertEqual(manifest["packageType"], "windows-portable-user-release")
@@ -151,8 +152,8 @@ class WindowsPortablePackageTests(unittest.TestCase):
 
     def test_release_asset_name_is_stable_and_user_facing(self):
         self.assertEqual(
-            portable_asset_name("0.3.1"),
-            "BlueprintToCode-v0.3.1-windows-x64-portable.zip",
+            portable_asset_name("0.3.2"),
+            "BlueprintToCode-v0.3.2-windows-x64-portable.zip",
         )
 
 

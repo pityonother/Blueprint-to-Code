@@ -24,6 +24,12 @@ from blueprint_translator.evidence_repository import (
     open_resolved_asset_repository,
     resolve_asset_evidence_state,
 )
+from blueprint_translator.evidence_policy import (
+    EvidenceDecision,
+    EvidencePolicyError,
+    require_evidence,
+)
+from blueprint_translator.evidence_schema import parse_evidence_ref
 from blueprint_translator.interpretation_publication import (
     LoadedInterpretation,
     load_current_interpretation,
@@ -51,12 +57,30 @@ _GOAL_STOP_WORDS = frozenset(
     }
 )
 _MAX_FACT_CANDIDATES = 100
+_MAX_DEFAULT_FACT_CANDIDATES = 20
+_MAX_DEFAULT_ENTITY_BUDGET = 8000
 _MAX_GAP_CANDIDATES = 100
 _MAX_NODE_CANDIDATES = 100
 _MAX_PIN_CANDIDATES = 400
 _MAX_EDGE_CANDIDATES = 400
 _FACT_PAGE_SIZE = 20
 _GAP_PAGE_SIZE = 20
+_OBJECT_DEFAULT_TYPES = frozenset(
+    {
+        "ClassProperty",
+        "ObjectProperty",
+        "SoftClassProperty",
+        "SoftObjectProperty",
+    }
+)
+
+
+def _is_context_seed_ref(value: object) -> bool:
+    try:
+        parsed = parse_evidence_ref(str(value or ""))
+    except ValueError:
+        return False
+    return parsed.get("kind") in {"node", "pin"}
 
 
 def _canonical_json(value: object) -> str:
@@ -116,6 +140,59 @@ def _goal_terms(goal: str) -> tuple[str, ...]:
     return tuple(terms)
 
 
+def _is_exact_default_name(name: object, goal: str) -> bool:
+    folded = str(name or "").casefold()
+    return bool(
+        folded
+        and (
+            folded == goal.casefold()
+            or folded in {term.casefold() for term in _goal_terms(goal)}
+        )
+    )
+
+
+def _project_asset_field_value(
+    value: object,
+    *,
+    field_name: str = "value",
+) -> tuple[object, bool]:
+    """Keep Unreal object identities typed while withholding machine paths."""
+
+    if isinstance(value, str):
+        try:
+            assert_path_free({field_name: value})
+        except McpExecutionError:
+            try:
+                assert_path_free({"objectPath": value})
+            except McpExecutionError:
+                return {"withheldByPathPolicy": True}, False
+            return {"objectPath": value}, True
+        return value, True
+    if isinstance(value, Mapping):
+        projected: dict[str, object] = {}
+        complete = True
+        for key, item in value.items():
+            projected_item, item_complete = _project_asset_field_value(
+                item,
+                field_name=str(key),
+            )
+            projected[str(key)] = projected_item
+            complete = complete and item_complete
+        return projected, complete
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        projected_items: list[object] = []
+        complete = True
+        for item in value:
+            projected_item, item_complete = _project_asset_field_value(
+                item,
+                field_name=field_name,
+            )
+            projected_items.append(projected_item)
+            complete = complete and item_complete
+        return projected_items, complete
+    return value, True
+
+
 def _dedupe_by_ref(
     items: Iterable[Mapping[str, object]],
     *,
@@ -133,6 +210,44 @@ def _dedupe_by_ref(
         if len(returned) == limit:
             break
     return returned
+
+
+def _bounded_coverage(value: object) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    projection: dict[str, int] = {}
+    for key in ("available", "returned", "unresolved", "unparsedContainers"):
+        if key not in value:
+            continue
+        raw = value.get(key)
+        if isinstance(raw, bool):
+            return {}
+        try:
+            normalized = int(raw)
+        except (TypeError, ValueError):
+            return {}
+        if normalized < 0:
+            return {}
+        projection[key] = normalized
+    if not {"available", "returned"}.issubset(projection):
+        return {}
+    if projection["returned"] > projection["available"]:
+        return {}
+    return projection
+
+
+def _coverage_is_complete(
+    coverage: Mapping[str, int],
+    *,
+    represented: int,
+) -> bool:
+    return bool(
+        coverage
+        and coverage.get("returned") == coverage.get("available")
+        and represented == coverage.get("returned")
+        and not coverage.get("unresolved", 0)
+        and not coverage.get("unparsedContainers", 0)
+    )
 
 
 def _member(value: object, name: str, default: object = None) -> object:
@@ -161,6 +276,34 @@ def _mapping(value: object) -> dict[str, object]:
 def _error_from_exception(exc: Exception) -> McpExecutionError:
     if isinstance(exc, McpExecutionError):
         return exc
+    if isinstance(exc, EvidencePolicyError):
+        code = exc.code
+        if code == "EVIDENCE_STALE":
+            return McpExecutionError(
+                "EVIDENCE_STALE",
+                "Current Blueprint evidence is stale.",
+            )
+        if code == "EVIDENCE_EMPTY":
+            return McpExecutionError(
+                "EVIDENCE_NOT_AUTHORITATIVE",
+                "Current Blueprint evidence identifies the asset but has no semantic facts.",
+            )
+        if code in {
+            "SOURCE_UNAVAILABLE",
+            "SOURCE_KIND_NOT_CURRENT",
+            "RELEASE_AUTHORITY_MISSING",
+            "MIGRATION_REQUIRED",
+            "MANIFEST_BINDING_MISSING",
+            "POINTER_BINDING_MISSING",
+        }:
+            return McpExecutionError(
+                "EVIDENCE_NOT_AUTHORITATIVE",
+                "Current Blueprint evidence is not authoritative.",
+            )
+        return McpExecutionError(
+            "EVIDENCE_NOT_AUTHORITATIVE",
+            "Current Blueprint evidence has an invalid binding.",
+        )
     if isinstance(exc, ApiProblem):
         code = str(exc.payload.get("code") or "")
         if code == "BLUEPRINT_ASSET_NOT_FOUND":
@@ -265,19 +408,18 @@ class BlueprintService:
 
         try:
             asset_name, asset_dir = self._asset_dir(asset)
-            evidence_state, interpretation = self._load_bound_state(asset_dir)
-            with open_resolved_asset_repository(evidence_state) as repository:
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
                 identity = self._identity(
                     asset_name,
                     evidence_state,
                     interpretation,
                     repository,
+                    decision,
                 )
-                if evidence_state.freshness_status != "FRESH":
-                    raise McpExecutionError(
-                        "EVIDENCE_STALE",
-                        "Current Blueprint evidence is stale.",
-                    )
                 evidence = dict(identity["evidence"])
                 asset_identity = dict(identity["asset"])
                 payload: dict[str, object] = {
@@ -291,6 +433,194 @@ class BlueprintService:
                         self._graph_projection(item)
                         for item in repository.graph_summaries()
                     ],
+                }
+                assert_path_free(payload)
+                return payload
+        except Exception as exc:
+            raise _error_from_exception(exc) from exc
+
+    def get_node_binding_locators(
+        self,
+        *,
+        asset: str,
+        graph_ref: str,
+        node_refs: Sequence[str],
+    ) -> dict[str, object]:
+        """Project exact live-lookup locators from one current Evidence revision.
+
+        This is an application service for the repository-external request
+        builder, not an MCP tool.  It opens one immutable Evidence generation
+        and never returns its database or source paths.
+        """
+
+        if isinstance(node_refs, (str, bytes)):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "nodeRefs must be an array of exact Blueprint node references.",
+            )
+        requested = tuple(str(ref).strip() for ref in node_refs)
+        if (
+            not graph_ref.startswith("bp://")
+            or "/g/" not in graph_ref
+            or len(graph_ref) > 4096
+            or not 1 <= len(requested) <= 12
+            or any(not ref or len(ref) > 4096 for ref in requested)
+        ):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "One exact graphRef and between 1 and 12 nodeRefs are required.",
+            )
+        if len(requested) != len(set(requested)):
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "nodeRefs must not contain duplicates.",
+            )
+        try:
+            asset_name, asset_dir = self._asset_dir(asset)
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            if evidence_state.freshness_status != "FRESH":
+                raise McpExecutionError(
+                    "EVIDENCE_STALE",
+                    "Current Blueprint evidence is stale.",
+                )
+            manifest_sha256 = str(evidence_state.manifest_sha256 or "")
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
+                self._require_current_ref(graph_ref, repository)
+                graph = next(
+                    (
+                        item
+                        for item in repository.graph_summaries()
+                        if str(item.get("ref") or "") == graph_ref
+                    ),
+                    None,
+                )
+                if graph is None:
+                    raise McpExecutionError(
+                        "INVALID_ARGUMENT",
+                        "graphRef is not an exact graph in current Evidence.",
+                    )
+                for node_ref in requested:
+                    self._require_current_ref(node_ref, repository)
+                    if not node_ref.startswith(f"{graph_ref}/n/"):
+                        raise McpExecutionError(
+                            "INVALID_ARGUMENT",
+                            "Every nodeRef must belong to the exact target graph.",
+                        )
+                try:
+                    locators = repository.node_binding_locators(
+                        graph_ref=graph_ref,
+                        node_refs=requested,
+                    )
+                except KeyError as exc:
+                    raise McpExecutionError(
+                        "NODE_NOT_FOUND",
+                        "One or more exact Blueprint nodes were not found.",
+                    ) from exc
+                except ValueError as exc:
+                    if str(exc) == "NODE_GUID_NOT_AVAILABLE":
+                        raise ValueError("NODE_GUID_NOT_AVAILABLE") from exc
+                    raise
+                if any(not str(locator.get("nodeGuid") or "") for locator in locators):
+                    raise ValueError("NODE_GUID_NOT_AVAILABLE")
+                if (
+                    re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+                    or not evidence_state.release_authority
+                    or evidence_state.migration_required
+                ):
+                    raise McpExecutionError(
+                        "EVIDENCE_NOT_AUTHORITATIVE",
+                        "Current Blueprint evidence has no authoritative manifest binding.",
+                    )
+                identity = self._identity(
+                    asset_name,
+                    evidence_state,
+                    interpretation,
+                    repository,
+                    decision,
+                )
+                asset_identity = dict(identity["asset"])
+                payload: dict[str, object] = {
+                    "asset": {
+                        "name": asset_identity["name"],
+                        "objectPath": asset_identity["objectPath"],
+                        "assetId": asset_identity["assetId"],
+                        "evidenceRevisionId": repository.revision_id,
+                        "evidenceManifestSha256": manifest_sha256,
+                        "freshnessStatus": evidence_state.freshness_status,
+                    },
+                    "graph": {
+                        "name": str(graph.get("name") or ""),
+                        "graphRef": graph_ref,
+                    },
+                    "nodes": locators,
+                }
+                assert_path_free(payload)
+                return payload
+        except ValueError:
+            # This non-MCP application service preserves builder-only fail-closed
+            # codes without expanding the stable public MCP error enum.
+            raise
+        except Exception as exc:
+            raise _error_from_exception(exc) from exc
+
+    def get_editor_binding_authority(
+        self,
+        *,
+        asset: str,
+        graph_name: str,
+    ) -> dict[str, object]:
+        """Return only exact current graph and NodeGuid binding candidates."""
+
+        if not graph_name or len(graph_name) > 256:
+            raise McpExecutionError(
+                "INVALID_ARGUMENT",
+                "Focused graph identity is invalid.",
+            )
+        try:
+            asset_name, asset_dir = self._asset_dir(asset)
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
+                if evidence_state.freshness_status != "FRESH":
+                    raise McpExecutionError(
+                        "EVIDENCE_STALE",
+                        "Current Blueprint evidence is stale.",
+                    )
+                identity = self._identity(
+                    asset_name,
+                    evidence_state,
+                    interpretation,
+                    repository,
+                    decision,
+                )
+                graph_matches: list[dict[str, object]] = []
+                for item in repository.graph_summaries():
+                    if str(item.get("name") or "") != graph_name:
+                        continue
+                    graph_ref = str(item.get("ref") or "")
+                    graph_matches.append(
+                        {
+                            **self._graph_projection(item),
+                            "nodeGuidBindings": repository.node_guid_bindings(
+                                graph_ref
+                            ),
+                        }
+                    )
+                evidence = dict(identity["evidence"])
+                asset_identity = dict(identity["asset"])
+                payload: dict[str, object] = {
+                    "name": asset_identity["name"],
+                    "assetId": asset_identity["assetId"],
+                    "objectPath": asset_identity["objectPath"],
+                    "evidenceRevisionId": evidence["revisionId"],
+                    "evidenceManifestSha256": evidence["manifestSha256"],
+                    "freshness": evidence_state.freshness_status,
+                    "graphMatches": graph_matches,
                 }
                 assert_path_free(payload)
                 return payload
@@ -326,13 +656,17 @@ class BlueprintService:
         )
         try:
             asset_name, asset_dir = self._asset_dir(asset)
-            evidence_state, interpretation = self._load_bound_state(asset_dir)
-            with open_resolved_asset_repository(evidence_state) as repository:
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
                 identity = self._identity(
                     asset_name,
                     evidence_state,
                     interpretation,
                     repository,
+                    decision,
                 )
                 signature = self._context_signature(
                     evidence_state=evidence_state,
@@ -356,17 +690,25 @@ class BlueprintService:
                     repository=repository,
                     graph_summaries=graph_summaries,
                     search_items=search_items,
+                    goal=normalized_goal,
                     graph_ref=graph_ref,
                     seed_refs=normalized_seeds,
                 )
-                facts = self._facts(
-                    interpretation,
-                    {str(item["ref"]) for item in graph_targets},
-                    normalized_goal,
+                facts = self._merge_facts(
+                    self._default_facts(
+                        repository,
+                        search_items,
+                        normalized_goal,
+                    ),
+                    self._facts(
+                        interpretation,
+                        {str(item["ref"]) for item in graph_targets},
+                        normalized_goal,
+                    ),
                 )
                 for fact in facts:
                     for ref in fact.get("evidenceRefs", []):
-                        if "/n/" in str(ref) and str(ref) not in seeds:
+                        if _is_context_seed_ref(ref) and str(ref) not in seeds:
                             seeds.append(str(ref))
                         if len(seeds) == 10:
                             break
@@ -425,14 +767,18 @@ class BlueprintService:
             )
         try:
             asset_name, asset_dir = self._asset_dir(asset)
-            evidence_state, interpretation = self._load_bound_state(asset_dir)
-            with open_resolved_asset_repository(evidence_state) as repository:
+            evidence_state, interpretation, decision = self._load_bound_state(asset_dir)
+            with open_resolved_asset_repository(
+                evidence_state,
+                purpose="formal_query",
+            ) as repository:
                 self._require_current_ref(node_ref, repository)
                 identity = self._identity(
                     asset_name,
                     evidence_state,
                     interpretation,
                     repository,
+                    decision,
                 )
                 try:
                     entity = repository.query(
@@ -574,8 +920,9 @@ class BlueprintService:
     @staticmethod
     def _load_bound_state(
         asset_dir: Path,
-    ) -> tuple[ResolvedEvidenceState, LoadedInterpretation]:
-        evidence_state = resolve_asset_evidence_state(asset_dir)
+    ) -> tuple[ResolvedEvidenceState, LoadedInterpretation, EvidenceDecision]:
+        evidence_state = resolve_asset_evidence_state(asset_dir, allow_stale=True)
+        decision = require_evidence(evidence_state, purpose="formal_query")
         interpretation = load_current_interpretation(asset_dir)
         evidence_manifest = evidence_manifest_payload(evidence_state)
         expected_revision = str(interpretation.manifest.get("evidenceRevisionId") or "")
@@ -590,7 +937,7 @@ class BlueprintService:
                 "EVIDENCE_REVISION_MISMATCH",
                 "Interpretation and Evidence bindings changed during the query.",
             )
-        return evidence_state, interpretation
+        return evidence_state, interpretation, decision
 
     @staticmethod
     def _identity(
@@ -598,6 +945,7 @@ class BlueprintService:
         evidence_state: ResolvedEvidenceState,
         interpretation: LoadedInterpretation,
         repository: EvidenceRepository,
+        decision: EvidenceDecision,
     ) -> dict[str, object]:
         evidence_identity = repository.identity()
         interpretation_payload = interpretation.interpretation
@@ -613,6 +961,14 @@ class BlueprintService:
                 "pointerSha256": str(evidence_state.pointer_sha256 or ""),
                 "sourceKind": evidence_state.source_kind,
                 "releaseAuthority": evidence_state.release_authority,
+                "decision": {
+                    "reasonCode": decision.reason_code,
+                    "reasonCodes": list(decision.reason_codes),
+                    "bindingDigest": decision.binding_digest,
+                    "evidenceAvailability": decision.evidence_availability,
+                    "statusZh": decision.public_status_zh,
+                    "nonUpgradeableGaps": list(decision.non_upgradeable_gaps),
+                },
             },
             "interpretation": {
                 "revisionId": interpretation.revision_id,
@@ -641,12 +997,36 @@ class BlueprintService:
     ) -> list[dict[str, object]]:
         results: list[dict[str, object]] = []
         seen: set[str] = set()
+        searches: list[tuple[str, list[str]]] = []
+        normalized_goal = _normalized_goal(goal)
+        if normalized_goal:
+            # A property name may contain spaces.  Query the complete phrase
+            # before its individual terms so the exact row cannot be pushed
+            # beyond a bounded term page by many fuzzy matches.
+            searches.append((normalized_goal, ["default", "asset_field"]))
         for term in _goal_terms(goal):
+            searches.extend(
+                (
+                    (term, ["graph", "node"]),
+                    (term, ["default", "asset_field"]),
+                )
+            )
+
+        unique_searches: list[tuple[str, list[str]]] = []
+        seen_searches: set[tuple[str, tuple[str, ...]]] = set()
+        for query, kinds in searches:
+            identity = (query.casefold(), tuple(kinds))
+            if identity in seen_searches:
+                continue
+            seen_searches.add(identity)
+            unique_searches.append((query, kinds))
+
+        for query, kinds in unique_searches:
             response = repository.query(
                 {
                     "operation": "search",
-                    "query": term,
-                    "kinds": ["graph", "node"],
+                    "query": query,
+                    "kinds": kinds,
                     "pageSize": 25,
                     "budgetTokens": 1600,
                 }
@@ -666,6 +1046,7 @@ class BlueprintService:
         repository: EvidenceRepository,
         graph_summaries: Sequence[Mapping[str, object]],
         search_items: Sequence[Mapping[str, object]],
+        goal: str,
         graph_ref: str,
         seed_refs: Sequence[str],
     ) -> tuple[list[dict[str, object]], list[str]]:
@@ -714,12 +1095,24 @@ class BlueprintService:
             if str(item.get("kind")) == "node" and str(item.get("ref") or "") not in seeds:
                 seeds.append(str(item["ref"]))
         if not selected_refs:
-            if len(matching_graphs) != 1:
+            default_matches = [
+                item
+                for item in search_items
+                if str(item.get("kind") or "") in {"default", "asset_field"}
+            ]
+            exact_default_match = any(
+                _is_exact_default_name(item.get("name"), goal)
+                for item in default_matches
+            )
+            if len(matching_graphs) == 1:
+                selected_refs = matching_graphs
+            elif exact_default_match:
+                selected_refs = []
+            else:
                 self._raise_graph_selection(
                     [summaries[ref] for ref in matching_graphs if ref in summaries]
                     or graph_summaries
                 )
-            selected_refs = matching_graphs
         if len(selected_refs) > 5:
             self._raise_graph_selection(
                 [summaries[ref] for ref in selected_refs if ref in summaries]
@@ -799,6 +1192,354 @@ class BlueprintService:
             }
             for item in selected[:_MAX_FACT_CANDIDATES]
         ]
+
+    @staticmethod
+    def _default_entity_item(
+        repository: EvidenceRepository,
+        ref: str,
+        expected_kind: str = "default",
+    ) -> dict[str, object]:
+        budget = 1200
+        for _attempt in range(4):
+            response = repository.query(
+                {
+                    "operation": "entity",
+                    "selector": {"ref": ref},
+                    "valueChars": 400,
+                    "propertyLimit": 0,
+                    "observationLimit": 0,
+                    "budgetTokens": budget,
+                }
+            )
+            items = response.get("items")
+            if (
+                isinstance(items, Sequence)
+                and not isinstance(items, (str, bytes))
+                and items
+            ):
+                item = _mapping(items[0])
+                if (
+                    len(items) != 1
+                    or str(item.get("kind") or "") != expected_kind
+                    or str(item.get("ref") or "") != ref
+                ):
+                    raise McpExecutionError(
+                        "INTERNAL_CONTRACT_ERROR",
+                        "The exact field Evidence entity did not match "
+                        "the requested reference.",
+                    )
+                return item
+
+            coverage = _mapping(response.get("coverage"))
+            if not (
+                int(coverage.get("requested") or 0) == 1
+                and int(coverage.get("returned") or 0) == 0
+            ):
+                break
+            next_queries = response.get("nextQueries")
+            suggestions = (
+                [item for item in next_queries if isinstance(item, Mapping)]
+                if isinstance(next_queries, Sequence)
+                and not isinstance(next_queries, (str, bytes))
+                else []
+            )
+            suggested_budget = 0
+            for suggestion in suggestions:
+                if str(suggestion.get("operation") or "") != "entity":
+                    continue
+                selector = _mapping(suggestion.get("selector"))
+                if str(selector.get("ref") or "") != ref:
+                    continue
+                try:
+                    suggested_budget = int(suggestion.get("budgetTokens") or 0)
+                except (TypeError, ValueError):
+                    suggested_budget = 0
+                break
+            if suggested_budget <= budget:
+                break
+            budget = min(suggested_budget, _MAX_DEFAULT_ENTITY_BUDGET)
+
+        raise McpExecutionError(
+            "RESULT_BUDGET_EXCEEDED",
+            "The exact class-default Evidence entity exceeds its bounded query budget.",
+            details={"maximumEvidenceBudgetTokens": _MAX_DEFAULT_ENTITY_BUDGET},
+        )
+
+    @staticmethod
+    def _default_facts(
+        repository: EvidenceRepository,
+        search_items: Sequence[Mapping[str, object]],
+        goal: str,
+    ) -> list[dict[str, object]]:
+        goal_terms = {term.casefold() for term in _goal_terms(goal)}
+        goal_folded = goal.casefold()
+        candidates = _dedupe_by_ref(
+            (
+                item
+                for item in search_items
+                if str(item.get("kind") or "") in {"default", "asset_field"}
+                and _is_exact_default_name(item.get("name"), goal)
+            ),
+            limit=_MAX_DEFAULT_FACT_CANDIDATES,
+        )
+
+        def rank(item: Mapping[str, object]) -> tuple[int, str, str]:
+            name = str(item.get("name") or "")
+            folded = name.casefold()
+            if folded == goal_folded:
+                relevance = 0
+            elif folded in goal_terms:
+                relevance = 1
+            elif any(term in folded for term in goal_terms):
+                relevance = 2
+            else:
+                relevance = 3
+            return relevance, folded, str(item.get("ref") or "")
+
+        candidates.sort(key=rank)
+        facts: list[dict[str, object]] = []
+        for candidate in candidates[:_MAX_DEFAULT_FACT_CANDIDATES]:
+            ref = str(candidate.get("ref") or "")
+            if not ref:
+                continue
+            candidate_kind = str(candidate.get("kind") or "")
+            item = BlueprintService._default_entity_item(
+                repository,
+                ref,
+                candidate_kind,
+            )
+            if str(item.get("kind") or "") != candidate_kind:
+                continue
+            name = str(item.get("name") or "")
+            type_name = str(item.get("typeName") or "")
+            source_status = str(item.get("valueStatus") or "NOT_RECOVERED")
+            source_value_usable = (
+                item.get("valueUsable") is True and source_status == "CONFIRMED"
+            )
+            fact: dict[str, object] = {
+                "id": ref,
+                "kind": (
+                    "ASSET_FIELD"
+                    if candidate_kind == "asset_field"
+                    else "CLASS_DEFAULT"
+                ),
+                "text": "",
+                "status": source_status,
+                "sourceValueStatus": source_status,
+                "graphRef": "",
+                "nodeRef": "",
+                "evidenceRefs": [ref],
+                "gapRefs": [],
+                "name": name,
+                "typeName": type_name,
+                "confidence": str(item.get("confidence") or ""),
+                "valueUsable": False,
+            }
+            parse = item.get("parse")
+            if parse is not None:
+                candidate_fact = {**fact, "parse": parse}
+                try:
+                    assert_path_free(candidate_fact)
+                except McpExecutionError:
+                    pass
+                else:
+                    fact["parse"] = parse
+
+            resolved_name = item.get("resolvedObjectName")
+            if isinstance(resolved_name, str) and resolved_name:
+                typed_candidate = {**fact, "resolvedObjectPath": resolved_name}
+                try:
+                    assert_path_free(typed_candidate)
+                except McpExecutionError:
+                    name_candidate = {**fact, "resolvedObjectName": resolved_name}
+                    try:
+                        assert_path_free(name_candidate)
+                    except McpExecutionError:
+                        pass
+                    else:
+                        fact["resolvedObjectName"] = resolved_name
+                else:
+                    fact["resolvedObjectPath"] = resolved_name
+
+            raw_resolved_names = item.get("resolvedObjectNames")
+            if isinstance(raw_resolved_names, Sequence) and not isinstance(
+                raw_resolved_names, (str, bytes)
+            ):
+                resolved_paths: list[str | None] = []
+                resolved_names: list[str | None] = []
+                represented_names = 0
+                for raw_name in raw_resolved_names:
+                    name_value = str(raw_name or "")
+                    if not name_value:
+                        resolved_paths.append(None)
+                        resolved_names.append(None)
+                        represented_names += 1
+                        continue
+                    try:
+                        assert_path_free({"resolvedObjectPath": name_value})
+                    except McpExecutionError:
+                        try:
+                            assert_path_free({"resolvedObjectName": name_value})
+                        except McpExecutionError:
+                            resolved_paths.append(None)
+                            resolved_names.append(None)
+                            continue
+                        resolved_paths.append(None)
+                        resolved_names.append(name_value)
+                    else:
+                        resolved_paths.append(name_value)
+                        resolved_names.append(None)
+                    represented_names += 1
+                if any(value is not None for value in resolved_paths):
+                    fact["resolvedObjectPaths"] = resolved_paths
+                if any(value is not None for value in resolved_names):
+                    fact["resolvedObjectNames"] = resolved_names
+
+                coverage = _bounded_coverage(item.get("resolvedObjectCoverage"))
+                if coverage:
+                    fact["resolvedObjectCoverage"] = coverage
+                    fact["resolvedObjectIdentityComplete"] = (
+                        _coverage_is_complete(
+                            coverage,
+                            represented=represented_names,
+                        )
+                    )
+
+            raw_resolved_fields = item.get("resolvedObjectFields")
+            if isinstance(raw_resolved_fields, Sequence) and not isinstance(
+                raw_resolved_fields, (str, bytes)
+            ):
+                resolved_fields: list[dict[str, object]] = []
+                for raw_field in raw_resolved_fields:
+                    if not isinstance(raw_field, Mapping):
+                        continue
+                    field: dict[str, object] = {
+                        "elementIndex": int(raw_field.get("elementIndex") or 0),
+                        "propertyIndex": int(raw_field.get("propertyIndex") or 0),
+                        "propertyName": str(raw_field.get("propertyName") or ""),
+                    }
+                    raw_value_path = raw_field.get("valuePath")
+                    if isinstance(raw_value_path, Sequence) and not isinstance(
+                        raw_value_path,
+                        (str, bytes),
+                    ):
+                        field["valuePath"] = list(raw_value_path)
+                    name_value = str(raw_field.get("name") or "")
+                    if not name_value:
+                        continue
+                    try:
+                        assert_path_free({**field, "objectPath": name_value})
+                    except McpExecutionError:
+                        field["resolvedObjectName"] = name_value
+                    else:
+                        field["objectPath"] = name_value
+                    try:
+                        assert_path_free(field)
+                    except McpExecutionError:
+                        continue
+                    resolved_fields.append(field)
+                if resolved_fields:
+                    fact["resolvedObjectFields"] = resolved_fields
+
+                field_coverage = _bounded_coverage(
+                    item.get("resolvedObjectFieldCoverage")
+                )
+                if field_coverage:
+                    fact["resolvedObjectFieldCoverage"] = field_coverage
+                    fact["resolvedObjectFieldIdentityComplete"] = (
+                        _coverage_is_complete(
+                            field_coverage,
+                            represented=len(resolved_fields),
+                        )
+                    )
+
+            def expose_value(value: object) -> bool:
+                complete = True
+                if candidate_kind == "asset_field":
+                    value, complete = _project_asset_field_value(value)
+                candidate_fact = {**fact, "value": value}
+                try:
+                    assert_path_free(candidate_fact)
+                except McpExecutionError:
+                    typed_object_path = {
+                        **fact,
+                        "objectPath": value,
+                    }
+                    if isinstance(value, str) and type_name in _OBJECT_DEFAULT_TYPES:
+                        try:
+                            assert_path_free(typed_object_path)
+                        except McpExecutionError:
+                            fact["valueExposure"] = "WITHHELD_BY_PATH_POLICY"
+                        else:
+                            fact["objectPath"] = value
+                            fact["valueExposure"] = "OBJECT_PATH"
+                            return True
+                    else:
+                        fact["valueExposure"] = "WITHHELD_BY_PATH_POLICY"
+                else:
+                    fact["value"] = value
+                    fact["valueExposure"] = "RETURNED"
+                    return complete
+                return False
+
+            value_returned = False
+            if "value" in item:
+                value_returned = expose_value(item["value"])
+            elif "valueJsonPage" in item:
+                coverage = _mapping(item.get("valueCoverage"))
+                complete = (
+                    int(coverage.get("offset") or 0) == 0
+                    and int(coverage.get("returnedChars") or 0)
+                    == int(coverage.get("availableChars") or 0)
+                )
+                if complete:
+                    try:
+                        decoded_value = json.loads(str(item["valueJsonPage"]))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        fact["valueExposure"] = "NOT_RETURNED"
+                    else:
+                        value_returned = expose_value(decoded_value)
+                else:
+                    fact["valueCoverage"] = {
+                        "availableChars": int(coverage.get("availableChars") or 0),
+                        "returnedChars": int(coverage.get("returnedChars") or 0),
+                    }
+                    fact["valueExposure"] = "AVAILABLE_NOT_RETURNED"
+            if not value_returned and "valueExposure" not in fact:
+                fact["valueExposure"] = "NOT_RETURNED"
+            if value_returned:
+                fact["valueUsable"] = source_value_usable
+            else:
+                fact["valueUsable"] = False
+                if source_status == "CONFIRMED":
+                    fact["status"] = "NOT_RECOVERED"
+            label = (
+                "Asset instance field"
+                if candidate_kind == "asset_field"
+                else "Class default"
+            )
+            fact["text"] = f"{label} {name} value has status {fact['status']}."
+            assert_path_free(fact)
+            facts.append(fact)
+        return facts
+
+    @staticmethod
+    def _merge_facts(
+        *groups: Sequence[Mapping[str, object]],
+    ) -> list[dict[str, object]]:
+        merged: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for group in groups:
+            for source in group:
+                item = dict(source)
+                identity = str(item.get("id") or "")
+                if not identity or identity in seen:
+                    continue
+                seen.add(identity)
+                merged.append(item)
+                if len(merged) == _MAX_FACT_CANDIDATES:
+                    return merged
+        return merged
 
     @staticmethod
     def _gaps(
@@ -1056,10 +1797,36 @@ class BlueprintService:
         # Preserve the directly requested graph slice before secondary
         # interpretation prose.  Large gap records otherwise starve pins from
         # every continuation page at the default budget.
-        trim_order = ("edges", "gaps", "facts", "pins", "nodes")
+        trim_order = (
+            "edges",
+            "gaps",
+            "secondaryFacts",
+            "pins",
+            "nodes",
+            "defaultFacts",
+        )
         while estimate_tokens(_canonical_json(response)) > budget_tokens:
             removed = False
             for name in trim_order:
+                if name in {"secondaryFacts", "defaultFacts"}:
+                    fact_index = next(
+                        (
+                            index
+                            for index in range(len(page["facts"]) - 1, -1, -1)
+                            if (
+                                page["facts"][index].get("kind")
+                                == "CLASS_DEFAULT"
+                            )
+                            == (name == "defaultFacts")
+                        ),
+                        None,
+                    )
+                    if fact_index is not None:
+                        page["facts"].pop(fact_index)
+                        removed = True
+                        response = build()
+                        break
+                    continue
                 if page[name]:
                     page[name].pop()
                     removed = True
@@ -1071,6 +1838,26 @@ class BlueprintService:
                     "The minimum Blueprint context response exceeds budgetTokens.",
                     details={"minimumBudgetTokens": estimate_tokens(_canonical_json(response))},
                 )
+        if response["truncated"] and not any(page.values()):
+            minimum_progress_tokens: list[int] = []
+            for name, values in candidates.items():
+                offset = offsets[name]
+                if offset >= len(values):
+                    continue
+                page[name].append(values[offset])
+                minimum_progress_tokens.append(
+                    estimate_tokens(_canonical_json(build()))
+                )
+                page[name].pop()
+            raise McpExecutionError(
+                "RESULT_BUDGET_EXCEEDED",
+                "The Blueprint context budget cannot return any result item.",
+                details={
+                    "minimumBudgetTokens": min(minimum_progress_tokens)
+                    if minimum_progress_tokens
+                    else budget_tokens + 1
+                },
+            )
         assert_path_free(response)
         return response
 

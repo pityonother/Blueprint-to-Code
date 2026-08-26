@@ -330,6 +330,33 @@ def _make_link_disambiguation_capture(root: Path) -> Path:
 
 
 class EvidenceValidationTests(unittest.TestCase):
+    def test_independent_oracle_does_not_use_pin_name_for_uasset_node_identity(self):
+        from validate_evidence_store import _find_target_node
+
+        target_a = {
+            "identity": "package:20",
+            "name": "DuplicateTarget",
+            "pins": [{"native_pin_id": "", "name": "execute A"}],
+        }
+        target_b = {
+            "identity": "package:21",
+            "name": "DuplicateTarget",
+            "pins": [{"native_pin_id": "", "name": "execute B"}],
+        }
+        link = {
+            "target_node": "DuplicateTarget",
+            "target_pin": "execute B",
+            "source": "uasset_pin_package_index_scan",
+        }
+
+        resolved = _find_target_node(
+            link,
+            {},
+            {"DuplicateTarget": [target_a, target_b]},
+        )
+
+        self.assertIsNone(resolved)
+
     def test_index_only_validation_ignores_source_drift_but_checks_index_and_sqlite(self):
         from validate_evidence_store import validate_asset, validate_index_consistency
 
@@ -374,7 +401,7 @@ class EvidenceValidationTests(unittest.TestCase):
         self.assertEqual(_agent_index_counts(full), expected)
         self.assertEqual(_agent_index_counts(compact), expected)
 
-    def test_independent_oracle_reproduces_documented_node_and_pin_disambiguation(self):
+    def test_independent_oracle_rejects_duplicate_native_pin_identity(self):
         from validate_evidence_store import validate_asset
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -385,7 +412,7 @@ class EvidenceValidationTests(unittest.TestCase):
         self.assertTrue(report["ok"], report)
         reconciliation = report["checks"]["legacyReconciliation"]
         self.assertEqual(reconciliation["expectedCounts"]["edge_observations"], 2)
-        self.assertEqual(reconciliation["expectedCounts"]["edges"], 2)
+        self.assertEqual(reconciliation["expectedCounts"]["edges"], 1)
         self.assertEqual(reconciliation["mismatches"], {})
 
     def test_validator_reconciles_manifest_sources_and_proves_exact_recall(self):
@@ -549,6 +576,29 @@ class EvidenceValidationTests(unittest.TestCase):
             stale,
         )
 
+    def test_direct_current_ignores_unbound_legacy_sidecars(self):
+        from blueprint_translator.evidence_writer import DIRECT_PAYLOAD_PARSER_VERSION
+        from validate_evidence_store import validate_asset
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture_root = Path(temp_dir) / "captures"
+            _make_capture(capture_root, name="MixedGenerationFixture")
+            asset_dir, _uasset_path = _make_direct_capture(
+                capture_root,
+                name="MixedGenerationFixture",
+            )
+
+            report = validate_asset(asset_dir)
+
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["source"]["mode"], "direct")
+        self.assertEqual(
+            report["checks"]["versions"]["expectedParserVersion"],
+            DIRECT_PAYLOAD_PARSER_VERSION,
+        )
+        self.assertFalse(report["checks"]["legacyReconciliation"]["enabled"])
+        self.assertTrue(report["checks"]["sourceManifest"]["ok"])
+
     def test_parser_version_must_match_the_current_legacy_constant(self):
         from blueprint_translator.evidence_schema import LEGACY_CAPTURE_PARSER_VERSION
         from validate_evidence_store import validate_asset
@@ -646,6 +696,44 @@ class EvidenceValidationTests(unittest.TestCase):
         )
         self.assertTrue(any("legacyReconciliation" in item for item in report["hardFailures"]))
         self.assertTrue(any("artifacts" in item for item in report["hardFailures"]))
+
+    def test_pin_link_identity_gate_rejects_duplicate_canonical_endpoint_id(self):
+        from validate_evidence_store import _pin_link_identity_check
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset_dir = _make_capture(Path(temp_dir))
+            _migrate(asset_dir, publish_v3=False)
+            database_path = asset_dir / "evidence" / "evidence.sqlite"
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.row_factory = sqlite3.Row
+                baseline = _pin_link_identity_check(connection)
+                connection.execute(
+                    "UPDATE pins SET native_pin_id = 'pin-energy-out' "
+                    "WHERE name = 'FallbackAmount'"
+                )
+                duplicate = _pin_link_identity_check(connection)
+                connection.execute(
+                    "UPDATE pins SET native_pin_id = 'pin-fallback-in' "
+                    "WHERE name = 'FallbackAmount'"
+                )
+                connection.execute("DELETE FROM edge_observations")
+                missing_link_evidence = _pin_link_identity_check(connection)
+
+        self.assertTrue(baseline["ok"], baseline)
+        self.assertFalse(duplicate["ok"], duplicate)
+        self.assertEqual(duplicate["invalidEdgeCount"], 1)
+        self.assertEqual(
+            duplicate["invalidEdges"][0]["sourceIdentityCount"],
+            2,
+        )
+        self.assertFalse(missing_link_evidence["ok"], missing_link_evidence)
+        self.assertEqual(missing_link_evidence["invalidEdgeCount"], 1)
+        self.assertEqual(
+            missing_link_evidence["invalidEdges"][0][
+                "authoritativeObservationCount"
+            ],
+            0,
+        )
 
     def test_cli_all_discovers_assets_and_returns_nonzero_on_hard_failure(self):
         from validate_evidence_store import main

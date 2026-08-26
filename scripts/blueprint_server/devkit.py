@@ -7,6 +7,11 @@ from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
 
+from arkdev_scripting_probe.native_class import (
+    NativeClassProbeError,
+    is_native_class_path,
+    run_native_class_probe,
+)
 from blueprint_translator.artifact_modes import normalize_artifact_mode
 from blueprint_translator.devkit_paths import first_existing_devkit_content_root
 from blueprint_translator.uasset_graphs import (
@@ -67,6 +72,15 @@ def mine_uasset_graph_candidates_for_request(
     normalized = normalize_asset_path(asset_path)
     if not normalized:
         raise ValueError("Paste an ARK DevKit Object Path that starts with /Game/.")
+    if normalized.casefold().startswith("/script/"):
+        raise ApiProblem(
+            HTTPStatus.BAD_REQUEST,
+            {
+                "ok": False,
+                "code": "native_class_requires_reflection",
+                "error": "/Script 原生类没有 .uasset 候选，请使用原生类只读反射。",
+            },
+        )
     payload, attempted = mine_candidates(
         normalized,
         max_candidates=max_candidates,
@@ -91,6 +105,83 @@ def mine_uasset_graph_candidates_for_request(
     }
 
 
+def _devkit_root_from_content_root(content_root: Path | None) -> Path:
+    if content_root is None:
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "ok": False,
+                "code": "devkit_not_found",
+                "error": "没有找到本机 ARK DevKit，请先在 Epic Games Launcher 安装或定位 DevKit。",
+            },
+        )
+    root = Path(content_root)
+    if (
+        root.name.casefold() != "content"
+        or root.parent.name.casefold() != "shootergame"
+        or root.parent.parent.name.casefold() != "projects"
+    ):
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            {
+                "ok": False,
+                "code": "devkit_root_invalid",
+                "error": "DevKit Content root 不能定位到 Projects/ShooterGame/Content。",
+            },
+        )
+    return root.parents[2]
+
+
+def read_native_class_for_request(
+    asset_path: str,
+    *,
+    content_root: Path | None,
+    probe_script: Path,
+    probe_runner: Callable[..., dict[str, object]] = run_native_class_probe,
+) -> dict[str, object]:
+    normalized = normalize_asset_path(asset_path)
+    if not is_native_class_path(normalized):
+        raise ValueError("Paste a native class path like /Script/Module.ClassName.")
+    devkit_root = _devkit_root_from_content_root(content_root)
+    try:
+        result = probe_runner(
+            normalized,
+            devkit_root=devkit_root,
+            probe_script=probe_script,
+        )
+    except NativeClassProbeError as exc:
+        if exc.code == "invalid_native_class_path":
+            status = HTTPStatus.BAD_REQUEST
+        elif exc.code == "native_class_probe_timed_out":
+            status = HTTPStatus.GATEWAY_TIMEOUT
+        elif exc.code in {
+            "devkit_commandlet_not_found",
+            "devkit_project_not_found",
+            "native_class_probe_script_not_found",
+        }:
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+        else:
+            status = HTTPStatus.BAD_GATEWAY
+        raise ApiProblem(
+            status,
+            {
+                "ok": False,
+                "code": exc.code,
+                "error": str(exc),
+            },
+        ) from exc
+    if result.get("classLoaded") is not True:
+        raise ApiProblem(
+            HTTPStatus.NOT_FOUND,
+            {
+                "ok": False,
+                "code": "native_class_not_found",
+                "error": f"ARK DevKit 没有加载到原生类 {normalized}。",
+            },
+        )
+    return result
+
+
 def read_uasset_graphs_for_request(
     asset_path: str,
     max_graphs: int = 0,
@@ -111,10 +202,26 @@ def read_uasset_graphs_for_request(
     write_graph_files: Callable[..., dict[str, str]] = (
         write_uasset_graph_read_files
     ),
+    native_class_reader: Callable[[str], dict[str, object]] | None = None,
 ) -> dict[str, object]:
     normalized = normalize_asset_path(asset_path)
     if not normalized:
-        raise ValueError("Paste an ARK DevKit Object Path that starts with /Game/.")
+        raise ValueError(
+            "Paste an ARK DevKit Object Path that starts with /Game/ or /Script/."
+        )
+    if normalized.casefold().startswith("/script/"):
+        if not is_native_class_path(normalized):
+            raise ValueError("Paste a native class path like /Script/Module.ClassName.")
+        if native_class_reader is None:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {
+                    "ok": False,
+                    "code": "native_class_reader_unavailable",
+                    "error": "当前版本没有配置 ARK DevKit 原生类只读反射。",
+                },
+            )
+        return native_class_reader(normalized)
     uasset_path, attempted = object_path_resolver(normalized)
     if uasset_path is None:
         raise ApiProblem(
@@ -203,6 +310,7 @@ __all__ = [
     "devkit_output_log_command",
     "devkit_python_command",
     "mine_uasset_graph_candidates_for_request",
+    "read_native_class_for_request",
     "read_devkit_request",
     "read_uasset_graphs_for_request",
     "write_devkit_request",

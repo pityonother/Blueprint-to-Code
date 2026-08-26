@@ -1,0 +1,323 @@
+{
+  "schema": "blueprint-to-code-native-analysis-recipe/v1",
+  "recipeId": "ark-btc-category-native/v1",
+  "description": "Bounded four-wave analysis for seven BTC native-class samples: structure restrictions and supply crates; NPC zones; spline consumers and focused navigation; camera probe construction, state, vtable, and consumers.",
+  "binaryModule": "ShooterGameEditor-ShooterGame.dll",
+  "requirements": {
+    "pdbRequired": true,
+    "formalProvenanceRequired": true
+  },
+  "targets": [
+    {
+      "id": "structure-get-build-restriction",
+      "selector": { "qualifiedName": "AStructurePreventionZoneVolume::GetBuildRestrictionAtPointForTeam" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-is-point-allowed",
+      "selector": { "qualifiedName": "AStructurePreventionZoneVolume::IsPointAllowed" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-is-structure-allowed",
+      "selector": { "qualifiedName": "AStructurePreventionZoneVolume::IsStructureAllowed" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-is-allowed-in-volume",
+      "selector": { "qualifiedName": "AStructurePreventionZoneVolume::IsStructureAllowedInVolume" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-is-within-any-volume",
+      "selector": { "qualifiedName": "AStructurePreventionZoneVolume::IsWithinAnyVolume" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-build-restriction-actor-filter",
+      "selector": { "rva": "0x14DC8F0" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-point-actor-filter",
+      "selector": { "rva": "0x14DCB40" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-allowed-actor-filter",
+      "selector": { "rva": "0x14DD270" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "structure-within-actor-filter",
+      "selector": { "rva": "0x14DD7C0" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "supply-begin-play",
+      "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::BeginPlay" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "supply-check-crate-spawn",
+      "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::CheckCrateSpawn" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "supply-check-start",
+      "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::CheckForSupplyCrateStart" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "supply-valid-spawn-point",
+      "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::GetValidSpawnPointEntry" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "supply-remove-crate",
+      "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::RemoveCrate" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "supply-set-enabled",
+      "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::SetSpawnEnabled" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "supply-spawn-all-points",
+      "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::SpawnCratesFromAllPoints" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "supply-spawn-all-volumes",
+      "selector": { "qualifiedName": "ASupplyCrateSpawningVolume::SpawnCratesFromAllVolumes" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-begin-play",
+      "selector": { "qualifiedName": "ANPCZoneVolume::BeginPlay" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-end-play",
+      "selector": { "qualifiedName": "ANPCZoneVolume::EndPlay" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-get-count",
+      "selector": { "qualifiedName": "ANPCZoneVolume::GetNumNPCTouching" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-get-overlapped",
+      "selector": { "qualifiedName": "ANPCZoneVolume::GetOverlappedDinos" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-handle-latent-count",
+      "selector": { "qualifiedName": "ANPCZoneVolume::HandleLatentSpawnCount" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-hibernation-change",
+      "selector": { "qualifiedName": "ANPCZoneVolume::HibernationChange" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-on-begin-overlap",
+      "selector": { "qualifiedName": "ANPCZoneVolume::OnBeginOverlap" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-on-end-overlap",
+      "selector": { "qualifiedName": "ANPCZoneVolume::OnEndOverlap" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-on-deserialized",
+      "selector": { "qualifiedName": "ANPCZoneVolume::OnDeserializedByGame" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-zone-resync-hibernation",
+      "selector": { "qualifiedName": "ANPCZoneVolume::ResyncWithHibernationManager" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "npc-spawn-volume-constructor",
+      "selector": { "rva": "0x152AAC0" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "splineactor-constructor",
+      "selector": { "rva": "0x8A2780" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "splineactor-water-destinations",
+      "selector": { "qualifiedName": "AWaterVolumeWithFlow::SetDestinationsFromSplineActor" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "splineactor-water-strength",
+      "selector": { "qualifiedName": "AWaterVolumeWithFlow::SetStrengthFromSplineActor" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-get-area-at-location",
+      "selector": { "qualifiedName": "APrimalRecastNavMesh::GetNavAreaAtLocation" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-update-active-tiles",
+      "selector": { "qualifiedName": "APrimalRecastNavMesh::UpdateActiveTiles" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-parallel-body",
+      "selector": { "rva": "0x14F4D50" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-serial-body",
+      "selector": { "rva": "0x14F6500" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-parallel-step-1",
+      "selector": { "rva": "0x14F4720" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-parallel-step-2",
+      "selector": { "rva": "0x14F61E0" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "nav-active-tiles-parallel-step-3",
+      "selector": { "rva": "0x14F7D70" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "camera-constructor",
+      "selector": { "rva": "0x7B9030" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": true }
+    },
+    {
+      "id": "camera-advance",
+      "selector": { "qualifiedName": "APrimalCameraProbeActor::Advance" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "camera-advance-internal",
+      "selector": { "qualifiedName": "APrimalCameraProbeActor::AdvanceInternal" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": false, "branches": true, "vtable": false }
+    },
+    {
+      "id": "camera-back-to-player",
+      "selector": { "qualifiedName": "APrimalCameraProbeActor::BackToPlayer" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "camera-is-active",
+      "selector": { "qualifiedName": "APrimalCameraProbeActor::IsActive" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    },
+    {
+      "id": "camera-play-from-here",
+      "selector": { "qualifiedName": "APrimalCameraProbeActor::PlayFromHere" },
+      "expectedMatches": 1,
+      "exports": { "decompile": true, "callersDepth": 0, "calleesDepth": 0, "constants": true, "fieldAccesses": true, "branches": true, "vtable": false }
+    }
+  ],
+  "fieldQueries": [
+    {
+      "id": "structure-prevent-all-field",
+      "structureName": "AStructurePreventionZoneVolume",
+      "fieldName": "bPreventAllStructures",
+      "functionTargetIds": ["structure-is-allowed-in-volume"],
+      "expectedMatches": 1
+    },
+    {
+      "id": "supply-weighted-points-field",
+      "structureName": "ASupplyCrateSpawningVolume",
+      "fieldName": "bUseSpawnPointWeights",
+      "functionTargetIds": ["supply-begin-play", "supply-check-crate-spawn", "supply-valid-spawn-point", "supply-set-enabled", "supply-spawn-all-points"],
+      "expectedMatches": 5
+    },
+    {
+      "id": "npc-count-tamed-field",
+      "structureName": "ANPCZoneVolume",
+      "fieldName": "bCountTamedDinos",
+      "functionTargetIds": ["npc-zone-handle-latent-count", "npc-zone-on-begin-overlap", "npc-zone-on-end-overlap", "npc-zone-resync-hibernation"],
+      "expectedMatches": 4
+    },
+    {
+      "id": "camera-active-field",
+      "structureName": "APrimalCameraProbeActor",
+      "fieldName": "bActive",
+      "functionTargetIds": ["camera-constructor", "camera-advance", "camera-back-to-player", "camera-is-active", "camera-play-from-here"],
+      "expectedMatches": 5
+    }
+  ],
+  "vtableQueries": [
+    {
+      "id": "camera-primary-vtable-slot",
+      "className": "APrimalCameraProbeActor",
+      "slotOffset": "0x0",
+      "expectedMatches": 2
+    }
+  ],
+  "budgets": {
+    "maxFunctions": 220,
+    "maxCallEdges": 5000,
+    "maxFieldAccesses": 128,
+    "maxConstants": 12000,
+    "maxVtableMatches": 8,
+    "maxDecompiledCharactersPerFunction": 40000,
+    "maxTotalDecompiledCharacters": 800000
+  }
+}

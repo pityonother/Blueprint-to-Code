@@ -194,10 +194,11 @@ QUERY_SNAPSHOT
 content-addressed receipt；无真实 backend 的操作只能
 `BLOCKED_GAP`，不能自证 `SUCCEEDED`。
 
-当前生产默认 backend 只接通 `CLASS_CLOSURE` 和
-`EFFECTIVE_ENTITY` 两个选择性 materializer。其余 source ingest、role、
-domain、edge、registration、native、projection 与 cache 重建仍缺完整生产
-backend。
+当前默认单 Blueprint add-only 路径已接通选择性 FACT、EFFECTIVE_ENTITY、
+按 percentile dependency proof 展开的 ROLE_ENTITY、ontology-owned
+DOMAIN_ENTITY、六个逐文件 PROJECTION 与 QUERY_SNAPSHOT。其他 source 类型或
+不能由依赖闭包证明的 task 仍 fail closed；它们不会因同名 queue kind 存在就被
+视为具有生产 backend。
 
 完整构建器与 `scripts/update_ark_kb_vnext.py` 复用
 `kb_vnext/source_manifest.py` 的同一个数据模型和 scanner。新 full snapshot
@@ -216,9 +217,13 @@ observation-set loader，所以 runtime 只承诺汇总 hash；文档不虚构 p
 返回 `cacheHit=true`、`published=false`。
 
 只要发现首次运行、runtime/非选择性输入变化、删除或尚无生产能力的选择性
-变更，默认路径都会在 lock、staging、queue mutation 和 publication 之前
-fail fast，并返回 `fullRebuildRequired=true`。它目前不是“单资产变化已可
-生产发布”的完成声明；安全路径仍是显式完整构建。
+变更，默认路径都会在 staging 和 queue mutation 之前 fail fast，并返回
+`fullRebuildRequired=true`。通过 capability 的单 Blueprint add-only 输入还要
+依次完成 reparse-safe staging、quarantine、v3 delta、worker drain、固定 11 项
+narrow gates、candidate reseal 与完整质量报告密封，之后才可用 exact CAS 发布
+一个无 cutover 权力的 shadow Snapshot。发布前再次扫描 live Source Manifest，
+发布后独立回读完整 Snapshot；任何真实前提缺失都不会因为代码路径存在而被视为
+生产发布完成。
 
 ## 运行与验证
 

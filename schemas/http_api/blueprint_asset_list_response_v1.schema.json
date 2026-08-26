@@ -4,7 +4,7 @@
   "title": "Blueprint asset list response",
   "type": "object",
   "additionalProperties": false,
-  "required": ["ok", "schema", "items", "page"],
+  "required": ["ok", "schema", "items", "page", "summary"],
   "properties": {
     "ok": {"const": true},
     "schema": {"const": "blueprint-to-code.blueprint-asset-list-response/v1"},
@@ -21,11 +21,22 @@
         }
       }
     },
-    "page": {"$ref": "#/$defs/page"}
+    "page": {"$ref": "#/$defs/page"},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ready", "total"],
+      "properties": {
+        "ready": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 0}
+      }
+    }
   },
   "$defs": {
     "maybeRevision": {"type": "string", "pattern": "^(?:$|[0-9a-f]{24})$"},
     "maybeHash": {"type": "string", "pattern": "^(?:$|[0-9a-f]{64})$"},
+    "exactRevision": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+    "exactHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "health": {
       "type": "object",
       "additionalProperties": false,
@@ -71,7 +82,38 @@
             "generatedAt": {"type": "string", "maxLength": 128}
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "READY"}},
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "properties": {
+                  "revisionId": {"$ref": "#/$defs/exactRevision"},
+                  "manifestSha256": {"$ref": "#/$defs/exactHash"},
+                  "pointerSha256": {"$ref": "#/$defs/exactHash"},
+                  "freshnessStatus": {"const": "FRESH"},
+                  "releaseAuthority": {"const": true},
+                  "migrationRequired": {"const": false}
+                }
+              },
+              "interpretation": {
+                "properties": {
+                  "status": {"const": "CURRENT"},
+                  "revisionId": {"$ref": "#/$defs/exactRevision"},
+                  "manifestSha256": {"$ref": "#/$defs/exactHash"},
+                  "pointerSha256": {"$ref": "#/$defs/exactHash"},
+                  "semanticDigest": {"$ref": "#/$defs/exactHash"}
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "page": {
       "type": "object",

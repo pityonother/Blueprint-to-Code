@@ -16,9 +16,10 @@ from .blueprint_service import BlueprintService
 from .contracts import McpExecutionError, assert_path_free
 from .editor_bridge import (
     MUTATION_CAPABILITIES,
-    DisconnectedEditorBridge,
     EditorBridge,
 )
+from .editor_binding import EditorBindingService
+from .editor_bridge_file import FileEditorBridge
 from .prompts import register_prompts
 from .resources import register_resources
 from .schemas import (
@@ -30,10 +31,13 @@ from .schemas import (
     PatchPlanDraftToolOutput,
     PatchPlanValidateToolOutput,
     StatusToolOutput,
+    SolverToolOutput,
     TaskCreateToolOutput,
     TaskResearchToolOutput,
     TaskResumeToolOutput,
 )
+from .solver.service import SolverService
+from .solver.store import SolverStore
 from .tasking.plan_service import PlanService
 from .tasking.research_service import ResearchService
 from .tasking.store import TaskStore
@@ -45,6 +49,10 @@ STATUS_SCHEMA = "blueprint-to-code.arkdev-mcp-status/v1"
 READ_ONLY_DESCRIPTION = "READ-ONLY. NO ARK DEVKIT MUTATION."
 METADATA_WRITE_DESCRIPTION = (
     "WRITES LOCAL TASK METADATA ONLY. "
+    "DOES NOT MODIFY ARK DEVKIT OR BLUEPRINT EVIDENCE."
+)
+SOLVER_METADATA_WRITE_DESCRIPTION = (
+    "WRITES LOCAL SOLVER/TASK METADATA ONLY. "
     "DOES NOT MODIFY ARK DEVKIT OR BLUEPRINT EVIDENCE."
 )
 
@@ -65,6 +73,7 @@ PatchPlanValidateToolResult: TypeAlias = Annotated[
 PatchPlanConfirmToolResult: TypeAlias = Annotated[
     CallToolResult, PatchPlanConfirmToolOutput
 ]
+SolverToolResult: TypeAlias = Annotated[CallToolResult, SolverToolOutput]
 
 
 def _package_version(name: str) -> str:
@@ -141,11 +150,16 @@ def create_server(
     *,
     editor_bridge: EditorBridge | None = None,
     task_root: str | Path | None = None,
+    solver_root: str | Path | None = None,
 ) -> MCPServer:
-    """Build a stdio MCP server whose only writes are local Task metadata."""
+    """Build a stdio MCP server whose only writes are local Solver/Task metadata."""
 
     blueprint = BlueprintService(capture_root)
-    bridge = editor_bridge or DisconnectedEditorBridge()
+    bridge = (
+        editor_bridge
+        if editor_bridge is not None
+        else FileEditorBridge.for_project_root(Path(capture_root).resolve().parent)
+    )
     configured_task_root = task_root or os.environ.get("ARKDEV_MCP_TASK_ROOT")
     resolved_task_root = (
         Path(configured_task_root)
@@ -156,32 +170,57 @@ def create_server(
     tasks = TaskService(blueprint, store)
     research = ResearchService(blueprint, tasks, store)
     plans = PlanService(blueprint, tasks, store)
+    configured_solver_root = solver_root or os.environ.get("ARKDEV_MCP_SOLVER_ROOT")
+    resolved_solver_root = (
+        Path(configured_solver_root)
+        if configured_solver_root is not None
+        else Path(capture_root).resolve().parent / ".blueprint-solvers"
+    )
+    solver_store = SolverStore(resolved_solver_root)
+    solvers = SolverService(blueprint, tasks, solver_store)
+    editor_binding = EditorBindingService(blueprint, tasks)
     server = MCPServer(
         name="arkdev-blueprint",
         title="ARK Dev Blueprint Task Planning MCP",
         description=(
-            "Read-only ARK/Evidence access plus local Task and Patch Plan metadata."
+            "Read-only ARK/Evidence access plus local Solver, Task, and Patch Plan metadata."
         ),
         instructions=(
-            "Five tools read bounded ARK/Evidence data; six tools write only local "
-            "Task metadata. Never modify ARK DevKit. Never confirm a Patch Plan "
+            "Five tools read bounded ARK/Evidence data; eleven tools write only local "
+            "Solver/Task metadata. Never modify ARK DevKit or Blueprint Evidence. "
+            "Never confirm a Patch Plan "
             "until the user explicitly approves the displayed plan in the current "
-            "conversation. Phase 2 has no execution tool."
+            "conversation. No execution or ARK mutation tool is exposed."
         ),
         version=SERVER_VERSION,
         log_level="ERROR",
     )
 
-    def editor_state_payload(*, include_selection: bool) -> dict[str, object]:
+    def editor_state_payload(
+        *,
+        include_selection: bool,
+        include_graph_nodes: bool = False,
+        max_graph_nodes: int = 200,
+        task_id: str = "",
+    ) -> dict[str, object]:
         try:
-            capabilities = set(bridge.get_capabilities())
+            state = dict(
+                bridge.get_state(
+                    include_selection=include_selection,
+                    include_graph_nodes=include_graph_nodes,
+                    max_graph_nodes=max_graph_nodes,
+                )
+            )
+            capabilities = {
+                str(item) for item in state.get("capabilities", [])
+            }
             if capabilities & MUTATION_CAPABILITIES:
                 raise McpExecutionError(
                     "INTERNAL_CONTRACT_ERROR",
                     "The editor bridge advertised a forbidden mutation capability.",
                 )
-            state = dict(bridge.get_state(include_selection=include_selection))
             state["capabilities"] = sorted(capabilities)
+            state = editor_binding.enrich(state, task_id=task_id)
             assert_path_free(state)
             return state
         except McpExecutionError:
@@ -218,11 +257,17 @@ def create_server(
                 "editorBridge": bool(health.get("connected")),
                 "taskContext": True,
                 "patchPlan": True,
+                "solver": True,
                 "localTaskMetadataWrite": True,
+                "localSolverMetadataWrite": True,
                 "mutation": False,
             },
             "editorBridge": {
                 "status": str(health.get("status") or "DISCONNECTED"),
+                "stateStatus": str(
+                    health.get("stateStatus")
+                    or ("CONNECTED" if health.get("connected") else "DISCONNECTED")
+                ),
                 "reasonCode": str(
                     health.get("reasonCode")
                     or (
@@ -259,9 +304,23 @@ def create_server(
     )
     def arkdev_editor_state(  # noqa: N803
         includeSelection: bool = True,
+        includeGraphNodes: bool = False,
+        maxGraphNodes: Annotated[int, Field(ge=1, le=1000)] = 200,
+        taskId: Annotated[
+            str,
+            Field(
+                max_length=39,
+                pattern=r"^(?:|task://[0-9a-f]{32})$",
+            ),
+        ] = "",
     ) -> EditorToolResult:
         return _invoke(
-            lambda: editor_state_payload(include_selection=includeSelection),
+            lambda: editor_state_payload(
+                include_selection=includeSelection,
+                include_graph_nodes=includeGraphNodes,
+                max_graph_nodes=maxGraphNodes,
+                task_id=taskId,
+            ),
             lambda payload: (
                 "Editor bridge state: "
                 + ("CONNECTED" if payload.get("connected") else "DISCONNECTED")
@@ -319,7 +378,8 @@ def create_server(
                 continuation=continuation,
             ),
             lambda payload: (
-                f"Returned {len(payload.get('nodes', []))} nodes from "
+                f"Returned {len(payload.get('facts', []))} facts and "
+                f"{len(payload.get('nodes', []))} nodes from "
                 f"{len(payload.get('graphTargets', []))} graph targets."
             ),
         )
@@ -520,6 +580,112 @@ def create_server(
             lambda payload: f"Confirmed local Patch Plan {payload['planId']} only.",
         )
 
+    @server.tool(
+        name="blueprint_solver_create",
+        description=(
+            f"{SOLVER_METADATA_WRITE_DESCRIPTION} Compile one bounded Requirement Proposal."
+        ),
+        annotations=_metadata_write_annotations(),
+        structured_output=True,
+    )
+    def blueprint_solver_create(  # noqa: N803
+        rawRequest: Annotated[str, Field(min_length=1, max_length=8000)],
+        language: Annotated[str, Field(min_length=1, max_length=32)],
+        proposal: dict[str, object],
+    ) -> SolverToolResult:
+        return _invoke(
+            lambda: solvers.create(
+                raw_request=rawRequest,
+                language=language,
+                proposal=proposal,
+            ),
+            lambda payload: f"Created Solver {payload['solverId']}.",
+        )
+
+    @server.tool(
+        name="blueprint_solver_resume",
+        description=(
+            f"{SOLVER_METADATA_WRITE_DESCRIPTION} Resume one compact Solver state."
+        ),
+        annotations=_metadata_write_annotations(),
+        structured_output=True,
+    )
+    def blueprint_solver_resume(  # noqa: N803
+        solverId: Annotated[str, Field(min_length=41, max_length=41)],
+    ) -> SolverToolResult:
+        return _invoke(
+            lambda: solvers.resume(solverId),
+            lambda payload: f"Resumed Solver in {payload['status']} state.",
+        )
+
+    @server.tool(
+        name="blueprint_solver_preflight",
+        description=(
+            f"{SOLVER_METADATA_WRITE_DESCRIPTION} Check bounded Evidence readiness without acquisition writes."
+        ),
+        annotations=_metadata_write_annotations(),
+        structured_output=True,
+    )
+    def blueprint_solver_preflight(  # noqa: N803
+        solverId: Annotated[str, Field(min_length=41, max_length=41)],
+        problemIds: Annotated[tuple[str, ...], Field(max_length=8)] = (),
+    ) -> SolverToolResult:
+        return _invoke(
+            lambda: solvers.preflight(
+                solverId,
+                problem_ids=problemIds,
+            ),
+            lambda payload: f"Solver preflight reached {payload['status']} state.",
+        )
+
+    @server.tool(
+        name="blueprint_solver_update",
+        description=(
+            f"{SOLVER_METADATA_WRITE_DESCRIPTION} Apply one typed, atomically validated Solver update."
+        ),
+        annotations=_metadata_write_annotations(),
+        structured_output=True,
+    )
+    def blueprint_solver_update(  # noqa: N803
+        solverId: Annotated[str, Field(min_length=41, max_length=41)],
+        operation: Literal[
+            "selectAssetCandidate",
+            "addTargetAlias",
+            "resolveBlockingQuestion",
+            "provideDatasetDescriptor",
+            "provideLocalizationDescriptor",
+            "provideModAssetDescriptor",
+        ],
+        payload: dict[str, object],
+    ) -> SolverToolResult:
+        return _invoke(
+            lambda: solvers.update(
+                solverId,
+                update={"operation": operation, "payload": payload},
+            ),
+            lambda result: f"Updated Solver in {result['status']} state.",
+        )
+
+    @server.tool(
+        name="blueprint_solver_materialize_task",
+        description=(
+            f"{SOLVER_METADATA_WRITE_DESCRIPTION} Materialize one ready problem through the existing Task service."
+        ),
+        annotations=_metadata_write_annotations(),
+        structured_output=True,
+    )
+    def blueprint_solver_materialize_task(  # noqa: N803
+        solverId: Annotated[str, Field(min_length=41, max_length=41)],
+        problemId: Annotated[str, Field(min_length=1, max_length=128)],
+    ) -> SolverToolResult:
+        return _invoke(
+            lambda: solvers.materialize_task(
+                solverId,
+                problem_id=problemId,
+            ),
+            lambda payload: f"Solver task binding is in {payload['status']} state.",
+        )
+
     def safe_resource(operation: Callable[[], dict[str, object]]) -> dict[str, object]:
         try:
             payload = operation()
@@ -546,7 +712,12 @@ def create_server(
         server,
         status_provider=lambda: safe_resource(status_payload),
         editor_state_provider=lambda: safe_resource(
-            lambda: editor_state_payload(include_selection=True)
+            lambda: editor_state_payload(
+                include_selection=True,
+                include_graph_nodes=False,
+                max_graph_nodes=200,
+                task_id="",
+            )
         ),
         asset_health_provider=lambda asset: safe_resource(
             lambda: blueprint.health(asset=asset)
@@ -559,6 +730,9 @@ def create_server(
         ),
         plan_provider=lambda plan_id: safe_resource(
             lambda: plan_resource(plan_id)
+        ),
+        solver_provider=lambda solver_id: safe_resource(
+            lambda: solvers.resume(f"solver://{solver_id}")
         ),
     )
     register_prompts(server)

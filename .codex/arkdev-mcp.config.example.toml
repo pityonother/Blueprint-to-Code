@@ -23,5 +23,10 @@ enabled_tools = [
   "blueprint_patch_plan_draft",
   "blueprint_patch_plan_validate",
   "blueprint_patch_plan_confirm",
+  "blueprint_solver_create",
+  "blueprint_solver_resume",
+  "blueprint_solver_preflight",
+  "blueprint_solver_update",
+  "blueprint_solver_materialize_task",
 ]
 default_tools_approval_mode = "auto"

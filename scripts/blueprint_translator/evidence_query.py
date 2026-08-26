@@ -21,7 +21,16 @@ from urllib.parse import urlsplit
 
 from .context_pack import estimate_tokens
 from .bound_database import materialize_bound_database_snapshot
+from .evidence_policy import (
+    EvidenceDecision,
+    EvidencePurpose,
+    EvidenceState,
+    require_evidence,
+)
 from .evidence_values import default_parse_gap, project_default_value
+from .loot_rewards import discover_loot_rewards
+from .runtime_routes import discover_runtime_routes
+from .runtime_signals import discover_runtime_signals
 
 
 DEFAULT_BUDGET_TOKENS = 1000
@@ -111,6 +120,9 @@ def _status(value: object, default: str = "CONFIRMED") -> str:
         "MISSING_TARGET_PIN_ID": "NOT_RECOVERED",
         "AMBIGUOUS_TARGET_NODE": "AMBIGUOUS",
         "AMBIGUOUS_TARGET_PIN": "AMBIGUOUS",
+        "SOURCE_PIN_IDENTITY_UNAVAILABLE": "SOURCE_NOT_AVAILABLE",
+        "TARGET_PIN_IDENTITY_UNAVAILABLE": "NOT_RECOVERED",
+        "TARGET_PIN_IDENTITY_MISMATCH": "NOT_RECOVERED",
     }
     if normalized in aliases:
         return aliases[normalized]
@@ -157,10 +169,13 @@ class EvidenceQueryService:
         self,
         database_path: Path,
         connection: sqlite3.Connection,
+        *,
+        evidence_decision: EvidenceDecision | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         self._connection = connection
         self._closed = False
+        self.evidence_decision = evidence_decision
         row = connection.execute(
             "SELECT asset_id, asset_name, object_path, revision_id, source_fingerprint "
             "FROM asset_revisions ORDER BY rowid DESC LIMIT 1"
@@ -205,6 +220,24 @@ class EvidenceQueryService:
             snapshot.close()
             raise
 
+    @classmethod
+    def open_resolved(
+        cls,
+        state: EvidenceState,
+        *,
+        purpose: EvidencePurpose = "formal_query",
+    ) -> "EvidenceQueryService":
+        """Open bound bytes only after the shared policy permits the purpose."""
+
+        decision = require_evidence(state, purpose=purpose)
+        service = cls.open(
+            state.database_path,
+            expected_sha256=state.database_sha256,
+            expected_size=state.database_bytes,
+        )
+        service.evidence_decision = decision
+        return service
+
     def close(self) -> None:
         if not self._closed:
             self._connection.close()
@@ -229,6 +262,9 @@ class EvidenceQueryService:
             "neighborhood": self._neighborhood,
             "trace": self._trace,
             "gaps": self._gaps,
+            "loot-rewards": self._loot_rewards,
+            "runtime-routes": self._runtime_routes,
+            "runtime-signals": self._runtime_signals,
         }
         handler = handlers.get(operation)
         if handler is None:
@@ -393,6 +429,7 @@ class EvidenceQueryService:
             "(SELECT COUNT(*) FROM edges) AS wire_count, "
             "(SELECT COUNT(*) FROM edge_observations) AS observation_count, "
             "(SELECT COUNT(*) FROM class_defaults) AS default_count, "
+            "(SELECT COUNT(*) FROM properties WHERE owner_kind = 'asset') AS asset_field_count, "
             "(SELECT COUNT(*) FROM diagnostics) + "
             "(SELECT COUNT(*) FROM edge_observations "
             " WHERE lower(COALESCE(NULLIF(resolution_status, ''), status, '')) <> 'resolved_pin') AS gap_count"
@@ -407,6 +444,7 @@ class EvidenceQueryService:
             "wireCount": int(counts["wire_count"]),
             "linkObservationCount": int(counts["observation_count"]),
             "defaultCount": int(counts["default_count"]),
+            "assetFieldCount": int(counts["asset_field_count"]),
             "gapCount": gap_count,
         }
         self._set_coverage(
@@ -439,12 +477,20 @@ class EvidenceQueryService:
             )
         kinds_value = request.get("kinds")
         if kinds_value is None:
-            kinds = ("graph", "node", "pin", "default", "diagnostic")
+            kinds = ("graph", "node", "pin", "default", "asset_field", "diagnostic")
         elif isinstance(kinds_value, Sequence) and not isinstance(kinds_value, (str, bytes)):
             kinds = tuple(dict.fromkeys(str(value).strip().casefold() for value in kinds_value if str(value).strip()))
         else:
             raise ValueError("kinds must be an array")
-        allowed = {"graph", "node", "pin", "default", "diagnostic", "edge_observation"}
+        allowed = {
+            "graph",
+            "node",
+            "pin",
+            "default",
+            "asset_field",
+            "diagnostic",
+            "edge_observation",
+        }
         if not kinds or any(kind not in allowed for kind in kinds):
             raise ValueError("kinds contains an unsupported entity kind")
         try:
@@ -553,7 +599,9 @@ class EvidenceQueryService:
 
     def _materialized_search_kinds(self, kinds: Sequence[str]) -> set[str]:
         eligible = tuple(
-            kind for kind in kinds if kind in {"graph", "node", "pin", "default"}
+            kind
+            for kind in kinds
+            if kind in {"graph", "node", "pin", "default", "asset_field"}
         )
         if not eligible:
             return set()
@@ -662,6 +710,33 @@ class EvidenceQueryService:
                         "graph_ref": "",
                         "summary": f"{row['type_name']}={_short_text(row['value_json'], 80)}",
                         "search_text": f"{row['name']} {row['type_name']} {row['value_json']}",
+                    }
+                )
+        if "asset_field" in kinds:
+            sql = (
+                "SELECT property_ref, name, type_name, value_json FROM properties "
+                "WHERE owner_kind = 'asset'"
+            )
+            parameters = ()
+            if like is not None:
+                sql += (
+                    " AND lower(name || ' ' || type_name || ' ' || value_json) "
+                    "LIKE ? ESCAPE '\\'"
+                )
+                parameters = (like,)
+            for row in self._connection.execute(sql, parameters):
+                rows.append(
+                    {
+                        "ref": row["property_ref"],
+                        "kind": "asset_field",
+                        "name": row["name"],
+                        "graph_ref": "",
+                        "summary": (
+                            f"{row['type_name']}={_short_text(row['value_json'], 80)}"
+                        ),
+                        "search_text": (
+                            f"{row['name']} {row['type_name']} {row['value_json']}"
+                        ),
                     }
                 )
         if "diagnostic" in kinds:
@@ -1042,12 +1117,20 @@ class EvidenceQueryService:
             return self._diagnostic_item(row)
         row = self._connection.execute("SELECT * FROM edges WHERE edge_ref = ?", (ref,)).fetchone()
         if row is not None:
+            source_native_pin_id = self._native_pin_id_for_ref(
+                str(row["source_pin_ref"])
+            )
+            target_native_pin_id = self._native_pin_id_for_ref(
+                str(row["target_pin_ref"])
+            )
             item = {
                 "ref": str(row["edge_ref"]),
                 "kind": "edge",
                 "graphRef": str(row["graph_ref"]),
                 "sourcePinRef": str(row["source_pin_ref"]),
                 "targetPinRef": str(row["target_pin_ref"]),
+                "sourceNativePinId": source_native_pin_id,
+                "targetNativePinId": target_native_pin_id,
                 "edgeKind": str(row["kind"]),
                 "confidence": str(row["confidence"]),
                 "status": _status(row["resolution_status"]),
@@ -1076,6 +1159,15 @@ class EvidenceQueryService:
                 candidate_limit=candidate_limit,
             )
         return None
+
+    def _native_pin_id_for_ref(self, pin_ref: str) -> str:
+        if not pin_ref:
+            return ""
+        row = self._connection.execute(
+            "SELECT native_pin_id FROM pins WHERE pin_ref = ?",
+            (pin_ref,),
+        ).fetchone()
+        return str(row["native_pin_id"] or "") if row is not None else ""
 
     def _candidate_dictionary(self) -> list[str]:
         row = self._connection.execute(
@@ -1121,12 +1213,16 @@ class EvidenceQueryService:
                     **({"pinRef": str(candidate["candidate_pin_ref"])} if candidate["candidate_pin_ref"] else {}),
                 }
             )
+        source_native_pin_id = self._native_pin_id_for_ref(
+            str(row["source_pin_ref"] or "")
+        )
         return {
             "ref": str(row["observation_ref"]),
             "kind": "edge_observation",
             "graphRef": str(row["graph_ref"]),
             "sourceNodeRef": str(row["source_node_ref"] or ""),
             "sourcePinRef": str(row["source_pin_ref"] or ""),
+            "sourceNativePinId": source_native_pin_id,
             "targetNodeRef": str(row["target_node_ref"] or ""),
             "targetPinRef": str(row["target_pin_ref"] or ""),
             "targetNodeName": str(row["target_node_name"] or ""),
@@ -1134,6 +1230,9 @@ class EvidenceQueryService:
             "targetPinName": str(row["target_pin_name"] or ""),
             "edgeKind": str(row["kind"]),
             "status": _status(row["resolution_status"] or row["status"]),
+            "resolutionStatus": str(
+                row["resolution_status"] or row["status"] or ""
+            ),
             "confidence": str(row["confidence"] or ""),
             "source": str(row["source"] or ""),
             "rawEvidence": _json_value(row["raw_json"], {}),
@@ -1263,6 +1362,9 @@ class EvidenceQueryService:
             "defaultObject": str(row["default_object"]),
             "confidence": str(row["confidence"]),
         }
+        persistent_guid = str(row["persistent_guid"] or "")
+        if persistent_guid:
+            item["persistentGuid"] = persistent_guid
         observations, observation_total = self._observation_summaries(
             "source_pin_ref = ? OR target_pin_ref = ?",
             (row["pin_ref"], row["pin_ref"]),
@@ -1361,16 +1463,36 @@ class EvidenceQueryService:
 
     @classmethod
     def _property_item(cls, row: sqlite3.Row, *, value_offset: int, value_chars: int) -> dict[str, object]:
+        owner_kind = str(row["owner_kind"])
+        paged_value = cls._paged_value(
+            row,
+            value_offset=value_offset,
+            value_chars=value_chars,
+        )
+        extra = _json_value(row["extra_json"], {})
+        confirmed_asset_value = (
+            owner_kind == "asset"
+            and isinstance(extra, Mapping)
+            and extra.get("confirmed_value_usable") is True
+        )
         return {
             "ref": str(row["property_ref"]),
-            "kind": "property",
-            "ownerKind": str(row["owner_kind"]),
+            "kind": "asset_field" if owner_kind == "asset" else "property",
+            "ownerKind": owner_kind,
             "ownerRef": str(row["owner_ref"]),
             "name": str(row["name"]),
             "typeName": str(row["type_name"]),
             "confidence": str(row["confidence"]),
             "source": str(row["source"]),
-            **cls._paged_value(row, value_offset=value_offset, value_chars=value_chars),
+            **(
+                {
+                    "valueStatus": "CONFIRMED",
+                    "valueUsable": True,
+                }
+                if confirmed_asset_value
+                else {}
+            ),
+            **paged_value,
         }
 
     @staticmethod
@@ -1656,6 +1778,9 @@ class EvidenceQueryService:
         native_pin_id = str(row["native_pin_id"] or "")
         if native_pin_id:
             item["nativePinId"] = native_pin_id
+        persistent_guid = str(row["persistent_guid"] or "")
+        if persistent_guid:
+            item["persistentGuid"] = persistent_guid
         subcategory = str(row["subcategory"] or "")
         if subcategory:
             item["subcategory"] = subcategory
@@ -1688,7 +1813,9 @@ class EvidenceQueryService:
             parameters.append(node_ref)
         rows = self._connection.execute(
             "SELECT e.edge_ref, e.source_pin_ref, e.target_pin_ref, e.kind, e.confidence, e.resolution_status, "
-            "source_node.node_ref AS source_node_ref, target_node.node_ref AS target_node_ref "
+            "source_node.node_ref AS source_node_ref, target_node.node_ref AS target_node_ref, "
+            "source_pin.native_pin_id AS source_native_pin_id, "
+            "target_pin.native_pin_id AS target_native_pin_id "
             "FROM edges e "
             "JOIN pins source_pin ON source_pin.pin_ref = e.source_pin_ref "
             "JOIN nodes source_node ON source_node.node_ref = source_pin.node_ref "
@@ -1709,6 +1836,8 @@ class EvidenceQueryService:
                 "ref": str(row["edge_ref"]),
                 "sourcePinRef": str(row["source_pin_ref"]),
                 "targetPinRef": str(row["target_pin_ref"]),
+                "sourceNativePinId": str(row["source_native_pin_id"] or ""),
+                "targetNativePinId": str(row["target_native_pin_id"] or ""),
                 "kind": str(row["kind"]),
         }
         status = _status(row["resolution_status"])
@@ -1828,6 +1957,277 @@ class EvidenceQueryService:
         )
         return response
 
+    def _runtime_signals(
+        self,
+        request: Mapping[str, object],
+        budget: int,
+    ) -> dict[str, object]:
+        items = discover_runtime_signals(self._connection)
+        status_counts: dict[str, int] = {}
+        for item in items:
+            status = _status(item.get("status"), "NOT_RECOVERED")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        try:
+            page_size = min(int(request.get("pageSize", DEFAULT_PAGE_SIZE)), MAX_PAGE_SIZE)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("pageSize must be an integer") from exc
+        if page_size <= 0:
+            raise ValueError("pageSize must be positive")
+        signature = _query_hash("runtime-signals")
+        start = 0
+        cursor = request.get("cursor")
+        if cursor is not None:
+            payload = _cursor_decode(cursor)
+            if str(payload.get("revision")) != self.revision_id:
+                raise ValueError("STALE_CURSOR: cursor belongs to another asset revision")
+            if str(payload.get("query")) != signature:
+                raise ValueError(
+                    "CURSOR_QUERY_MISMATCH: cursor belongs to another runtime-signals query"
+                )
+            last_ref = str(payload.get("lastRef") or "")
+            positions = [
+                index
+                for index, item in enumerate(items)
+                if str(item.get("ref")) == last_ref
+            ]
+            if not positions:
+                raise ValueError(
+                    "INVALID_CURSOR: last runtime signal reference no longer exists"
+                )
+            start = positions[0] + 1
+        page_items = items[start : start + page_size]
+        response = self._base_response("runtime-signals", budget)
+
+        def next_cursor(returned: int) -> str | None:
+            position = start + returned
+            if returned <= 0 or position >= len(items):
+                return None
+            return _cursor_encode(
+                {
+                    "v": 1,
+                    "revision": self.revision_id,
+                    "query": signature,
+                    "lastRef": items[position - 1]["ref"],
+                }
+            )
+
+        self._bounded_items(
+            response,
+            page_items,
+            budget,
+            requested=len(items),
+            not_recovered=status_counts.get("NOT_RECOVERED", 0),
+            status_counts=status_counts,
+            cursor_factory=next_cursor,
+        )
+        return response
+
+    def _loot_rewards(
+        self,
+        request: Mapping[str, object],
+        budget: int,
+    ) -> dict[str, object]:
+        item_query = str(request.get("itemQuery") or "").strip()
+        if not item_query:
+            raise ValueError("itemQuery is required")
+        discovery = discover_loot_rewards(self._connection, item_query)
+        raw_items = discovery["items"]
+        assert isinstance(raw_items, list)
+        items = list(raw_items)
+        if int(discovery["defaultsAvailable"]) == 0:
+            asset_ref = f"bp://{self.asset_id}@{self.revision_id}/asset"
+            items.append(
+                {
+                    "ref": f"{asset_ref}/loot-reward/defaults-gap",
+                    "kind": "lootRewardGap",
+                    "status": "SOURCE_NOT_AVAILABLE",
+                    "reasonCode": "LOOT_DEFAULTS_NOT_AVAILABLE",
+                    "evidenceRefs": [asset_ref],
+                }
+            )
+        matching_entries = int(discovery["matchingEntries"])
+        unreadable_defaults = int(discovery["unreadableDefaults"])
+        if matching_entries:
+            match_status = "MATCHED"
+        elif int(discovery["defaultsAvailable"]) == 0:
+            match_status = "SOURCE_NOT_AVAILABLE"
+        elif unreadable_defaults:
+            match_status = "INCOMPLETE_DEFAULT_COVERAGE"
+        else:
+            match_status = "NOT_FOUND_IN_RECOVERED_DEFAULTS"
+        status_counts: dict[str, int] = {}
+        for item in items:
+            status = _status(item.get("status"), "NOT_RECOVERED")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        try:
+            page_size = min(int(request.get("pageSize", DEFAULT_PAGE_SIZE)), MAX_PAGE_SIZE)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("pageSize must be an integer") from exc
+        if page_size <= 0:
+            raise ValueError("pageSize must be positive")
+        signature = _query_hash("loot-rewards", itemQuery=item_query.casefold())
+        start = 0
+        cursor = request.get("cursor")
+        if cursor is not None:
+            payload = _cursor_decode(cursor)
+            if str(payload.get("revision")) != self.revision_id:
+                raise ValueError("STALE_CURSOR: cursor belongs to another asset revision")
+            if str(payload.get("query")) != signature:
+                raise ValueError(
+                    "CURSOR_QUERY_MISMATCH: cursor belongs to another loot-rewards query"
+                )
+            last_ref = str(payload.get("lastRef") or "")
+            positions = [
+                index
+                for index, item in enumerate(items)
+                if str(item.get("ref")) == last_ref
+            ]
+            if not positions:
+                raise ValueError(
+                    "INVALID_CURSOR: last loot reward reference no longer exists"
+                )
+            start = positions[0] + 1
+        page_items = items[start : start + page_size]
+        response = self._base_response("loot-rewards", budget)
+        response["match"] = {
+            "query": item_query,
+            "status": match_status,
+            "matchingEntries": matching_entries,
+            "defaultsAvailable": int(discovery["defaultsAvailable"]),
+            "searchedDefaults": int(discovery["searchedDefaults"]),
+            "unreadableDefaults": unreadable_defaults,
+            "searchedEntries": int(discovery["searchedEntries"]),
+            "scope": "CURRENT_ASSET_CLASS_DEFAULTS_ONLY",
+        }
+
+        def next_cursor(returned: int) -> str | None:
+            position = start + returned
+            if returned <= 0 or position >= len(items):
+                return None
+            return _cursor_encode(
+                {
+                    "v": 1,
+                    "revision": self.revision_id,
+                    "query": signature,
+                    "lastRef": items[position - 1]["ref"],
+                }
+            )
+
+        self._bounded_items(
+            response,
+            page_items,
+            budget,
+            requested=len(items),
+            not_recovered=status_counts.get("NOT_RECOVERED", 0),
+            status_counts=status_counts,
+            cursor_factory=next_cursor,
+        )
+        return response
+
+    def _runtime_routes(
+        self,
+        request: Mapping[str, object],
+        budget: int,
+    ) -> dict[str, object]:
+        event_name = str(request.get("eventName") or "").strip()
+        if not event_name:
+            raise ValueError("eventName is required")
+        discovery = discover_runtime_routes(self._connection, event_name)
+        raw_items = discovery["items"]
+        assert isinstance(raw_items, list)
+        items = list(raw_items)
+        confirmed_routes = int(discovery["confirmedRoutes"])
+        receiver_nodes = int(discovery["receiverNodes"])
+        confirmed_receiver_nodes = int(discovery["confirmedReceiverNodes"])
+        route_gaps = int(discovery["routeGaps"])
+        if confirmed_routes:
+            match_status = "MATCHED"
+        elif receiver_nodes:
+            match_status = "RECEIVER_FOUND_ROUTE_INCOMPLETE"
+        else:
+            match_status = "GLOBAL_EVENT_RECEIVER_NOT_INDEXED"
+            asset_ref = f"bp://{self.asset_id}@{self.revision_id}/asset"
+            items.append(
+                {
+                    "ref": f"{asset_ref}/runtime-route/receiver-gap",
+                    "kind": "runtimeRouteGap",
+                    "routeKind": "global_event_receiver_to_spawn",
+                    "status": "NOT_RECOVERED",
+                    "reasonCode": "GLOBAL_EVENT_RECEIVER_NOT_INDEXED",
+                    "eventName": event_name,
+                    "scopeRef": asset_ref,
+                    "evidenceRefs": [asset_ref],
+                }
+            )
+            route_gaps += 1
+        status_counts: dict[str, int] = {}
+        for item in items:
+            status = _status(item.get("status"), "NOT_RECOVERED")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        try:
+            page_size = min(int(request.get("pageSize", DEFAULT_PAGE_SIZE)), MAX_PAGE_SIZE)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("pageSize must be an integer") from exc
+        if page_size <= 0:
+            raise ValueError("pageSize must be positive")
+        signature = _query_hash("runtime-routes", eventName=event_name.casefold())
+        start = 0
+        cursor = request.get("cursor")
+        if cursor is not None:
+            payload = _cursor_decode(cursor)
+            if str(payload.get("revision")) != self.revision_id:
+                raise ValueError("STALE_CURSOR: cursor belongs to another asset revision")
+            if str(payload.get("query")) != signature:
+                raise ValueError(
+                    "CURSOR_QUERY_MISMATCH: cursor belongs to another runtime-routes query"
+                )
+            last_ref = str(payload.get("lastRef") or "")
+            positions = [
+                index
+                for index, item in enumerate(items)
+                if str(item.get("ref")) == last_ref
+            ]
+            if not positions:
+                raise ValueError(
+                    "INVALID_CURSOR: last runtime route reference no longer exists"
+                )
+            start = positions[0] + 1
+        page_items = items[start : start + page_size]
+        response = self._base_response("runtime-routes", budget)
+        response["match"] = {
+            "eventName": event_name,
+            "status": match_status,
+            "receiverNodes": receiver_nodes,
+            "confirmedReceiverNodes": confirmed_receiver_nodes,
+            "confirmedRoutes": confirmed_routes,
+            "routeGaps": route_gaps,
+            "scope": "CURRENT_ASSET_ONLY",
+        }
+
+        def next_cursor(returned: int) -> str | None:
+            position = start + returned
+            if returned <= 0 or position >= len(items):
+                return None
+            return _cursor_encode(
+                {
+                    "v": 1,
+                    "revision": self.revision_id,
+                    "query": signature,
+                    "lastRef": items[position - 1]["ref"],
+                }
+            )
+
+        self._bounded_items(
+            response,
+            page_items,
+            budget,
+            requested=len(items),
+            not_recovered=status_counts.get("NOT_RECOVERED", 0),
+            status_counts=status_counts,
+            cursor_factory=next_cursor,
+        )
+        return response
+
     def _observation_gap_items(self, *, scope_ref: str = "") -> list[dict[str, object]]:
         clauses = ["lower(COALESCE(NULLIF(resolution_status, ''), status, '')) <> 'resolved_pin'"]
         parameters: list[object] = []
@@ -1845,7 +2245,10 @@ class EvidenceQueryService:
         ).fetchall()
         items: list[dict[str, object]] = []
         for row in rows:
-            status = _status(row["resolution_status"] or row["status"])
+            raw_resolution_status = str(
+                row["resolution_status"] or row["status"] or ""
+            )
+            status = _status(raw_resolution_status)
             if status not in _GAP_STATUSES:
                 continue
             reason = {
@@ -1853,6 +2256,19 @@ class EvidenceQueryService:
                 "AMBIGUOUS": "ambiguous_link_target",
                 "SOURCE_NOT_AVAILABLE": "link_source_not_available",
             }.get(status, "unresolved_link_target")
+            if raw_resolution_status == "source_pin_identity_unavailable":
+                reason = "source_pin_identity_unavailable"
+            elif raw_resolution_status in {
+                "target_pin_identity_unavailable",
+                "target_pin_identity_mismatch",
+            }:
+                reason = raw_resolution_status
+            elif raw_resolution_status in {
+                "ambiguous_source_pin_identity",
+                "ambiguous_target_node_identity",
+                "ambiguous_target_pin_identity",
+            }:
+                reason = raw_resolution_status
             target = _first_text(row["target_node_name"], row["target_pin_name"], row["target_native_pin_id"])
             items.append(
                 {

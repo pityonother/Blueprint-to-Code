@@ -12,6 +12,7 @@ PayloadProvider = Callable[[], dict[str, object]]
 AssetPayloadProvider = Callable[[str], dict[str, object]]
 TaskPayloadProvider = Callable[[str], dict[str, object]]
 PlanPayloadProvider = Callable[[str], dict[str, object]]
+SolverPayloadProvider = Callable[[str], dict[str, object]]
 
 
 def _json(value: dict[str, object]) -> str:
@@ -32,6 +33,7 @@ def register_resources(
     asset_health_provider: AssetPayloadProvider,
     task_provider: TaskPayloadProvider,
     plan_provider: PlanPayloadProvider,
+    solver_provider: SolverPayloadProvider,
 ) -> None:
     @server.resource(
         "arkdev://status",
@@ -77,6 +79,15 @@ def register_resources(
     )
     def blueprint_patch_plan_state_resource(plan_id: str) -> str:
         return _json(plan_provider(plan_id))
+
+    @server.resource(
+        "arkdev://solvers/{solver_id}",
+        name="blueprint_solver_state",
+        description="READ-ONLY compact projection of local Solver metadata.",
+        mime_type="application/json",
+    )
+    def blueprint_solver_state_resource(solver_id: str) -> str:
+        return _json(solver_provider(solver_id))
 
 
 __all__ = ["register_resources"]

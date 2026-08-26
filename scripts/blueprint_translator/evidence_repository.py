@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import tempfile
 import zlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from .evidence_publication import (
     _require_plain_path_chain,
     _validate_v2_manifest,
 )
+from .evidence_policy import EvidencePurpose, evaluate_evidence, semantic_fact_count
 from .evidence_revision import load_current_evidence_revision
 from .evidence_values import project_default_value
 from .evidence_writer import write_evidence_store_from_capture
@@ -48,6 +50,8 @@ class ResolvedEvidenceState:
     agent_index_sha256: str
     agent_index_bytes: int
     agent_index_raw: bytes
+    semantic_fact_count: int
+    non_upgradeable_gaps: tuple[str, ...] = ()
 
 
 def evidence_state_metadata(
@@ -63,6 +67,17 @@ def evidence_state_metadata(
         "manifestSha256": state.manifest_sha256,
         "pointerSha256": state.pointer_sha256,
     }
+
+
+def is_release_ready_evidence(state: ResolvedEvidenceState) -> bool:
+    """Compatibility adapter for the historical authority-ready predicate.
+
+    Benchmark purpose deliberately permits an authoritative identity-only
+    capture to be inspected and classified; formal query and publication do
+    not permit it.
+    """
+
+    return evaluate_evidence(state, purpose="benchmark").allowed
 
 
 class EvidenceRepository:
@@ -89,6 +104,7 @@ class EvidenceRepository:
         self.migration_required = bool(migration_required)
         self.manifest_sha256 = manifest_sha256
         self.pointer_sha256 = pointer_sha256
+        self.evidence_decision = service.evidence_decision
         self.agent_index_path = state.agent_index_path if state is not None else None
         self.manifest_path = state.manifest_path if state is not None else None
         self.pointer_path = state.pointer_path if state is not None else None
@@ -168,6 +184,143 @@ class EvidenceRepository:
             }
             for row in rows
         ]
+
+    def node_binding_locators(
+        self,
+        *,
+        graph_ref: str,
+        node_refs: Sequence[str],
+    ) -> list[dict[str, object]]:
+        """Return bounded, read-only UObject locators from this bound revision.
+
+        ``name`` is the serialized UObject export name used only as a lookup
+        locator.  ``nodeGuid`` remains the authority that a live editor probe
+        must verify.  The projection deliberately excludes database and source
+        paths and preserves the caller's node order.
+        """
+
+        if self._closed:
+            raise RuntimeError("EvidenceRepository is closed")
+        if isinstance(node_refs, (str, bytes)):
+            raise ValueError("NODE_LIMIT_EXCEEDED")
+        requested = [str(ref) for ref in node_refs]
+        if not graph_ref or not 1 <= len(requested) <= 12:
+            raise ValueError("NODE_LIMIT_EXCEEDED")
+        if len(requested) != len(set(requested)):
+            raise ValueError("NODE_REF_DUPLICATE")
+        if any(not ref.startswith(f"{graph_ref}/n/") for ref in requested):
+            raise ValueError("NODE_GRAPH_MISMATCH")
+
+        graph = self._service._connection.execute(  # noqa: SLF001
+            "SELECT graph_ref, name FROM graphs WHERE graph_ref = ?",
+            (graph_ref,),
+        ).fetchone()
+        if graph is None:
+            raise KeyError(f"graph not found: {graph_ref}")
+
+        placeholders = ", ".join("?" for _ref in requested)
+        node_rows = self._service._connection.execute(  # noqa: SLF001
+            "SELECT node_ref, graph_ref, name, class_name, x, y, extra_json "
+            f"FROM nodes WHERE node_ref IN ({placeholders})",
+            tuple(requested),
+        ).fetchall()
+        nodes_by_ref = {str(row["node_ref"]): row for row in node_rows}
+        if set(nodes_by_ref) != set(requested):
+            raise KeyError("one or more exact Evidence nodes were not found")
+
+        pin_rows = self._service._connection.execute(  # noqa: SLF001
+            "SELECT pin_ref, node_ref, ordinal, name, direction, category, "
+            f"subcategory FROM pins WHERE node_ref IN ({placeholders}) "
+            "ORDER BY node_ref, ordinal",
+            tuple(requested),
+        ).fetchall()
+        pins_by_node: dict[str, list[dict[str, object]]] = {
+            node_ref: [] for node_ref in requested
+        }
+        for row in pin_rows:
+            node_ref = str(row["node_ref"])
+            pins_by_node[node_ref].append(
+                {
+                    "name": str(row["name"] or ""),
+                    "direction": str(row["direction"] or ""),
+                    "ordinal": int(row["ordinal"]),
+                    "category": str(row["category"] or ""),
+                    "subcategory": str(row["subcategory"] or ""),
+                }
+            )
+        if (
+            any(len(pins) > 64 for pins in pins_by_node.values())
+            or len(pin_rows) > 512
+        ):
+            raise ValueError("PIN_LIMIT_EXCEEDED")
+
+        locators: list[dict[str, object]] = []
+        for node_ref in requested:
+            row = nodes_by_ref[node_ref]
+            if str(row["graph_ref"]) != graph_ref:
+                raise ValueError("NODE_GRAPH_MISMATCH")
+            try:
+                extra = json.loads(str(row["extra_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("NODE_GUID_NOT_AVAILABLE") from exc
+            if not isinstance(extra, Mapping):
+                raise ValueError("NODE_GUID_NOT_AVAILABLE")
+            raw_node_guid = str(
+                extra.get("node_guid")
+                or extra.get("nodeGuid")
+                or extra.get("NodeGuid")
+                or ""
+            )
+            compact_node_guid = re.sub(r"[-{}()]", "", raw_node_guid.strip())
+            node_guid = (
+                compact_node_guid.upper()
+                if re.fullmatch(r"[0-9A-Fa-f]{32}", compact_node_guid)
+                and compact_node_guid != "0" * 32
+                else ""
+            )
+            locator: dict[str, object] = {
+                "nodeRef": node_ref,
+                "graphRef": graph_ref,
+                "graphName": str(graph["name"] or ""),
+                "objectName": str(row["name"] or ""),
+                "className": str(row["class_name"] or ""),
+                "nodeGuid": node_guid,
+                "evidenceRevisionId": self.revision_id,
+                "evidenceManifestSha256": str(self.manifest_sha256 or ""),
+                "pins": pins_by_node[node_ref],
+            }
+            if row["x"] is not None and row["y"] is not None:
+                locator["x"] = int(row["x"])
+                locator["y"] = int(row["y"])
+            locators.append(locator)
+        return locators
+
+    def node_guid_bindings(self, graph_ref: str) -> list[dict[str, str]]:
+        """Return exact persisted NodeGuid values for one current graph."""
+
+        rows = self._service._connection.execute(  # noqa: SLF001
+            "SELECT node_ref, extra_json FROM nodes "
+            "WHERE graph_ref = ? ORDER BY local_index, node_ref",
+            (graph_ref,),
+        ).fetchall()
+        bindings: list[dict[str, str]] = []
+        for row in rows:
+            try:
+                extra = json.loads(str(row["extra_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(extra, dict):
+                continue
+            node_guid = str(extra.get("node_guid") or "").strip()
+            if not node_guid:
+                continue
+            bindings.append(
+                {
+                    "nodeGuid": node_guid,
+                    "evidenceNodeRef": str(row["node_ref"]),
+                }
+            )
+        return bindings
 
     @staticmethod
     def _decode_value(row: Any) -> object:
@@ -614,6 +767,7 @@ def resolve_asset_evidence_state(
             agent_index_sha256=agent_index_sha256,
             agent_index_bytes=agent_index_bytes,
             agent_index_raw=agent_index_raw,
+            semantic_fact_count=semantic_fact_count(validated.manifest.get("counts")),
         )
 
     indexed_database = root / "evidence" / "evidence.sqlite"
@@ -718,6 +872,7 @@ def resolve_asset_evidence_state(
             agent_index_sha256=agent_index_sha256,
             agent_index_bytes=agent_index_bytes,
             agent_index_raw=agent_index_raw_after,
+            semantic_fact_count=semantic_fact_count(projection.get("counts")),
         )
 
     raise FileNotFoundError(f"NO_EVIDENCE: indexed evidence not found under {root}")
@@ -784,6 +939,8 @@ def open_asset_repository(
 
 def open_resolved_asset_repository(
     state: ResolvedEvidenceState,
+    *,
+    purpose: EvidencePurpose | None = None,
 ) -> EvidenceRepository:
     """Open exactly the immutable evidence generation represented by ``state``.
 
@@ -793,12 +950,17 @@ def open_resolved_asset_repository(
     combine metadata from one revision with query results from another.
     """
 
-    return EvidenceRepository(
-        EvidenceQueryService.open(
+    service = (
+        EvidenceQueryService.open_resolved(state, purpose=purpose)
+        if purpose is not None
+        else EvidenceQueryService.open(
             state.database_path,
             expected_sha256=state.database_sha256,
             expected_size=state.database_bytes,
-        ),
+        )
+    )
+    return EvidenceRepository(
+        service,
         source_kind=state.source_kind,
         release_authority=state.release_authority,
         freshness_status=state.freshness_status,
@@ -815,6 +977,7 @@ __all__ = [
     "evidence_agent_index_text",
     "evidence_manifest_payload",
     "evidence_state_metadata",
+    "is_release_ready_evidence",
     "open_bound_evidence_database",
     "open_asset_repository",
     "open_resolved_asset_repository",

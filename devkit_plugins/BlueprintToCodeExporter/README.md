@@ -1,11 +1,46 @@
 # Blueprint To Code Exporter
 
 Editor-only Unreal/ARK DevKit plugin for exporting Blueprint graph page queues
-into the local Blueprint to Code analyzer.
+and publishing a bounded, read-only Editor state snapshot to the local
+Blueprint to Code analyzer.
 
 This is intentionally small: it does not try to decompile Blueprint behavior.
 Its first job is to prove that ARK DevKit can load a C++ editor plugin and to
-write the real graph page list using `UBlueprint::GetAllGraphs()`.
+write the real graph page list using `UBlueprint::GetAllGraphs()`. Version
+`0.2.0` also reads public Editor state; it never creates, connects, compiles,
+saves, or otherwise modifies Blueprint content.
+
+## Read-only Editor State Bridge
+
+The plugin checks public Editor state every 250 ms and writes only when the
+semantic state changes or a two-second heartbeat is due. It atomically replaces:
+
+```text
+<your Blueprint to Code folder>\.arkdev-bridge\editor_state.json
+```
+
+The snapshot is capped at 2,000 focused-graph nodes and contains the active
+Blueprint object path, focused graph, NodeGuid/graph-space position, package
+dirty state, compile status, build identity, sequence, and UTC timestamp. The
+current public UE 5.5 interface available for this implementation does not
+provide a stable selection contract through `IBlueprintEditor`, so the plugin
+reports `selectionStatus=UNSUPPORTED_BY_DEVKIT_BUILD` and does not advertise
+`READ_SELECTION`.
+
+`graphStatus` distinguishes an unavailable public Blueprint editor interface from
+an available editor with no focused graph. Snapshot publication writes a temporary
+file beside the destination and atomically replaces it on Windows.
+
+Diagnostic menu entries are available under:
+
+```text
+Tools -> Blueprint to Code -> Show Editor Bridge Status
+Tools -> Blueprint to Code -> Write Editor State Snapshot Now
+```
+
+Normal heartbeat operation is automatic and does not require either menu item.
+On normal plugin shutdown the snapshot is deleted. A crash-left snapshot is
+rejected by the MCP reader after the six-second freshness window.
 
 ## What It Exports
 
@@ -68,7 +103,15 @@ First success criteria:
 3. Selecting a Blueprint asset and running the menu command writes
    `graph_queue.txt`.
 4. The web control center can load that queue.
+5. `.arkdev-bridge\editor_state.json` updates within two seconds while a
+   Blueprint is open.
+6. `python scripts\validate_arkdev_editor_bridge_snapshot.py` reports a fresh,
+   connected snapshot without printing its machine-local path.
 
 If ARK DevKit cannot compile/load custom editor C++ plugins, stop here and use
 the lower-risk fallback: paste candidate graph names into the control center and
 validate them with the DevKit Python exporter.
+
+The complete runtime checklist is in
+`docs/mcp/EDITOR_BRIDGE_MANUAL_ACCEPTANCE.md`. A fixture or source-contract test
+does not count as a real ARK DevKit runtime pass.

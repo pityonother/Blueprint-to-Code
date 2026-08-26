@@ -1,0 +1,983 @@
+{
+  "schema": "ark.btc.category-reviewed-assessments/v1",
+  "purposeZh": "固定同一批分类样本的玩家问题、人工复核结论和证据引用，用于工具改进前后回归。",
+  "samples": {
+    "1": {
+      "questionOverride": {
+        "questionZh": "海滩环境音白天和夜晚分别播放什么，何时切换？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "只恢复到白天和夜间 AudioComponent，组件内部 Sound 资产与昼夜切换链未恢复。"
+      ]
+    },
+    "2": {
+      "questionOverride": {
+        "questionZh": "森林环境音白天和夜晚分别播放什么，何时切换？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "只恢复到白天和夜间 AudioComponent，组件内部 Sound 资产与昼夜切换链未恢复。"
+      ]
+    },
+    "3": {
+      "questionOverride": {
+        "questionZh": "玩家怎样进入、前后切换并退出该原生镜头探针视角？"
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "PlayFromHere 将本地玩家的 ViewTarget 切到当前镜头探针，并把活动状态设为真。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x7B93E0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x3543D0"
+          ]
+        },
+        {
+          "textZh": "Advance 与 AdvanceInternal 枚举镜头探针，并按前进或后退方向循环选择下一个探针。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x7B9070",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x7B9150"
+          ]
+        },
+        {
+          "textZh": "BackToPlayer 把 ViewTarget 恢复到玩家，并清除活动状态。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x7B9330"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "4": {
+      "questionOverride": {
+        "questionZh": "玩家进入或离开该区域时，会不会强制传送并切换、恢复镜头？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "执行连接全部为推测连接，无法精确证明事件到镜头调用的顺序。",
+        "current Interpretation 还省略了主 EventGraph。"
+      ]
+    },
+    "5": {
+      "questionOverride": {
+        "questionZh": "VR 战斗过场如何启动，车灯如何随演出变化？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "过场入口、灯光参数和后续调用之间只有推测连接。"
+      ]
+    },
+    "6": {
+      "questionOverride": {
+        "questionZh": "升天演出更新时，如何驱动径向模糊？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "事件、变量和材质调用之间没有精确连接。"
+      ]
+    },
+    "7": {
+      "questionOverride": {
+        "questionZh": "该 AI 的基础血量、攻击距离是多少，攻击如何生效？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "可读默认值，但未恢复 ApplyDamage 执行链。",
+        "current Interpretation 省略了主 EventGraph。"
+      ]
+    },
+    "8": {
+      "questionOverride": {
+        "questionZh": "平台 Dodo 有多少血，击杀回血多少，死亡与受伤效果如何执行？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "可读默认值，但无法把击杀、死亡入口与回血、寿命调用精确连接。"
+      ]
+    },
+    "10": {
+      "questionOverride": {
+        "questionZh": "基础设置中的难度、驯服速度和采集量倍率默认是多少？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "难度偏移约为 0.2。",
+          "evidenceRefs": [
+            "bp://f51c02c0112821c56b686505@e91b734c3357df290665b842/default/DifficultyOffset"
+          ]
+        },
+        {
+          "textZh": "驯服速度倍率为 1.0。",
+          "evidenceRefs": [
+            "bp://f51c02c0112821c56b686505@e91b734c3357df290665b842/default/TamingSpeedMultiplier"
+          ]
+        },
+        {
+          "textZh": "采集量倍率为 1.0。",
+          "evidenceRefs": [
+            "bp://f51c02c0112821c56b686505@e91b734c3357df290665b842/default/HarvestAmountMultiplier"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "11": {
+      "questionOverride": {
+        "questionZh": "船柱多少伤害会碎，碎裂时使用哪套几何体？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "只恢复 GeometryCollection 引用，没有生命值、伤害阈值或父类破坏实现。"
+      ]
+    },
+    "12": {
+      "questionOverride": {
+        "questionZh": "船坞多少伤害会碎，碎裂时使用哪套几何体？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "只恢复 GeometryCollection 引用，没有生命值、伤害阈值或父类破坏实现。"
+      ]
+    },
+    "13": {
+      "questionOverride": {
+        "questionZh": "做地图时，这个区域点默认覆盖多大，绑定哪个数据层？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "默认半径为 3500。",
+          "evidenceRefs": [
+            "bp://8324d60cfba14e2cc2802ae7@4147f0ece94fa54d1d07bcca/default/Radius"
+          ]
+        },
+        {
+          "textZh": "绑定 EditorTools 数据层。",
+          "evidenceRefs": [
+            "bp://8324d60cfba14e2cc2802ae7@4147f0ece94fa54d1d07bcca/default/DataLayerAssets"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "14": {
+      "questionOverride": {
+        "questionZh": "Flowmap 烘焙的采样间距、整体流速是多少，BakeFlowmap 如何执行？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "默认参数可读，但 BakeFlowmap 的执行连接全部是推测连接。"
+      ]
+    },
+    "15": {
+      "questionOverride": {
+        "questionZh": "打开这个档案宝箱会播放什么动画，并获得哪个档案或奖励？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "只恢复打开动画，奖励、档案身份和父类开箱逻辑未恢复。"
+      ]
+    },
+    "16": {
+      "questionOverride": {
+        "questionZh": "打开李美盈宝箱会播放什么动画，并获得哪个档案或奖励？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "只恢复打开动画，奖励和父类逻辑未恢复。"
+      ]
+    },
+    "17": {
+      "questionOverride": {
+        "questionZh": "这个旋风 Buff 默认多久出现一次、持续多久、最多同时几个？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "持续时间为 90 秒。",
+          "evidenceRefs": [
+            "bp://1e61a444869faae5a0655392@0d3d82db4ae03592e04fe82d/default/CycloneDuration"
+          ]
+        },
+        {
+          "textZh": "出现间隔为 360 秒。",
+          "evidenceRefs": [
+            "bp://1e61a444869faae5a0655392@0d3d82db4ae03592e04fe82d/default/CycloneInterval"
+          ]
+        },
+        {
+          "textZh": "区域内最多同时存在 1 个。",
+          "evidenceRefs": [
+            "bp://1e61a444869faae5a0655392@0d3d82db4ae03592e04fe82d/default/MaxNumCycloneInBox"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "18": {
+      "questionOverride": {
+        "questionZh": "这个区域默认最多维持多少泡泡、多久检查一次玩家、检查多远、无人附近多久后清理？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "区域默认最多维持 10 个泡泡。",
+          "evidenceRefs": [
+            "bp://24824046ce3d8879f4b9d1cc@43f26143699dd57eec3be831/default/MaxBubblesNumInBox"
+          ]
+        },
+        {
+          "textZh": "每 5 秒检查一次玩家，检查半径为 45000。",
+          "evidenceRefs": [
+            "bp://24824046ce3d8879f4b9d1cc@43f26143699dd57eec3be831/default/CheckPlayerInterval",
+            "bp://24824046ce3d8879f4b9d1cc@43f26143699dd57eec3be831/default/CheckPlayerRadius"
+          ]
+        },
+        {
+          "textZh": "无人附近时泡泡默认保留 120 秒。",
+          "evidenceRefs": [
+            "bp://24824046ce3d8879f4b9d1cc@43f26143699dd57eec3be831/default/BubbleDurationWithoutPlayerNearby"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "生成、重叠检查、销毁和结束清理图已经收录，但仍有未恢复的接口与连线，不能把完整执行顺序写成精确闭环。"
+      ]
+    },
+    "19": {
+      "questionOverride": {
+        "questionZh": "滑坡危险区默认两次触发至少隔多久，预警间隔是多少？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "两次触发至少间隔 180 秒。",
+          "evidenceRefs": [
+            "bp://93e77eeb05a768ff3532a699@3b7b333d461849cda37989bb/default/MinTimeBetweenActivations"
+          ]
+        },
+        {
+          "textZh": "预警间隔为 10 到 15 秒。",
+          "evidenceRefs": [
+            "bp://93e77eeb05a768ff3532a699@3b7b333d461849cda37989bb/default/MinWarningInterval",
+            "bp://93e77eeb05a768ff3532a699@3b7b333d461849cda37989bb/default/MaxWarningInterval"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "20": {
+      "questionOverride": {
+        "questionZh": "雪崩危险区默认两次触发至少隔多久，预警间隔是多少？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "两次触发至少间隔 180 秒。",
+          "evidenceRefs": [
+            "bp://c217fcb90a22b3faa9e25369@480597dc406a456bf700614e/default/MinTimeBetweenActivations"
+          ]
+        },
+        {
+          "textZh": "预警间隔为 10 到 15 秒。",
+          "evidenceRefs": [
+            "bp://c217fcb90a22b3faa9e25369@480597dc406a456bf700614e/default/MinWarningInterval",
+            "bp://c217fcb90a22b3faa9e25369@480597dc406a456bf700614e/default/MaxWarningInterval"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "21": {
+      "questionOverride": {
+        "questionZh": "碰到蛋币后是否自动拾取并增加特殊分数？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "触发到计分的执行链只有推测连接，拾取特效和声音引用也未解码。"
+      ]
+    },
+    "22": {
+      "questionOverride": {
+        "questionZh": "玩家会拿到哪把武器，能否重复拾取？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "是否可重复拾取可读，但 PickUpWeapon 仍是未解码对象编号，目标武器和拾取链未恢复。"
+      ]
+    },
+    "23": {
+      "questionOverride": {
+        "questionZh": "它如何随日夜调整灯光颜色和强度？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "曲线取值、分支、颜色与强度调用之间没有可靠连接。",
+        "MCP Interpretation 省略了相关图。"
+      ]
+    },
+    "24": {
+      "questionOverride": {
+        "questionZh": "这盏琥珀点光的颜色、亮度和日夜变化是什么？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "只恢复灯光组件身份，没有颜色、亮度或有效执行链。"
+      ]
+    },
+    "25": {
+      "questionOverride": {
+        "questionZh": "这里刷出的生物是否按驯服状态、忽略驯服上限，并且不使用固定等级？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "刷出的生物按驯服状态处理。",
+          "evidenceRefs": [
+            "bp://e7bff4e312ceb8ea19d58952@66f226409c0241366b174375/default/bIsTamed"
+          ]
+        },
+        {
+          "textZh": "忽略最大驯服数量限制。",
+          "evidenceRefs": [
+            "bp://e7bff4e312ceb8ea19d58952@66f226409c0241366b174375/default/bIgnoreMaxTameLimit"
+          ]
+        },
+        {
+          "textZh": "不使用固定出生等级。",
+          "evidenceRefs": [
+            "bp://e7bff4e312ceb8ea19d58952@66f226409c0241366b174375/default/bUseFixedSpawnLevel"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "26": {
+      "questionOverride": {
+        "questionZh": "检查点命中后如何启用、禁用并播放视觉反馈？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "启用、禁用和反馈节点可见，但全部执行连接都是推测连接，部分向量值还存在解析失真。"
+      ]
+    },
+    "28": {
+      "questionOverride": {
+        "questionZh": "这个原生导航类如何判断当前位置属于哪个区域并维护活动导航瓦片？"
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "GetNavAreaAtLocation 查询当前位置所在导航多边形的 AreaClass；查询失败时回退到默认可行走区域。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F8EC0"
+          ]
+        },
+        {
+          "textZh": "UpdateActiveTiles 会根据运行条件进入并行或串行瓦片维护路径，辅助函数负责收集、更新和移除活动瓦片。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14FAD70",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F4720",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F61E0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14F7D70"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "并行主体 0x14F4D50 与串行主体 0x14F6500 均达到 40000 字符反编译预算；活动瓦片增、改、删的所有分支尚未穷尽。"
+      ]
+    },
+    "29": {
+      "questionOverride": {
+        "questionZh": "洞穴管理器至少维持多少 NPC，是否禁止在水中刷，使用哪个刷新表？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "至少维持 40 个 NPC。",
+          "evidenceRefs": [
+            "bp://55e7c4f91b2c4309a082460b@508040fc01aaee72e6134422/default/MinDesiredNumberOfNPC"
+          ]
+        },
+        {
+          "textZh": "禁止在水中刷新。",
+          "evidenceRefs": [
+            "bp://55e7c4f91b2c4309a082460b@508040fc01aaee72e6134422/default/bNeverSpawnInWater"
+          ]
+        },
+        {
+          "textZh": "刷新表指向 DinoSpawnEntries_Generic。",
+          "evidenceRefs": [
+            "bp://55e7c4f91b2c4309a082460b@508040fc01aaee72e6134422/default/NPCSpawnEntriesContainerObject"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "30": {
+      "questionOverride": {
+        "questionZh": "陆地管理器至少维持多少 NPC，是否禁止在水中刷，使用哪个刷新表？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "至少维持 40 个 NPC。",
+          "evidenceRefs": [
+            "bp://8553c8e39c23da78cf751b13@3ea24ae319336de00d323dad/default/MinDesiredNumberOfNPC"
+          ]
+        },
+        {
+          "textZh": "禁止在水中刷新。",
+          "evidenceRefs": [
+            "bp://8553c8e39c23da78cf751b13@3ea24ae319336de00d323dad/default/bNeverSpawnInWater"
+          ]
+        },
+        {
+          "textZh": "刷新表指向 DinoSpawnEntries_Generic。",
+          "evidenceRefs": [
+            "bp://8553c8e39c23da78cf751b13@3ea24ae319336de00d323dad/default/NPCSpawnEntriesContainerObject"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "31": {
+      "questionOverride": {
+        "questionZh": "水域管理器维持多少 NPC，并且是否只在水中刷？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "最少和最多目标数量均为 30。",
+          "evidenceRefs": [
+            "bp://872aee1bb229f2e87e91faf8@f295052b6c7b69a846d779c0/default/MinDesiredNumberOfNPC",
+            "bp://872aee1bb229f2e87e91faf8@f295052b6c7b69a846d779c0/default/MaxDesiredNumberOfNPC"
+          ]
+        },
+        {
+          "textZh": "只允许在水中刷新，且没有启用禁止水中刷新。",
+          "evidenceRefs": [
+            "bp://872aee1bb229f2e87e91faf8@f295052b6c7b69a846d779c0/default/bOnlySpawnInWater",
+            "bp://872aee1bb229f2e87e91faf8@f295052b6c7b69a846d779c0/default/bNeverSpawnInWater"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "32": {
+      "questionOverride": {
+        "questionZh": "这个打包环境 Actor 实际装载哪个场景？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "装载 GiantBranch_D 场景资产。",
+          "evidenceRefs": [
+            "bp://2cee481b35cf0e847fa87361@5883f775143e11614bed7e2f/default/WorldAsset"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "33": {
+      "questionOverride": {
+        "questionZh": "这个打包环境 Actor 实际装载哪个场景？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "装载 GiantBranch_E 场景资产。",
+          "evidenceRefs": [
+            "bp://ea214294b0e3ed377930de8b@26c2374f40d467b2c4ce4a98/default/WorldAsset"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "34": {
+      "questionOverride": {
+        "questionZh": "目标点出生和销毁时怎样登记、移除，使用什么标签？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "Add、Remove 节点和 LunarTeleport 标签可见，但生命周期入口与调用之间没有可靠连接。"
+      ]
+    },
+    "35": {
+      "questionOverride": {
+        "questionZh": "另一个导航点能否访问此点，判定条件是什么？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "允许列表、强制选择条件与 true/false 结果之间没有可靠连接。"
+      ]
+    },
+    "36": {
+      "questionOverride": {
+        "questionZh": "施工脚本怎样给深海 PCG 区域设置标签，标签值是什么？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "标签枚举只恢复为内部值，NameTag 值损坏，执行连接不精确。",
+        "该可正式查询资产通过 MCP 查询时触发本机路径投影错误。"
+      ]
+    },
+    "39": {
+      "questionOverride": {
+        "questionZh": "喷口影响多大、持续多久，会给玩家和恐龙什么 Buff？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "半径和持续值可读，但玩家与恐龙 Buff 数组仍是未解码对象编号。"
+      ]
+    },
+    "40": {
+      "questionOverride": {
+        "questionZh": "油脉是否可受伤、拆除，它的结构标签和物理材质是什么？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "结构标签为 OilVein，不能受伤，也不能拆除。",
+          "evidenceRefs": [
+            "bp://7eb7ea0cdc62f9df655fa2df@ce0ac402d4b2fd2687eb909c/default/StructureTag",
+            "bp://7eb7ea0cdc62f9df655fa2df@ce0ac402d4b2fd2687eb909c/default/bCanBeDamaged",
+            "bp://7eb7ea0cdc62f9df655fa2df@ce0ac402d4b2fd2687eb909c/default/bCanDemolish"
+          ]
+        },
+        {
+          "textZh": "默认伤害特效物理材质类型为 Rock。",
+          "evidenceRefs": [
+            "bp://7eb7ea0cdc62f9df655fa2df@ce0ac402d4b2fd2687eb909c/default/TargetableDamageFXDefaultPhysMaterial"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "41": {
+      "questionOverride": {
+        "questionZh": "它是功能站还是视觉环境 Actor，如何布置模型和灯光？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "实际模型对象、施工顺序与灯光连接不能可靠还原。",
+        "MCP Interpretation 省略了整张相关图。"
+      ]
+    },
+    "42": {
+      "questionOverride": {
+        "questionZh": "大花默认点光和聚光的亮度、范围、衰减与阴影设置是多少？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "阴影启用。",
+          "evidenceRefs": [
+            "bp://a252ce608e09bde46f731be7@3e52eedade89ebd8d1350f58/default/Enable%20Shadows"
+          ]
+        },
+        {
+          "textZh": "点光亮度 3、范围 10000、衰减 8。",
+          "evidenceRefs": [
+            "bp://a252ce608e09bde46f731be7@3e52eedade89ebd8d1350f58/default/PointLight%20Brightness",
+            "bp://a252ce608e09bde46f731be7@3e52eedade89ebd8d1350f58/default/PointLight%20Attenuation%20Radius",
+            "bp://a252ce608e09bde46f731be7@3e52eedade89ebd8d1350f58/default/PointLight%20FallOff"
+          ]
+        },
+        {
+          "textZh": "聚光亮度 6、范围 13000、衰减 2。",
+          "evidenceRefs": [
+            "bp://a252ce608e09bde46f731be7@3e52eedade89ebd8d1350f58/default/SpotLight%20Brightness",
+            "bp://a252ce608e09bde46f731be7@3e52eedade89ebd8d1350f58/default/SpotLight%20Attenuation%20Radius",
+            "bp://a252ce608e09bde46f731be7@3e52eedade89ebd8d1350f58/default/SpotLight%20FallOff"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "43": {
+      "questionOverride": {
+        "questionZh": "这是会生成奖励的宝箱点，还是纯服务器标记，绑定了哪个奖励资产？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "只能确认服务端点位默认值，Loot、Inventory、ItemSet、Reward 以及地图实例用途均未绑定。"
+      ]
+    },
+    "44": {
+      "questionOverride": {
+        "questionZh": "补给箱出现特效的预设动画长度是多少？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "预设动画长度为 6 秒。",
+          "evidenceRefs": [
+            "bp://b3ce98288318d4514910525f@eb10774579719dc2e63d91f6/default/AnimLength"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "45": {
+      "questionOverride": {
+        "questionZh": "这个区域怎样挑选刷新点并生成补给箱？"
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "StartCrateSpawning 建立补给箱刷新计时，并使用配置的首次延迟与后续间隔范围。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x10223C0"
+          ]
+        },
+        {
+          "textZh": "检查刷新、选择有效点和从全部点生成的路径会过滤候选点，并在启用时使用刷新点权重。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1020770",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1022FC0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x10265B0"
+          ]
+        },
+        {
+          "textZh": "该区域另有移除已刷补给箱、启停刷新以及按全部刷新体积生成的独立路径。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1025E70",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1026330",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x1027990"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "CheckCrateSpawn、GetValidSpawnPointEntry 与 SpawnCratesFromAllPoints 均达到 40000 字符反编译预算；所有过滤条件、权重分支和最终生成分支尚未穷尽。"
+      ]
+    },
+    "46": {
+      "questionOverride": {
+        "questionZh": "这个原生区域怎样参与 NPC 刷新？"
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "该类自身只恢复出构造函数；构造阶段把碰撞设置为 NoCollisionButQuery，表现为供外部系统查询的空间配置载体。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152AAC0"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "“本类不自行刷新 NPC”是当前 PDB 类成员发现范围内的否定结论；负责消费该区域配置的外部管理器调用链尚未恢复。"
+      ]
+    },
+    "47": {
+      "questionOverride": {
+        "questionZh": "这个原生区域怎样处理 NPC 刷新、玩家进入和休眠同步？"
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "重叠开始与结束路径维护区域内 NPC 集合；计数路径按 bCountTamedDinos 决定是否计入已驯服生物。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152C260",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152CB90",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152D8E0"
+          ]
+        },
+        {
+          "textZh": "休眠、反序列化与重同步路径会重新登记区域状态，并与休眠管理器恢复同步。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152C800",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152D6A0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x152DFE0"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "48": {
+      "questionOverride": {
+        "questionZh": "毒树配置了什么 Buff，爆发半径和持续时间是多少？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "Buff 指向 Buff_PlantPoison_GenBogPlant_GasMaskable_C。",
+          "evidenceRefs": [
+            "bp://233306374b062a35f4ce13f8@e764532ab67624106baf0387/default/BuffToApply"
+          ]
+        },
+        {
+          "textZh": "爆发半径为 2500，持续时间为 12 秒。",
+          "evidenceRefs": [
+            "bp://233306374b062a35f4ce13f8@e764532ab67624106baf0387/default/BurstOverlapRadius",
+            "bp://233306374b062a35f4ce13f8@e764532ab67624106baf0387/default/BurstTimeLength"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "49": {
+      "questionOverride": {
+        "questionZh": "Pillar 的精确父类、消耗物品、结构规则和破坏几何是什么，能否证明玩家可制作或放置？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "Pillar 的精确父类为 Floor_Base_SM_C，消耗物品引用解析为 PrimalItemStructure_WoodFloor_C。",
+          "evidenceRefs": [
+            "bp://24b0ede3b1e5501308ab1741@de69bd72216d97656eb9bde5/asset/field/ParentClass",
+            "bp://24b0ede3b1e5501308ab1741@de69bd72216d97656eb9bde5/default/ConsumesPrimalItem"
+          ]
+        },
+        {
+          "textZh": "结构规则类为 StructureSettings_BrokenByMetal_C；破坏几何只指向 Pillar 自己的 Steamboat_Willie_Pillar_3_GeometryCollection。",
+          "evidenceRefs": [
+            "bp://24b0ede3b1e5501308ab1741@de69bd72216d97656eb9bde5/default/StructureSettingsClass",
+            "bp://24b0ede3b1e5501308ab1741@de69bd72216d97656eb9bde5/default/SoftDestructionGeoCollectionAsset"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "没有恢复 Engram、物品获得入口或完整放置链；这些引用不能证明玩家可正常制作或放置，伤害阈值和父类破坏实现也未闭合。"
+      ]
+    },
+    "50": {
+      "questionOverride": {
+        "questionZh": "Dock 的精确父类、消耗物品、结构规则和破坏几何是什么，能否证明玩家可制作或放置？",
+        "requiredSignalGroups": [],
+        "requiresExactFlow": false
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "Dock 的精确父类为 Floor_Base_SM_C，消耗物品引用解析为 PrimalItemStructure_WoodFloor_C。",
+          "evidenceRefs": [
+            "bp://d71cb3f46e14942d4c41f6bf@2026357e4660b7f059d13033/asset/field/ParentClass",
+            "bp://d71cb3f46e14942d4c41f6bf@2026357e4660b7f059d13033/default/ConsumesPrimalItem"
+          ]
+        },
+        {
+          "textZh": "结构规则类为 StructureSettings_BrokenByMetal_C；破坏几何只指向 Dock 自己的 Steamboat_Willie_Dock_GeometryCollection。",
+          "evidenceRefs": [
+            "bp://d71cb3f46e14942d4c41f6bf@2026357e4660b7f059d13033/default/StructureSettingsClass",
+            "bp://d71cb3f46e14942d4c41f6bf@2026357e4660b7f059d13033/default/SoftDestructionGeoCollectionAsset"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "没有恢复 Engram、物品获得入口或完整放置链；这些引用不能证明玩家可正常制作或放置，伤害阈值和父类破坏实现也未闭合。"
+      ]
+    },
+    "51": {
+      "questionOverride": {
+        "questionZh": "它从哪一行后处理表读取设置，在什么条件下显示？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "DataTableRowHandle 结构未解码，无法得到 DataTable 与 RowName，执行连接也不精确。"
+      ]
+    },
+    "52": {
+      "questionOverride": {
+        "questionZh": "是否全局无边界生效，实际修改哪些视觉参数？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "可确认全局无边界，但 PostProcessSettings 结构未解码，曝光、材质与颜色值未知。"
+      ]
+    },
+    "53": {
+      "questionOverride": {
+        "questionZh": "瀑布由哪些组件、样条、材质、声音与流速共同控制？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "全部执行连接均为推测，声音来源未闭合。",
+        "Interpretation 只选择 4/8 图，普通玩家问题还需要手工指定 GraphRef。"
+      ]
+    },
+    "54": {
+      "questionOverride": {
+        "questionZh": "岸线遮罩代理是否只是隐藏视觉辅助，锐度是多少，何时更新？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "锐度和隐藏状态可读，但 BeginPlay 后的遮罩设置顺序及捕获对象未闭合。"
+      ]
+    },
+    "55": {
+      "questionOverride": {
+        "questionZh": "它是纯熔岩视觉表现，还是还会造成伤害？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "材质和流速可读，但伤害边界、执行连接与继承逻辑未闭合。",
+        "Interpretation 只选择 2/6 图，普通玩家问题需要手工指定 GraphRef。"
+      ]
+    },
+    "56": {
+      "questionOverride": {
+        "questionZh": "月面发光岩石只是灯光场景物，还是带伤害或交互？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "灯光参数可读，但当前未命中伤害或交互信号不足以证明全局不存在。"
+      ]
+    },
+    "57": {
+      "questionOverride": {
+        "questionZh": "这个服务端点位会不会加载到客户端，本类是否包含实际玩法逻辑？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "本类默认值和空图可读，但地图实例、外部消费者及实际玩法用途未闭合。",
+        "即使 Interpretation 完整，普通玩家问题仍要求手工选择 GraphRef。"
+      ]
+    },
+    "58": {
+      "questionOverride": {
+        "questionZh": "Huge 点位是否加载到客户端，和普通点位有什么功能差异？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "客户端加载值可读，但父类行为、地图实例用途与 Huge 的业务差异未闭合。"
+      ]
+    },
+    "59": {
+      "questionOverride": {
+        "questionZh": "禁建区域如何判断位置或结构是否允许建造？"
+      },
+      "status": "PARTIAL",
+      "claims": [
+        {
+          "textZh": "结构判定会检查全禁建开关、结构类型、标签、队伍、PvE 条件以及对象是否位于区域内。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DE040"
+          ]
+        },
+        {
+          "textZh": "位置、结构和任意禁建区域包装函数复用空间包含检查与统一允许性判定。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DDE40",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DE2F0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DC8F0",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x14DCB40"
+          ]
+        }
+      ],
+      "blockingGaps": [
+        "部分 GameState/GameMode 字节与位域没有符号名；这些服务器状态开关的业务名称及完整优先级矩阵仍不能精确命名。"
+      ]
+    },
+    "60": {
+      "questionOverride": {
+        "questionZh": "谁使用这个原生样条，样条怎样影响路径和方向？"
+      },
+      "status": "CLOSED_EXACT",
+      "claims": [
+        {
+          "textZh": "SplineActor 构造时创建并持有 SplineComponent；该类本身是路径数据载体。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x8A2780"
+          ]
+        },
+        {
+          "textZh": "WaterVolumeWithFlow 的两个消费者读取该样条，分别生成流向目标并计算沿样条的水流强度与方向。",
+          "evidenceRefs": [
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x11B1100",
+            "native://b0e67e1e7625dd89a30b5a1df7652a44b9b142b045f820c419b8b51bbe3d7d2a/ShooterGameEditor-ShooterGame.dll/0x11B2000"
+          ]
+        }
+      ],
+      "blockingGaps": []
+    },
+    "61": {
+      "questionOverride": {
+        "questionZh": "蓝色方尖碑终端显示什么名字，交互、库存或 Boss 行为绑定在哪里？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "显示名可读，但交互、库存、Boss 和 Tribute 功能位于未恢复的父类或原生逻辑。",
+        "普通玩家问题需要手工选择 GraphRef。"
+      ]
+    },
+    "62": {
+      "questionOverride": {
+        "questionZh": "绿色方尖碑终端显示什么名字，交互、库存或 Boss 行为绑定在哪里？"
+      },
+      "status": "PARTIAL",
+      "claims": [],
+      "blockingGaps": [
+        "显示名可读，但交互、库存、Boss 和 Tribute 功能位于未恢复的父类或原生逻辑。"
+      ]
+    }
+  }
+}

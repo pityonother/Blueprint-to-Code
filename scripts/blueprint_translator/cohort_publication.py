@@ -1,0 +1,545 @@
+"""Publish a reviewed, cross-category Blueprint Evidence cohort.
+
+The cohort publisher is deliberately a thin orchestrator around the existing
+Evidence v3 and Interpretation v1 publishers.  It validates every source and
+destination identity before the first mutation, then publishes one asset at a
+time with the existing immutable revision and pointer-CAS contracts.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Final
+
+from .evidence_publication import (
+    _lexical_absolute,
+    _require_plain_directory,
+    _require_plain_path_chain,
+    evidence_publication_lock,
+    publish_prepared_evidence_revision,
+)
+from .evidence_policy import (
+    EvidenceDecision,
+    EvidencePolicyError,
+    require_evidence,
+)
+from .evidence_repository import (
+    ResolvedEvidenceState,
+    evidence_manifest_payload,
+    resolve_asset_evidence_state,
+)
+from .interpretation_publication import (
+    build_interpretation,
+    inspect_interpretation_health,
+    publish_interpretation,
+)
+
+
+PLAN_SCHEMA: Final = "blueprint-to-code.evidence-cohort-plan/v1"
+PREFLIGHT_SCHEMA: Final = "blueprint-to-code.evidence-cohort-preflight/v1"
+RECEIPT_SCHEMA: Final = "blueprint-to-code.evidence-cohort-publication/v1"
+_CATEGORY_RE: Final = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
+_COHORT_ID_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+class CohortPublicationError(RuntimeError):
+    """Fail-closed cohort error with a stable machine-readable code."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {detail}")
+
+
+@dataclass(frozen=True)
+class _PlanAsset:
+    asset: str
+    source_relative: PurePosixPath
+    object_path: str
+    category_code: str
+    represented_object_count: int
+
+
+@dataclass(frozen=True)
+class _PreparedAsset:
+    plan: _PlanAsset
+    source_dir: Path
+    destination_dir: Path
+    state: ResolvedEvidenceState
+    decision: EvidenceDecision
+    destination_was_present: bool
+    destination_pointer_sha256: str | None
+    semantic_fact_count: int
+    interpretation_digest: str
+
+
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID",
+                f"duplicate JSON key is forbidden: {key}",
+            )
+        result[key] = value
+    return result
+
+
+def _load_plan(path: Path) -> tuple[str, tuple[_PlanAsset, ...]]:
+    _require_plain_path_chain(path, label="cohort plan")
+    if not path.is_file():
+        raise CohortPublicationError("COHORT_PLAN_INVALID", "plan file is missing")
+    if path.stat().st_size > 4 * 1024 * 1024:
+        raise CohortPublicationError("COHORT_PLAN_INVALID", "plan exceeds 4 MiB")
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_object,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant: {value}")
+            ),
+        )
+    except CohortPublicationError:
+        raise
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise CohortPublicationError(
+            "COHORT_PLAN_INVALID", "plan must be strict UTF-8 JSON"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("schema") != PLAN_SCHEMA:
+        raise CohortPublicationError(
+            "COHORT_PLAN_INVALID", f"schema must be {PLAN_SCHEMA}"
+        )
+    cohort_id = str(payload.get("cohortId") or "")
+    if not _COHORT_ID_RE.fullmatch(cohort_id):
+        raise CohortPublicationError("COHORT_PLAN_INVALID", "cohortId is invalid")
+    raw_assets = payload.get("assets")
+    if not isinstance(raw_assets, list) or not raw_assets or len(raw_assets) > 100:
+        raise CohortPublicationError(
+            "COHORT_PLAN_INVALID", "assets must contain between 1 and 100 entries"
+        )
+
+    assets: list[_PlanAsset] = []
+    seen_assets: set[str] = set()
+    seen_sources: set[str] = set()
+    seen_objects: set[str] = set()
+    for index, raw in enumerate(raw_assets):
+        if not isinstance(raw, dict):
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID", f"assets[{index}] must be an object"
+            )
+        asset = str(raw.get("asset") or "")
+        if (
+            not asset
+            or len(asset) > 255
+            or asset in {".", ".."}
+            or any(character in asset for character in "/\\:\0")
+            or any(ord(character) < 32 or ord(character) == 127 for character in asset)
+        ):
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID", f"assets[{index}].asset is invalid"
+            )
+        raw_source = raw.get("sourceAssetDir")
+        if not isinstance(raw_source, str) or not raw_source or "\\" in raw_source:
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID",
+                f"assets[{index}].sourceAssetDir must be a relative POSIX path",
+            )
+        source_relative = PurePosixPath(raw_source)
+        if (
+            source_relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in source_relative.parts)
+            or source_relative.name != asset
+        ):
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID",
+                f"assets[{index}].sourceAssetDir escapes its source root or mismatches asset",
+            )
+        object_path = str(raw.get("objectPath") or "")
+        if (
+            not object_path.startswith("/")
+            or "." not in object_path
+            or len(object_path) > 4096
+            or any(ord(character) < 32 or ord(character) == 127 for character in object_path)
+        ):
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID", f"assets[{index}].objectPath is invalid"
+            )
+        category_code = str(raw.get("categoryCode") or "")
+        if not _CATEGORY_RE.fullmatch(category_code):
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID", f"assets[{index}].categoryCode is invalid"
+            )
+        represented = raw.get("representedObjectCount")
+        if (
+            not isinstance(represented, int)
+            or isinstance(represented, bool)
+            or represented < 1
+        ):
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID",
+                f"assets[{index}].representedObjectCount must be a positive integer",
+            )
+
+        asset_key = asset.casefold()
+        source_key = source_relative.as_posix().casefold()
+        object_key = object_path.casefold()
+        if asset_key in seen_assets or source_key in seen_sources or object_key in seen_objects:
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID", "asset, sourceAssetDir, and objectPath must be unique"
+            )
+        seen_assets.add(asset_key)
+        seen_sources.add(source_key)
+        seen_objects.add(object_key)
+        assets.append(
+            _PlanAsset(
+                asset=asset,
+                source_relative=source_relative,
+                object_path=object_path,
+                category_code=category_code,
+                represented_object_count=represented,
+            )
+        )
+    return cohort_id, tuple(assets)
+
+
+def _destination_identity(destination: Path) -> tuple[str | None, str | None]:
+    if not destination.exists():
+        return None, None
+    _require_plain_path_chain(destination, label="cohort destination asset")
+    _require_plain_directory(destination, label="cohort destination asset")
+    try:
+        state = resolve_asset_evidence_state(destination, allow_stale=True)
+        manifest = evidence_manifest_payload(state)
+    except Exception as exc:
+        raise CohortPublicationError(
+            "COHORT_DESTINATION_INVALID",
+            f"{destination.name} exists without valid indexed Evidence",
+        ) from exc
+    if state.source_kind == "INDEXED_V3_CURRENT":
+        return str(manifest.get("objectPath") or ""), state.pointer_sha256
+    if state.source_kind == "INDEXED_V2_COMPATIBILITY":
+        return str(manifest.get("object_path") or ""), state.pointer_sha256
+    raise CohortPublicationError(
+        "COHORT_DESTINATION_INVALID",
+        f"{destination.name} has an unsupported Evidence source kind",
+    )
+
+
+def _prepare_assets(
+    assets: tuple[_PlanAsset, ...],
+    *,
+    source_root: Path,
+    capture_root: Path,
+    budget: int,
+) -> tuple[_PreparedAsset, ...]:
+    prepared: list[_PreparedAsset] = []
+    for asset in assets:
+        source_dir = source_root.joinpath(*asset.source_relative.parts)
+        destination = capture_root / asset.asset
+        try:
+            state = resolve_asset_evidence_state(source_dir, allow_stale=True)
+            decision = require_evidence(state, purpose="publish")
+            manifest = evidence_manifest_payload(state)
+        except EvidencePolicyError as exc:
+            if exc.code == "EVIDENCE_EMPTY":
+                raise CohortPublicationError(
+                    "COHORT_SOURCE_HAS_NO_SEMANTIC_FACTS",
+                    f"{asset.asset} is an identity-only capture",
+                ) from exc
+            raise CohortPublicationError(
+                "COHORT_SOURCE_NOT_AUTHORITATIVE",
+                f"{asset.asset} requires publish-authorized current Evidence",
+            ) from exc
+        except Exception as exc:
+            raise CohortPublicationError(
+                "COHORT_SOURCE_INVALID",
+                f"{asset.asset} source Evidence did not validate",
+            ) from exc
+        if str(manifest.get("objectPath") or "") != asset.object_path:
+            raise CohortPublicationError(
+                "COHORT_SOURCE_IDENTITY_MISMATCH",
+                f"{asset.asset} source objectPath differs from the reviewed plan",
+            )
+        semantic_fact_count = state.semantic_fact_count
+        destination_object_path, destination_pointer_sha256 = _destination_identity(
+            destination
+        )
+        if destination_object_path is not None and destination_object_path != asset.object_path:
+            raise CohortPublicationError(
+                "COHORT_DESTINATION_IDENTITY_CONFLICT",
+                f"{asset.asset} already belongs to another objectPath",
+            )
+        try:
+            preview = build_interpretation(
+                source_dir,
+                budget=budget,
+                bounded_selection=True,
+            )
+        except Exception as exc:
+            raise CohortPublicationError(
+                "COHORT_INTERPRETATION_PREFLIGHT_FAILED",
+                f"{asset.asset} Interpretation could not be built within the review budget",
+            ) from exc
+        prepared.append(
+            _PreparedAsset(
+                plan=asset,
+                source_dir=source_dir,
+                destination_dir=destination,
+                state=state,
+                decision=decision,
+                destination_was_present=destination_object_path is not None,
+                destination_pointer_sha256=destination_pointer_sha256,
+                semantic_fact_count=semantic_fact_count,
+                interpretation_digest=preview.semantic_digest,
+            )
+        )
+    return tuple(prepared)
+
+
+def _preflight_inputs(
+    *,
+    plan_path: str | os.PathLike[str],
+    source_root: str | os.PathLike[str],
+    capture_root: str | os.PathLike[str],
+    budget: int,
+) -> tuple[str, tuple[_PlanAsset, ...], tuple[_PreparedAsset, ...], Path]:
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+        raise CohortPublicationError("COHORT_PLAN_INVALID", "budget must be positive")
+    plan = _lexical_absolute(plan_path)
+    sources = _lexical_absolute(source_root)
+    captures = _lexical_absolute(capture_root)
+    cohort_id, assets = _load_plan(plan)
+    try:
+        _require_plain_path_chain(sources, label="cohort source root")
+        _require_plain_directory(sources, label="cohort source root")
+        _require_plain_path_chain(captures, label="cohort capture root")
+    except (OSError, ValueError) as exc:
+        raise CohortPublicationError(
+            "COHORT_ROOT_INVALID", "source or destination root is invalid"
+        ) from exc
+    if sources == captures or sources in captures.parents or captures in sources.parents:
+        raise CohortPublicationError(
+            "COHORT_ROOTS_OVERLAP", "source and destination roots must be disjoint"
+        )
+    prepared = _prepare_assets(
+        assets,
+        source_root=sources,
+        capture_root=captures,
+        budget=budget,
+    )
+    return cohort_id, assets, prepared, captures
+
+
+def preflight_evidence_cohort(
+    *,
+    plan_path: str | os.PathLike[str],
+    source_root: str | os.PathLike[str],
+    capture_root: str | os.PathLike[str],
+    budget: int = 100_000,
+) -> dict[str, object]:
+    """Validate a cohort completely without creating or changing destinations."""
+
+    cohort_id, assets, prepared, _captures = _preflight_inputs(
+        plan_path=plan_path,
+        source_root=source_root,
+        capture_root=capture_root,
+        budget=budget,
+    )
+    return _preflight_payload(cohort_id=cohort_id, assets=assets, prepared=prepared)
+
+
+def _preflight_payload(
+    *,
+    cohort_id: str,
+    assets: tuple[_PlanAsset, ...],
+    prepared: tuple[_PreparedAsset, ...],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema": PREFLIGHT_SCHEMA,
+        "cohortId": cohort_id,
+        "status": "READY_TO_PUBLISH",
+        "total": len(assets),
+        "representedObjectCount": sum(
+            asset.represented_object_count for asset in assets
+        ),
+        "assets": [
+            {
+                "asset": item.plan.asset,
+                "categoryCode": item.plan.category_code,
+                "objectPath": item.plan.object_path,
+                "representedObjectCount": item.plan.represented_object_count,
+                "semanticFactCount": item.semantic_fact_count,
+                "sourceEvidenceRevisionId": str(
+                    evidence_manifest_payload(item.state).get("revisionId") or ""
+                ),
+                "sourceManifestSha256": item.state.manifest_sha256,
+                "sourcePointerSha256": item.state.pointer_sha256,
+                "sourceEvidenceDecision": {
+                    "reasonCode": item.decision.reason_code,
+                    "bindingDigest": item.decision.binding_digest,
+                    "evidenceAvailability": item.decision.evidence_availability,
+                },
+                "interpretationSemanticDigest": item.interpretation_digest,
+                "destinationStatus": (
+                    "EXISTING_COMPATIBLE"
+                    if item.destination_was_present
+                    else "NEW"
+                ),
+                "destinationPointerSha256": item.destination_pointer_sha256,
+            }
+            for item in prepared
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload["preflightSha256"] = hashlib.sha256(canonical).hexdigest()
+    return payload
+
+
+def publish_evidence_cohort(
+    *,
+    plan_path: str | os.PathLike[str],
+    source_root: str | os.PathLike[str],
+    capture_root: str | os.PathLike[str],
+    budget: int = 100_000,
+    expected_preflight_sha256: str | None = None,
+) -> dict[str, object]:
+    """Publish every reviewed asset and return a path-free completion receipt."""
+
+    cohort_id, assets, prepared, captures = _preflight_inputs(
+        plan_path=plan_path,
+        source_root=source_root,
+        capture_root=capture_root,
+        budget=budget,
+    )
+    preflight = _preflight_payload(
+        cohort_id=cohort_id,
+        assets=assets,
+        prepared=prepared,
+    )
+    actual_preflight_sha256 = str(preflight["preflightSha256"])
+    if expected_preflight_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_preflight_sha256):
+            raise CohortPublicationError(
+                "COHORT_PLAN_INVALID",
+                "expected preflight SHA-256 must be 64 lowercase hexadecimal characters",
+            )
+        if expected_preflight_sha256 != actual_preflight_sha256:
+            raise CohortPublicationError(
+                "COHORT_PREFLIGHT_MISMATCH",
+                "source generation, Interpretation preview, or destination state changed",
+            )
+
+    captures.mkdir(parents=True, exist_ok=True)
+    _require_plain_directory(captures, label="cohort capture root")
+    receipts: list[dict[str, object]] = []
+    for item in prepared:
+        try:
+            with evidence_publication_lock(item.source_dir):
+                live_state = resolve_asset_evidence_state(
+                    item.source_dir,
+                    allow_stale=True,
+                )
+                live_decision = require_evidence(live_state, purpose="publish")
+                if live_decision.binding_digest != item.decision.binding_digest:
+                    raise CohortPublicationError(
+                        "COHORT_SOURCE_GENERATION_CHANGED",
+                        f"{item.plan.asset} source Evidence changed after preflight",
+                    )
+                manifest = evidence_manifest_payload(live_state)
+                evidence = publish_prepared_evidence_revision(
+                    asset_dir=item.destination_dir,
+                    database_path=live_state.database_path,
+                    agent_index_bytes=live_state.agent_index_raw,
+                    asset_id=str(manifest.get("assetId") or ""),
+                    object_path=item.plan.object_path,
+                    expected_pointer_sha256=item.destination_pointer_sha256,
+                    require_fresh=True,
+                )
+            interpretation = publish_interpretation(
+                item.destination_dir,
+                budget=budget,
+                bounded_selection=True,
+                expected_semantic_digest=item.interpretation_digest,
+            )
+            final_state = resolve_asset_evidence_state(
+                item.destination_dir,
+                allow_stale=True,
+            )
+            final_decision = require_evidence(final_state, purpose="publish")
+            if (
+                final_state.manifest_sha256 != evidence.manifest_sha256
+                or final_state.pointer_sha256 != evidence.pointer_sha256
+            ):
+                raise CohortPublicationError(
+                    "COHORT_ASSET_NOT_READY",
+                    f"{item.plan.asset} final Evidence generation changed",
+                )
+            health = inspect_interpretation_health(item.destination_dir)
+        except CohortPublicationError:
+            raise
+        except Exception as exc:
+            raise CohortPublicationError(
+                "COHORT_ASSET_PUBLICATION_FAILED",
+                f"{item.plan.asset} did not reach READY",
+            ) from exc
+        if health.get("status") != "READY":
+            raise CohortPublicationError(
+                "COHORT_ASSET_NOT_READY",
+                f"{item.plan.asset} failed the final authoritative health gate",
+            )
+        receipts.append(
+            {
+                "asset": item.plan.asset,
+                "categoryCode": item.plan.category_code,
+                "objectPath": item.plan.object_path,
+                "representedObjectCount": item.plan.represented_object_count,
+                "semanticFactCount": item.semantic_fact_count,
+                "status": "READY",
+                "freshnessStatus": "FRESH",
+                "releaseAuthority": True,
+                "evidenceRevisionId": evidence.revision_id,
+                "evidenceManifestSha256": evidence.manifest_sha256,
+                "evidencePointerSha256": evidence.pointer_sha256,
+                "evidenceDecision": {
+                    "reasonCode": final_decision.reason_code,
+                    "bindingDigest": final_decision.binding_digest,
+                    "evidenceAvailability": final_decision.evidence_availability,
+                },
+                "evidenceReused": evidence.reused_existing,
+                "interpretationRevisionId": interpretation.revision_id,
+                "interpretationManifestSha256": interpretation.manifest_sha256,
+                "interpretationPointerSha256": interpretation.pointer_sha256,
+                "interpretationReused": interpretation.reused,
+            }
+        )
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "cohortId": cohort_id,
+        "status": "COMPLETE",
+        "preflightSha256": actual_preflight_sha256,
+        "ready": len(receipts),
+        "total": len(assets),
+        "representedObjectCount": sum(
+            asset.represented_object_count for asset in assets
+        ),
+        "assets": receipts,
+    }
+
+
+__all__ = [
+    "CohortPublicationError",
+    "PLAN_SCHEMA",
+    "PREFLIGHT_SCHEMA",
+    "RECEIPT_SCHEMA",
+    "preflight_evidence_cohort",
+    "publish_evidence_cohort",
+]

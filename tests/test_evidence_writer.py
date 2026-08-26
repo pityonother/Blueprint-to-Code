@@ -334,6 +334,128 @@ def _open_rows(database_path: Path) -> Iterator[sqlite3.Connection]:
 
 
 class EvidenceWriterTests(unittest.TestCase):
+    def test_direct_writer_materializes_asset_instance_fields_and_gaps(self):
+        payload = {
+            "asset_name": "ModDataAsset_Test",
+            "asset_path": "/Game/Test/ModDataAsset_Test.ModDataAsset_Test",
+            "graphs": [],
+            "class_defaults": {
+                "variables": {
+                    "NativeDefault": {
+                        "value": 7,
+                        "type": "IntProperty",
+                        "confidence": "high",
+                    }
+                }
+            },
+            "asset_fields": {
+                "loaded": True,
+                "instance_object": "ModDataAsset_Test",
+                "instance_class": "ModDataAsset",
+                "export_index": 0,
+                "business_fact_count": 2,
+                "variables": {
+                    "ModName": {
+                        "value": "Fixture Mod",
+                        "type": "StrProperty",
+                        "source": "uasset_asset_instance",
+                        "confidence": "high",
+                        "owner_kind": "asset",
+                        "confirmed_value_usable": True,
+                    },
+                    "Cosmetics.count": {
+                        "value": 20,
+                        "type": "ArrayCount",
+                        "source": "uasset_asset_instance_array_count",
+                        "confidence": "high",
+                        "owner_kind": "asset",
+                        "confirmed_value_usable": True,
+                    },
+                },
+                "gaps": [
+                    {
+                        "field": "Cosmetics[3].Cosmetic",
+                        "type": "ObjectProperty",
+                        "reason_code": "ASSET_FIELD_NOT_DECODED",
+                        "detail": "PackageIndex was outside package maps.",
+                    }
+                ],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_path = root / "first.sqlite"
+            second_path = root / "second.sqlite"
+            first = write_evidence_store_from_payload(
+                str(payload["asset_path"]), None, payload, first_path
+            )
+            changed = copy.deepcopy(payload)
+            changed["asset_fields"]["variables"]["ModName"]["value"] = (
+                "Changed Mod"
+            )
+            second = write_evidence_store_from_payload(
+                str(payload["asset_path"]), None, changed, second_path
+            )
+            with _open_rows(first_path) as connection:
+                rows = connection.execute(
+                    "SELECT owner_kind, owner_ref, name, value_json, extra_json "
+                    "FROM properties ORDER BY name"
+                ).fetchall()
+                search_rows = connection.execute(
+                    "SELECT kind, name FROM search_entities ORDER BY kind, name"
+                ).fetchall()
+                diagnostic = connection.execute(
+                    "SELECT scope_kind, scope_ref, reason_code, raw_json "
+                    "FROM diagnostics WHERE reason_code = 'ASSET_FIELD_NOT_DECODED'"
+                ).fetchone()
+
+        self.assertEqual(first["asset_field_count"], 2)
+        self.assertNotEqual(first["revision_id"], second["revision_id"])
+        self.assertEqual({row["owner_kind"] for row in rows}, {"asset"})
+        self.assertTrue(all(str(row["owner_ref"]).endswith("/asset") for row in rows))
+        self.assertEqual(
+            [(row["kind"], row["name"]) for row in search_rows],
+            [
+                ("asset_field", "Cosmetics.count"),
+                ("asset_field", "ModName"),
+                ("default", "NativeDefault"),
+            ],
+        )
+        self.assertEqual(diagnostic["scope_kind"], "asset_field")
+        self.assertIn("Cosmetics%5B3%5D.Cosmetic", diagnostic["scope_ref"])
+        self.assertIn("PackageIndex", diagnostic["raw_json"])
+
+    def test_zero_asset_instance_fields_create_an_explicit_gap(self):
+        payload = {
+            "asset_name": "EmptyDataAsset",
+            "asset_path": "/Game/Test/EmptyDataAsset.EmptyDataAsset",
+            "graphs": [],
+            "asset_fields": {
+                "loaded": True,
+                "instance_object": "EmptyDataAsset",
+                "variables": {},
+                "gaps": [],
+                "business_fact_count": 0,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "evidence.sqlite"
+            result = write_evidence_store_from_payload(
+                str(payload["asset_path"]), None, payload, database_path
+            )
+            with _open_rows(database_path) as connection:
+                reason_codes = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT reason_code FROM diagnostics"
+                    )
+                }
+
+        self.assertEqual(result["asset_field_count"], 0)
+        self.assertIn("ASSET_FIELDS_EMPTY", reason_codes)
+
     def test_direct_parser_v4_keeps_heuristic_pin_keys_out_of_authority(self):
         graph_payload = {
             "metadata": {
@@ -465,22 +587,21 @@ class EvidenceWriterTests(unittest.TestCase):
                     "SELECT target_pin_ref, target_native_pin_id "
                     "FROM edge_observations"
                 ).fetchone()
-                edge = connection.execute(
-                    "SELECT resolution_status, confidence FROM edges"
-                ).fetchone()
+                edge_count = connection.execute(
+                    "SELECT COUNT(*) FROM edges"
+                ).fetchone()[0]
                 graph = connection.execute(
                     "SELECT metadata_json FROM graphs"
                 ).fetchone()
 
         self.assertEqual(result["parser_version"], DIRECT_PAYLOAD_PARSER_VERSION)
-        self.assertEqual(DIRECT_PAYLOAD_PARSER_VERSION, "uasset-graph-reader-evidence-v4")
+        self.assertEqual(DIRECT_PAYLOAD_PARSER_VERSION, "uasset-graph-reader-evidence-v7")
         self.assertEqual(pin["native_pin_id"], "")
         self.assertEqual(pin["persistent_guid"], "")
         self.assertEqual(authority_pin_count, 0)
         self.assertIsNotNone(observation["target_pin_ref"])
         self.assertEqual(observation["target_native_pin_id"], "")
-        self.assertEqual(edge["resolution_status"], "resolved_pin_heuristic")
-        self.assertEqual(edge["confidence"], "medium")
+        self.assertEqual(edge_count, 0)
         self.assertEqual(
             json.loads(pin["resolution_json"])["heuristic_guid_candidate"],
             "12345678123456781234567812345678",
@@ -488,6 +609,103 @@ class EvidenceWriterTests(unittest.TestCase):
         self.assertEqual(
             json.loads(graph["metadata_json"])["graph_guid"],
             "11111111222222223333333344444444",
+        )
+
+    def test_writer_refuses_exact_edge_when_source_native_pin_id_is_missing(self):
+        unavailable_source_pin = {
+            "id": "Source_pin_1",
+            "name": "then",
+            "direction": "EGPD_Output",
+            "category": "exec",
+            "source": "uasset_custom_pin_scan",
+            "confidence": "medium",
+            "resolution": {"native_pin_id_authority": "UNAVAILABLE"},
+            "links": [
+                {
+                    "target_node": "Target",
+                    "target_pin_id": "TARGET-NATIVE-ID",
+                    "target_pin_id_authority": "EXACT",
+                    "target_pin": "execute",
+                    "source": "uasset_inline_pin_reference",
+                    "resolution_status": "resolved_pin",
+                    "confidence": "high",
+                }
+            ],
+        }
+        target_pin = {
+            **_make_pin(
+                "TARGET-NATIVE-ID",
+                "execute",
+                "EGPD_Input",
+            ),
+            "source": "uasset_custom_pin_scan",
+            "resolution": {"native_pin_id_authority": "EXACT"},
+        }
+        graph_payload = {
+            "metadata": {
+                "asset_name": "MissingSourceIdentityFixture",
+                "graph_name": "EventGraph",
+                "graph_type": "EventGraph",
+                "uasset_export_index": 7,
+                "uasset_read_status": "partial",
+            },
+            "nodes": [
+                {
+                    "index": 1,
+                    "name": "Source",
+                    "pins": [unavailable_source_pin],
+                },
+                {
+                    "index": 2,
+                    "name": "Target",
+                    "pins": [target_pin],
+                },
+            ],
+        }
+        payload = {
+            "asset_name": "MissingSourceIdentityFixture",
+            "asset_path": (
+                "/Game/Test/MissingSourceIdentityFixture."
+                "MissingSourceIdentityFixture"
+            ),
+            "graphs": [
+                {
+                    "graph": "EventGraph",
+                    "graph_type": "EventGraph",
+                    "export_index": 7,
+                    "status": "partial",
+                    "confidence": "medium",
+                    "payload": graph_payload,
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "evidence.sqlite"
+            write_evidence_store_from_payload(
+                str(payload["asset_path"]),
+                None,
+                payload,
+                database_path,
+            )
+            with _open_rows(database_path) as connection:
+                edge_count = connection.execute(
+                    "SELECT COUNT(*) FROM edges"
+                ).fetchone()[0]
+                observation = connection.execute(
+                    "SELECT target_pin_ref, target_native_pin_id, "
+                    "resolution_status FROM edge_observations"
+                ).fetchone()
+
+        self.assertEqual(edge_count, 0)
+        self.assertIsNotNone(observation["target_pin_ref"])
+        self.assertEqual(
+            observation["target_native_pin_id"],
+            "TARGET-NATIVE-ID",
+        )
+        self.assertEqual(
+            observation["resolution_status"],
+            "source_pin_identity_unavailable",
         )
 
     def test_function_reference_preserves_exact_member_parent_target(self):
@@ -542,6 +760,9 @@ class EvidenceWriterTests(unittest.TestCase):
                     "node": connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
                     "pin": connection.execute("SELECT COUNT(*) FROM pins").fetchone()[0],
                     "default": connection.execute("SELECT COUNT(*) FROM class_defaults").fetchone()[0],
+                    "asset_field": connection.execute(
+                        "SELECT COUNT(*) FROM properties WHERE owner_kind = 'asset'"
+                    ).fetchone()[0],
                 }
                 indexed_counts = {
                     str(row["kind"]): int(row["row_count"])
@@ -559,12 +780,18 @@ class EvidenceWriterTests(unittest.TestCase):
                     "SELECT kind, name, summary, search_text FROM search_entities"
                 ).fetchall()
 
-        self.assertEqual(indexed_counts, canonical_counts)
+        self.assertEqual(
+            indexed_counts,
+            {kind: count for kind, count in canonical_counts.items() if count},
+        )
         self.assertEqual(
             materialized,
             {kind: (count, 1) for kind, count in canonical_counts.items()},
         )
-        self.assertEqual({str(row["kind"]) for row in projection}, set(canonical_counts))
+        self.assertEqual(
+            {str(row["kind"]) for row in projection},
+            {kind for kind, count in canonical_counts.items() if count},
+        )
         self.assertTrue(all(len(str(row["summary"])) <= 160 for row in projection))
         self.assertTrue(all(len(str(row["search_text"])) <= 384 for row in projection))
         copied_projection = "\n".join(
@@ -644,7 +871,10 @@ class EvidenceWriterTests(unittest.TestCase):
         self.assertEqual(edge_count, 0)
         self.assertIsNone(observation["target_node_ref"])
         self.assertIsNone(observation["target_pin_ref"])
-        self.assertEqual(observation["resolution_status"], "ambiguous")
+        self.assertEqual(
+            observation["resolution_status"],
+            "ambiguous_target_node_identity",
+        )
 
     def test_ambiguous_same_named_target_pins_do_not_create_a_canonical_edge(self):
         graph_payload = {
@@ -716,7 +946,133 @@ class EvidenceWriterTests(unittest.TestCase):
         self.assertEqual(edge_count, 0)
         self.assertIsNotNone(observation["target_node_ref"])
         self.assertIsNone(observation["target_pin_ref"])
-        self.assertEqual(observation["resolution_status"], "ambiguous")
+        self.assertEqual(
+            observation["resolution_status"],
+            "ambiguous_target_pin_identity",
+        )
+
+    def test_uasset_pin_name_cannot_guess_between_same_named_target_nodes(self):
+        def uasset_pin(
+            native_pin_id: str,
+            name: str,
+            direction: str,
+            *,
+            links: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
+            return {
+                **_make_pin(
+                    native_pin_id,
+                    name,
+                    direction,
+                    links=links,
+                ),
+                "source": "uasset_inline_pin",
+                "resolution": {
+                    "native_pin_id_authority": "EXACT",
+                    "persistent_guid_method": "UNAVAILABLE",
+                },
+            }
+
+        graph_payload = {
+            "metadata": {
+                "asset_name": "UassetNodeAmbiguityFixture",
+                "graph_name": "EventGraph",
+                "graph_type": "EventGraph",
+                "uasset_export_index": 7,
+                "uasset_read_status": "partial",
+            },
+            "nodes": [
+                {
+                    "index": 1,
+                    "name": "Source",
+                    "pins": [
+                        uasset_pin(
+                            "SOURCE-PIN",
+                            "then",
+                            "EGPD_Output",
+                            links=[
+                                {
+                                    "target_node": "DuplicateTarget",
+                                    "target_pin": "execute B",
+                                    "source": "uasset_pin_package_index_scan",
+                                    "resolution_status": (
+                                        "ambiguous_target_node_identity"
+                                    ),
+                                    "resolution_method": (
+                                        "ambiguous_target_node_identity"
+                                    ),
+                                    "kind": "exec",
+                                }
+                            ],
+                        )
+                    ],
+                },
+                {
+                    "index": 2,
+                    "name": "DuplicateTarget",
+                    "pins": [
+                        uasset_pin(
+                            "TARGET-A",
+                            "execute A",
+                            "EGPD_Input",
+                        )
+                    ],
+                },
+                {
+                    "index": 3,
+                    "name": "DuplicateTarget",
+                    "pins": [
+                        uasset_pin(
+                            "TARGET-B",
+                            "execute B",
+                            "EGPD_Input",
+                        )
+                    ],
+                },
+            ],
+        }
+        payload = {
+            "asset_name": "UassetNodeAmbiguityFixture",
+            "asset_path": (
+                "/Game/Test/UassetNodeAmbiguityFixture."
+                "UassetNodeAmbiguityFixture"
+            ),
+            "graphs": [
+                {
+                    "graph": "EventGraph",
+                    "graph_type": "EventGraph",
+                    "export_index": 7,
+                    "status": "partial",
+                    "confidence": "medium",
+                    "payload": graph_payload,
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "evidence.sqlite"
+            write_evidence_store_from_payload(
+                str(payload["asset_path"]),
+                None,
+                payload,
+                database_path,
+            )
+            with _open_rows(database_path) as connection:
+                edge_count = connection.execute(
+                    "SELECT COUNT(*) FROM edges"
+                ).fetchone()[0]
+                observation = connection.execute(
+                    "SELECT target_node_ref, target_pin_ref, resolution_status "
+                    "FROM edge_observations"
+                ).fetchone()
+
+        self.assertEqual(edge_count, 0)
+        self.assertIsNone(observation["target_node_ref"])
+        self.assertIsNone(observation["target_pin_ref"])
+        self.assertEqual(
+            observation["resolution_status"],
+            "ambiguous_target_node_identity",
+        )
 
     def test_unique_native_pin_id_disambiguates_same_named_target_nodes(self):
         graph_payload = {
@@ -792,7 +1148,7 @@ class EvidenceWriterTests(unittest.TestCase):
         self.assertEqual(edge["target_native_pin_id"], "TARGET-B")
         self.assertEqual(edge["resolution_status"], "resolved_pin")
 
-    def test_unique_pin_name_disambiguates_colliding_native_ids_within_one_node(self):
+    def test_pin_name_cannot_disambiguate_colliding_native_pin_ids(self):
         graph_payload = {
             "metadata": {
                 "asset_name": "PinDisambiguationFixture",
@@ -855,14 +1211,20 @@ class EvidenceWriterTests(unittest.TestCase):
                 database_path,
             )
             with _open_rows(database_path) as connection:
-                edge = connection.execute(
-                    "SELECT target.name AS target_name, edges.resolution_status "
-                    "FROM edges JOIN pins AS target ON target.pin_ref = edges.target_pin_ref"
+                edge_count = connection.execute(
+                    "SELECT COUNT(*) FROM edges"
+                ).fetchone()[0]
+                observation = connection.execute(
+                    "SELECT target_pin_ref, resolution_status "
+                    "FROM edge_observations"
                 ).fetchone()
 
-        self.assertIsNotNone(edge)
-        self.assertEqual(edge["target_name"], "execute B")
-        self.assertEqual(edge["resolution_status"], "resolved_pin")
+        self.assertEqual(edge_count, 0)
+        self.assertIsNone(observation["target_pin_ref"])
+        self.assertEqual(
+            observation["resolution_status"],
+            "ambiguous_target_pin_identity",
+        )
 
     def test_direct_diagnostic_uses_graph_export_index_when_names_collide(self):
         def graph(export_index: int, status: str) -> dict[str, object]:
@@ -952,6 +1314,82 @@ class EvidenceWriterTests(unittest.TestCase):
             changed = write_evidence_store_from_capture(asset_dir, root / "changed.sqlite")
 
         self.assertEqual(first["asset_id"], second["asset_id"])
+        self.assertEqual(first["revision_id"], second["revision_id"])
+        self.assertEqual(first["source_fingerprint"], second["source_fingerprint"])
+        self.assertNotEqual(first["revision_id"], changed["revision_id"])
+        self.assertNotEqual(first["source_fingerprint"], changed["source_fingerprint"])
+
+    def test_direct_revision_ignores_capture_timestamp_but_tracks_pin_identity(self):
+        def payload(generated: str, native_pin_id: str) -> dict[str, object]:
+            graph_payload = {
+                "metadata": {
+                    "generated": generated,
+                    "asset_name": "DirectRevisionFixture",
+                    "graph_name": "EventGraph",
+                    "graph_type": "EventGraph",
+                    "uasset_export_index": 7,
+                    "uasset_read_status": "complete",
+                },
+                "nodes": [
+                    {
+                        "index": 1,
+                        "name": "Source",
+                        "pins": [
+                            {
+                                **_make_pin(
+                                    native_pin_id,
+                                    "then",
+                                    "EGPD_Output",
+                                ),
+                                "source": "uasset_inline_pin",
+                                "resolution": {
+                                    "native_pin_id_authority": "EXACT",
+                                    "persistent_guid_method": "UNAVAILABLE",
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+            return {
+                "asset_name": "DirectRevisionFixture",
+                "asset_path": (
+                    "/Game/Test/DirectRevisionFixture."
+                    "DirectRevisionFixture"
+                ),
+                "graphs": [
+                    {
+                        "graph": "EventGraph",
+                        "graph_type": "EventGraph",
+                        "export_index": 7,
+                        "status": "complete",
+                        "confidence": "high",
+                        "payload": graph_payload,
+                    }
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = write_evidence_store_from_payload(
+                str(payload("2026-08-21T10:00:00", "PIN-A")["asset_path"]),
+                None,
+                payload("2026-08-21T10:00:00", "PIN-A"),
+                root / "first.sqlite",
+            )
+            second = write_evidence_store_from_payload(
+                str(payload("2026-08-21T10:01:00", "PIN-A")["asset_path"]),
+                None,
+                payload("2026-08-21T10:01:00", "PIN-A"),
+                root / "second.sqlite",
+            )
+            changed = write_evidence_store_from_payload(
+                str(payload("2026-08-21T10:01:00", "PIN-B")["asset_path"]),
+                None,
+                payload("2026-08-21T10:01:00", "PIN-B"),
+                root / "changed.sqlite",
+            )
+
         self.assertEqual(first["revision_id"], second["revision_id"])
         self.assertEqual(first["source_fingerprint"], second["source_fingerprint"])
         self.assertNotEqual(first["revision_id"], changed["revision_id"])

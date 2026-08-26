@@ -1,0 +1,36 @@
+{
+  "proposal": {
+    "schema": "blueprint-to-code.requirement-proposal/v1",
+    "rawRequest": "等级输入如何影响档位与最终数量？\n列出一个宝箱的全部中文奖池",
+    "language": "zh-CN",
+    "subproblems": [
+      {
+        "sourceStart": 0,
+        "sourceEnd": 16,
+        "sourceText": "等级输入如何影响档位与最终数量？",
+        "intent": "ANSWER_CURRENT_BEHAVIOR",
+        "outputKind": "FORMULA",
+        "completeness": "REQUIRED",
+        "targetHints": [],
+        "constraints": {},
+        "acceptanceCriteria": []
+      },
+      {
+        "sourceStart": 17,
+        "sourceEnd": 30,
+        "sourceText": "列出一个宝箱的全部中文奖池",
+        "intent": "ANSWER_CURRENT_BEHAVIOR",
+        "outputKind": "COMPLETE_ENUMERATION",
+        "completeness": "REQUIRED",
+        "targetHints": [],
+        "constraints": {"localizedNamesOnly": true, "outputLanguage": "zh-CN"},
+        "acceptanceCriteria": []
+      }
+    ]
+  },
+  "expected": {
+    "outputKinds": ["FORMULA", "COMPLETE_ENUMERATION"],
+    "operators": ["TRACE_VALUE_FORMULA", "EXPAND_REFERENCE_CLOSURE", "RESOLVE_LOCALIZATION"],
+    "evidenceKinds": ["GRAPH_STRUCTURE", "DEFAULTS", "REFERENCE_CLOSURE", "LOCALIZATION"]
+  }
+}

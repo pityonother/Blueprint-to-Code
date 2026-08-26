@@ -55,15 +55,19 @@ def _graph_payload(*, output_default: str = "1.0", target_pin_id: str = "pin-in-
                         "default": output_default,
                         "source": "uasset_custom_pin_scan",
                         "confidence": "high",
+                        "resolution": {
+                            "native_pin_id_authority": "EXACT",
+                        },
                         "links": [
                             {
                                 "target_node": "K2Node_CallFunction_0",
                                 "target_pin_id": target_pin_id,
+                                "target_pin_id_authority": "EXACT",
                                 "target_package_index": 22,
                                 "resolution_status": "resolved_pin",
                                 "status": "resolved_node",
                                 "kind": "data",
-                                "source": "uasset_pin_package_index_scan",
+                                "source": "uasset_inline_pin_reference",
                                 "confidence": "high",
                             }
                         ],
@@ -88,6 +92,9 @@ def _graph_payload(*, output_default: str = "1.0", target_pin_id: str = "pin-in-
                         "default": "0.0",
                         "source": "uasset_custom_pin_scan",
                         "confidence": "high",
+                        "resolution": {
+                            "native_pin_id_authority": "EXACT",
+                        },
                         "links": [],
                     },
                     {
@@ -98,6 +105,9 @@ def _graph_payload(*, output_default: str = "1.0", target_pin_id: str = "pin-in-
                         "default": "0.0",
                         "source": "uasset_custom_pin_scan",
                         "confidence": "high",
+                        "resolution": {
+                            "native_pin_id_authority": "EXACT",
+                        },
                         "links": [],
                     },
                 ],
@@ -424,11 +434,11 @@ class EvidenceMigrationTests(unittest.TestCase):
                     }
                 )
 
-        self.assertEqual(result["gap_count"], 3)
-        self.assertRegex(agent_index, r"(?im)^-\s*Evidence gaps:\s*3(?:;|\s*$)")
-        self.assertEqual(overview["summary"]["gapCount"], 3)
-        self.assertEqual(gaps["coverage"]["requested"], 3)
-        self.assertEqual(gaps["coverage"]["byStatus"]["HEURISTIC"], 1)
+        self.assertEqual(result["gap_count"], 2)
+        self.assertRegex(agent_index, r"(?im)^-\s*Evidence gaps:\s*2(?:;|\s*$)")
+        self.assertEqual(overview["summary"]["gapCount"], 2)
+        self.assertEqual(gaps["coverage"]["requested"], 2)
+        self.assertEqual(gaps["coverage"]["byStatus"]["HEURISTIC"], 0)
         self.assertEqual(gaps["coverage"]["byStatus"]["NOT_RECOVERED"], 1)
         self.assertEqual(gaps["coverage"]["byStatus"]["SOURCE_NOT_AVAILABLE"], 1)
         default_gap_names = {
@@ -467,8 +477,8 @@ class EvidenceMigrationTests(unittest.TestCase):
             refreshed_text = index_path.read_text(encoding="utf-8")
             self.assertEqual(database_path.read_bytes(), database_before)
             self.assertEqual(refreshed["revision_id"], migrated["revision_id"])
-            self.assertEqual(refreshed["gap_count"], 3)
-            self.assertRegex(refreshed_text, r"(?im)^-\s*Evidence gaps:\s*3(?:;|\s*$)")
+            self.assertEqual(refreshed["gap_count"], 2)
+            self.assertRegex(refreshed_text, r"(?im)^-\s*Evidence gaps:\s*2(?:;|\s*$)")
 
     def test_agent_index_is_bounded_copyable_and_treats_blueprint_text_as_data(self):
         hostile = (

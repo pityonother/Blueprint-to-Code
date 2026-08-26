@@ -10,6 +10,7 @@ from ..evidence_repository import (
     ResolvedEvidenceState,
     _read_bound_file_bytes,
     evidence_manifest_payload,
+    is_release_ready_evidence,
     open_bound_evidence_database,
     resolve_asset_evidence_state,
 )
@@ -29,7 +30,11 @@ from .contracts import (
     semantic_digest,
     sha256_bytes,
 )
-from .engine import _build_from_source
+from .engine import (
+    BOUNDED_SELECTION_ALGORITHM,
+    MAX_INTERPRETATION_BUDGET,
+    _build_from_source,
+)
 from .render import gaps_payload, render_markdown, render_pseudocode_and_trace
 from .source import load_interpretation_source
 
@@ -281,16 +286,10 @@ def _evidence_binding(state: ResolvedEvidenceState) -> tuple[str, str, str]:
 
 
 def _require_authoritative_evidence(state: ResolvedEvidenceState) -> None:
-    if (
-        state.source_kind != "INDEXED_V3_CURRENT"
-        or not state.release_authority
-        or state.migration_required
-        or not state.manifest_sha256
-        or not state.pointer_sha256
-    ):
+    if not is_release_ready_evidence(state):
         raise _invalid(
             "INTERPRETATION_EVIDENCE_NOT_AUTHORITATIVE",
-            "Interpretation requires one authoritative current v3 Evidence revision.",
+            "Interpretation requires one FRESH authoritative current v3 Evidence revision.",
         )
 
 
@@ -382,6 +381,70 @@ def _validate_contract(
             "INTERPRETATION_SCHEMA_INVALID",
             "Interpretation JSON fields do not match the v1 schema.",
         )
+    selection = interpretation.get("selection")
+    if selection != {"graphRefs": []}:
+        expected_selection_keys = {
+            "algorithm",
+            "budget",
+            "sourceWorkUnits",
+            "selectedWorkUnits",
+            "complete",
+            "selectedGraphRefs",
+            "omittedGraphRefs",
+        }
+        if not isinstance(selection, dict) or set(selection) != expected_selection_keys:
+            raise _invalid(
+                "INTERPRETATION_SELECTION_INVALID",
+                "Bounded selection fields do not match the v1 contract.",
+            )
+        if selection.get("algorithm") != BOUNDED_SELECTION_ALGORITHM:
+            raise _invalid(
+                "INTERPRETATION_SELECTION_INVALID",
+                "Bounded selection algorithm is not supported.",
+            )
+        numeric_fields = ("budget", "sourceWorkUnits", "selectedWorkUnits")
+        if any(
+            isinstance(selection.get(field), bool)
+            or not isinstance(selection.get(field), int)
+            or int(selection[field]) < 0
+            for field in numeric_fields
+        ):
+            raise _invalid(
+                "INTERPRETATION_SELECTION_INVALID",
+                "Bounded selection work-unit fields must be non-negative integers.",
+            )
+        if (
+            int(selection["budget"]) < 1
+            or int(selection["budget"]) > MAX_INTERPRETATION_BUDGET
+            or int(selection["selectedWorkUnits"]) > int(selection["sourceWorkUnits"])
+            or int(selection["selectedWorkUnits"]) > int(selection["budget"])
+        ):
+            raise _invalid(
+                "INTERPRETATION_SELECTION_INVALID",
+                "Bounded selection work-unit values are inconsistent.",
+            )
+        selected_refs = _required_ref_list(
+            selection.get("selectedGraphRefs"),
+            label="selection.selectedGraphRefs",
+            evidence_refs=evidence_refs,
+        )
+        omitted_refs = _required_ref_list(
+            selection.get("omittedGraphRefs"),
+            label="selection.omittedGraphRefs",
+            evidence_refs=evidence_refs,
+        )
+        if set(selected_refs) & set(omitted_refs):
+            raise _invalid(
+                "INTERPRETATION_SELECTION_INVALID",
+                "Selected and omitted graph refs must be disjoint.",
+            )
+        if not isinstance(selection.get("complete"), bool) or bool(
+            selection["complete"]
+        ) != (not omitted_refs):
+            raise _invalid(
+                "INTERPRETATION_SELECTION_INVALID",
+                "Bounded selection completeness differs from omitted graph refs.",
+            )
     if set(trace) != {
         "schema",
         "assetId",
@@ -508,6 +571,33 @@ def _validate_contract(
         raise _invalid(
             "INTERPRETATION_GAPS_INVALID",
             "Gap counts do not match the immutable gap items.",
+        )
+    bounded_selection = (
+        isinstance(selection, dict)
+        and selection.get("algorithm") == BOUNDED_SELECTION_ALGORITHM
+    )
+    omission_gaps = [
+        gap
+        for gap in gap_items
+        if gap.get("code") == "INTERPRETATION_GRAPH_OMITTED_BY_BUDGET"
+    ]
+    if bounded_selection:
+        omitted_refs = list(selection["omittedGraphRefs"])
+        observed_omissions = [str(gap.get("graphRef") or "") for gap in omission_gaps]
+        if sorted(observed_omissions) != sorted(omitted_refs) or any(
+            gap.get("status") != "NOT_RECOVERED"
+            or gap.get("source") != "INTERPRETER_BUDGET_SELECTION"
+            or gap.get("evidenceRefs") != [gap.get("graphRef")]
+            for gap in omission_gaps
+        ):
+            raise _invalid(
+                "INTERPRETATION_SELECTION_GAPS_INVALID",
+                "Every omitted graph must have exactly one canonical budget-omission gap.",
+            )
+    elif omission_gaps:
+        raise _invalid(
+            "INTERPRETATION_SELECTION_GAPS_INVALID",
+            "Budget-omission gaps require a bounded selection contract.",
         )
     projection = {
         key: value
@@ -783,7 +873,20 @@ def _validate_derived_content(
         root,
         evidence_state=state,
     )
-    expected_build = _build_from_source(source, budget=100_000)
+    selection = interpretation.get("selection")
+    bounded = (
+        isinstance(selection, dict)
+        and selection.get("algorithm") == BOUNDED_SELECTION_ALGORITHM
+    )
+    expected_build = _build_from_source(
+        source,
+        budget=(
+            int(selection["budget"])
+            if bounded
+            else MAX_INTERPRETATION_BUDGET
+        ),
+        bounded_selection=bounded,
+    )
     expected_interpretation = {
         **expected_build.interpretation,
         "generatedAt": interpretation["generatedAt"],

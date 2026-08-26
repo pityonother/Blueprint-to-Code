@@ -593,6 +593,12 @@ class EvidenceV3ConsumerAdversarialTests(unittest.TestCase):
             self.assertTrue(response["migrationRequired"])
             self.assertIsNone(response["manifestSha256"])
             self.assertIsNone(response["pointerSha256"])
+            self.assertEqual(response["evidenceDecision"]["purpose"], "draft_query")
+            self.assertEqual(
+                response["evidenceDecision"]["evidenceAvailability"],
+                "UNAVAILABLE",
+            )
+            self.assertEqual(response["statusZh"], "只能回答一部分")
 
 
 if __name__ == "__main__":

@@ -64,6 +64,11 @@ manifest SHA-256, and target identity before returning `VALIDATED`.
 
 - A stale expected baseline or competing writer raises
   `PointerCASConflictError`; the observed pointer is not overwritten.
+- Because the immutable directory rename occurs before the pointer CAS, an old
+  pointer can coexist with a new orphan directory. Incremental publication
+  reports its bounded relative inventory and preserves it for manual
+  reconciliation; pointer unchanged does not mean no immutable directory was
+  created.
 - Invalid or escaping destinations raise `PointerCASDestinationError` before
   replacement.
 - A failure before `os.replace()` raises `PointerCASWriteError` with

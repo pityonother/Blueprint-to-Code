@@ -154,6 +154,29 @@ class InterpretationPublicationTests(unittest.TestCase):
         )
         self.assertEqual(pointer["revisionId"], published.revision_id)
 
+    def test_source_unavailable_never_advances_interpretation_current(self) -> None:
+        self.source_path.unlink()
+        state = resolve_asset_evidence_state(self.asset_dir)
+        self.assertEqual(state.freshness_status, "SOURCE_UNAVAILABLE")
+
+        with self.assertRaises(InterpretationPublicationError) as caught:
+            publish_interpretation(self.asset_dir, budget=32_000)
+
+        self.assertEqual(caught.exception.code, "EVIDENCE_SOURCE_UNAVAILABLE")
+        self.assertFalse((self.asset_dir / "interpretation" / "current.json").exists())
+
+    def test_current_interpretation_is_not_readable_after_source_disappears(self) -> None:
+        publish_interpretation(self.asset_dir, budget=32_000)
+        self.source_path.unlink()
+
+        with self.assertRaises(InterpretationArtifactInvalid) as caught:
+            load_current_interpretation(self.asset_dir)
+
+        self.assertEqual(
+            caught.exception.code,
+            "INTERPRETATION_EVIDENCE_NOT_AUTHORITATIVE",
+        )
+
     def test_interrupted_publication_leaves_reusable_orphan(self) -> None:
         def fail_after_rename(checkpoint: str) -> None:
             if checkpoint == "after_revision_rename":
@@ -224,6 +247,52 @@ class InterpretationPublicationTests(unittest.TestCase):
         self.assertEqual(
             caught.exception.code,
             "INTERPRETATION_SEMANTIC_EVIDENCE_MISMATCH",
+        )
+
+    def test_rehashed_bounded_selection_tampering_is_rejected(self) -> None:
+        published = publish_interpretation(
+            self.asset_dir,
+            budget=32_000,
+            bounded_selection=True,
+        )
+
+        def mutate(documents: dict[str, Any]) -> None:
+            selection = documents["interpretation"]["selection"]
+            selection["selectedWorkUnits"] -= 1
+
+        self.install_rewritten_current(published, mutate=mutate)
+        with self.assertRaises(InterpretationArtifactInvalid) as caught:
+            load_current_interpretation(self.asset_dir)
+        self.assertEqual(
+            caught.exception.code,
+            "INTERPRETATION_SEMANTIC_EVIDENCE_MISMATCH",
+        )
+
+    def test_rehashed_missing_budget_omission_gap_is_rejected(self) -> None:
+        published = publish_interpretation(
+            self.asset_dir,
+            budget=5_000,
+            bounded_selection=True,
+        )
+
+        def mutate(documents: dict[str, Any]) -> None:
+            gaps = documents["gaps"]
+            removed = next(
+                gap
+                for gap in gaps["items"]
+                if gap["code"] == "INTERPRETATION_GRAPH_OMITTED_BY_BUDGET"
+            )
+            gaps["items"] = [
+                gap for gap in gaps["items"] if gap["id"] != removed["id"]
+            ]
+            gaps["counts"]["INTERPRETATION_GRAPH_OMITTED_BY_BUDGET"] -= 1
+
+        self.install_rewritten_current(published, mutate=mutate)
+        with self.assertRaises(InterpretationArtifactInvalid) as caught:
+            load_current_interpretation(self.asset_dir)
+        self.assertEqual(
+            caught.exception.code,
+            "INTERPRETATION_SELECTION_GAPS_INVALID",
         )
 
     def test_fabricated_pseudocode_is_rejected_after_full_rehash(self) -> None:

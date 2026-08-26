@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "blueprint-to-code.solver-operator-registry/v1",
+  "title": "Blueprint Solver Operator Registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "operators", "semanticDigest"],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.solver-operator-registry/v1"},
+    "version": {"type": "string", "minLength": 1, "maxLength": 32},
+    "operators": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 18,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "inputTypes", "outputTypes", "requiredEvidenceKinds", "supportsCompleteness", "maxInputs", "defaultBudget"],
+        "properties": {
+          "kind": {"type": "string", "pattern": "^[A-Z0-9_]+$"},
+          "inputTypes": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
+          "outputTypes": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
+          "requiredEvidenceKinds": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
+          "supportsCompleteness": {"type": "boolean"},
+          "maxInputs": {"type": "integer", "minimum": 0, "maximum": 64},
+          "defaultBudget": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["maxInputs", "maxItems", "maxEstimatedTokens"],
+            "properties": {
+              "maxInputs": {"type": "integer", "minimum": 1, "maximum": 64},
+              "maxItems": {"type": "integer", "minimum": 1, "maximum": 500},
+              "maxEstimatedTokens": {"type": "integer", "minimum": 1, "maximum": 8000}
+            }
+          }
+        }
+      }
+    },
+    "semanticDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

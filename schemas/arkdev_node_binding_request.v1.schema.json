@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blueprint-to-code.local/schemas/arkdev_node_binding_request.v1.schema.json",
+  "title": "ARK DevKit Evidence-Guided Node Binding Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "requestId", "asset", "graph", "nodes", "maxNodes", "semanticDigest"],
+  "properties": {
+    "schema": {"const": "blueprint-to-code.arkdev-node-binding-request/v1"},
+    "requestId": {
+      "type": "string",
+      "pattern": "^node-binding-request://[^\\s]+$",
+      "maxLength": 4096
+    },
+    "asset": {"$ref": "#/$defs/asset"},
+    "graph": {"$ref": "#/$defs/graph"},
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "maxNodes": {"const": 12},
+    "semanticDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "objectPath", "assetId", "evidenceRevisionId", "evidenceManifestSha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "objectPath": {
+          "type": "string",
+          "pattern": "^/(Game|Engine)/",
+          "maxLength": 4096
+        },
+        "assetId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "evidenceRevisionId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{24,64}$"
+        },
+        "evidenceManifestSha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "graphRef"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "graphRef": {
+          "type": "string",
+          "pattern": "^bp://[^\\s]+/g/[^/]+$",
+          "maxLength": 4096
+        }
+      }
+    },
+    "guid": {
+      "type": "string",
+      "pattern": "^(?!0{32}$)[0-9A-F]{32}$"
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeRef", "objectName", "expectedClassName", "expectedNodeGuid"],
+      "dependentRequired": {
+        "evidenceX": ["evidenceY"],
+        "evidenceY": ["evidenceX"]
+      },
+      "properties": {
+        "nodeRef": {
+          "type": "string",
+          "pattern": "^bp://[^\\s]+/g/[^/]+/n/[^/]+$",
+          "maxLength": 4096
+        },
+        "objectName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "expectedClassName": {"type": "string", "minLength": 1, "maxLength": 256},
+        "expectedNodeGuid": {"$ref": "#/$defs/guid"},
+        "evidenceX": {"type": "integer"},
+        "evidenceY": {"type": "integer"},
+        "evidencePins": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {"$ref": "#/$defs/evidencePin"}
+        }
+      }
+    },
+    "evidencePin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "direction", "ordinal"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "direction": {"type": "string", "minLength": 1, "maxLength": 256},
+        "ordinal": {"type": "integer", "minimum": 0, "maximum": 511},
+        "category": {"type": "string", "maxLength": 256},
+        "subcategory": {"type": "string", "maxLength": 256}
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

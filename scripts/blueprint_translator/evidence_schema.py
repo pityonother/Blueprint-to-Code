@@ -15,7 +15,7 @@ EVIDENCE_SCHEMA_USER_VERSION = 2
 # them separate from the SQLite schema version: normalization can change while
 # the public v2 schema remains compatible, and such a change must not reuse an
 # older revision ID.
-LEGACY_CAPTURE_PARSER_VERSION = "legacy-capture-evidence-v3"
+LEGACY_CAPTURE_PARSER_VERSION = "legacy-capture-evidence-v4"
 
 
 def _stable_json(value: object) -> str:
@@ -84,6 +84,25 @@ def make_default_ref(asset_id: str, revision_id: str, property_path: str) -> str
     return f"bp://{asset_id}@{revision_id}/default/{quote(str(property_path), safe='')}"
 
 
+def make_asset_ref(asset_id: str, revision_id: str) -> str:
+    if not asset_id or not revision_id:
+        raise ValueError("asset_id and revision_id are required")
+    return f"bp://{asset_id}@{revision_id}/asset"
+
+
+def make_asset_field_ref(
+    asset_id: str,
+    revision_id: str,
+    field_path: str,
+) -> str:
+    if not str(field_path):
+        raise ValueError("field_path is required")
+    return (
+        f"{make_asset_ref(asset_id, revision_id)}/field/"
+        f"{quote(str(field_path), safe='')}"
+    )
+
+
 def parse_evidence_ref(ref: str) -> dict[str, object]:
     parsed = urlsplit(str(ref or ""))
     if parsed.scheme != "bp" or not parsed.netloc or "@" not in parsed.netloc:
@@ -93,6 +112,10 @@ def parse_evidence_ref(ref: str) -> dict[str, object]:
         raise ValueError("invalid Blueprint evidence ref")
     parts = [unquote(part) for part in parsed.path.split("/") if part]
     result: dict[str, object] = {"asset_id": asset_id, "revision_id": revision_id}
+    if parts == ["asset"]:
+        return {**result, "kind": "asset"}
+    if len(parts) == 3 and parts[0] == "asset" and parts[1] == "field" and parts[2]:
+        return {**result, "kind": "asset_field", "field_path": parts[2]}
     if len(parts) == 2 and parts[0] == "default" and parts[1]:
         return {**result, "kind": "default", "property_path": parts[1]}
     if len(parts) not in {2, 4, 6} or parts[0] != "g":

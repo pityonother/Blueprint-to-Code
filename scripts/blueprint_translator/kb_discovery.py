@@ -2688,6 +2688,15 @@ def _registry_output_path(
     return resolved
 
 
+def _mapping_int_or_default(
+    mapping: Mapping[str, object],
+    key: str,
+    default: int,
+) -> int:
+    value = mapping.get(key)
+    return default if value is None else int(value)
+
+
 def _normalize_object_path(value: object) -> str:
     """Normalize Unreal class/object reference strings without guessing identity."""
 
@@ -2956,7 +2965,11 @@ def load_registry_snapshot(
     )
     for prefix, actual, expected_rows in expected_metrics:
         expected_hash = str(integrity.get(f"{prefix}_sha256") or "")
-        expected_bytes = int(integrity.get(f"{prefix}_bytes") or -1)
+        expected_bytes = _mapping_int_or_default(
+            integrity,
+            f"{prefix}_bytes",
+            -1,
+        )
         if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_hash):
             raise ValueError(f"REGISTRY_{prefix.upper()}_SHA256_MISSING")
         if actual["sha256"].casefold() != expected_hash.casefold():
@@ -3016,9 +3029,12 @@ def load_registry_snapshot(
                 str(metadata.get("path") or "").replace("\\", "/") != relative
                 or str(metadata.get("sha256") or "").casefold()
                 != str(actual["sha256"]).casefold()
-                or int(metadata.get("bytes") or -1) != actual["bytes"]
-                or int(metadata.get("lines") or -1) != actual["rows"]
-                or int(metadata.get("record_count") or -1) != expected_rows
+                or _mapping_int_or_default(metadata, "bytes", -1)
+                != actual["bytes"]
+                or _mapping_int_or_default(metadata, "lines", -1)
+                != actual["rows"]
+                or _mapping_int_or_default(metadata, "record_count", -1)
+                != expected_rows
                 or str(metadata.get("row_schema") or "") != row_schema
             ):
                 raise ValueError(f"REGISTRY_{key.upper()}_GENERATION_METADATA_MISMATCH")

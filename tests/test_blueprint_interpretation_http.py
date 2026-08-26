@@ -24,6 +24,7 @@ if str(SCRIPTS) not in sys.path:
 from blueprint_server.request import ApiProblem  # noqa: E402
 from blueprint_server.routes_blueprint import (  # noqa: E402
     BlueprintRouteResult,
+    _path_free,
     blueprint_get_payload,
 )
 import blueprint_tool_server as tool_server  # noqa: E402
@@ -191,6 +192,139 @@ class BlueprintInterpretationHttpTests(unittest.TestCase):
         _assert_path_free(self, first.payload, str(self.capture_root))
         _assert_path_free(self, second.payload, str(self.capture_root))
 
+    def test_asset_list_reports_global_ready_total_from_current_v3_candidates(self) -> None:
+        for name in ("Legacy", "Ready", "NotReady"):
+            (self.capture_root / name).mkdir()
+        for name in ("Ready", "NotReady"):
+            for relative in ("evidence/current.json", "interpretation/current.json"):
+                path = self.capture_root / name / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}", encoding="utf-8")
+        inspected: list[str] = []
+
+        def inspect(asset_dir: Path) -> dict[str, object]:
+            inspected.append(asset_dir.name)
+            return {
+                "status": "READY" if asset_dir.name == "Ready" else "INVALID",
+            }
+
+        result = blueprint_get_payload(
+            "/api/blueprint/assets",
+            "q=Ready&limit=10",
+            capture_root=self.capture_root,
+            inspect_health=inspect,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.payload["summary"], {"ready": 1, "total": 4})
+        self.assertEqual(inspected, ["NotReady", "Ready"])
+
+    def test_health_accepts_virtual_unreal_mount_without_allowing_local_posix_path(self) -> None:
+        def inspect(object_path: str):
+            return lambda _asset_dir: {
+                "status": "READY",
+                "asset": {
+                    "name": "Fixture",
+                    "assetId": ASSET_ID,
+                    "objectPath": object_path,
+                },
+                "evidence": {
+                    "revisionId": EVIDENCE_REVISION,
+                    "manifestSha256": EVIDENCE_MANIFEST_SHA,
+                    "pointerSha256": "0" * 64,
+                    "freshnessStatus": "FRESH",
+                    "releaseAuthority": True,
+                    "migrationRequired": False,
+                },
+                "interpretation": {
+                    "status": "CURRENT",
+                    "revisionId": INTERPRETATION_REVISION,
+                    "manifestSha256": INTERPRETATION_MANIFEST_SHA,
+                    "pointerSha256": INTERPRETATION_POINTER_SHA,
+                    "semanticDigest": "1" * 64,
+                    "interpreterVersion": "blueprint-interpreter/1.1.0",
+                    "schemaVersion": "blueprint-to-code.blueprint-interpretation/v1",
+                    "generatedAt": "2026-08-18T00:00:00Z",
+                },
+            }
+
+        for virtual_path in (
+            "/ASBExportGun/Weapons/Fixture.Fixture",
+            "/DinoDefense/Camera/Fixture.Fixture",
+        ):
+            with self.subTest(virtual_path=virtual_path):
+                result = blueprint_get_payload(
+                    "/api/blueprint/assets/Fixture/evidence/health",
+                    "",
+                    capture_root=self.capture_root,
+                    inspect_health=inspect(virtual_path),
+                )
+                self.assertEqual(result.status, HTTPStatus.OK)
+                self.assertEqual(
+                    result.payload["health"]["asset"]["objectPath"], virtual_path
+                )
+
+        native_path = "/Script/Engine.Actor"
+        native = blueprint_get_payload(
+            "/api/blueprint/assets/Fixture/evidence/health",
+            "",
+            capture_root=self.capture_root,
+            inspect_health=inspect(native_path),
+        )
+        self.assertEqual(native.payload["health"]["asset"]["objectPath"], native_path)
+
+        separator = chr(92)
+        posix_private = "/" + "/".join(("home", "ac", "private"))
+        users_private = "/" + "/".join(("Users", "ac", "private"))
+        volumes_asset = "/" + "/".join(("Volumes", "Secret", "Project", "Asset.Asset"))
+        workspace_asset = "/" + "/".join(("workspace", "repo", "Secret.Secret"))
+        local_file_uri = "file:" + "//localhost" + users_private + "/evidence.sqlite"
+        encoded_slash = chr(37) + "2F"
+        for local_path in (
+            posix_private + "/evidence.sqlite",
+            users_private + "/private.private",
+            volumes_asset,
+            workspace_asset,
+            "/C/Users/ac/Secret.Secret",
+            "/Game/private/evidence.sqlite",
+            "file://" + users_private + "/evidence.sqlite",
+            "file:" + users_private + "/evidence.sqlite",
+            local_file_uri,
+        ):
+            with self.subTest(local_path=local_path):
+                with self.assertRaises(ApiProblem) as raised:
+                    blueprint_get_payload(
+                        "/api/blueprint/assets/Fixture/evidence/health",
+                        "",
+                        capture_root=self.capture_root,
+                        inspect_health=inspect(local_path),
+                    )
+                self.assertEqual(
+                    raised.exception.payload["code"], "BLUEPRINT_RESPONSE_INVALID"
+                )
+
+        with self.assertRaises(ApiProblem):
+            _path_free({"detail": "/Game/private/private.private"})
+        with self.assertRaises(ApiProblem):
+            _path_free({"detail": "file://" + users_private + "/evidence.sqlite"})
+        with self.assertRaises(ApiProblem):
+            _path_free(
+                {
+                    "detail": "file:"
+                    + encoded_slash * 3
+                    + encoded_slash.join(
+                        ("Users", "ac", "private", "evidence.sqlite")
+                    )
+                }
+            )
+        with self.assertRaises(ApiProblem):
+            _path_free(
+                {
+                    "detail": separator
+                    + separator.join(("Users", "ac", "private", "evidence.sqlite"))
+                }
+            )
+
     def test_interpretation_filters_and_paginates_statements(self) -> None:
         first = self.route(
             "/api/blueprint/assets/Fixture/interpretation",
@@ -344,7 +478,7 @@ class BlueprintInterpretationPublishedArtifactTests(unittest.TestCase):
         self._temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self._temporary.cleanup)
         self.capture_root = Path(self._temporary.name) / "captures"
-        self.asset_dir, _source_path, _payload = publish_interpretation_fixture(
+        self.asset_dir, self.source_path, _payload = publish_interpretation_fixture(
             self.capture_root
         )
         self.published = publish_interpretation(self.asset_dir, budget=32_000)
@@ -367,6 +501,44 @@ class BlueprintInterpretationPublishedArtifactTests(unittest.TestCase):
                 encoded = json.dumps(result.payload, ensure_ascii=False)
                 self.assertNotIn(str(self.asset_dir), encoded)
                 self.assertNotIn(str(self.asset_dir).replace("\\", "/"), encoded)
+
+    def test_source_unavailable_is_not_ready_and_is_excluded_from_summary(self) -> None:
+        self.source_path.unlink()
+
+        health = self.route("evidence/health")
+        asset_list = blueprint_get_payload(
+            "/api/blueprint/assets",
+            "limit=5",
+            capture_root=self.capture_root,
+        )
+
+        self.assertEqual(health.payload["health"]["status"], "SOURCE_UNAVAILABLE")
+        self.assertEqual(
+            health.payload["health"]["reasonCode"],
+            "BLUEPRINT_EVIDENCE_SOURCE_UNAVAILABLE",
+        )
+        self.assertIsNotNone(asset_list)
+        self.assertEqual(asset_list.payload["summary"], {"ready": 0, "total": 1})
+
+    def test_ready_schema_rejects_non_fresh_or_non_authoritative_evidence(self) -> None:
+        payload = self.route("evidence/health").payload
+        schema = json.loads(
+            (
+                ROOT
+                / "schemas"
+                / "http_api"
+                / "blueprint_evidence_health_response_v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        for field, value in (
+            ("freshnessStatus", "SOURCE_UNAVAILABLE"),
+            ("releaseAuthority", False),
+            ("migrationRequired", True),
+        ):
+            changed = json.loads(json.dumps(payload))
+            changed["health"]["evidence"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                Draft202012Validator(schema).validate(changed)
 
     def test_real_route_payloads_match_their_strict_public_schemas(self) -> None:
         asset_list = blueprint_get_payload(

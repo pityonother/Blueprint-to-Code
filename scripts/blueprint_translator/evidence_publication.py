@@ -35,6 +35,7 @@ from .evidence_schema import (
     EVIDENCE_SCHEMA_VERSION,
     make_asset_id,
 )
+from .evidence_policy import semantic_fact_count
 from .context_pack import estimate_tokens
 from .bound_database import materialize_bound_database_snapshot
 
@@ -371,6 +372,11 @@ def _database_projection(
             "links": _table_count(connection, "edges"),
             "edgeObservations": _table_count(connection, "edge_observations"),
             "classDefaults": _table_count(connection, "class_defaults"),
+            "assetFields": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM properties WHERE owner_kind = 'asset'"
+                ).fetchone()[0]
+            ),
             "diagnostics": _table_count(connection, "diagnostics"),
         }
         graph_coverage = {
@@ -703,6 +709,8 @@ def _validate_v2_manifest(
         "edgeObservations": "edgeObservations",
         "class_defaults": "classDefaults",
         "classDefaults": "classDefaults",
+        "asset_fields": "assetFields",
+        "assetFields": "assetFields",
         "diagnostics": "diagnostics",
     }
     required_count_groups = (
@@ -823,6 +831,7 @@ def publish_prepared_evidence_revision(
     expected_pointer_sha256: str | None | object = _EXPECTED_POINTER_UNSET,
     fault_injector: Callable[[str], None] | None = None,
     compatibility_manifest_bytes: bytes | None = None,
+    require_fresh: bool = False,
 ) -> PublishedEvidenceRevision:
     """Publish prepared v2 bytes as one immutable v3 revision."""
 
@@ -836,7 +845,12 @@ def publish_prepared_evidence_revision(
     revisions_root = evidence_root / "revisions"
     revisions_root.mkdir(exist_ok=True)
     _require_plain_directory(revisions_root, label="evidence revisions root")
-    from .evidence_revision import EvidenceArtifactInvalid, load_evidence_revision
+    from .evidence_revision import (
+        FRESH,
+        EvidenceArtifactInvalid,
+        load_current_evidence_revision,
+        load_evidence_revision,
+    )
 
     source_database = _lexical_absolute(database_path)
     _require_plain_path_chain(source_database, label="evidence database source")
@@ -871,6 +885,28 @@ def publish_prepared_evidence_revision(
 
     baseline_raw = _read_pointer_raw(evidence_root)
     baseline_sha = _pointer_sha(baseline_raw)
+    if baseline_raw is not None:
+        existing_current = load_current_evidence_revision(root, allow_stale=True)
+        if (
+            existing_current.asset_id != projected_asset_id
+            or existing_current.object_path != projected_object_path
+        ):
+            raise EvidenceArtifactInvalid(
+                "ASSET_DIRECTORY_IDENTITY_MISMATCH",
+                "destination current belongs to a different Blueprint object path",
+            )
+    else:
+        compatibility_database = evidence_root / "evidence.sqlite"
+        if _path_present(compatibility_database):
+            compatibility_projection = _database_projection(compatibility_database)
+            if (
+                compatibility_projection["assetId"] != projected_asset_id
+                or compatibility_projection["objectPath"] != projected_object_path
+            ):
+                raise EvidenceArtifactInvalid(
+                    "ASSET_DIRECTORY_IDENTITY_MISMATCH",
+                    "destination compatibility evidence belongs to a different Blueprint object path",
+                )
     if expected_pointer_sha256 is _EXPECTED_POINTER_UNSET:
         expected_sha = baseline_sha
     else:
@@ -907,6 +943,11 @@ def publish_prepared_evidence_revision(
         staged_projection = _database_projection(staged_database)
         if staged_projection["revisionId"] != projection["revisionId"]:
             raise ValueError("staged database revision changed during publication")
+        if require_fresh and semantic_fact_count(staged_projection.get("counts")) <= 0:
+            raise EvidenceArtifactInvalid(
+                "EVIDENCE_EMPTY",
+                "strict publication requires at least one semantic fact",
+            )
         intended_manifest = _manifest_payload(
             staged_projection,
             database_path=staged_database,
@@ -923,12 +964,17 @@ def publish_prepared_evidence_revision(
         # repeated after rename, but the first pass prevents invalid identity
         # or path data from leaving an orphan/collision behind.
         manifest_sha = _sha256_bytes(manifest_raw)
-        load_evidence_revision(
+        staged_validated = load_evidence_revision(
             validation_asset,
             revision_id,
             allow_stale=True,
             manifest_sha256=manifest_sha,
         )
+        if require_fresh and staged_validated.freshness_status != FRESH:
+            raise EvidenceArtifactInvalid(
+                "EVIDENCE_SOURCE_NOT_FRESH",
+                f"prepared Evidence source is {staged_validated.freshness_status}, not FRESH",
+            )
         _call_fault(fault_injector, "after_stage_validated")
 
         revision_dir = revisions_root / revision_id
@@ -946,12 +992,17 @@ def publish_prepared_evidence_revision(
             os.replace(stage, revision_dir)
 
         try:
-            load_evidence_revision(
+            installed_validated = load_evidence_revision(
                 root,
                 revision_id,
                 allow_stale=True,
                 manifest_sha256=manifest_sha,
             )
+            if require_fresh and installed_validated.freshness_status != FRESH:
+                raise EvidenceArtifactInvalid(
+                    "EVIDENCE_SOURCE_NOT_FRESH",
+                    f"installed Evidence source is {installed_validated.freshness_status}, not FRESH",
+                )
         except EvidenceArtifactInvalid as exc:
             if reused_existing:
                 raise EvidenceRevisionCollision(
@@ -969,6 +1020,18 @@ def publish_prepared_evidence_revision(
                 raise EvidencePointerConflict(
                     f"expected pointer SHA {expected_sha!r}, observed {observed_sha!r}"
                 )
+            if require_fresh:
+                commit_validated = load_evidence_revision(
+                    root,
+                    revision_id,
+                    allow_stale=True,
+                    manifest_sha256=manifest_sha,
+                )
+                if commit_validated.freshness_status != FRESH:
+                    raise EvidenceArtifactInvalid(
+                        "EVIDENCE_SOURCE_NOT_FRESH",
+                        f"Evidence source became {commit_validated.freshness_status} before current pointer commit",
+                    )
             if observed_raw == pointer_raw:
                 pointer_updated = False
             else:
@@ -1066,6 +1129,30 @@ def publish_prepared_evidence_revision(
                 manifest_sha256=manifest_sha,
             )
         )
+        if require_fresh:
+            if not current_still_intended:
+                raise EvidencePublicationUncertain(
+                    "current pointer advanced before the final publication policy gate"
+                )
+            try:
+                from .evidence_policy import require_evidence
+                from .evidence_repository import resolve_asset_evidence_state
+
+                final_state = resolve_asset_evidence_state(root, allow_stale=True)
+                require_evidence(final_state, purpose="publish")
+            except Exception as exc:
+                raise EvidencePublicationUncertain(
+                    "final publication policy rejected the reopened current Evidence"
+                ) from exc
+            if (
+                final_state.manifest_sha256 != manifest_sha
+                or final_state.pointer_sha256 != pointer_sha256
+                or final_state.database_sha256
+                != str(intended_manifest["artifacts"]["database"]["sha256"])
+            ):
+                raise EvidencePublicationUncertain(
+                    "final publication policy reopened a different Evidence generation"
+                )
         return PublishedEvidenceRevision(
             schema=PUBLICATION_SCHEMA,
             asset_dir=str(root),

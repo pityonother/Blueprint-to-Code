@@ -1,9 +1,9 @@
 {
   "FileVersion": 3,
-  "Version": 1,
-  "VersionName": "0.1.0",
+  "Version": 2,
+  "VersionName": "0.2.0",
   "FriendlyName": "Blueprint To Code Exporter",
-  "Description": "Editor-only exporter that writes Blueprint graph queues for the Blueprint to Code analyzer.",
+  "Description": "Editor-only graph queue exporter and read-only atomic Editor state snapshot bridge for Blueprint to Code.",
   "Category": "Editor",
   "CreatedBy": "Blueprint to Code",
   "CanContainContent": false,

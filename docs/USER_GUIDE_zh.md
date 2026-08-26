@@ -87,6 +87,23 @@ G:\ARKDevkit\Projects\ShooterGame\Mods\Kaminan_server\Content
 如果你需要给人看的长篇中文说明，再点 **生成 / 刷新人类报告**。它会复用这个资产的同一 Object Path，以 `dual` 模式重新读取当前源，再生成与新 evidence 同源的
 `behavior_summary.md`、`asset_report.md` 等 legacy 人类报告；默认 indexed 读取不会为了这些长报告重复生成整套旧产物。
 
+### 查询 `/Script` 原生类的下蹲属性
+
+v0.3.2 也接受原生类路径：
+
+```text
+/Script/ShooterGame.ShooterCharacter
+```
+
+粘贴后，绿色按钮会显示为 **读取原生类属性**。工具不会寻找 `.uasset`，而是启动
+本机 ARK DevKit 的官方 PythonScriptCommandlet，做一次有边界的只读反射。第一次
+初始化通常约需一分钟。结果会列出 `bIsCrouched` / `is_crouched`、声明类、类默认
+值、继承链，以及下蹲函数是否存在；探针不会调用函数或修改资产。
+
+这里读到的是 **类默认对象**，不是在线玩家实时值。它能回答“这个类是否暴露下蹲
+状态、默认值是什么、从哪里继承”，不能回答“某个玩家现在是否下蹲”。后一个问题
+仍需在游戏或 PIE 中取得玩家运行时实例。
+
 如果第 4 步上面出现红色的“需要手动补采的图页”面板，按里面的按钮即可：
 **载入失败图页到补采队列** → 在 DevKit 里 `Ctrl+A`、`Ctrl+C` → 展开补采面板
 逐个保存。

@@ -107,13 +107,26 @@ runtime\python\python.exe scripts\interpret_blueprint_evidence.py `
 
 - `--graph <bp://ref>`：只投影 stdout 中的 JSON；发布仍是完整 asset scope。
 - `--format json|markdown|pseudocode|all`：选择 stdout 格式。
-- `--budget <正整数>`：确定性 work-unit 上限；超限不发布。
+- `--budget <1..10000000>`：确定性 work-unit 上限；超限不发布。较大预算只扩大完整
+  asset-scope 解释的可处理规模，不截断 Graph，也不放宽 Evidence/ref/缺口门禁。
 - `--fail-on-gap`：存在任何 gap 时以独立门禁错误退出且不更新 pointer。
 - `--allow-stale=false`、`--allow-legacy-fallback=false`：显式诊断开关；即使启用，也
   不能让 stale、v2 或 legacy Evidence 推进 Interpretation current。
 
 `all` 的 stdout 是不含本机绝对路径的 JSON receipt；人类报告与伪代码从 immutable
 revision 读取。CLI 成功不等于 ARK 运行时实测通过。
+
+批量权威发布器使用 `graph-atomic-output-bounded/v1`：按 `(export_index, graph_ref)`
+确定性选择完整 Graph，不截断 Graph 内的 Node、Pin、Edge 或 Observation。若完整
+Interpretation 超过预算，就逐步降低 Graph work 上限并重放同一选择算法，直到来源和
+渲染输出同时满足预算。每个未选择 Graph 都必须产生且只产生一条
+`INTERPRETATION_GRAPH_OMITTED_BY_BUDGET / NOT_RECOVERED` gap；完整 Graph 事实仍保留在
+绑定的权威 Evidence 中，可继续通过 Evidence 查询。`selection`（预算、完整性、已选择/
+遗漏 Graph、来源/选择 work units）进入 semantic digest，reader 按记录预算重建并逐项
+比对，因此改写 selection 或删除遗漏 gap 都会失败关闭。
+
+单文件读取上限保持：Interpretation JSON/trace 16 MiB，gaps/Markdown/伪代码 8 MiB；
+bounded 模式不通过扩大这些上限来容纳深图。
 
 ## 5. HTTP API 与 UI
 

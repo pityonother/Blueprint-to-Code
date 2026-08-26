@@ -1,0 +1,23 @@
+{
+  "proposal": {
+    "schema": "blueprint-to-code.requirement-proposal/v1",
+    "rawRequest": "根据用户给定对称惩罚公式输出 Top 10",
+    "language": "zh-CN",
+    "subproblems": [{
+      "sourceStart": 0,
+      "sourceEnd": 21,
+      "sourceText": "根据用户给定对称惩罚公式输出 Top 10",
+      "intent": "ANSWER_CURRENT_BEHAVIOR",
+      "outputKind": "RANKING",
+      "completeness": "REQUIRED",
+      "targetHints": [{"text": "Reaper", "role": "MOD_ASSET", "aliases": ["死神"], "expectedKind": "Blueprint", "userSupplied": true}],
+      "constraints": {"topK": 10, "userFormula": "abs(value - target)", "formulaVariables": {"value": "candidateValue", "target": "requestedValue"}},
+      "acceptanceCriteria": ["返回按公式排序的前 10 项"]
+    }]
+  },
+  "expected": {
+    "outputKinds": ["RANKING"],
+    "operators": ["NORMALIZE_ENTITY_DATASET", "EVALUATE_EXPRESSION", "RANK_RESULTS"],
+    "evidenceKinds": ["ENTITY_DATASET", "DATASET_SCHEMA", "USER_FORMULA", "THIRD_PARTY_MOD_ASSET"]
+  }
+}

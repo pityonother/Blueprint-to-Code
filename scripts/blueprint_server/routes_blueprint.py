@@ -18,6 +18,7 @@ from blueprint_translator.evidence_publication import (
     _require_plain_directory,
     _require_plain_path_chain,
 )
+from blueprint_translator.public_paths import public_value_is_path_free
 
 from .request import ApiProblem, problem
 
@@ -38,11 +39,6 @@ MAX_CURSOR_CHARACTERS = 4096
 MAX_IDENTIFIER_CHARACTERS = 1024
 MAX_HINT_PREVIEW = 20
 
-_WINDOWS_ABSOLUTE = re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/]")
-_UNC_PATH = re.compile(r"(?<![A-Za-z0-9_])\\\\[^\\\s]+[\\/]")
-_POSIX_LOCAL_PATH = re.compile(
-    r"(?<![:/<A-Za-z0-9_])/(?!Game/|Script/|Engine/|Plugin/|Plugins/)[^\s]+"
-)
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _STATEMENT_KINDS = frozenset(
@@ -321,33 +317,13 @@ def _collection(value: object, *keys: str) -> list[dict[str, object]]:
     return result
 
 
-def _path_free(value: object) -> None:
-    if isinstance(value, Path):
+def _path_free(value: object, *, field_name: str = "") -> None:
+    if not public_value_is_path_free(value, field_name=field_name):
         raise problem(
             HTTPStatus.INTERNAL_SERVER_ERROR,
             "BLUEPRINT_RESPONSE_INVALID",
             "Blueprint response contains a non-public value.",
         )
-    if isinstance(value, str):
-        if (
-            _WINDOWS_ABSOLUTE.search(value)
-            or _UNC_PATH.search(value)
-            or _POSIX_LOCAL_PATH.search(value)
-        ):
-            raise problem(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                "BLUEPRINT_RESPONSE_INVALID",
-                "Blueprint response contains a non-public value.",
-            )
-        return
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            _path_free(str(key))
-            _path_free(item)
-        return
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for item in value:
-            _path_free(item)
 
 
 def _core_error(exc: Exception) -> ApiProblem:
@@ -662,6 +638,54 @@ def _asset_names(capture_root: str | os.PathLike[str]) -> list[str]:
     return sorted(names, key=lambda value: (value.casefold(), value))
 
 
+def _path_declared(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Let the authoritative health reader classify an inaccessible entry.
+        return True
+    return True
+
+
+def _asset_readiness_summary(
+    names: Sequence[str],
+    *,
+    root: Path,
+    inspect_health: Callable[[Path], dict[str, object]],
+) -> tuple[dict[str, int], dict[str, dict[str, object]]]:
+    """Count READY exactly while avoiding full validation of legacy-only assets."""
+
+    health_cache: dict[str, dict[str, object]] = {}
+    ready = 0
+    for name in names:
+        asset_dir = root / name
+        if not (
+            _path_declared(asset_dir / "evidence" / "current.json")
+            and _path_declared(asset_dir / "interpretation" / "current.json")
+        ):
+            continue
+        try:
+            health = inspect_health(asset_dir)
+            if not isinstance(health, Mapping):
+                raise TypeError("health result must be an object")
+            public_health = _public_health(health, asset_name=name)
+            _path_free(public_health)
+        except Exception:
+            public_health = _public_health(
+                {
+                    "status": "INVALID",
+                    "reasonCode": "BLUEPRINT_HEALTH_UNAVAILABLE",
+                },
+                asset_name=name,
+            )
+        health_cache[name] = public_health
+        if public_health["status"] == "READY":
+            ready += 1
+    return {"ready": ready, "total": len(names)}, health_cache
+
+
 def _asset_list(
     query: str,
     *,
@@ -678,7 +702,8 @@ def _asset_list(
         )
     limit = _page_limit(values)
     raw_cursor = _single(values, "cursor")
-    names = [name for name in _asset_names(capture_root) if needle in name.casefold()]
+    all_names = _asset_names(capture_root)
+    names = [name for name in all_names if needle in name.casefold()]
     query_digest = _digest({"q": needle})
     collection_digest = _digest(names)
     start = 0
@@ -706,8 +731,16 @@ def _asset_list(
         start = names.index(last) + 1
     selected_names = names[start : start + limit]
     items: list[dict[str, object]] = []
-    root = _capture_root(capture_root) if selected_names else _lexical_absolute(capture_root)
+    root = _capture_root(capture_root) if all_names else _lexical_absolute(capture_root)
+    summary, health_cache = _asset_readiness_summary(
+        all_names,
+        root=root,
+        inspect_health=inspect_health,
+    )
     for name in selected_names:
+        if name in health_cache:
+            items.append({"asset": name, "health": health_cache[name]})
+            continue
         try:
             health = inspect_health(root / name)
             if not isinstance(health, Mapping):
@@ -738,6 +771,7 @@ def _asset_list(
         "ok": True,
         "schema": ASSET_LIST_SCHEMA,
         "items": items,
+        "summary": summary,
         "page": {
             "limit": limit,
             "returned": len(items),

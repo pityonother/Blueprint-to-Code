@@ -1683,6 +1683,83 @@ class KnowledgeDiscoveryBundleTests(unittest.TestCase):
                 )
             )
 
+    def test_v2_registry_loader_accepts_disabled_empty_dependencies(self):
+        from blueprint_translator.kb_discovery import load_registry_snapshot
+        from devkit_exporters import export_kb_registry_snapshot as exporter
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot = Path(temp_dir) / "registry"
+            checkpoint = exporter._new_checkpoint(
+                "d" * 64,
+                "e" * 64,
+                False,
+                500,
+                1,
+                1,
+                0,
+                0,
+            )
+            checkpoint.update(
+                {
+                    "phase": "complete",
+                    "status": "COMPLETE",
+                    "asset_cursor": 1,
+                    "asset_rows": 1,
+                    "completed_at": "2026-08-18T00:00:00Z",
+                }
+            )
+            generation_relative = f"generations/{checkpoint['generation_id']}"
+            generation = snapshot / generation_relative
+            generation.mkdir(parents=True)
+            assets_path = generation / exporter.ASSET_OUTPUT_NAME
+            dependencies_path = generation / exporter.DEPENDENCY_OUTPUT_NAME
+            checkpoint_path = generation / exporter.CHECKPOINT_OUTPUT_NAME
+            assets_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "ark.kb.registry-asset.v1",
+                        "object_path": "/Game/TestAsset.TestAsset",
+                        "package_name": "/Game/TestAsset",
+                        "package_path": "/Game",
+                        "asset_name": "TestAsset",
+                        "asset_class_path": "/Script/Engine.Blueprint",
+                        "package_flags": 0,
+                        "tags": {},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            dependencies_path.write_bytes(b"")
+            checkpoint_path.write_text(
+                json.dumps(checkpoint, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            manifest = exporter._manifest_from_checkpoint(
+                checkpoint,
+                500,
+                generation_relative,
+                {
+                    "assets": exporter._file_integrity(str(assets_path)),
+                    "dependencies": exporter._file_integrity(
+                        str(dependencies_path)
+                    ),
+                    "checkpoint": exporter._file_integrity(
+                        str(checkpoint_path)
+                    ),
+                },
+            )
+            (snapshot / exporter.MANIFEST_OUTPUT_NAME).write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            assets, dependencies, loaded_manifest = load_registry_snapshot(snapshot)
+
+            self.assertEqual(len(assets), 1)
+            self.assertEqual(len(dependencies), 0)
+            self.assertFalse(loaded_manifest["dependencies_enabled"])
+
     def test_registry_type_flags_require_authoritative_type_evidence(self):
         from blueprint_translator.kb_discovery import _registry_identity
 

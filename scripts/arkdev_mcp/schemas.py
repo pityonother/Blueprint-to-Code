@@ -38,6 +38,16 @@ class ErrorOutput(PublicOutput):
         "PATCH_PLAN_NOT_CONFIRMABLE",
         "PATCH_PLAN_DIGEST_MISMATCH",
         "PLAN_CONFIRMATION_REQUIRED",
+        "SOLVER_NOT_FOUND",
+        "REQUIREMENT_PROPOSAL_INVALID",
+        "REQUEST_TEXT_UNASSIGNED",
+        "SOLVER_PHASE_INVALID",
+        "SOLVER_UPDATE_INVALID",
+        "TARGET_SELECTION_REQUIRED",
+        "TARGET_CANDIDATE_NOT_FOUND",
+        "EVIDENCE_ACQUISITION_REQUIRED",
+        "TASK_NOT_APPLICABLE",
+        "SOLVER_LIMIT_EXCEEDED",
         "INTERNAL_CONTRACT_ERROR",
     ]
     message: str
@@ -52,12 +62,15 @@ class StatusCapabilities(PublicOutput):
     editorBridge: bool
     taskContext: bool
     patchPlan: bool
+    solver: bool
     localTaskMetadataWrite: bool
+    localSolverMetadataWrite: bool
     mutation: Literal[False]
 
 
 class StatusEditorBridge(PublicOutput):
     status: str
+    stateStatus: str
     reasonCode: str
 
 
@@ -90,6 +103,18 @@ class EditorStateOutput(PublicOutput):
     compileStatus: str
     capabilities: list[str]
     reasonCode: str
+    stateStatus: str
+    snapshot: dict[str, Any]
+    activityStatus: str
+    graphStatus: str
+    selectionStatus: str
+    activeAssetDetails: dict[str, Any] | None
+    activeGraphDetails: dict[str, Any] | None
+    activeAssetBinding: dict[str, Any]
+    activeGraphBinding: dict[str, Any]
+    graphNodes: list[dict[str, Any]]
+    graphNodeSummary: dict[str, Any]
+    taskBinding: dict[str, Any]
 
 
 class AssetListOutput(PublicOutput):
@@ -215,6 +240,30 @@ class PatchPlanConfirmationOutput(PublicOutput):
     nextPhase: Literal["READ_ONLY_EDITOR_BRIDGE"]
 
 
+class SolverStateOutput(PublicOutput):
+    schema_: Literal["blueprint-to-code.solver-state/v1"] = Field(alias="schema")
+    solverId: str
+    status: Literal[
+        "CREATED",
+        "PREFLIGHT",
+        "ACQUISITION_REQUIRED",
+        "READY_FOR_TASKS",
+        "TASKS_MATERIALIZED",
+        "BLOCKED",
+    ]
+    mode: Literal["ANSWER", "CHANGE", "MIXED"]
+    requirementSummary: dict[str, Any]
+    problemSummaries: list[dict[str, Any]]
+    coverageSummary: dict[str, Any]
+    acquisitionActions: list[dict[str, Any]]
+    blockingQuestions: list[dict[str, Any]]
+    materializedTasks: list[dict[str, Any]]
+    nextRecommendedAction: str
+    nextRecommendedTool: str = ""
+    estimatedTokens: int
+    semanticDigest: str
+
+
 class StatusToolOutput(RootModel[StatusOutput | ErrorOutput]):
     pass
 
@@ -263,6 +312,10 @@ class PatchPlanConfirmToolOutput(
     pass
 
 
+class SolverToolOutput(RootModel[SolverStateOutput | ErrorOutput]):
+    pass
+
+
 __all__ = [
     "AssetListOutput",
     "AssetListToolOutput",
@@ -278,6 +331,8 @@ __all__ = [
     "PatchPlanValidateToolOutput",
     "StatusOutput",
     "StatusToolOutput",
+    "SolverStateOutput",
+    "SolverToolOutput",
     "TaskCreateToolOutput",
     "TaskResearchToolOutput",
     "TaskResumeToolOutput",

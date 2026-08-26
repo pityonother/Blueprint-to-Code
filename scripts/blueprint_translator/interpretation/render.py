@@ -27,6 +27,7 @@ def _quoted(value: object) -> str:
 
 def render_markdown(interpretation: dict[str, Any], gaps: list[dict[str, Any]]) -> str:
     summary = interpretation["assetSummary"]
+    selection = interpretation.get("selection")
     statements = list(interpretation["statements"])
     confirmed = [row for row in statements if row["status"] == "CONFIRMED"]
     nonconfirmed = [row for row in statements if row["status"] != "CONFIRMED"]
@@ -52,9 +53,24 @@ def render_markdown(interpretation: dict[str, Any], gaps: list[dict[str, Any]]) 
         f"- Exact edges: {summary['edgeCount']}",
         f"- Diagnostic gaps: {summary['diagnosticGapCount']}",
         "",
-        "## Confirmed statements",
-        "",
     ]
+    if isinstance(selection, dict) and selection.get("algorithm"):
+        selected = list(selection.get("selectedGraphRefs") or [])
+        omitted = list(selection.get("omittedGraphRefs") or [])
+        lines.extend(
+            [
+                "## Interpretation selection",
+                "",
+                f"- Algorithm: `{_markdown(selection['algorithm'])}`",
+                f"- Complete: `{str(bool(selection['complete'])).lower()}`",
+                f"- Selected graphs: {len(selected)} / {len(selected) + len(omitted)}",
+                f"- Budget: {selection['budget']} work units",
+                f"- Selected/source work: {selection['selectedWorkUnits']} / {selection['sourceWorkUnits']}",
+                "- Omitted graphs remain complete in Evidence and each has an explicit budget-omission gap.",
+                "",
+            ]
+        )
+    lines.extend(["## Confirmed statements", ""])
     if confirmed:
         for statement in confirmed:
             refs = ", ".join(f"`{_markdown(ref)}`" for ref in statement["evidenceRefs"])

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from os import PathLike
+
+from blueprint_translator.public_paths import public_value_is_path_free
 
 
 ERROR_SCHEMA = "blueprint-to-code.arkdev-mcp-error/v1"
@@ -21,6 +20,11 @@ TOOL_NAMES = (
     "blueprint_patch_plan_draft",
     "blueprint_patch_plan_validate",
     "blueprint_patch_plan_confirm",
+    "blueprint_solver_create",
+    "blueprint_solver_resume",
+    "blueprint_solver_preflight",
+    "blueprint_solver_update",
+    "blueprint_solver_materialize_task",
 )
 ERROR_CODES = frozenset(
     {
@@ -46,18 +50,19 @@ ERROR_CODES = frozenset(
         "PATCH_PLAN_NOT_CONFIRMABLE",
         "PATCH_PLAN_DIGEST_MISMATCH",
         "PLAN_CONFIRMATION_REQUIRED",
+        "SOLVER_NOT_FOUND",
+        "REQUIREMENT_PROPOSAL_INVALID",
+        "REQUEST_TEXT_UNASSIGNED",
+        "SOLVER_PHASE_INVALID",
+        "SOLVER_UPDATE_INVALID",
+        "TARGET_SELECTION_REQUIRED",
+        "TARGET_CANDIDATE_NOT_FOUND",
+        "EVIDENCE_ACQUISITION_REQUIRED",
+        "TASK_NOT_APPLICABLE",
+        "SOLVER_LIMIT_EXCEEDED",
         "INTERNAL_CONTRACT_ERROR",
     }
 )
-
-_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)(?<![A-Za-z0-9_])[a-z]:[\\/]")
-_FILE_URI = re.compile(r"(?i)(?<![A-Za-z0-9_])file://")
-_UNC_PATH = re.compile(r"(?<![A-Za-z0-9_:])(?:\\\\|//)[^\\/\s]+[\\/]")
-_POSIX_ABSOLUTE_PATH = re.compile(
-    r"(?<![A-Za-z0-9_:/])/(?!Game(?:/|$)|Engine(?:/|$)|Script(?:/|$))[^\s\"']+"
-)
-_UNREAL_VIRTUAL_ROOTS = ("/Game/", "/Engine/", "/Script/")
-
 
 @dataclass
 class McpExecutionError(Exception):
@@ -85,45 +90,14 @@ class McpExecutionError(Exception):
         return payload
 
 
-def _contains_machine_path(value: str) -> bool:
-    normalized = value.strip()
-    if not normalized:
-        return False
-    if _WINDOWS_ABSOLUTE_PATH.search(normalized):
-        return True
-    if _FILE_URI.search(normalized) or _UNC_PATH.search(normalized):
-        return True
-    if normalized in {root.removesuffix("/") for root in _UNREAL_VIRTUAL_ROOTS}:
-        return False
-    return bool(_POSIX_ABSOLUTE_PATH.search(normalized))
-
-
 def assert_path_free(value: object) -> None:
     """Fail closed when a public value contains a machine-local path."""
 
-    pending = [value]
-    while pending:
-        current = pending.pop()
-        if isinstance(current, PathLike):
-            raise McpExecutionError(
-                "INTERNAL_CONTRACT_ERROR",
-                "The response contained machine-local path data.",
-            )
-        if isinstance(current, str):
-            if _contains_machine_path(current):
-                raise McpExecutionError(
-                    "INTERNAL_CONTRACT_ERROR",
-                    "The response contained machine-local path data.",
-                )
-            continue
-        if isinstance(current, Mapping):
-            pending.extend(current.keys())
-            pending.extend(current.values())
-            continue
-        if isinstance(current, Sequence) and not isinstance(
-            current, (bytes, bytearray)
-        ):
-            pending.extend(current)
+    if not public_value_is_path_free(value):
+        raise McpExecutionError(
+            "INTERNAL_CONTRACT_ERROR",
+            "The response contained machine-local path data.",
+        )
 
 
 __all__ = [

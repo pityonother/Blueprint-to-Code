@@ -21,23 +21,68 @@ export interface WorkflowViewModel {
   devkitInput: string;
   mainNotice: string;
   mainNoticeTone: MainNoticeTone;
+  nativeClassResult: NativeClassReadResult | null;
   reportContent: string;
   reportLoading: boolean;
   reportPath: string;
   selectedReport: ReportKey;
   state: AppState | null;
   typedAssetName: string;
+  typedNativeClass: boolean;
   typedPathRecognized: boolean;
+}
+
+
+export interface NativeClassPropertyResult {
+  requestedName: string;
+  readName: string;
+  pythonAttribute: string;
+  ownerClass: string;
+  descriptor: string;
+  readable: boolean;
+  value: unknown;
+  valueType: string;
+  scope: 'CLASS_DEFAULT_OBJECT';
+}
+
+
+export interface NativeClassFunctionResult {
+  name: string;
+  pythonAttribute: string;
+  ownerClass: string;
+  available: boolean;
+  called: false;
+}
+
+
+export interface NativeClassReadResult {
+  sourceKind: 'native_class_reflection';
+  assetPath: string;
+  className: string;
+  classLoaded: boolean;
+  classDefaultObjectRead: boolean;
+  inheritance: string[];
+  engineVersion: string;
+  generatedAt: string;
+  readOnly: true;
+  properties: NativeClassPropertyResult[];
+  functions: NativeClassFunctionResult[];
+  runtimeStateAvailable: false;
+  runtimeStateReason: 'CLASS_DEFAULT_OBJECT_ONLY';
+  runtimeStateExplanation: string;
 }
 
 
 function readStatusBadge(view: WorkflowViewModel): string {
   const { asset } = view;
+  if (view.typedNativeClass) {
+    return '<span class="status-line muted">已识别为 /Script 原生类；将启动本机 ARK DevKit 做一次只读反射，不会查找 .uasset。</span>';
+  }
   if (!asset) {
     if (view.typedPathRecognized) {
       return '<span class="status-line muted">路径格式已识别，但这个资产还没有读取进历史列表。点下面绿色按钮开始读取。</span>';
     }
-    return '<span class="status-line muted">未识别。粘贴 /Game/... Object Path，或 Kaminan_server/... 这种 mod 相对路径。</span>';
+    return '<span class="status-line muted">未识别。粘贴 /Game/... Object Path、/Script/模块.类名，或 mod 相对路径。</span>';
   }
   if (!asset.hasUassetGraphRead) {
     return '<span class="status-line muted">这个资产还没有从 .uasset 读取过。点下面的“从 .uasset 读取图内容”开始。</span>';
@@ -63,10 +108,10 @@ export function renderStepPath(view: WorkflowViewModel): string {
         <span class="step-num">1</span>
         <div class="step-title">
           <h2>粘贴蓝图 Object Path</h2>
-          <p class="hint">在 ARK DevKit 里右键资产 → <code>Copy Reference</code>，把整段路径粘贴到下面。例如 <code>/Game/ASA/Dinos/Gigantoraptor/Gigantoraptor_Character_BP.Gigantoraptor_Character_BP</code>，或 <code>Kaminan_server/.../Asset.Asset</code>。</p>
+          <p class="hint">资产可粘贴 <code>/Game/.../Asset.Asset</code>；原生类可粘贴 <code>/Script/ShooterGame.ShooterCharacter</code>；也支持 <code>Kaminan_server/.../Asset.Asset</code> 这种 mod 相对路径。</p>
         </div>
       </div>
-      <textarea id="devkit-path" spellcheck="false" placeholder="/Game/ASA/.../Asset.Asset 或 Kaminan_server/.../Asset.Asset">${escapeHtml(value)}</textarea>
+      <textarea id="devkit-path" spellcheck="false" placeholder="/Game/.../Asset.Asset 或 /Script/模块.类名">${escapeHtml(value)}</textarea>
       <div class="status-row">
         <strong>已选资产：</strong>
         <span class="asset-name">${escapeHtml(view.asset?.name || view.typedAssetName || '无')}</span>
@@ -81,19 +126,26 @@ export function renderStepActions(view: WorkflowViewModel): string {
   const readPath = view.devkitInput || view.state?.devkitAssetPath || '';
   const canRead = !view.busy && Boolean(readPath.trim());
   const canAnalyze = !view.busy && Boolean(view.asset && view.asset.graphs);
+  const primaryTitle = view.typedNativeClass ? '读取原生类属性' : '从 .uasset 读取图内容';
+  const primaryHint = view.typedNativeClass
+    ? '通过官方 PythonScriptCommandlet 只读反射类默认对象；不会修改 DevKit 资产。'
+    : '解析 .uasset / .uexp，默认生成低 token 证据库和 AI 索引。';
+  const sectionHint = view.typedNativeClass
+    ? '原生类没有对应 .uasset。本次只读取类、继承、属性默认值和函数是否存在。'
+    : '第一次操作只需要点左边绿色按钮，生成当前 revision 的 Evidence Store 和 AI 索引。右边只在需要人类长报告时使用。';
   return `
     <section class="panel step-panel">
       <div class="step-head">
         <span class="step-num">2</span>
         <div class="step-title">
           <h2>读取并生成报告</h2>
-          <p class="hint">第一次操作只需要点左边绿色按钮，生成当前 revision 的 Evidence Store 和 AI 索引。右边只在需要人类长报告时使用。</p>
+          <p class="hint">${sectionHint}</p>
         </div>
       </div>
       <div class="big-action-row">
         <button class="big-btn primary" data-action="read-uasset-graphs" ${canRead ? '' : 'disabled'}>
-          <strong>从 .uasset 读取图内容</strong>
-          <small>解析 .uasset / .uexp，默认生成低 token 证据库和 AI 索引。</small>
+          <strong>${primaryTitle}</strong>
+          <small>${primaryHint}</small>
         </button>
         <button class="big-btn secondary" data-action="analyze-standard" ${canAnalyze ? '' : 'disabled'}>
           <strong>生成 / 刷新人类报告</strong>
@@ -111,7 +163,71 @@ export function renderStepActions(view: WorkflowViewModel): string {
 }
 
 
-export function renderStepResult(asset?: AssetSummary): string {
+function nativeValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined) return '';
+  return JSON.stringify(value);
+}
+
+
+function renderNativeClassResult(result: NativeClassReadResult): string {
+  const propertyRows = result.properties
+    .map(
+      (property) => `
+        <tr>
+          <td><code>${escapeHtml(property.requestedName)}</code></td>
+          <td>${property.readable ? '可读' : '不可读'}</td>
+          <td><code>${escapeHtml(nativeValue(property.value))}</code></td>
+          <td>${escapeHtml(property.ownerClass || '未知')}</td>
+          <td>类默认对象</td>
+        </tr>
+      `,
+    )
+    .join('');
+  const availableFunctions = result.functions
+    .filter((item) => item.available)
+    .map((item) => item.name)
+    .join('、');
+  return `
+    <section class="panel step-panel">
+      <div class="step-head">
+        <span class="step-num">3</span>
+        <div class="step-title">
+          <h2>原生类反射结果</h2>
+          <p class="hint"><code>${escapeHtml(result.assetPath)}</code> · 引擎 ${escapeHtml(result.engineVersion || '未知')}</p>
+        </div>
+      </div>
+      <div class="action-notice warn"><strong>边界：</strong>当前显示的是类默认对象，不是在线玩家实时值；要监测实际下蹲，仍需在游戏或 PIE 中取得玩家实例。</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>属性</th><th>状态</th><th>默认值</th><th>声明类</th><th>范围</th></tr></thead>
+          <tbody>${propertyRows || '<tr><td colspan="5">没有读到目标属性。</td></tr>'}</tbody>
+        </table>
+      </div>
+      <p class="hint">继承链：${escapeHtml(result.inheritance.join(' → ') || '未知')}</p>
+      <p class="hint">可用下蹲函数：${escapeHtml(availableFunctions || '未发现')}</p>
+    </section>
+  `;
+}
+
+
+export function renderStepResult(view: WorkflowViewModel): string {
+  const { asset, nativeClassResult } = view;
+  if (nativeClassResult) return renderNativeClassResult(nativeClassResult);
+  if (view.typedNativeClass) {
+    return `
+      <section class="panel step-panel">
+        <div class="step-head">
+          <span class="step-num">3</span>
+          <div class="step-title">
+            <h2>原生类反射结果</h2>
+            <p class="hint">点击上面的“读取原生类属性”后，这里会显示类默认对象中的属性值与继承来源。</p>
+          </div>
+        </div>
+        <div class="empty-state">尚未读取这个原生类。</div>
+      </section>
+    `;
+  }
   if (!asset || !asset.hasUassetGraphRead) {
     return `
       <section class="panel step-panel">

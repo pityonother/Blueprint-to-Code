@@ -35,6 +35,7 @@ from .formulas import build_formula_candidates, render_formula_candidates
 from .output import resolve_output_paths, write_glossary
 from .evidence_publication import evidence_publication_lock
 from .evidence_repository import resolve_asset_evidence_state
+from .package_source_snapshot import PackageSourceSnapshot, snapshot_package_source
 from .quality import (
     behavior_area,
     build_components_suggestions,
@@ -642,6 +643,36 @@ def build_asset_diagnostics(asset_payload: dict[str, object]) -> dict[str, objec
                     "The binary reader resolved target nodes and selected likely target pins, but these links should be treated as pin-level heuristic until LinkedTo PinId bytes are decoded exactly.",
                     [f"resolved_pin_heuristic={resolution_counts.get('resolved_pin_heuristic')}"],
                     "Use uasset_link_resolution_report.md and clipboard compare fixtures to validate exact pin-level behavior.",
+                )
+            )
+        identity_unavailable = sum(
+            int(resolution_counts.get(status) or 0)
+            for status in (
+                "source_pin_identity_unavailable",
+                "target_pin_identity_unavailable",
+                "target_pin_identity_mismatch",
+            )
+        ) if isinstance(resolution_counts, dict) else 0
+        identity_ambiguous = sum(
+            int(resolution_counts.get(status) or 0)
+            for status in (
+                "ambiguous_source_pin_identity",
+                "ambiguous_target_node_identity",
+                "ambiguous_target_pin_identity",
+            )
+        ) if isinstance(resolution_counts, dict) else 0
+        if identity_unavailable or identity_ambiguous:
+            findings.append(
+                diagnostic_finding(
+                    "UASSET022",
+                    "warning",
+                    "Pin identity prevented exact link publication",
+                    "A canonical link is emitted only when both native PinIds are present and unique; missing, mismatched, or duplicate identities remain observations.",
+                    [
+                        f"identity_unavailable={identity_unavailable}",
+                        f"identity_ambiguous={identity_ambiguous}",
+                    ],
+                    "Inspect the edge observation and recover structural PinId/LinkedTo evidence; do not select a target Pin by name, direction, or GUID scan.",
                 )
             )
         if isinstance(failure_counts, dict) and failure_counts.get("need_node_reader"):
@@ -1414,31 +1445,39 @@ def run_asset_binary_translate(args: argparse.Namespace) -> int:
         for item in attempted:
             print(f"- attempted: {item}", file=sys.stderr)
         return 2
-    payload = read_uasset_graph_content(asset_path, uasset_path, max_graphs=max_graphs)
-    if prune_requested:
-        if not bool(payload.get("loaded")):
-            print("Refusing to prune because the source asset did not load completely.", file=sys.stderr)
-            return 2
-        structure = payload.get("structure")
-        if isinstance(structure, dict) and "graph_exports_count" in structure:
-            expected_graphs = int(structure.get("graph_exports_count") or 0)
-            if int(payload.get("graph_count") or 0) != expected_graphs:
-                print("Refusing to prune because the current graph read is incomplete.", file=sys.stderr)
+    with snapshot_package_source(uasset_path) as source_snapshot:
+        payload = read_uasset_graph_content(
+            asset_path,
+            source_snapshot.snapshot_uasset_path,
+            max_graphs=max_graphs,
+        )
+        _rebind_payload_source_paths(payload, source_snapshot)
+        source_snapshot.assert_original_unchanged()
+        if prune_requested:
+            if not bool(payload.get("loaded")):
+                print("Refusing to prune because the source asset did not load completely.", file=sys.stderr)
                 return 2
-        status_counts = payload.get("status_counts")
-        if isinstance(status_counts, dict) and any(
-            int(count or 0) > 0 and str(status) not in {"complete", "complete_empty"}
-            for status, count in status_counts.items()
-        ):
-            print("Refusing to prune because one or more graphs are not completely recovered.", file=sys.stderr)
-            return 2
-    capture_root = Path(os.path.expandvars(getattr(args, "capture_root", "") or "captures")).expanduser()
-    paths = write_uasset_graph_read_files(
-        asset_path,
-        capture_root,
-        payload,
-        artifact_mode=artifact_mode,
-    )
+            structure = payload.get("structure")
+            if isinstance(structure, dict) and "graph_exports_count" in structure:
+                expected_graphs = int(structure.get("graph_exports_count") or 0)
+                if int(payload.get("graph_count") or 0) != expected_graphs:
+                    print("Refusing to prune because the current graph read is incomplete.", file=sys.stderr)
+                    return 2
+            status_counts = payload.get("status_counts")
+            if isinstance(status_counts, dict) and any(
+                int(count or 0) > 0 and str(status) not in {"complete", "complete_empty"}
+                for status, count in status_counts.items()
+            ):
+                print("Refusing to prune because one or more graphs are not completely recovered.", file=sys.stderr)
+                return 2
+        capture_root = Path(os.path.expandvars(getattr(args, "capture_root", "") or "captures")).expanduser()
+        paths = write_uasset_graph_read_files(
+            asset_path,
+            capture_root,
+            payload,
+            artifact_mode=artifact_mode,
+            source_binary_path=source_snapshot.snapshot_uasset_path,
+        )
     print(f"Wrote uasset graph read directory: {paths['asset_dir']}")
     if paths.get("graph_report"):
         print(f"- graph report: {paths['graph_report']}")
@@ -1470,6 +1509,26 @@ def run_asset_binary_translate(args: argparse.Namespace) -> int:
         args.asset_name = str(payload.get("asset_name") or "")
     args.keep_stale_output = True
     return run_asset_translate(args)
+
+
+def _rebind_payload_source_paths(
+    payload: dict[str, object],
+    source_snapshot: PackageSourceSnapshot,
+) -> None:
+    """Replace temporary snapshot paths with the live logical source paths."""
+
+    uasset_path = str(source_snapshot.original_uasset_path)
+    uexp = source_snapshot.logical_path(".uexp")
+    uexp_path = str(uexp) if uexp is not None else ""
+    payload["uasset_path"] = uasset_path
+    payload["uexp_path"] = uexp_path
+    for key in ("package", "structure"):
+        nested = payload.get(key)
+        if not isinstance(nested, dict):
+            continue
+        nested["uasset_path"] = uasset_path
+        if "uexp_path" in nested or key == "package":
+            nested["uexp_path"] = uexp_path
 
 
 def suggestion_has_items(suggestions: dict[str, object], key: str) -> bool:

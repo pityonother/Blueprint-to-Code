@@ -49,25 +49,56 @@ from blueprint_translator.kb_vnext.incremental_delta import (  # noqa: E402
     build_add_only_blueprint_delta,
     logical_database_state,
 )
+from blueprint_translator.kb_vnext.incremental_publisher import (  # noqa: E402
+    IncrementalPublicationNotReplaced,
+    IncrementalPublicationUncertain,
+    candidate_semantic_inputs,
+    publish_incremental_shadow_snapshot,
+    reseal_incremental_snapshot_candidate,
+    seal_incremental_narrow_gate_report,
+    verify_incremental_shadow_publication,
+)
 from blueprint_translator.kb_vnext.invalidation import (  # noqa: E402
     InvalidationBlockedGap,
     InvalidationPlan,
     apply_invalidation_plan,
     plan_additive_asset_invalidation,
 )
-from blueprint_translator.kb_vnext.ontology import load_ontology  # noqa: E402
+from blueprint_translator.kb_vnext.ontology import (  # noqa: E402
+    OntologyBundle,
+    load_ontology,
+    materialize_domain_entity_memberships,
+)
 from blueprint_translator.kb_vnext.pointer_cas import (  # noqa: E402
     CurrentSnapshotBaseline,
     PointerCASError,
     capture_current_snapshot_baseline,
     read_current_pointer_baseline,
 )
+from blueprint_translator.kb_vnext.narrow_gate_runner import (  # noqa: E402
+    ProductionNarrowGateError,
+    ProductionNarrowGateInputs,
+    ProductionNarrowGateRun,
+    run_production_narrow_gates,
+)
+from blueprint_translator.kb_vnext.narrow_gates import (  # noqa: E402
+    UpdateBaseline as NarrowGateUpdateBaseline,
+)
 from blueprint_translator.kb_vnext.snapshot import (  # noqa: E402
     _snapshot_semantic_input_hashes,
+    _validate_staged_snapshot_for_promotion,
     resolve_current_snapshot,
+    semantic_inputs_sha256,
+    snapshot_build_id,
 )
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
     DOMAIN_PROJECTIONS,
+    build_domain_projection,
+)
+from blueprint_translator.kb_vnext.roles import (  # noqa: E402
+    compute_additive_role_dependency_scope,
+    materialize_discovery_role_entities,
+    materialize_incremental_role_classifier_revision,
 )
 from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     SNAPSHOT_SEMANTIC_INPUT_KEYS as SNAPSHOT_SEMANTIC_INPUT_KEYS,
@@ -186,6 +217,7 @@ class UpdateWorkspace:
     core_path: Path
     cache_path: Path
     projection_dir: Path
+    discovery_path: Path | None = None
     invalidation_events: list[dict[str, object]] = field(
         default_factory=list
     )
@@ -198,21 +230,41 @@ class UpdateWorkspace:
     verified_additive_delta: AddOnlyBlueprintDelta | None = None
     invalidation_plan: InvalidationPlan | None = None
     backend_event_id: str = ""
+    candidate_build_id: str = ""
+    candidate_source_fingerprint: str = ""
+    candidate_generated_at: str = ""
+    worker_report: object | None = None
+    delta_receipt_bytes: bytes = b""
+    delta_receipt_sha256: str = ""
+    candidate_manifest: dict[str, object] = field(default_factory=dict)
+    narrow_gate_run: ProductionNarrowGateRun | None = None
 
 
 @dataclass(frozen=True)
 class GateResult:
     passed: bool
     checks: tuple[dict[str, object], ...]
+    report_uri: str = ""
+    report_sha256: str = ""
+    production_authority: bool = False
 
     def payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "passed": self.passed,
             "total": len(self.checks),
             "failed": sum(
                 not bool(check.get("passed")) for check in self.checks
             ),
         }
+        if self.report_sha256:
+            payload.update(
+                {
+                    "reportUri": self.report_uri,
+                    "reportSha256": self.report_sha256,
+                    "productionAuthority": self.production_authority,
+                }
+            )
+        return payload
 
 
 def _validated_gate_payload(gates: GateResult) -> dict[str, object]:
@@ -246,10 +298,32 @@ def _validated_gate_payload(gates: GateResult) -> dict[str, object]:
             "Narrow gate aggregate contradicts its check results.",
             full_rebuild_required=True,
         )
+    report: dict[str, object] = {}
+    if gates.report_uri or gates.report_sha256:
+        if (
+            gates.report_uri != "reports/incremental_narrow_gates.json"
+            or not re.fullmatch(r"[0-9a-f]{64}", gates.report_sha256)
+            or gates.production_authority is not False
+        ):
+            raise UpdateBlocked(
+                "NARROW_GATE_RESULT_INVALID",
+                "Narrow gate report binding is invalid.",
+                full_rebuild_required=True,
+            )
+        report = {
+            "reportUri": gates.report_uri,
+            "reportSha256": gates.report_sha256,
+            "productionAuthority": False,
+        }
     return {
         "passed": recomputed,
         "total": len(passed_values),
         "failed": sum(not value for value in passed_values),
+        "checks": [
+            {"id": str(check["id"]), "passed": bool(check["passed"])}
+            for check in gates.checks
+        ],
+        **report,
     }
 
 
@@ -268,6 +342,7 @@ IngestChanges = Callable[
     [UpdateWorkspace, SourceDiff, UpdatePaths],
     Mapping[str, object],
 ]
+BlueprintSourceProvider = Callable[..., BlueprintIngestResult]
 DrainWorker = Callable[[UpdateWorkspace, int], object]
 NarrowGates = Callable[[UpdateWorkspace], GateResult]
 AtomicPublisher = Callable[
@@ -293,6 +368,9 @@ class UpdateHooks:
     publish_atomic: AtomicPublisher
     verify_publication: PublicationVerifier
     require_locked_update_baseline: bool = False
+    blueprint_source_provider: BlueprintSourceProvider = (
+        materialize_blueprint_defaults
+    )
 
 
 def scan_source_manifest(paths: UpdatePaths) -> SourceManifest:
@@ -500,16 +578,27 @@ def stage_current_snapshot(
             ),
             residual_identifier=exc.residual_identifier,
         ) from exc
+    candidate_generated_at = baseline.candidate_source_manifest.generated_at
+    candidate_source_fingerprint = semantic_inputs_sha256(
+        candidate_semantic_inputs(baseline.candidate_source_manifest)
+    )
     return UpdateWorkspace(
         temporary_root=staged.temporary_root,
         snapshot_dir=staged.snapshot_dir,
         core_path=staged.snapshot_dir / "core.sqlite",
         cache_path=staged.snapshot_dir / "cache.sqlite",
         projection_dir=staged.snapshot_dir / "domain_exports",
+        discovery_path=paths.discovery_database,
         base_build_id=staged.base_build_id,
         staging_receipt=staged.receipt,
         staged_baseline=staged,
         update_baseline=baseline,
+        candidate_build_id=snapshot_build_id(
+            candidate_generated_at,
+            candidate_source_fingerprint,
+        ),
+        candidate_source_fingerprint=candidate_source_fingerprint,
+        candidate_generated_at=candidate_generated_at,
     )
 
 
@@ -779,6 +868,8 @@ def materialize_additive_asset_dependency_scope(
     entity_ids: Iterable[int],
     fact_ids: Iterable[int],
     actual_write_tables: Iterable[str],
+    role_entity_ids: Iterable[int] | None = None,
+    role_scope_proof: Mapping[str, object] | None = None,
 ) -> InvalidationPlan:
     """Materialize and strictly validate one verified additive scope.
 
@@ -790,11 +881,15 @@ def materialize_additive_asset_dependency_scope(
     revisions = tuple(source_revision_ids)
     entities = tuple(entity_ids)
     facts = tuple(fact_ids)
+    role_entities = tuple(
+        entities if role_entity_ids is None else role_entity_ids
+    )
     tables = tuple(actual_write_tables)
     for label, values in (
         ("source revision", revisions),
         ("entity", entities),
         ("fact", facts),
+        ("role entity", role_entities),
     ):
         if (
             not values
@@ -822,7 +917,7 @@ def materialize_additive_asset_dependency_scope(
             "ADDITIVE_ROLE_INPUT",
         )
         for revision_id in revisions
-        for entity_id in entities
+        for entity_id in role_entities
     }
     expected_rows.update(
         (
@@ -950,6 +1045,8 @@ def materialize_additive_asset_dependency_scope(
             entity_ids=entities,
             source_revision_ids=revisions,
             actual_write_tables=tables,
+            role_entity_ids=role_entities,
+            role_scope_proof=role_scope_proof,
         )
         connection.execute(f"RELEASE SAVEPOINT {savepoint}")
         savepoint_open = False
@@ -969,6 +1066,8 @@ def ingest_additive_blueprint_changes(
     workspace: UpdateWorkspace,
     diff: SourceDiff,
     paths: UpdatePaths,
+    *,
+    source_provider: BlueprintSourceProvider | None = None,
 ) -> Mapping[str, object]:
     """Validate selected Evidence Stores, then create the real ASSET event."""
 
@@ -1022,7 +1121,12 @@ def ingest_additive_blueprint_changes(
     core = sqlite3.connect(workspace.core_path)
     core.execute("PRAGMA foreign_keys=ON")
     try:
-        result = materialize_blueprint_defaults(
+        provider = (
+            source_provider
+            if source_provider is not None
+            else materialize_blueprint_defaults
+        )
+        result = provider(
             discovery,
             core,
             capture_root=frozen.ingest_root,
@@ -1066,12 +1170,36 @@ def ingest_additive_blueprint_changes(
                 "The staged Core changed after verified delta scope capture.",
                 full_rebuild_required=True,
             )
+        if len(delta.source_revision_ids) != 1:
+            raise UpdateBlocked(
+                "ADDITIVE_ROLE_DEPENDENCY_SCOPE_INVALID",
+                "The v1 role dependency proof requires one source revision.",
+                full_rebuild_required=True,
+            )
+        role_revision_id = materialize_incremental_role_classifier_revision(
+            core,
+            generated_at=(
+                workspace.candidate_generated_at
+                or datetime.now(UTC).isoformat(timespec="seconds")
+            ),
+        )
+        role_entity_ids, role_scope_proof = (
+            compute_additive_role_dependency_scope(
+                discovery,
+                core,
+                changed_entity_ids=delta.entity_ids,
+                source_revision_id=role_revision_id,
+                trigger_source_revision_ids=delta.source_revision_ids,
+            )
+        )
         plan = materialize_additive_asset_dependency_scope(
             core,
             source_revision_ids=delta.source_revision_ids,
             entity_ids=delta.entity_ids,
             fact_ids=delta.fact_ids,
             actual_write_tables=delta.changed_tables,
+            role_entity_ids=role_entity_ids,
+            role_scope_proof=role_scope_proof,
         )
         if not plan.downstream:
             raise UpdateBlocked(
@@ -1158,6 +1286,117 @@ def _unavailable_drain(
 
 class ProductionIncrementalRebuildBackend(CoreMaterializerRebuildBackend):
     """Implemented production materializers for one add-only Blueprint."""
+
+    def __init__(
+        self,
+        *,
+        discovery: sqlite3.Connection | None,
+        ontology: OntologyBundle,
+        projection_dir: Path,
+        cache_connection: sqlite3.Connection,
+        candidate_build_id: str,
+        candidate_source_fingerprint: str,
+        candidate_generated_at: str,
+    ) -> None:
+        super().__init__(
+            projection_dir=projection_dir,
+            cache_connection=cache_connection,
+        )
+        self._discovery = discovery
+        self._ontology = ontology
+        self._candidate_build_id = candidate_build_id
+        self._candidate_source_fingerprint = candidate_source_fingerprint
+        self._candidate_generated_at = candidate_generated_at
+
+    @staticmethod
+    def _role_source_revision(scope: RebuildScope) -> int:
+        row = scope.core.execute(
+            "SELECT payload_json FROM invalidation_events WHERE event_id=?",
+            (scope.task.event_id,),
+        ).fetchone()
+        if row is None:
+            raise RebuildBlockedGap(
+                "ADDITIVE_ROLE_DEPENDENCY_PROOF_MISSING",
+                "The queued role task has no durable event payload.",
+            )
+        try:
+            payload = json.loads(str(row[0]))
+        except json.JSONDecodeError as exc:
+            raise RebuildBlockedGap(
+                "ADDITIVE_ROLE_DEPENDENCY_PROOF_INVALID",
+                "The queued role task event payload is not canonical JSON.",
+            ) from exc
+        proof = payload.get("_roleScopeProof")
+        if (
+            not isinstance(proof, dict)
+            or proof.get("schema")
+            != "ark-kb-additive-role-dependency-scope/v1"
+            or type(proof.get("sourceRevisionId")) is not int
+            or not isinstance(proof.get("roleEntityIds"), list)
+            or scope.task.downstream_id not in proof["roleEntityIds"]
+        ):
+            raise RebuildBlockedGap(
+                "ADDITIVE_ROLE_DEPENDENCY_PROOF_INVALID",
+                "The queued role task is outside its durable dependency proof.",
+            )
+        return int(proof["sourceRevisionId"])
+
+    def rebuild_role_entity(self, scope: RebuildScope) -> None:
+        if self._discovery is None:
+            raise RebuildBlockedGap(
+                "STAGED_DISCOVERY_NOT_AVAILABLE",
+                "Role rebuild requires the base-bound Discovery input.",
+            )
+        materialize_discovery_role_entities(
+            self._discovery,
+            scope.core,  # type: ignore[arg-type]
+            entity_ids=(scope.task.downstream_id,),
+            source_revision_id=self._role_source_revision(scope),
+        )
+
+    def rebuild_domain_entity(self, scope: RebuildScope) -> None:
+        try:
+            materialize_domain_entity_memberships(
+                scope.core,  # type: ignore[arg-type]
+                ontology=self._ontology,
+                entity_id=scope.task.downstream_id,
+            )
+        except ValueError as exc:
+            raise RebuildBlockedGap(
+                "DOMAIN_ONTOLOGY_SOURCE_NOT_AVAILABLE",
+                "Domain rebuild requires one fresh bound ontology revision.",
+            ) from exc
+
+    def rebuild_projection(self, scope: RebuildScope) -> None:
+        if scope.projection_dir is None:
+            raise RebuildBlockedGap(
+                "PROJECTION_STAGING_NOT_AVAILABLE",
+                "The worker did not supply a projection staging directory.",
+            )
+        if not (
+            self._candidate_build_id
+            and self._candidate_source_fingerprint
+            and self._candidate_generated_at
+        ):
+            raise RebuildBlockedGap(
+                "CANDIDATE_SNAPSHOT_IDENTITY_MISSING",
+                "Projection rebuild requires the candidate Snapshot identity.",
+            )
+        projection_name = tuple(DOMAIN_PROJECTIONS)[
+            scope.task.downstream_id - 1
+        ]
+        build_domain_projection(
+            core=scope.core,  # type: ignore[arg-type]
+            projection_name=projection_name,
+            output_path=(
+                scope.projection_dir / f"{projection_name}.sqlite"
+            ),
+            generated_at=self._candidate_generated_at,
+            ontology_version=self._ontology.version,
+            review_path=(PROJECT_ROOT / "ontology" / "projection_review.v1.json"),
+            snapshot_build_id=self._candidate_build_id,
+            snapshot_source_fingerprint=self._candidate_source_fingerprint,
+        )
 
     def rebuild_query_snapshot(self, scope: RebuildScope) -> None:
         if scope.cache is None:
@@ -1317,12 +1556,27 @@ def drain_production_rebuilds(
     """Drain with only the production materializers currently implemented."""
 
     cache = _open_staged_query_cache(workspace)
+    discovery: sqlite3.Connection | None = None
+    discovery_path = workspace.discovery_path
+    if discovery_path is not None and discovery_path.is_file():
+        discovery = sqlite3.connect(
+            f"file:{discovery_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        )
     try:
         return drain_with_rebuild_backend(
             workspace,
             max_items,
             backend=ProductionIncrementalRebuildBackend(
-                cache_connection=cache
+                discovery=discovery,
+                ontology=load_ontology(PROJECT_ROOT / "ontology"),
+                projection_dir=workspace.projection_dir,
+                cache_connection=cache,
+                candidate_build_id=workspace.candidate_build_id,
+                candidate_source_fingerprint=(
+                    workspace.candidate_source_fingerprint
+                ),
+                candidate_generated_at=workspace.candidate_generated_at,
             ),
         )
     except UpdateBlocked:
@@ -1335,30 +1589,213 @@ def drain_production_rebuilds(
             full_rebuild_required=True,
         ) from exc
     finally:
+        if discovery is not None:
+            discovery.close()
         cache.close()
 
 
-def _unavailable_gates(workspace: UpdateWorkspace) -> GateResult:
-    del workspace
-    raise UpdateBlocked(
-        "SELECTIVE_NARROW_GATES_UNAVAILABLE",
-        "Selective narrow gates are not implemented.",
-        full_rebuild_required=True,
+def run_production_narrow_gate_checks(
+    workspace: UpdateWorkspace,
+) -> GateResult:
+    """Compute the fixed 11 checks and seal their canonical report."""
+
+    baseline = workspace.update_baseline
+    staged = workspace.staged_baseline
+    frozen = workspace.frozen_additive_input
+    delta = workspace.verified_additive_delta
+    worker = workspace.worker_report
+    if (
+        type(baseline) is not UpdateBaseline
+        or type(staged) is not StagedBaselineSnapshot
+        or type(frozen) is not FrozenAdditiveBlueprintInput
+        or type(delta) is not AddOnlyBlueprintDelta
+        or worker is None
+        or not workspace.delta_receipt_bytes
+        or not workspace.delta_receipt_sha256
+        or workspace.discovery_path is None
+    ):
+        raise UpdateBlocked(
+            "PRODUCTION_NARROW_GATE_INPUT_MISSING",
+            "The typed baseline, receipt, worker, or candidate input is missing.",
+            full_rebuild_required=True,
+        )
+    if not workspace.candidate_manifest:
+        raise UpdateBlocked(
+            "INCREMENTAL_CANDIDATE_RESEAL_INVALID",
+            "The final candidate was not resealed before its delta receipt.",
+            full_rebuild_required=True,
+        )
+    try:
+        gate_run = run_production_narrow_gates(
+            ProductionNarrowGateInputs(
+                baseline=baseline,
+                staged_snapshot=staged,
+                frozen_input=frozen,
+                candidate_source_manifest=(
+                    baseline.candidate_source_manifest
+                ),
+                candidate_manifest=workspace.candidate_manifest,
+                delta_receipt_bytes=workspace.delta_receipt_bytes,
+                delta_receipt_sha256=workspace.delta_receipt_sha256,
+                worker_report=worker,
+                changed_source_revision_ids=delta.source_revision_ids,
+                affected_entity_ids=delta.entity_ids,
+            )
+        )
+        narrow_baseline = NarrowGateUpdateBaseline(
+            base_build_id=baseline.base_build_id,
+            base_pointer_sha256=baseline.base_pointer_sha256,
+            base_manifest_sha256=baseline.base_manifest_sha256,
+            base_source_manifest_fingerprint=(
+                baseline.base_source_manifest_fingerprint
+            ),
+            candidate_source_manifest_fingerprint=(
+                baseline.candidate_source_manifest_fingerprint
+            ),
+            source_diff_sha256=baseline.source_diff_sha256,
+            delta_receipt_sha256=workspace.delta_receipt_sha256,
+        )
+        workspace.candidate_manifest = seal_incremental_narrow_gate_report(
+            staging=workspace.snapshot_dir,
+            manifest=workspace.candidate_manifest,
+            report_bytes=gate_run.report_bytes,
+            report_sha256=gate_run.report_sha256,
+            update_baseline=narrow_baseline,
+        )
+        workspace.narrow_gate_run = gate_run
+    except ProductionNarrowGateError as exc:
+        raise UpdateBlocked(
+            "PRODUCTION_NARROW_GATE_FAILED",
+            f"The production narrow gate failed: {exc.gate_id}.",
+            full_rebuild_required=True,
+        ) from exc
+    except (OSError, sqlite3.DatabaseError, TypeError, ValueError) as exc:
+        raise UpdateBlocked(
+            "INCREMENTAL_CANDIDATE_RESEAL_INVALID",
+            "The candidate could not be resealed and verified.",
+            full_rebuild_required=True,
+        ) from exc
+    return GateResult(
+        passed=True,
+        checks=tuple(
+            {
+                "id": str(check["id"]),
+                "passed": True,
+            }
+            for check in gate_run.report["checks"]
+        ),
+        report_uri="reports/incremental_narrow_gates.json",
+        report_sha256=gate_run.report_sha256,
+        production_authority=False,
     )
 
 
-def _unavailable_publish(
+def prepare_production_incremental_candidate(
+    workspace: UpdateWorkspace,
+) -> None:
+    """Reseal final worker output before constructing its v3 delta receipt."""
+
+    baseline = workspace.update_baseline
+    if (
+        type(baseline) is not UpdateBaseline
+        or type(workspace.staged_baseline) is not StagedBaselineSnapshot
+        or workspace.discovery_path is None
+    ):
+        raise UpdateBlocked(
+            "INCREMENTAL_CANDIDATE_RESEAL_INPUT_MISSING",
+            "The final worker output lacks its typed baseline or Discovery.",
+            full_rebuild_required=True,
+        )
+    try:
+        base_manifest = json.loads(
+            baseline.current_snapshot.manifest_bytes.decode("utf-8")
+        )
+        if not isinstance(base_manifest, dict):
+            raise ValueError("base snapshot manifest is not an object")
+        resealed = reseal_incremental_snapshot_candidate(
+            staging=workspace.snapshot_dir,
+            base_manifest=base_manifest,
+            base_manifest_sha256=baseline.base_manifest_sha256,
+            candidate_source_manifest=baseline.candidate_source_manifest,
+            project_root=PROJECT_ROOT,
+            discovery_database=workspace.discovery_path,
+        )
+    except (OSError, sqlite3.DatabaseError, TypeError, ValueError) as exc:
+        raise UpdateBlocked(
+            "INCREMENTAL_CANDIDATE_RESEAL_INVALID",
+            "The final worker output could not be resealed safely.",
+            full_rebuild_required=True,
+        ) from exc
+    workspace.candidate_manifest = resealed.manifest
+    workspace.candidate_build_id = str(resealed.manifest["buildId"])
+    source = resealed.manifest.get("source")
+    if not isinstance(source, Mapping):
+        raise AssertionError("resealed candidate source identity is missing")
+    workspace.candidate_source_fingerprint = str(source["sha256"])
+    workspace.candidate_generated_at = str(resealed.manifest["generatedAt"])
+
+
+def publish_production_incremental_shadow(
     workspace: UpdateWorkspace,
     paths: UpdatePaths,
     manifest: SourceManifest,
     diff: SourceDiff,
 ) -> Mapping[str, object]:
-    del workspace, paths, manifest, diff
-    raise UpdateBlocked(
-        "ATOMIC_INCREMENTAL_PUBLICATION_NOT_IMPLEMENTED",
-        "No atomic incremental snapshot publisher is implemented.",
-        full_rebuild_required=True,
+    """Publish only the exact candidate sealed by the production gates."""
+
+    baseline = workspace.update_baseline
+    candidate_manifest = workspace.candidate_manifest
+    gate_run = workspace.narrow_gate_run
+    if (
+        type(baseline) is not UpdateBaseline
+        or type(gate_run) is not ProductionNarrowGateRun
+        or not candidate_manifest
+        or manifest != baseline.candidate_source_manifest
+        or diff != baseline.source_diff
+    ):
+        raise IncrementalPublicationNotReplaced(
+            "publisher inputs are not the sealed narrow-gate candidate"
+        )
+    narrow_baseline = NarrowGateUpdateBaseline(
+        base_build_id=baseline.base_build_id,
+        base_pointer_sha256=baseline.base_pointer_sha256,
+        base_manifest_sha256=baseline.base_manifest_sha256,
+        base_source_manifest_fingerprint=(
+            baseline.base_source_manifest_fingerprint
+        ),
+        candidate_source_manifest_fingerprint=(
+            baseline.candidate_source_manifest_fingerprint
+        ),
+        source_diff_sha256=baseline.source_diff_sha256,
+        delta_receipt_sha256=workspace.delta_receipt_sha256,
     )
+
+    def revalidate_live_sources_before_pointer_cas() -> None:
+        validate_final_source_manifest(
+            baseline,
+            scan_source_manifest(paths),
+        )
+
+    receipt = publish_incremental_shadow_snapshot(
+        staging=workspace.snapshot_dir,
+        output_dir=paths.output,
+        manifest=candidate_manifest,
+        expected_current_pointer=baseline.current_snapshot.pointer,
+        expected_current_manifest_sha256=baseline.base_manifest_sha256,
+        expected_update_baseline=narrow_baseline,
+        expected_candidate_source_manifest=manifest,
+        before_pointer_cas=revalidate_live_sources_before_pointer_cas,
+    )
+    if not verify_incremental_shadow_publication(
+        output_dir=paths.output,
+        build_id=str(receipt.get("buildId") or ""),
+        expected_update_baseline=narrow_baseline,
+        expected_candidate_source_manifest=manifest,
+    ):
+        raise IncrementalPublicationUncertain(
+            "the switched snapshot failed independent publication verification"
+        )
+    return receipt
 
 
 def verify_current_publication(
@@ -1377,8 +1814,30 @@ def verify_current_publication(
         return False
     if current.build_id != build_id:
         return False
+    try:
+        _validate_staged_snapshot_for_promotion(
+            staging=current.snapshot_dir,
+            manifest=current.manifest,
+        )
+    except (OSError, sqlite3.DatabaseError, TypeError, ValueError):
+        return False
     update = current.manifest.get("incrementalUpdate")
-    if update is None:
+    publication = current.manifest.get("incrementalPublication")
+    cutover = current.manifest.get("cutover")
+    quality = current.manifest.get("qualityGates")
+    if (
+        update is None
+        or not isinstance(publication, Mapping)
+        or publication.get("productionAuthority") is not False
+        or publication.get("cutoverEligible") is not False
+        or publication.get("mode") != "shadow"
+        or publication.get("defaultQuerySource") != "legacy"
+        or not isinstance(cutover, Mapping)
+        or cutover.get("mode") != "shadow"
+        or cutover.get("defaultQuerySource") != "legacy"
+        or not isinstance(quality, Mapping)
+        or quality.get("cutoverEligible") is not False
+    ):
         return False
     try:
         bound = source_manifest_from_binding(update)
@@ -1396,10 +1855,11 @@ def default_hooks() -> UpdateHooks:
         plan_changes=plan_additive_blueprint_changes,
         ingest_changes=ingest_additive_blueprint_changes,
         drain_worker=drain_production_rebuilds,
-        run_narrow_gates=_unavailable_gates,
-        publish_atomic=_unavailable_publish,
+        run_narrow_gates=run_production_narrow_gate_checks,
+        publish_atomic=publish_production_incremental_shadow,
         verify_publication=verify_current_publication,
         require_locked_update_baseline=True,
+        blueprint_source_provider=materialize_blueprint_defaults,
     )
 
 
@@ -1957,6 +2417,106 @@ def _safe_publication(
             "Publisher did not prove atomic source-manifest binding.",
             full_rebuild_required=True,
         )
+    if "schema" in payload:
+        required = {
+            "schema",
+            "evidenceClass",
+            "status",
+            "buildId",
+            "sourceSha256",
+            "sourceManifestFingerprint",
+            "previousBuildId",
+            "previousManifestSha256",
+            "narrowGateReportSha256",
+            "pointerCAS",
+            "atomicSourceManifestBound",
+            "published",
+            "productionAuthority",
+            "cutoverEligible",
+            "mode",
+            "defaultQuerySource",
+            "proof",
+        }
+        body = {key: value for key, value in payload.items() if key != "proof"}
+        pointer = payload.get("pointerCAS")
+        try:
+            expected_source_sha256 = semantic_inputs_sha256(
+                candidate_semantic_inputs(manifest)
+            )
+            expected_build_id = snapshot_build_id(
+                manifest.generated_at,
+                expected_source_sha256,
+            )
+        except (TypeError, ValueError) as exc:
+            raise UpdateBlocked(
+                "ATOMIC_PUBLICATION_RECEIPT_INVALID",
+                "Publisher receipt cannot be bound to candidate identity.",
+                full_rebuild_required=True,
+            ) from exc
+        expected_proof = "publication-proof://" + hashlib.sha256(
+            json.dumps(
+                body,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            set(payload) != required
+            or payload.get("schema")
+            != "ark-kb-incremental-shadow-publication-receipt/v1"
+            or payload.get("evidenceClass") != "UNSIGNED_LOCAL_WRITE_FACT"
+            or payload.get("status") != "REPLACED"
+            or payload.get("published") is not True
+            or payload.get("productionAuthority") is not False
+            or payload.get("cutoverEligible") is not False
+            or payload.get("mode") != "shadow"
+            or payload.get("defaultQuerySource") != "legacy"
+            or build_id != expected_build_id
+            or payload.get("sourceSha256") != expected_source_sha256
+            or any(
+                not re.fullmatch(r"[0-9a-f]{64}", str(payload.get(key) or ""))
+                for key in (
+                    "previousManifestSha256",
+                    "narrowGateReportSha256",
+                )
+            )
+            or not isinstance(pointer, Mapping)
+            or set(pointer)
+            != {
+                "operation",
+                "beforeBuildId",
+                "afterBuildId",
+                "beforePointerSha256",
+                "afterPointerSha256",
+                "pointerUpdated",
+                "independentlyVerified",
+                "recoveredAfterFailure",
+            }
+            or pointer.get("operation")
+            != "INCREMENTAL_SHADOW_PUBLICATION"
+            or pointer.get("beforeBuildId")
+            != payload.get("previousBuildId")
+            or pointer.get("afterBuildId") != build_id
+            or any(
+                not re.fullmatch(r"[0-9a-f]{64}", str(pointer.get(key) or ""))
+                for key in (
+                    "beforePointerSha256",
+                    "afterPointerSha256",
+                )
+            )
+            or pointer.get("pointerUpdated") is not True
+            or pointer.get("independentlyVerified") is not True
+            or type(pointer.get("recoveredAfterFailure")) is not bool
+            or payload.get("proof") != expected_proof
+        ):
+            raise UpdateBlocked(
+                "ATOMIC_PUBLICATION_RECEIPT_INVALID",
+                "Publisher returned an invalid local shadow receipt.",
+                full_rebuild_required=True,
+            )
+        return payload
     return {
         "buildId": build_id,
         "sourceManifestFingerprint": bound,
@@ -2307,12 +2867,30 @@ def run_incremental_update(
                 base["selectiveInvalidationPlan"] = _safe_plan_summary(
                     plans
                 )
-                ingest = hooks.ingest_changes(workspace, diff, paths)
+                ingest = (
+                    hooks.ingest_changes(
+                        workspace,
+                        diff,
+                        paths,
+                        source_provider=hooks.blueprint_source_provider,
+                    )
+                    if hooks.ingest_changes
+                    is ingest_additive_blueprint_changes
+                    else hooks.ingest_changes(workspace, diff, paths)
+                )
                 base["ingest"] = _safe_ingest_summary(ingest)
                 worker = _worker_payload(
                     hooks.drain_worker(workspace, max_rebuild_items)
                 )
+                workspace.worker_report = worker
                 base["worker"] = _safe_worker_summary(worker)
+                early_worker_blockers = _worker_blockers(worker)
+                if (
+                    not early_worker_blockers
+                    and hooks.run_narrow_gates
+                    is run_production_narrow_gate_checks
+                ):
+                    prepare_production_incremental_candidate(workspace)
                 if hooks.ingest_changes is ingest_additive_blueprint_changes:
                     if (
                         baseline is None
@@ -2357,6 +2935,10 @@ def run_incremental_update(
                         expected_delta_raw_sha256 = hashlib.sha256(
                             delta_raw
                         ).hexdigest()
+                        workspace.delta_receipt_bytes = delta_raw
+                        workspace.delta_receipt_sha256 = (
+                            expected_delta_raw_sha256
+                        )
                         delta_inspection = (
                             inspect_base_bound_prepublication_delta_receipt(
                                 baseline,
@@ -2393,7 +2975,7 @@ def run_incremental_update(
                         receipt=delta_receipt,
                         inspection=delta_inspection.payload(),
                     )
-                blockers = _worker_blockers(worker)
+                blockers = early_worker_blockers
                 if blockers:
                     raise UpdateBlocked(
                         "REBUILD_QUEUE_NOT_DRAINED",
@@ -2429,6 +3011,37 @@ def run_incremental_update(
                         paths,
                         current,
                         diff,
+                    )
+                except IncrementalPublicationNotReplaced as exc:
+                    result = {
+                        **base,
+                        "status": "not_replaced",
+                        "cacheHit": False,
+                        "published": False,
+                        "gapCodes": ["ATOMIC_PUBLICATION_NOT_REPLACED"],
+                        "reason": (
+                            "Publisher independently confirmed that current "
+                            "was not replaced."
+                        ),
+                        "fullRebuildRequired": True,
+                    }
+                    if exc.residual_identifier:
+                        result.update(
+                            {
+                                "publicationResidualIdentifier": (
+                                    exc.residual_identifier
+                                ),
+                                "orphanInventory": list(
+                                    exc.orphan_inventory
+                                ),
+                                "orphanPolicy": exc.orphan_policy,
+                            }
+                        )
+                    return result
+                except IncrementalPublicationUncertain:
+                    return _uncertain_after_switch_result(
+                        base=base,
+                        gap_code="PUBLISHER_OUTCOME_UNCERTAIN",
                     )
                 except Exception:
                     return _uncertain_after_switch_result(
@@ -2474,8 +3087,8 @@ def run_incremental_update(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the bounded additive Blueprint rebuild diagnostic and fail "
-            "closed without publication when any backend or gate is missing."
+            "Run the bounded additive Blueprint rebuild and publish only a "
+            "fully verified local shadow snapshot; otherwise fail closed."
         )
     )
     parser.add_argument("--discovery-database", type=Path, required=True)

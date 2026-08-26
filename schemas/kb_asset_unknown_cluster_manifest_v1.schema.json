@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://arkdev.local/schemas/kb_asset_unknown_cluster_manifest_v1.schema.json",
+  "title": "ARK KB UNKNOWN Class Cluster Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "publicationEligible",
+    "authorityScope",
+    "sourceBinding",
+    "counts",
+    "ruleset",
+    "files",
+    "warnings"
+  ],
+  "properties": {
+    "schema": {"const": "ark.kb.asset-unknown-cluster-manifest.v1"},
+    "status": {"const": "COMPLETE"},
+    "publicationEligible": {"type": "boolean"},
+    "authorityScope": {
+      "const": "REGISTRY_EXACT_CLASS_IDENTITY_AND_CLASS_LEVEL_ONLY"
+    },
+    "sourceBinding": {
+      "type": "object",
+      "required": [
+        "status",
+        "sourceManifestSchema",
+        "sourceTaxonomyFingerprint",
+        "sourcePackageTaxonomy",
+        "sourcePublicationEligible"
+      ],
+      "properties": {
+        "status": {"const": "VERIFIED_MANIFEST"},
+        "sourceManifestSchema": {"const": "ark.kb.asset-taxonomy-manifest.v1"},
+        "sourceTaxonomyFingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sourcePackageTaxonomy": {
+          "type": "object",
+          "required": [
+            "sha256",
+            "bytes",
+            "lines",
+            "packageCount",
+            "unknownObjectCount"
+          ],
+          "properties": {
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "bytes": {"type": "integer", "minimum": 0},
+            "lines": {"type": "integer", "minimum": 0},
+            "packageCount": {"type": "integer", "minimum": 0},
+            "unknownObjectCount": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        },
+        "sourcePublicationEligible": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "counts": {
+      "type": "object",
+      "required": [
+        "unknownObjects",
+        "exactClassClusters",
+        "repeatedExactClassClusters",
+        "singletonExactClassClusters",
+        "safeClassLevelRepresentatives",
+        "generatedClassDefinitionsLinked",
+        "nativeClassClusters",
+        "confirmedClassLevelObjects",
+        "candidateNameFamilies",
+        "deepReadTargets",
+        "stratifiedSampleTargets"
+      ],
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "ruleset": {
+      "type": "object",
+      "required": [
+        "version",
+        "sha256",
+        "safeDeduplication",
+        "nameFamilyNormalization",
+        "nameFamiliesAuthorizeDedupe",
+        "semanticPropagationScope",
+        "notPropagated",
+        "categoryRuleIds"
+      ],
+      "properties": {
+        "version": {"const": "ark-unknown-class-clustering-rules/v2"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "safeDeduplication": {"const": "EXACT_ASSET_CLASS_PATH_ONLY"},
+        "nameFamilyNormalization": {
+          "const": "NUMERIC_TOKEN_OR_ROLE_STEM_CANDIDATE_ONLY"
+        },
+        "nameFamiliesAuthorizeDedupe": {"const": false},
+        "semanticPropagationScope": {"const": "CLASS_LEVEL_ONLY"},
+        "notPropagated": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "categoryRuleIds": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "files": {
+      "type": "object",
+      "minProperties": 6,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["path", "sha256", "bytes", "lines"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "lines": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1
+    }
+  }
+}

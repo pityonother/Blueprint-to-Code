@@ -33,6 +33,9 @@ from blueprint_translator.kb_vnext.rebuild_worker import (  # noqa: E402
     drain_rebuild_queue,
     requeue_rebuild_tasks,
 )
+from blueprint_translator.kb_vnext.roles import (  # noqa: E402
+    ROLE_CLASSIFIER_VERSION,
+)
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CACHE_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
@@ -102,6 +105,94 @@ def _queue(
     connection.commit()
 
 
+def _queue_role_scope_proof(
+    connection: sqlite3.Connection,
+    *,
+    classifier_version: str = ROLE_CLASSIFIER_VERSION,
+    trigger_revision_ids: tuple[int, ...] = (3,),
+    role_entity_ids: tuple[int, ...] = (1,),
+    durable_revision_ids: tuple[int, ...] = (3,),
+) -> rebuild_worker_module.RebuildTask:
+    connection.executemany(
+        """
+        INSERT INTO source_revisions VALUES (
+            ?, ?, ?, ?, ?, 'v1', '2026-07-31T00:00:00Z', 'FRESH'
+        )
+        """,
+        [
+            (
+                2,
+                "role_classifier",
+                f"classifier://{ROLE_CLASSIFIER_VERSION}",
+                "role-classifier-sha",
+                ROLE_CLASSIFIER_VERSION,
+            ),
+            (
+                3,
+                "blueprint_evidence",
+                "bp://source/3",
+                "blueprint-sha-3",
+                "fixture/v1",
+            ),
+            (
+                4,
+                "blueprint_evidence",
+                "bp://source/4",
+                "blueprint-sha-4",
+                "fixture/v1",
+            ),
+        ],
+    )
+    proof: dict[str, object] = {
+        "schema": "ark-kb-additive-role-dependency-scope/v1",
+        "classifierVersion": classifier_version,
+        "sourceRevisionId": 2,
+        "triggerSourceRevisionIds": list(trigger_revision_ids),
+        "changedEntityIds": [1],
+        "roleEntityIds": list(role_entity_ids),
+        "transitions": [],
+    }
+    proof["proof"] = "role-scope://" + rebuild_worker_module._digest(proof)
+    payload = {
+        "ROLE_ENTITY": list(role_entity_ids),
+        "_upstreamRevisionIds": list(durable_revision_ids),
+        "_roleScopeProof": proof,
+    }
+    connection.execute(
+        """
+        INSERT INTO invalidation_events VALUES (
+            'event-role-proof', 'ASSET', NULL, ?,
+            '2026-07-31T00:00:01Z', 'APPLIED'
+        )
+        """,
+        (json.dumps(payload, separators=(",", ":")),),
+    )
+    connection.executemany(
+        """
+        INSERT INTO invalidation_queue VALUES (
+            'event-role-proof', 'ROLE_ENTITY', ?,
+            'ADDITIVE_ROLE_INPUT', 'PENDING_REBUILD'
+        )
+        """,
+        [(entity_id,) for entity_id in role_entity_ids],
+    )
+    connection.executemany(
+        """
+        INSERT INTO invalidation_dependencies VALUES (
+            ?, 'ROLE_ENTITY', 1, 'ADDITIVE_ROLE_INPUT'
+        )
+        """,
+        [(revision_id,) for revision_id in durable_revision_ids],
+    )
+    connection.commit()
+    return rebuild_worker_module.RebuildTask(
+        event_id="event-role-proof",
+        downstream_kind="ROLE_ENTITY",
+        downstream_id=1,
+        dependency_reason="ADDITIVE_ROLE_INPUT",
+    )
+
+
 def _seed_role(
     connection: sqlite3.Connection,
     *,
@@ -131,6 +222,16 @@ def _seed_role(
         """
         INSERT INTO knowledge_depth_policies VALUES (
             ?, 'INDEX_ONLY', '[]', 'test-role/v1'
+        )
+        """,
+        (entity_id,),
+    )
+    connection.execute(
+        """
+        INSERT INTO role_signal_metrics VALUES (
+            ?, 'UNCLASSIFIED', NULL, 'NOT_MEASURED',
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            '{}', 'test-role/v1', 1
         )
         """,
         (entity_id,),
@@ -446,21 +547,23 @@ class IntegrationBackend(CoreMaterializerRebuildBackend):
 
     def rebuild_projection(self, scope: RebuildScope) -> None:
         self.projection_calls += 1
-        for projection_name in DOMAIN_PROJECTIONS:
-            scope.core.execute(
-                """
-                UPDATE projection_runs
-                SET source_revision_set_hash='fresh-hash',
-                    built_at='2026-07-28T01:00:00Z',
-                    validation_status='VALID'
-                WHERE projection_name=?
-                """,
-                (projection_name,),
-            )
-            _write_projection(
-                scope.projection_dir / f"{projection_name}.sqlite",
-                projection_name,
-            )
+        projection_name = tuple(DOMAIN_PROJECTIONS)[
+            scope.task.downstream_id - 1
+        ]
+        scope.core.execute(
+            """
+            UPDATE projection_runs
+            SET source_revision_set_hash='fresh-hash',
+                built_at='2026-07-28T01:00:00Z',
+                validation_status='VALID'
+            WHERE projection_name=?
+            """,
+            (projection_name,),
+        )
+        _write_projection(
+            scope.projection_dir / f"{projection_name}.sqlite",
+            projection_name,
+        )
 
     def rebuild_query_snapshot(self, scope: RebuildScope) -> None:
         assert scope.cache is not None
@@ -769,6 +872,35 @@ class CompleteProjectionBackend(RebuildBackend):
             )
 
 
+class SingleProjectionBackend(RebuildBackend):
+    def __init__(self, *, projection_dir: Path) -> None:
+        super().__init__(projection_dir=projection_dir)
+        self.calls = 0
+
+    def rebuild_projection(self, scope: RebuildScope) -> None:
+        self.calls += 1
+        projection_name = tuple(DOMAIN_PROJECTIONS)[
+            scope.task.downstream_id - 1
+        ]
+        scope.core.execute(
+            """
+            UPDATE projection_runs
+            SET projection_version='v2',
+                source_revision_set_hash='fresh-hash',
+                ontology_version='test-ontology/v1',
+                built_at='2026-07-28T01:00:00Z',
+                row_count=0,
+                validation_status='VALID'
+            WHERE projection_name=?
+            """,
+            (projection_name,),
+        )
+        _write_projection(
+            scope.projection_dir / f"{projection_name}.sqlite",
+            projection_name,
+        )
+
+
 class MetadataOnlyProjectionBackend(RebuildBackend):
     def rebuild_projection(self, scope: RebuildScope) -> None:
         projection_name = tuple(DOMAIN_PROJECTIONS)[
@@ -884,6 +1016,134 @@ class SimulatedProcessCrash(BaseException):
 
 
 class RebuildWorkerTests(unittest.TestCase):
+    def test_role_proof_rejects_rehashed_classifier_version_tamper(
+        self,
+    ) -> None:
+        core = _core()
+        task = _queue_role_scope_proof(
+            core,
+            classifier_version="attacker-role/v999",
+        )
+
+        with self.assertRaisesRegex(
+            rebuild_worker_module.RebuildVerificationError,
+            "role dependency proof is invalid",
+        ):
+            rebuild_worker_module._role_scope_proof(core, task)
+        core.close()
+
+    def test_role_proof_rejects_rehashed_trigger_revision_replacement(
+        self,
+    ) -> None:
+        core = _core()
+        task = _queue_role_scope_proof(
+            core,
+            trigger_revision_ids=(4,),
+        )
+
+        with self.assertRaisesRegex(
+            rebuild_worker_module.RebuildVerificationError,
+            "trigger revision scope is invalid",
+        ):
+            rebuild_worker_module._role_scope_proof(core, task)
+        core.close()
+
+    def test_role_proof_rejects_stale_trigger_revision(self) -> None:
+        core = _core()
+        task = _queue_role_scope_proof(core)
+        core.execute(
+            "UPDATE source_revisions SET freshness_status='STALE' "
+            "WHERE revision_id=3"
+        )
+        core.commit()
+
+        with self.assertRaisesRegex(
+            rebuild_worker_module.RebuildVerificationError,
+            "trigger revision is not fresh",
+        ):
+            rebuild_worker_module._role_scope_proof(core, task)
+        core.close()
+
+    def test_role_proof_and_queue_tamper_cannot_bypass_dependencies(
+        self,
+    ) -> None:
+        core = _core()
+        core.execute(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind, status, confidence
+            ) VALUES (
+                2, '/Game/Test/Other.Other', 'BLUEPRINT_ASSET',
+                'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+        task = _queue_role_scope_proof(
+            core,
+            role_entity_ids=(1, 2),
+        )
+
+        with self.assertRaisesRegex(
+            rebuild_worker_module.RebuildVerificationError,
+            "dependency rows are invalid",
+        ):
+            rebuild_worker_module._role_scope_proof(core, task)
+        core.close()
+
+    def test_role_task_claim_order_follows_fact_and_effective_inputs(
+        self,
+    ) -> None:
+        core = _core()
+        _queue(
+            core,
+            [
+                ("ROLE_ENTITY", 1),
+                ("EFFECTIVE_ENTITY", 1),
+                ("FACT", 1),
+            ],
+        )
+
+        first = rebuild_worker_module._claim_next_task(core, set())
+        second = rebuild_worker_module._claim_next_task(core, set())
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.downstream_kind, "FACT")
+        self.assertEqual(second.downstream_kind, "EFFECTIVE_ENTITY")
+        core.close()
+
+    def test_recovered_role_task_revalidates_proof_before_target_state(
+        self,
+    ) -> None:
+        core = _core()
+        _seed_role(core, status="CONFIRMED")
+        _queue_role_scope_proof(core)
+        core.execute(
+            "UPDATE source_revisions SET freshness_status='STALE' "
+            "WHERE revision_id=3"
+        )
+        core.execute(
+            "UPDATE invalidation_queue SET status='RUNNING'"
+        )
+        core.execute(
+            "UPDATE invalidation_events SET status='RUNNING'"
+        )
+        core.commit()
+
+        report = drain_rebuild_queue(
+            core,
+            NoopRoleBackend(),
+            max_items=1,
+        )
+
+        self.assertEqual(report.recovered_running, 1)
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(
+            core.execute("SELECT status FROM knowledge_roles").fetchone()[0],
+            "CONFIRMED",
+        )
+        core.close()
+
     def test_every_supported_kind_has_exact_row_scope_policy(
         self,
     ) -> None:
@@ -905,7 +1165,7 @@ class RebuildWorkerTests(unittest.TestCase):
                         "EXPLICIT_WHOLE_CACHE_BATCH",
                     )
 
-    def test_real_schema_backend_rebuilds_all_kinds_and_projections_once(
+    def test_real_schema_backend_rebuilds_each_projection_exactly_once(
         self,
     ) -> None:
         core = _core()
@@ -949,7 +1209,7 @@ class RebuildWorkerTests(unittest.TestCase):
         self.assertEqual(report.succeeded, len(queue_rows))
         self.assertEqual(report.failed, 0)
         self.assertEqual(report.blocked_gap, 0)
-        self.assertEqual(backend.projection_calls, 1)
+        self.assertEqual(backend.projection_calls, len(DOMAIN_PROJECTIONS))
         self.assertTrue(
             all(
                 status == "SUCCEEDED"
@@ -1020,7 +1280,7 @@ class RebuildWorkerTests(unittest.TestCase):
             recover_running=False,
         )
         self.assertEqual(repeat.attempted, 0)
-        self.assertEqual(backend.projection_calls, 1)
+        self.assertEqual(backend.projection_calls, len(DOMAIN_PROJECTIONS))
         core.close()
         cache.close()
 
@@ -2013,6 +2273,189 @@ class RebuildWorkerTests(unittest.TestCase):
                 )
             )
         )
+        core.close()
+
+    def test_equal_content_projection_records_verified_execution_basis(
+        self,
+    ) -> None:
+        core = _core()
+        projection_name = tuple(DOMAIN_PROJECTIONS)[0]
+        core.execute(
+            """
+            INSERT INTO projection_runs VALUES (
+                ?, 'v2', 'fresh-hash', 'test-ontology/v1',
+                '2026-07-28T01:00:00Z', 0, 'VALID'
+            )
+            """,
+            (projection_name,),
+        )
+        core.commit()
+        _queue(core, [("PROJECTION", 1)])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "projections"
+            output_dir.mkdir()
+            published = output_dir / f"{projection_name}.sqlite"
+            _write_projection(published, projection_name)
+            sibling = output_dir / f"{tuple(DOMAIN_PROJECTIONS)[1]}.sqlite"
+            sibling.write_bytes(b"sibling-must-not-change")
+            sibling_before = sibling.read_bytes()
+
+            report = drain_rebuild_queue(
+                core,
+                SingleProjectionBackend(projection_dir=output_dir),
+                max_items=1,
+                recover_running=False,
+            )
+
+            self.assertEqual(report.succeeded, 1)
+            self.assertEqual(sibling.read_bytes(), sibling_before)
+        payload = json.loads(
+            core.execute(
+                "SELECT payload_json FROM invalidation_events"
+            ).fetchone()[0]
+        )
+        receipt = payload["_rebuildReceipts"]["PROJECTION:1"]
+        self.assertEqual(
+            receipt["verification"]["basis"],
+            "VERIFIED_PROJECTION_REBUILD",
+        )
+        self.assertEqual(
+            receipt["verification"]["rowScope"]["projectionName"],
+            projection_name,
+        )
+        core.close()
+
+    def test_projection_rollback_failure_preserves_recovery_residual(
+        self,
+    ) -> None:
+        core = _core()
+        projection_name = tuple(DOMAIN_PROJECTIONS)[0]
+        core.execute(
+            """
+            INSERT INTO projection_runs VALUES (
+                ?, 'v2', 'fresh-hash', 'test-ontology/v1',
+                '2026-07-28T01:00:00Z', 0, 'VALID'
+            )
+            """,
+            (projection_name,),
+        )
+        core.commit()
+        _queue(core, [("PROJECTION", 1)])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_dir = root / "projections"
+            output_dir.mkdir()
+            published = output_dir / f"{projection_name}.sqlite"
+            _write_projection(published, projection_name)
+            real_replace = rebuild_worker_module._atomic_replace
+            replace_calls = 0
+
+            def uncertain_replace(source: Path, target: Path) -> None:
+                nonlocal replace_calls
+                replace_calls += 1
+                if replace_calls == 1:
+                    real_replace(source, target)
+                    raise OSError("synthetic uncertain failure after replace")
+                raise OSError("synthetic backup restore failure")
+
+            with mock.patch.object(
+                rebuild_worker_module,
+                "_atomic_replace",
+                side_effect=uncertain_replace,
+            ):
+                report = drain_rebuild_queue(
+                    core,
+                    SingleProjectionBackend(projection_dir=output_dir),
+                    max_items=1,
+                    recover_running=False,
+                )
+
+            self.assertEqual(report.failed, 1)
+            self.assertIn("projection rollback incomplete", report.outcomes[0].detail)
+            residuals = [
+                path
+                for path in root.iterdir()
+                if path.name.startswith(".kb-rebuild-")
+            ]
+            self.assertEqual(len(residuals), 1)
+            self.assertTrue(
+                (
+                    residuals[0]
+                    / ".publish-backup"
+                    / f"{projection_name}.sqlite"
+                ).is_file()
+            )
+        core.close()
+
+    def test_projection_marker_recovers_crash_after_replace_before_receipt(
+        self,
+    ) -> None:
+        core = _core()
+        projection_name = tuple(DOMAIN_PROJECTIONS)[0]
+        core.execute(
+            """
+            INSERT INTO projection_runs VALUES (
+                ?, 'v2', 'fresh-hash', 'test-ontology/v1',
+                '2026-07-28T01:00:00Z', 0, 'VALID'
+            )
+            """,
+            (projection_name,),
+        )
+        core.commit()
+        _queue(core, [("PROJECTION", 1)])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "projections"
+            output_dir.mkdir()
+            _write_projection(
+                output_dir / f"{projection_name}.sqlite",
+                projection_name,
+            )
+            backend = SingleProjectionBackend(projection_dir=output_dir)
+
+            def crash_before_core_receipt_commit(
+                core_connection: sqlite3.Connection,
+                cache_connection: sqlite3.Connection | None,
+            ) -> None:
+                rebuild_worker_module._end_authorizers(
+                    core_connection,
+                    cache_connection,
+                )
+                core_connection.rollback()
+                raise SimulatedProcessCrash
+
+            with mock.patch.object(
+                rebuild_worker_module,
+                "_commit_backend_transactions",
+                side_effect=crash_before_core_receipt_commit,
+            ):
+                with self.assertRaises(SimulatedProcessCrash):
+                    drain_rebuild_queue(
+                        core,
+                        backend,
+                        max_items=1,
+                        recover_running=False,
+                    )
+
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(
+                core.execute(
+                    "SELECT status FROM invalidation_queue"
+                ).fetchone()[0],
+                "RUNNING",
+            )
+            recovered = drain_rebuild_queue(
+                core,
+                backend,
+                max_items=1,
+            )
+
+            self.assertEqual(recovered.recovered_running, 1)
+            self.assertEqual(recovered.succeeded, 1)
+            self.assertTrue(recovered.outcomes[0].cache_hit)
+            self.assertEqual(backend.calls, 1)
         core.close()
 
     def test_metadata_only_projection_cannot_pass_verification(

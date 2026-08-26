@@ -63,6 +63,9 @@ def _make_indexed_fixture(root: Path) -> tuple[Path, dict[str, object]]:
                             "default": "FULL_PIN_BODY_SENTINEL_" + "p" * 4096,
                             "source": "uasset_custom_pin_scan",
                             "confidence": "high",
+                            "resolution": {
+                                "native_pin_id_authority": "EXACT",
+                            },
                             "links": [
                                 {
                                     "target_node": "ApplyEffectNode",
@@ -94,6 +97,9 @@ def _make_indexed_fixture(root: Path) -> tuple[Path, dict[str, object]]:
                             "default": "",
                             "source": "uasset_custom_pin_scan",
                             "confidence": "high",
+                            "resolution": {
+                                "native_pin_id_authority": "EXACT",
+                            },
                             "links": [],
                         }
                     ],
@@ -344,7 +350,7 @@ class EvidenceRepositoryContextPackTests(unittest.TestCase):
                 "graphCount": 1,
                 "nodeCount": 2,
                 "pinCount": 2,
-                "wireCount": 1,
+                "wireCount": 0,
                 "linkObservationCount": 1,
                 "defaultCount": 1,
                 "gapCount": 2,
@@ -372,7 +378,7 @@ class EvidenceRepositoryContextPackTests(unittest.TestCase):
         self.assertEqual(default["name"], "MaxHealth")
         self.assertEqual(gap["reasonCode"], "missing_target_pin_id")
         self.assertIn("clipboard", str(gap["nextProbe"]).lower())
-        self.assertEqual(heuristic_gap["status"], "HEURISTIC")
+        self.assertEqual(heuristic_gap["status"], "NOT_RECOVERED")
         self.assertTrue(heuristic_gap["targetPinRef"])
         self.assertEqual(heuristic_gap["targetNativePinId"], "")
 

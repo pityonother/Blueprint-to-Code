@@ -20,7 +20,10 @@ import {
   preferredReportForAsset,
   reportTargets,
 } from './views/common';
-import type { WorkflowViewModel } from './views/workflow';
+import type {
+  NativeClassReadResult,
+  WorkflowViewModel,
+} from './views/workflow';
 import {
   renderStepActions,
   renderStepPath,
@@ -69,10 +72,13 @@ export class LegacyControlCenterWorkspace {
   private activeJobLabel = '';
   private mainNotice = '';
   private mainNoticeTone: MainNoticeTone = 'info';
+  private nativeClassResult: NativeClassReadResult | null = null;
   private missingFunctions: MissingFunctionItem[] = [];
   private selectedMissingFunctions = new Set<string>();
   private graphQueueSummary: GraphQueueSummary | null = null;
   private graphQueueSummaryAssetPath = '';
+  private pendingAssetName = '';
+  private stateLoadError = '';
   private stateRequest: Promise<void> | null = null;
   private versionRequest: Promise<void> | null = null;
 
@@ -94,8 +100,7 @@ export class LegacyControlCenterWorkspace {
     if (this.state || this.stateRequest) return;
     this.stateRequest = this.refreshState()
       .catch((error) => {
-        this.logs = [error instanceof Error ? error.message : String(error)];
-        this.notify();
+        this.recordStateLoadError(error);
       })
       .finally(() => {
         this.stateRequest = null;
@@ -106,8 +111,7 @@ export class LegacyControlCenterWorkspace {
     if (this.appVersion || this.versionRequest) return;
     this.versionRequest = this.refreshVersion()
       .catch((error) => {
-        this.logs = [error instanceof Error ? error.message : String(error)];
-        this.notify();
+        this.recordStateLoadError(error);
       })
       .finally(() => {
         this.versionRequest = null;
@@ -115,10 +119,17 @@ export class LegacyControlCenterWorkspace {
   }
 
   selectAssetByName(assetName: string): void {
+    if (!this.state) {
+      this.pendingAssetName = assetName;
+      return;
+    }
     const asset = this.state?.assets.find((candidate) => candidate.name === assetName);
-    if (!asset || asset.path === this.selectedPath) return;
+    if (!asset) return;
+    this.pendingAssetName = '';
+    if (asset.path === this.selectedPath && this.devkitInput === asset.path) return;
     this.selectedPath = asset.path;
     this.devkitInput = asset.path;
+    this.nativeClassResult = null;
     this.captureAssetName = asset.name;
     this.selectedReport = preferredReportForAsset(asset);
     this.reportContent = '';
@@ -139,21 +150,37 @@ export class LegacyControlCenterWorkspace {
 
   renderLegacy(): string {
     const asset = this.synchronizedAsset();
-    return renderStepReports(this.workflowView(asset));
+    return `${this.renderStateLoadError()}${renderStepReports(this.workflowView(asset))}`;
   }
 
   renderExperimental(): string {
     const asset = this.synchronizedAsset();
     const workflow = this.workflowView(asset);
     return `
+      ${this.renderStateLoadError()}
       ${renderStepPath(workflow)}
       ${renderStepActions(workflow)}
-      ${renderStepResult(asset)}
+      ${renderStepResult(workflow)}
       ${renderKnowledgeBaseSection(this.state, this.busy)}
       ${renderRecaptureSection(this.captureView(asset))}
       ${renderAdvancedSection(this.advancedView(asset))}
       <p class="footnote">日志最近一条：${escapeHtml(this.logs[0] || '无')}</p>
     `;
+  }
+
+  private renderStateLoadError(): string {
+    if (!this.stateLoadError) return '';
+    return `<div class="action-notice danger" role="alert">
+      <strong>旧版状态不可用</strong>
+      <p>${escapeHtml(this.stateLoadError)}</p>
+      <p>权威 Evidence 首页不受影响；修复旧资产后可使用顶部“刷新状态”重试。</p>
+    </div>`;
+  }
+
+  private recordStateLoadError(error: unknown): void {
+    this.stateLoadError = readableError(error);
+    this.logs = [this.stateLoadError];
+    this.notify();
   }
 
   syncInputs(): void {
@@ -177,6 +204,7 @@ export class LegacyControlCenterWorkspace {
         this.syncInputs();
         this.selectedPath = button.dataset.selectAsset || '';
         this.devkitInput = this.selectedPath;
+        this.nativeClassResult = null;
         window.localStorage.setItem('blueprint-tool.selected', this.selectedPath);
         this.captureAssetName = this.selectedAsset()?.name || this.captureAssetName;
         this.selectedReport = preferredReportForAsset(this.selectedAsset());
@@ -192,6 +220,7 @@ export class LegacyControlCenterWorkspace {
     if (devkitField) {
       devkitField.addEventListener('input', () => {
         this.devkitInput = devkitField.value;
+        this.nativeClassResult = null;
         document
           .querySelector<HTMLButtonElement>('[data-action="read-uasset-graphs"]')
           ?.toggleAttribute('disabled', this.busy || !this.devkitInput.trim());
@@ -305,7 +334,7 @@ export class LegacyControlCenterWorkspace {
     if (quoted?.groups?.path) {
       text = quoted.groups.path.trim();
     }
-    const pathMatch = text.match(/(?<path>\/Game\/[^\s,'"]+)/);
+    const pathMatch = text.match(/(?<path>\/(?:Game|Script)\/[^\s,'"]+)/i);
     if (pathMatch?.groups?.path) {
       text = pathMatch.groups.path.trim();
     } else {
@@ -316,7 +345,11 @@ export class LegacyControlCenterWorkspace {
     }
     text = text.replace(/^["']|["']$/g, '');
     const lowered = text.toLowerCase();
-    if (lowered.startsWith('/game/')) {
+    if (lowered.startsWith('/script/')) {
+      text = `/Script/${text.slice(8)}`;
+    } else if (lowered.startsWith('script/')) {
+      text = `/Script/${text.slice(7)}`;
+    } else if (lowered.startsWith('/game/')) {
       text = `/Game/${text.slice(6)}`;
     } else if (lowered.startsWith('game/')) {
       text = `/Game/${text.slice(5)}`;
@@ -374,12 +407,14 @@ export class LegacyControlCenterWorkspace {
       devkitInput: this.devkitInput,
       mainNotice: this.mainNotice,
       mainNoticeTone: this.mainNoticeTone,
+      nativeClassResult: this.nativeClassResult,
       reportContent: this.reportContent,
       reportLoading: this.reportLoading,
       reportPath: this.reportPath,
       selectedReport: this.selectedReport,
       state: this.state,
       typedAssetName: this.assetNameFromObjectPath(pathValue),
+      typedNativeClass: normalizedPath.startsWith('/Script/'),
       typedPathRecognized: Boolean(normalizedPath),
     };
   }
@@ -418,6 +453,14 @@ export class LegacyControlCenterWorkspace {
     const previousSelectedPath = this.selectedPath;
     const payload = await api<AppState>('/api/state');
     this.state = payload;
+    this.stateLoadError = '';
+    const pendingAsset = this.state.assets.find(
+      (asset) => asset.name === this.pendingAssetName,
+    );
+    if (pendingAsset) {
+      this.selectedPath = pendingAsset.path;
+      this.pendingAssetName = '';
+    }
     this.appVersion = payload.version;
     if (!this.selectedPath || !this.state.assets.some((asset) => asset.path === this.selectedPath)) {
       this.selectedPath = this.state.assets.find((asset) => asset.graphs > 0 && asset.hasOutput)?.path || this.state.assets[0]?.path || '';
@@ -825,21 +868,23 @@ export class LegacyControlCenterWorkspace {
     this.busy = true;
     this.mainNotice = `正在读取：${this.normalizeObjectPathInput(this.devkitInput) || this.devkitInput}`;
     this.mainNoticeTone = 'info';
+    this.nativeClassResult = null;
     this.notify();
     try {
       const payload = await api<
         ApiResult & {
+          sourceKind?: 'native_class_reflection';
           assetPath: string;
-          uassetPath: string;
-          graphCount: number;
-          nodeCount: number;
-          pinCount: number;
-          linkCount: number;
-          graphReportPath: string;
+          uassetPath?: string;
+          graphCount?: number;
+          nodeCount?: number;
+          pinCount?: number;
+          linkCount?: number;
+          graphReportPath?: string;
           agentIndexPath?: string;
           artifactMode?: string;
           analysisJob?: JobInfo;
-        }
+        } & Partial<NativeClassReadResult>
       >('/api/uasset-graphs', {
         method: 'POST',
         body: JSON.stringify({
@@ -850,8 +895,24 @@ export class LegacyControlCenterWorkspace {
         }),
       });
       this.devkitInput = payload.assetPath;
+      if (payload.sourceKind === 'native_class_reflection') {
+        const nativeResult = payload as ApiResult & NativeClassReadResult;
+        this.nativeClassResult = nativeResult;
+        const crouch = nativeResult.properties.find((item) => item.requestedName === 'bIsCrouched')
+          || nativeResult.properties.find((item) => item.requestedName === 'is_crouched');
+        const defaultValue = crouch?.readable ? String(crouch.value) : '不可读';
+        this.setMainNotice(
+          `原生类反射完成：${crouch?.requestedName || '下蹲属性'}的类默认值为 ${defaultValue}；这不是在线玩家实时值。`,
+          crouch?.readable ? 'good' : 'warn',
+        );
+        this.appendLog(
+          `原生类 ${nativeResult.assetPath}：下蹲属性${crouch?.readable ? '可读' : '不可读'}，范围为类默认对象；实际玩家监测仍需运行时实例。`,
+        );
+        this.notify();
+        return;
+      }
       this.setMainNotice(
-        `已从 .uasset 读取 ${payload.graphCount} 个图、${payload.nodeCount} 个节点、${payload.pinCount} 个 pin、${payload.linkCount} 条候选连线。`,
+        `已从 .uasset 读取 ${payload.graphCount ?? 0} 个图、${payload.nodeCount ?? 0} 个节点、${payload.pinCount ?? 0} 个 pin、${payload.linkCount ?? 0} 条候选连线。`,
         'good',
       );
       if (payload.graphReportPath) this.appendLog(`资产解析报告：${payload.graphReportPath}`);
@@ -1060,8 +1121,12 @@ export class LegacyControlCenterWorkspace {
       return;
     }
     if (action === 'refresh') {
-      await this.refreshState();
-      this.appendLog('资产状态已刷新。');
+      try {
+        await this.refreshState();
+        this.appendLog('资产状态已刷新。');
+      } catch (error) {
+        this.recordStateLoadError(error);
+      }
       return;
     }
     if (action === 'open-capture-root') {

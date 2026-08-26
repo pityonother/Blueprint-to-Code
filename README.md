@@ -8,9 +8,10 @@ Blueprint to Code 是面向 ARK DevKit / Unreal Blueprint 的本地、证据优�
 证据，并可选连接与 DLL/PDB hash 绑定的 Native Evidence。项目版本以根目录
 [`VERSION`](VERSION) 为唯一来源。
 
-当前软件版本为 `0.3.1`；Windows 便携版下载方式、分发边界与已知限制见
-[v0.3.1 Release notes](docs/releases/v0.3.1.md)。历史上的
-[v0.3.0 Release notes](docs/releases/v0.3.0.md) 仍保留其 source-only 合同。
+当前软件版本为 `0.3.2`；Windows 便携版下载方式、合并功能、分发边界与已知限制见
+[v0.3.2 Release notes](docs/releases/v0.3.2.md)。历史上的
+[v0.3.1 Release notes](docs/releases/v0.3.1.md) 与
+[v0.3.0 Release notes](docs/releases/v0.3.0.md) 继续保留。
 
 它不是完整 Blueprint decompiler，不会恢复开发者的原始 C++，也不保证生成可编译
 C++。伪代码、Ghidra 伪 C 和静态排行都只是有明确来源与失效边界的分析产物。
@@ -29,7 +30,7 @@ C++。伪代码、Ghidra 伪 C 和静态排行都只是有明确来源与失效�
 | Query mode | `shadow` |
 | 默认查询来源 | `legacy` |
 | Blueprint-native links | 713 candidates / 1 confirmed |
-| Blueprint Evidence | Snapshot `234`；live Scarecrow 是唯一未发布新增 |
+| Blueprint Evidence | Snapshot `234`；live 输入已不是单一新增 |
 | Burn-in | `MISSING / BURN_IN_ATTESTATION_MISSING` |
 | Cutover | `false` |
 
@@ -38,17 +39,22 @@ registration、role Gold 与连续 burn-in 证据不足时，系统会继续 fai
 完整身份、统计和限制见
 [ARK KB vNext 当前状态](docs/ark_kb_vnext/CURRENT_STATUS.md)。
 
-PR #27（merge commit `86c7715dab7dc15635c0cb18789f36d5cd8f3f69`）
-已把生产 `QUERY_SNAPSHOT` backend 合入 `main`。真实 Scarecrow
-prepublication 回放得到 `SUCCEEDED=4 / BLOCKED_GAP=8 / FAILED=0`，v3
-receipt 为 `baseBindingVerified=true`；剩余 Backend 是 Role、Domain 和
-Projection。此次回放保持 `published=false`，没有创建增量 Snapshot，也没有
-修改 current pointer。
+Additive Rebuild Backend 工作包已补齐 selective Role、Domain、六个单投影与
+Query rebuild；隔离的 production-shaped 输入得到
+`SUCCEEDED=12 / BLOCKED_GAP=0 / FAILED=0`。这只是测试证据：2026-07-31
+只读 live rescan 实测为 14 个新增和 10 个变更，命中
+`NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`，因此没有把该结果冒充真实回放，
+也没有创建 Snapshot 或修改 current pointer。
+
+固定 11 项 production narrow gates、完整 candidate reseal、原子 shadow
+publisher 与独立 publication verification 也已接通默认增量路径，并由隔离
+fixture 验证真实目录 rename/CAS。它们不授予 production authority：live 输入仍在
+staging 前阻断，当前仍是 `shadow / legacy / cutoverEligible=false`，没有完成 E4。
 
 ## 5 分钟快速开始
 
 普通 Windows x64 用户请在 GitHub Release 下载
-`BlueprintToCode-v0.3.1-windows-x64-portable.zip`，完整解压后双击
+`BlueprintToCode-v0.3.2-windows-x64-portable.zip`，完整解压后双击
 `START_HERE.bat`。便携包已包含网页和 Python，不需要安装 Python 或 Node.js；
 分析自己的真实 ARK 资产时，仍需在本机合法安装 ARK DevKit。不要把 GitHub 自动
 生成的 `Source code (zip)` 当成便携包。
@@ -68,6 +74,11 @@ npm run build
 3. 先通过 `evidence/current.json` 读取其所指不可变 revision 内、不超过 1,500
    estimated tokens 的 `agent_index.md`；
 4. 再用有预算的 query/context 命令取得当前问题所需证据。
+
+查询 `/Script` 原生类时可直接粘贴
+`/Script/ShooterGame.ShooterCharacter`；绿色按钮会改为“读取原生类属性”，通过
+本机 ARK DevKit 的只读反射显示 `bIsCrouched`、继承来源和类默认值。该结果来自
+类默认对象，不是在线玩家实时状态；实际监测仍需在游戏或 PIE 中取得玩家实例。
 
 便携包用户可直接运行 `START_HERE.bat`；诊断入口是 `DIAGNOSE.bat`。包内还包含
 `QUICK_START_zh.txt` 与逐文件 `SHA256SUMS.txt`。
@@ -204,7 +215,16 @@ runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captu
 runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SnowDragon_Character_BP" search --query "AttackDamage" --budget 800
 runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SnowDragon_Character_BP" neighborhood --id "bp://..." --hops 2 --budget 1500
 runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SnowDragon_Character_BP" gaps --budget 1000
+runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\Iceworm_Queen_Character_BP" runtime-signals --budget 1200
+runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\Ragnarok_WP" runtime-routes --event-name "Ice Queen is Killed" --budget 1800
+runtime\python\python.exe scripts\query_blueprint_evidence.py --asset-dir "captures\SupplyCrate_Base_Horde_Easy" loot-rewards --item-query "PrimalItemArmor_UmbraSaddle" --budget 1600
 ```
+
+跨资产的事件发射、地图接收、`SpawnActor` 与奖励默认值组合使用
+`scripts\query_runtime_loot_chain.py`。它会保留 `GLOBAL_EVENT_RECEIVER_NOT_INDEXED`、
+`SPAWN_CLASS_PIN_IDENTITY_UNAVAILABLE` 和 `REWARD_SOURCE_NOT_AVAILABLE` 等断点，
+不会把独立奖励池命中冒充完整地图掉落路线。合同见
+[运行时掉落链 P0](docs/RUNTIME_LOOT_CHAIN_P0_zh.md)。
 
 从当前、fresh、release-authority Evidence v3 生成不可变 Interpretation Contract v1：
 

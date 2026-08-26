@@ -175,6 +175,7 @@ from blueprint_server.routes_blueprint import blueprint_get_payload
 from blueprint_server.routes_state import StateRoute, state_route_payload
 from blueprint_server.security import SecurityPolicy, redact_sensitive_text
 from package_full_env import read_project_version
+from arkdev_scripting_probe.native_class import run_native_class_probe
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -192,6 +193,13 @@ EXPORT_SCRIPT = (
     / "scripts"
     / "devkit_exporters"
     / "export_current_blueprint_defaults.py"
+)
+NATIVE_CLASS_PROBE_SCRIPT = (
+    PROJECT_ROOT
+    / "scripts"
+    / "arkdev_scripting_probe"
+    / "in_editor"
+    / "arkdev_native_class_probe.py"
 )
 DEVKIT_REQUEST_PATH = CAPTURE_ROOT / "_devkit_export_request.json"
 DEVKIT_CONTENT_ROOT_FILE = PROJECT_ROOT / "devkit_content_root.txt"
@@ -307,6 +315,15 @@ def mine_uasset_graph_candidates_for_request(
     )
 
 
+def read_native_class_for_request(asset_path: str) -> dict[str, object]:
+    return _devkit.read_native_class_for_request(
+        asset_path,
+        content_root=configured_devkit_content_root(),
+        probe_script=NATIVE_CLASS_PROBE_SCRIPT,
+        probe_runner=run_native_class_probe,
+    )
+
+
 def read_uasset_graphs_for_request(
     asset_path: str,
     max_graphs: int = 0,
@@ -327,6 +344,7 @@ def read_uasset_graphs_for_request(
         object_path_resolver=object_path_to_uasset_path,
         read_graph_content=read_uasset_graph_content,
         write_graph_files=write_uasset_graph_read_files,
+        native_class_reader=read_native_class_for_request,
     )
 
 

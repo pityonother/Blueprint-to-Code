@@ -57,15 +57,17 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
                 "blueprint://assets/{asset}/health",
                 "arkdev://tasks/{task_id}",
                 "arkdev://plans/{plan_id}",
+                "arkdev://solvers/{solver_id}",
             },
         )
-        self.assertLessEqual(len(resources) + len(templates), 5)
+        self.assertLessEqual(len(resources) + len(templates), 6)
         self.assertEqual(
             {prompt.name for prompt in prompts},
             {
                 "analyze_blueprint_task",
                 "inspect_blueprint_node",
                 "design_blueprint_patch",
+                "solve_ark_blueprint_requirement",
             },
         )
         by_name = {tool.name: tool for tool in tools}
@@ -99,7 +101,7 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(tool.annotations.open_world_hint)
                 self.assertIn("READ-ONLY", tool.description or "")
                 self.assertIn("NO ARK DEVKIT MUTATION", tool.description or "")
-        for tool in tools[5:]:
+        for tool in tools[5:11]:
             with self.subTest(tool=tool.name):
                 self.assertIsNotNone(tool.output_schema)
                 self.assertIsNotNone(tool.annotations)
@@ -108,6 +110,21 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(tool.annotations.open_world_hint)
                 self.assertIn("WRITES LOCAL TASK METADATA ONLY", tool.description or "")
                 self.assertIn("DOES NOT MODIFY ARK DEVKIT", tool.description or "")
+        for tool in tools[11:]:
+            with self.subTest(tool=tool.name):
+                self.assertIsNotNone(tool.output_schema)
+                self.assertIsNotNone(tool.annotations)
+                self.assertFalse(tool.annotations.read_only_hint)
+                self.assertFalse(tool.annotations.destructive_hint)
+                self.assertFalse(tool.annotations.open_world_hint)
+                self.assertIn(
+                    "WRITES LOCAL SOLVER/TASK METADATA ONLY.",
+                    tool.description or "",
+                )
+                self.assertIn(
+                    "DOES NOT MODIFY ARK DEVKIT OR BLUEPRINT EVIDENCE.",
+                    tool.description or "",
+                )
 
     async def test_tools_return_structured_content_and_stable_execution_errors(
         self,
@@ -129,6 +146,14 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
                     "budgetTokens": 2400,
                 },
             )
+            default_context = await client.call_tool(
+                "blueprint_get_context",
+                {
+                    "asset": "InterpretationFixture",
+                    "goal": "DefaultThreshold",
+                    "budgetTokens": 2400,
+                },
+            )
             error = await client.call_tool(
                 "blueprint_get_context",
                 {"asset": "MissingFixture", "goal": "ReceiveBeginPlay"},
@@ -142,12 +167,16 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status.structured_content["readOnly"])
         self.assertTrue(status.structured_content["taskMetadataWrite"])
         self.assertTrue(status.structured_content["capabilities"]["patchPlan"])
+        self.assertTrue(status.structured_content["capabilities"]["solver"])
+        self.assertTrue(
+            status.structured_content["capabilities"]["localSolverMetadataWrite"]
+        )
         self.assertEqual(status.structured_content["transport"], "stdio")
         self.assertNotIn(str(ROOT), json.dumps(status.structured_content))
         self.assertFalse(editor.structured_content["connected"])
         self.assertEqual(
             editor.structured_content["reasonCode"],
-            "EDITOR_BRIDGE_NOT_INSTALLED",
+            "EDITOR_BRIDGE_STATE_NOT_FOUND",
         )
         self.assertEqual(
             assets.structured_content["schema"],
@@ -157,6 +186,10 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
             context.structured_content["schema"],
             "blueprint-to-code.mcp-blueprint-context/v1",
         )
+        self.assertFalse(default_context.is_error)
+        self.assertEqual(len(default_context.structured_content["facts"]), 1)
+        self.assertEqual(default_context.structured_content["graphTargets"], [])
+        self.assertIn("1 facts and 0 nodes", default_context.content[0].text)
         self.assertTrue(error.is_error)
         self.assertEqual(
             error.structured_content,
@@ -242,12 +275,24 @@ class ArkdevMcpServerContractTests(unittest.IsolatedAsyncioTestCase):
             create_server(self.capture_root, editor_bridge=bridge)
         ) as client:
             status = await client.call_tool("arkdev_status", {})
+            editor_state = await client.call_tool(
+                "arkdev_editor_state", {"includeSelection": True}
+            )
 
         self.assertFalse(status.is_error)
         self.assertTrue(status.structured_content["capabilities"]["editorBridge"])
         self.assertEqual(
             status.structured_content["editorBridge"],
-            {"status": "CONNECTED", "reasonCode": ""},
+            {
+                "status": "CONNECTED",
+                "stateStatus": "CONNECTED",
+                "reasonCode": "",
+            },
+        )
+        self.assertFalse(editor_state.is_error)
+        self.assertEqual(
+            editor_state.structured_content["activeAsset"],
+            "/Game/Test/Fixture.Fixture",
         )
 
 

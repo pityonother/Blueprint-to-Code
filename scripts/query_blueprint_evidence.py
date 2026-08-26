@@ -11,7 +11,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from blueprint_translator.evidence_repository import open_asset_repository  # noqa: E402
+from blueprint_translator.evidence_repository import (  # noqa: E402
+    open_resolved_asset_repository,
+    resolve_asset_evidence_state,
+)
+
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
 
 
 def _add_budget(parser: argparse.ArgumentParser, default: int = 1000) -> None:
@@ -32,7 +42,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--kind",
         action="append",
         dest="kinds",
-        choices=["graph", "node", "pin", "default", "diagnostic", "edge_observation"],
+        choices=[
+            "graph",
+            "node",
+            "pin",
+            "default",
+            "asset_field",
+            "diagnostic",
+            "edge_observation",
+        ],
     )
     search.add_argument("--page-size", type=int)
     search.add_argument("--cursor")
@@ -76,6 +94,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     gaps.add_argument("--page-size", type=int)
     gaps.add_argument("--cursor")
     _add_budget(gaps, 1000)
+
+    runtime_signals = subparsers.add_parser("runtime-signals")
+    runtime_signals.add_argument("--page-size", type=int)
+    runtime_signals.add_argument("--cursor")
+    _add_budget(runtime_signals, 1200)
+
+    loot_rewards = subparsers.add_parser("loot-rewards")
+    loot_rewards.add_argument("--item-query", required=True)
+    loot_rewards.add_argument("--page-size", type=int)
+    loot_rewards.add_argument("--cursor")
+    _add_budget(loot_rewards, 1600)
+
+    runtime_routes = subparsers.add_parser("runtime-routes")
+    runtime_routes.add_argument("--event-name", required=True)
+    runtime_routes.add_argument("--page-size", type=int)
+    runtime_routes.add_argument("--cursor")
+    _add_budget(runtime_routes, 1800)
     return parser.parse_args(argv)
 
 
@@ -128,13 +163,40 @@ def request_from_args(args: argparse.Namespace) -> dict[str, object]:
             request["pageSize"] = args.page_size
         if args.cursor:
             request["cursor"] = args.cursor
+    if args.operation == "runtime-signals":
+        if args.page_size is not None:
+            request["pageSize"] = args.page_size
+        if args.cursor:
+            request["cursor"] = args.cursor
+    if args.operation == "loot-rewards":
+        request["itemQuery"] = args.item_query
+        if args.page_size is not None:
+            request["pageSize"] = args.page_size
+        if args.cursor:
+            request["cursor"] = args.cursor
+    if args.operation == "runtime-routes":
+        request["eventName"] = args.event_name
+        if args.page_size is not None:
+            request["pageSize"] = args.page_size
+        if args.cursor:
+            request["cursor"] = args.cursor
     return request
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     args = parse_args(list(argv if argv is not None else sys.argv[1:]))
     try:
-        with open_asset_repository(args.asset_dir) as repository:
+        state = resolve_asset_evidence_state(args.asset_dir, allow_stale=True)
+        purpose = (
+            "formal_query"
+            if state.source_kind == "INDEXED_V3_CURRENT"
+            else "draft_query"
+        )
+        with open_resolved_asset_repository(
+            state,
+            purpose=purpose,
+        ) as repository:
             request = request_from_args(args)
             if args.operation == "gaps" and str(args.scope or "").startswith("graph:"):
                 graph_name = str(args.scope)[len("graph:") :].strip()
@@ -168,6 +230,20 @@ def main(argv: list[str] | None = None) -> int:
                     "migrationRequired": repository.migration_required,
                     "manifestSha256": repository.manifest_sha256,
                     "pointerSha256": repository.pointer_sha256,
+                    "evidenceDecision": {
+                        "allowed": repository.evidence_decision.allowed,
+                        "purpose": repository.evidence_decision.purpose,
+                        "reasonCode": repository.evidence_decision.reason_code,
+                        "reasonCodes": list(repository.evidence_decision.reason_codes),
+                        "bindingDigest": repository.evidence_decision.binding_digest,
+                        "evidenceAvailability": (
+                            repository.evidence_decision.evidence_availability
+                        ),
+                        "nonUpgradeableGaps": list(
+                            repository.evidence_decision.non_upgradeable_gaps
+                        ),
+                    },
+                    "statusZh": repository.evidence_decision.public_status_zh,
                 }
             )
     except Exception as exc:

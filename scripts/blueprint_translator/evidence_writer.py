@@ -17,7 +17,7 @@ import sqlite3
 import tempfile
 import time
 import zlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -35,7 +35,9 @@ from .evidence_schema import (
     EVIDENCE_SCHEMA_VERSION,
     LEGACY_CAPTURE_PARSER_VERSION,
     ensure_evidence_schema,
+    make_asset_field_ref,
     make_asset_id,
+    make_asset_ref,
     make_default_ref,
     make_graph_ref,
     make_node_ref,
@@ -54,12 +56,12 @@ _SIDECAR_NAMES = (
     "uasset_failed_graph_queue.json",
 )
 
-DIRECT_PAYLOAD_PARSER_VERSION = "uasset-graph-reader-evidence-v4"
+DIRECT_PAYLOAD_PARSER_VERSION = "uasset-graph-reader-evidence-v7"
 JSON_COMPRESSION_THRESHOLD = 4096
 PUBLISH_REPLACE_ATTEMPTS = 6
 SEARCH_SUMMARY_MAX_CHARS = 160
 SEARCH_TEXT_MAX_CHARS = 384
-SEARCH_MATERIALIZED_KINDS = ("graph", "node", "pin", "default")
+SEARCH_MATERIALIZED_KINDS = ("graph", "node", "pin", "default", "asset_field")
 
 
 def _compact_json(value: object) -> str:
@@ -396,6 +398,7 @@ def _parser_local_pin_key(raw_pin: dict[str, Any]) -> str:
 
 def _parser_local_target_pin_key(raw_link: dict[str, Any]) -> str:
     return _first_text(
+        raw_link.get("target_pin_internal_key"),
         raw_link.get("target_native_pin_id"),
         raw_link.get("target_pin_id"),
     )
@@ -519,6 +522,13 @@ def _mark_search_materialization(connection: sqlite3.Connection, revision_id: st
         "default": int(
             connection.execute(
                 "SELECT COUNT(*) FROM class_defaults WHERE revision_id = ?",
+                (revision_id,),
+            ).fetchone()[0]
+        ),
+        "asset_field": int(
+            connection.execute(
+                "SELECT COUNT(*) FROM properties "
+                "WHERE revision_id = ? AND owner_kind = 'asset'",
                 (revision_id,),
             ).fetchone()[0]
         ),
@@ -798,10 +808,17 @@ def _insert_nodes_and_pins(
                 ),
             )
 
+    native_pin_counts = Counter(
+        pin["native_pin_id"]
+        for node in node_records
+        for pin in node["pins"]
+        if pin["native_pin_id"]
+    )
     return {
         "records": node_records,
         "by_name": nodes_by_name,
         "by_package": nodes_by_package,
+        "native_pin_counts": native_pin_counts,
     }
 
 
@@ -831,6 +848,7 @@ def _find_target_node(
     if len(candidates) == 1:
         return candidates[0], False
     native_pin_id = _authoritative_target_pin_id(link)
+    source = _first_text(link.get("source"), link.get("link_source"))
     pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
     if native_pin_id:
         id_matches = _unique_records(
@@ -844,19 +862,8 @@ def _find_target_node(
         if len(id_matches) == 1:
             return id_matches[0], False
         if len(id_matches) > 1:
-            if pin_name:
-                named_id_matches = _unique_records(
-                    (
-                        node
-                        for node in id_matches
-                        if any(pin["name"] == pin_name for pin in node["pins"])
-                    ),
-                    "node_ref",
-                )
-                if len(named_id_matches) == 1:
-                    return named_id_matches[0], False
             return None, True
-    if pin_name:
+    if pin_name and not source.startswith("uasset_"):
         name_matches = _unique_records(
             (
                 node
@@ -885,11 +892,6 @@ def _find_target_pin(
         if len(matches) == 1:
             return matches[0], False, False
         if len(matches) > 1:
-            pin_name = _first_text(link.get("target_pin"), link.get("target_pin_name"))
-            if pin_name:
-                named_matches = [pin for pin in matches if pin["name"] == pin_name]
-                if len(named_matches) == 1:
-                    return named_matches[0], False, False
             return None, True, False
     source = _first_text(link.get("source"), link.get("link_source"))
     if source.startswith("uasset_") and not native_pin_id:
@@ -942,7 +944,6 @@ def _insert_edges(
                     raw_link,
                     target_node,
                 )
-                ambiguous = target_node_ambiguous or target_pin_ambiguous
                 target_node_name = _first_text(raw_link.get("target_node"), raw_link.get("target_node_name"))
                 target_pin_id = _authoritative_target_pin_id(raw_link)
                 target_pin_name = _first_text(raw_link.get("target_pin"), raw_link.get("target_pin_name"))
@@ -951,12 +952,46 @@ def _insert_edges(
                     kind = "exec" if source_pin["category"].casefold() == "exec" else "data"
                 status = _first_text(raw_link.get("status"))
                 resolution_status = _first_text(raw_link.get("resolution_status"), status)
-                if ambiguous:
-                    resolution_status = "ambiguous"
+                source_native_pin_id = _first_text(
+                    source_pin.get("native_pin_id")
+                )
+                target_native_pin_id = (
+                    _first_text(target_pin.get("native_pin_id"))
+                    if target_pin is not None
+                    else ""
+                )
+                native_pin_counts = lookup.get("native_pin_counts", {})
+                source_identity_count = int(
+                    native_pin_counts.get(source_native_pin_id, 0)
+                ) if source_native_pin_id else 0
+                target_identity_count = int(
+                    native_pin_counts.get(target_native_pin_id, 0)
+                ) if target_native_pin_id else 0
+                if target_node_ambiguous:
+                    resolution_status = "ambiguous_target_node_identity"
+                elif target_pin_ambiguous:
+                    resolution_status = "ambiguous_target_pin_identity"
+                elif not source_native_pin_id:
+                    resolution_status = "source_pin_identity_unavailable"
+                elif source_identity_count != 1:
+                    resolution_status = "ambiguous_source_pin_identity"
                 elif heuristic_pin_match:
                     resolution_status = "resolved_pin_heuristic"
                 elif target_pin is not None and not resolution_status:
                     resolution_status = "resolved_pin"
+                if (
+                    target_pin is not None
+                    and not target_node_ambiguous
+                    and not target_pin_ambiguous
+                    and source_native_pin_id
+                    and source_identity_count == 1
+                ):
+                    if not target_pin_id or not target_native_pin_id:
+                        resolution_status = "target_pin_identity_unavailable"
+                    elif target_pin_id != target_native_pin_id:
+                        resolution_status = "target_pin_identity_mismatch"
+                    elif target_identity_count != 1:
+                        resolution_status = "ambiguous_target_pin_identity"
                 edge_confidence = _first_text(
                     raw_link.get("confidence"),
                     raw_link.get("link_confidence"),
@@ -1007,7 +1042,19 @@ def _insert_edges(
                         "INSERT INTO edge_candidate_sets(observation_id, candidates_json) VALUES (?, ?)",
                         (observation_id, _compact_json(packed_candidates)),
                     )
-                if target_pin is None:
+                identities_are_unique = (
+                    target_pin is not None
+                    and bool(source_native_pin_id)
+                    and bool(target_native_pin_id)
+                    and source_identity_count == 1
+                    and target_identity_count == 1
+                    and target_pin_id == target_native_pin_id
+                    and not target_node_ambiguous
+                    and not target_pin_ambiguous
+                    and not heuristic_pin_match
+                    and resolution_status == "resolved_pin"
+                )
+                if not identities_are_unique:
                     continue
                 source_ref, target_ref = _canonical_edge(source_pin, target_pin)
                 edge_key = (source_ref, target_ref, kind)
@@ -1149,6 +1196,146 @@ def _insert_defaults(
             name=name,
             summary=_first_text(row.get("type"), row.get("type_name")),
             search_text=" ".join((name, _first_text(row.get("type"), row.get("type_name")))),
+        )
+
+
+def _insert_asset_fields(
+    connection: sqlite3.Connection,
+    *,
+    payload: dict[str, Any],
+    asset_id: str,
+    revision_id: str,
+) -> int:
+    """Store only confirmed instance-owned values as queryable facts."""
+
+    variables = payload.get("variables")
+    if not isinstance(variables, dict):
+        return 0
+    owner_ref = make_asset_ref(asset_id, revision_id)
+    inserted = 0
+    for name in sorted(str(value) for value in variables):
+        raw = variables.get(name)
+        row = raw if isinstance(raw, dict) else {"value": raw}
+        if row.get("confirmed_value_usable") is not True:
+            continue
+        field_ref = make_asset_field_ref(asset_id, revision_id, name)
+        value = row.get("value")
+        value_json, value_codec, value_blob = _json_storage(value)
+        connection.execute(
+            "INSERT INTO properties(property_ref, revision_id, owner_kind, owner_ref, name, type_name, "
+            "value_json, value_codec, value_blob, confidence, source, raw_offsets_json, extra_json) "
+            "VALUES (?, ?, 'asset', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                field_ref,
+                revision_id,
+                owner_ref,
+                name,
+                _first_text(row.get("type"), row.get("type_name")),
+                value_json,
+                value_codec,
+                value_blob,
+                _first_text(row.get("confidence")),
+                _first_text(row.get("source")),
+                _compact_json(
+                    row.get("raw_offsets")
+                    if isinstance(row.get("raw_offsets"), dict)
+                    else {}
+                ),
+                _compact_json(
+                    _without(
+                        row,
+                        {
+                            "name",
+                            "type",
+                            "type_name",
+                            "value",
+                            "confidence",
+                            "source",
+                            "raw_offsets",
+                            "owner_kind",
+                        },
+                    )
+                ),
+            ),
+        )
+        type_name = _first_text(row.get("type"), row.get("type_name"))
+        _insert_search(
+            connection,
+            ref=field_ref,
+            revision_id=revision_id,
+            kind="asset_field",
+            name=name,
+            summary=type_name,
+            search_text=" ".join((name, type_name, _compact_json(value))),
+        )
+        inserted += 1
+    return inserted
+
+
+def _insert_asset_field_diagnostics(
+    connection: sqlite3.Connection,
+    *,
+    payload: dict[str, Any],
+    asset_id: str,
+    revision_id: str,
+    asset_field_count: int,
+) -> None:
+    owner_ref = make_asset_ref(asset_id, revision_id)
+    gaps = payload.get("gaps") if isinstance(payload.get("gaps"), list) else []
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            continue
+        field_path = _first_text(gap.get("field"), gap.get("field_path"))
+        scope_ref = (
+            make_asset_field_ref(asset_id, revision_id, field_path)
+            if field_path
+            else owner_ref
+        )
+        scope_kind = "asset_field" if field_path else "asset"
+        reason_code = _first_text(
+            gap.get("reason_code"),
+            "ASSET_FIELD_NOT_DECODED",
+        )
+        diagnostic_ref = (
+            f"{scope_ref}/diagnostic/"
+            f"{_short_hash(f'{field_path}|{reason_code}')}"
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO diagnostics(diagnostic_ref, revision_id, scope_kind, scope_ref, status, "
+            "reason_code, severity, title, detail, next_probe, evidence_json, raw_json) "
+            "VALUES (?, ?, ?, ?, 'NOT_RECOVERED', ?, 'warning', ?, ?, ?, '[]', ?)",
+            (
+                diagnostic_ref,
+                revision_id,
+                scope_kind,
+                scope_ref,
+                reason_code,
+                reason_code.replace("_", " "),
+                _first_text(gap.get("detail"), "The instance field was not decoded."),
+                _first_text(
+                    gap.get("next_probe"),
+                    "Inspect the exact serialized field boundaries and native struct layout.",
+                ),
+                _compact_json(gap),
+            ),
+        )
+    if asset_field_count == 0:
+        reason_code = "ASSET_FIELDS_EMPTY"
+        diagnostic_ref = f"{owner_ref}/diagnostic/{_short_hash(reason_code)}"
+        connection.execute(
+            "INSERT OR IGNORE INTO diagnostics(diagnostic_ref, revision_id, scope_kind, scope_ref, status, "
+            "reason_code, severity, title, detail, next_probe, evidence_json, raw_json) "
+            "VALUES (?, ?, 'asset', ?, 'NOT_RECOVERED', ?, 'warning', ?, ?, ?, '[]', ?)",
+            (
+                diagnostic_ref,
+                revision_id,
+                owner_ref,
+                reason_code,
+                "Asset instance fields are empty",
+                "No confirmed usable instance-owned field was materialized.",
+                "Recover at least one exact same-name instance field before treating this route as available.",
+                _compact_json(payload),
+            ),
         )
 
 
@@ -1336,6 +1523,7 @@ def _write_database_components(
     source_metadata: dict[str, tuple[int, str]],
     graph_inputs: Iterable[tuple[dict[str, Any], dict[str, Any]]],
     class_defaults: dict[str, Any],
+    asset_fields: dict[str, Any],
     triage: dict[str, Any],
     failed_queue: dict[str, Any],
     parser_version: str,
@@ -1435,6 +1623,21 @@ def _write_database_components(
                 asset_id=asset_id,
                 revision_id=revision_id,
             )
+            asset_fields_active = bool(asset_fields) and (
+                asset_fields.get("loaded") is True
+                or bool(asset_fields.get("instance_object"))
+                or bool(asset_fields.get("variables"))
+            )
+            asset_field_count = (
+                _insert_asset_fields(
+                    connection,
+                    payload=asset_fields,
+                    asset_id=asset_id,
+                    revision_id=revision_id,
+                )
+                if asset_fields_active
+                else 0
+            )
             _mark_search_materialization(connection, revision_id)
             asset_scope_ref = f"bp://{asset_id}@{revision_id}"
             _insert_diagnostics(
@@ -1450,6 +1653,14 @@ def _write_database_components(
                 revision_id=revision_id,
                 graphs=diagnostic_graphs,
             )
+            if asset_fields_active:
+                _insert_asset_field_diagnostics(
+                    connection,
+                    payload=asset_fields,
+                    asset_id=asset_id,
+                    revision_id=revision_id,
+                    asset_field_count=asset_field_count,
+                )
             connection.execute(
                 "INSERT INTO coverage(scope_ref, revision_id, scope_kind, status, confidence, metrics_json) "
                 "VALUES (?, ?, 'asset', 'AVAILABLE', '', ?)",
@@ -1574,6 +1785,7 @@ def _write_database_components(
         "counts": counts,
         "source_count": len(source_hashes),
         "default_count": default_count,
+        "asset_field_count": asset_field_count,
         "gap_count": gap_count,
         "candidate_count": candidate_count,
         "graph_status_counts": graph_status_counts,
@@ -1627,6 +1839,7 @@ def _build_database(asset_dir: Path, database_path: Path) -> dict[str, Any]:
         source_metadata=source_metadata,
         graph_inputs=graph_inputs,
         class_defaults=sidecars.get("uasset_class_defaults.json", {}),
+        asset_fields={},
         triage=sidecars.get("uasset_partial_graph_triage.json", {}),
         failed_queue=sidecars.get("uasset_failed_graph_queue.json", {}),
         parser_version=LEGACY_CAPTURE_PARSER_VERSION,
@@ -1645,6 +1858,22 @@ def write_evidence_store_from_capture(asset_dir: str | Path, database_path: str 
         raise FileNotFoundError(source)
     destination = Path(database_path).resolve()
     return _build_database(source, destination)
+
+
+def _stable_direct_graph_payload(payload: object) -> object:
+    """Remove capture-clock metadata without hiding semantic graph changes."""
+
+    if not isinstance(payload, dict):
+        return payload
+    stable = dict(payload)
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        stable["metadata"] = {
+            key: value
+            for key, value in metadata.items()
+            if key != "generated"
+        }
+    return stable
 
 
 def _direct_source_manifest(
@@ -1672,6 +1901,7 @@ def _direct_source_manifest(
         "asset_path": payload.get("asset_path", ""),
         "asset_name": payload.get("asset_name", ""),
         "class_defaults": payload.get("class_defaults", {}),
+        "asset_fields": payload.get("asset_fields", {}),
     }
     encoded = _compact_json(stable_header).encode("utf-8")
     fact_hasher.update(encoded)
@@ -1692,7 +1922,9 @@ def _direct_source_manifest(
             "link_count": graph.get("link_count", 0),
             "coverage": graph.get("coverage", {}),
             "warnings": graph.get("warnings", []),
-            "payload": graph.get("payload", {}),
+            "payload": _stable_direct_graph_payload(
+                graph.get("payload", {})
+            ),
         }
         encoded = _compact_json(evidence).encode("utf-8")
         fact_hasher.update(b"\x1e")
@@ -1755,6 +1987,8 @@ def write_evidence_store_from_payload(
     uasset_path: str | Path | None,
     payload: dict[str, Any],
     database_path: str | Path,
+    *,
+    source_binary_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Write v2 evidence directly from the parser's in-memory payload.
 
@@ -1768,7 +2002,12 @@ def write_evidence_store_from_payload(
         raise ValueError("asset_path is required")
     asset_name = _first_text(payload.get("asset_name"), Path(object_path.split(".", 1)[0]).name, "Blueprint")
     resolved_uasset = Path(uasset_path).expanduser().resolve() if uasset_path else None
-    source_hashes, source_metadata = _direct_source_manifest(resolved_uasset, payload)
+    resolved_binary_source = (
+        Path(source_binary_path).expanduser().resolve()
+        if source_binary_path
+        else resolved_uasset
+    )
+    source_hashes, source_metadata = _direct_source_manifest(resolved_binary_source, payload)
     graphs = payload.get("graphs") if isinstance(payload.get("graphs"), list) else []
 
     def graph_inputs() -> Iterable[tuple[dict[str, Any], dict[str, Any]]]:
@@ -1801,6 +2040,7 @@ def write_evidence_store_from_payload(
         source_metadata=source_metadata,
         graph_inputs=graph_inputs(),
         class_defaults=payload.get("class_defaults") if isinstance(payload.get("class_defaults"), dict) else {},
+        asset_fields=payload.get("asset_fields") if isinstance(payload.get("asset_fields"), dict) else {},
         triage=_direct_triage(payload),
         failed_queue=_direct_failed_queue(payload),
         parser_version=DIRECT_PAYLOAD_PARSER_VERSION,
@@ -1808,6 +2048,12 @@ def write_evidence_store_from_payload(
 
 
 def _agent_index(result: dict[str, Any]) -> str:
+    def within_portable_budget(text: str) -> bool:
+        # A user or editor can normalize LF output to CRLF on Windows.  Keep
+        # enough headroom that the same bounded index remains valid afterward.
+        crlf_text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+        return estimate_tokens(text) <= 1500 and estimate_tokens(crlf_text) <= 1500
+
     counts = result["counts"]
     node_rows = result.get("node_summaries") if isinstance(result.get("node_summaries"), list) else []
     node_rows = sorted(
@@ -1933,6 +2179,7 @@ def _agent_index(result: dict[str, Any]) -> str:
         f"- Graph status counts: {graph_status_text}\n"
         f"- Candidate target Pins retained: {int(result.get('candidate_count') or 0)}\n"
         f"- Class defaults: {int(result.get('default_count') or 0)}\n"
+        f"- Asset fields: {int(result.get('asset_field_count') or 0)}\n"
         f"- Evidence gaps: {int(result.get('gap_count') or 0)}; unresolved/heuristic link observations: {unresolved_links}\n\n"
         "## Selected high-signal entry points\n\n"
         "### Graphs\n\n"
@@ -1958,7 +2205,7 @@ def _agent_index(result: dict[str, Any]) -> str:
         "\n"
         "Indexed generation never deletes legacy files; only an explicit user-run `--prune-legacy` may remove them.\n"
     )
-    if estimate_tokens(content) <= 1500:
+    if within_portable_budget(content):
         return content
 
     # Long object paths and refs must not be allowed to break the index budget.
@@ -1974,14 +2221,14 @@ def _agent_index(result: dict[str, Any]) -> str:
     search_command = "    & $py $cli --asset-dir $asset search --query $term --kind node --page-size 10 --budget 600\n"
     content = content.replace(search_command, "", 1)
     content = content.replace(f"    $term = {selected_node_name}\n", "", 1)
-    if estimate_tokens(content) > 1500:
+    if not within_portable_budget(content):
         content = content.replace(f"- Graph status counts: {graph_status_text}\n", "", 1)
         content = content.replace(
             f"- Candidate target Pins retained: {int(result.get('candidate_count') or 0)}\n",
             "",
             1,
         )
-    if estimate_tokens(content) <= 1500:
+    if within_portable_budget(content):
         return content
 
     # Last-resort navigation card for deliberately hostile or filesystem-invalid
@@ -2053,6 +2300,7 @@ def _agent_index(result: dict[str, Any]) -> str:
         f"- Recovery rates: complete graphs={complete_graphs}/{counts['graphs']} ({graph_complete_rate:.1f}%); "
         f"exact links={confirmed_links}/{counts['edge_observations']} ({exact_link_rate:.1f}%)\n"
         f"- Graph status: {graph_status_text}; Defaults={int(result.get('default_count') or 0)}; "
+        f"Asset fields={int(result.get('asset_field_count') or 0)}; "
         f"Gaps={int(result.get('gap_count') or 0)}\n\n"
         "## Selected entry points\n\n"
         f"{compact_entry_text}\n\n"
@@ -2063,7 +2311,13 @@ def _agent_index(result: dict[str, Any]) -> str:
         f"{compact_commands}\n\n"
         "Indexed generation never deletes legacy files; `--prune-legacy` is explicit only.\n"
     )
-    if estimate_tokens(content) > 1500:
+    if not within_portable_budget(content):
+        content = content.replace(
+            compact_entry_text,
+            "- Use the exact bounded overview, entity, neighborhood, and gaps commands below.",
+            1,
+        )
+    if not within_portable_budget(content):
         raise ValueError("agent_index.md cannot be rendered within the 1500-token contract")
     return content
 
@@ -2473,6 +2727,7 @@ def write_evidence_artifacts_from_payload(
     asset_dir: str | Path,
     *,
     publish_v3: bool = True,
+    source_binary_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Publish an immutable v3 revision, then refresh v2 compatibility files."""
 
@@ -2484,7 +2739,13 @@ def write_evidence_artifacts_from_payload(
     staging_root = Path(tempfile.mkdtemp(prefix=".evidence-direct-", dir=destination_root))
     try:
         staged_database = staging_root / "evidence.sqlite"
-        result = write_evidence_store_from_payload(asset_path, uasset_path, payload, staged_database)
+        result = write_evidence_store_from_payload(
+            asset_path,
+            uasset_path,
+            payload,
+            staged_database,
+            source_binary_path=source_binary_path,
+        )
         staged_manifest = _atomic_write_bytes(
             staging_root / "manifest.json",
             (json.dumps(_manifest_payload(result), ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
@@ -2505,6 +2766,13 @@ def write_evidence_artifacts_from_payload(
                 database_path=staged_database,
                 agent_index_path=staged_index,
                 compatibility_manifest_bytes=staged_manifest.read_bytes(),
+                # The direct binary reader supplies an immutable snapshot path.
+                # Only that path can prove a single parsed source generation and
+                # is therefore allowed to require FRESH before pointer commit.
+                # Synthetic/imported payloads may still publish a v3 current for
+                # compatibility consumers, but strict READY gates will reject
+                # their SOURCE_UNAVAILABLE state.
+                require_fresh=source_binary_path is not None,
             )
             publication_metadata = {
                 "current_pointer_path": str(destination_root / "evidence" / "current.json"),

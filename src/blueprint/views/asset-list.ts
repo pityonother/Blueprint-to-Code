@@ -1,9 +1,15 @@
 import { escapeHtml } from '../../shared/html';
-import type { BlueprintAssetListItem, BlueprintPage } from '../types';
+import type {
+  BlueprintAssetListItem,
+  BlueprintAssetReadinessSummary,
+  BlueprintPage,
+} from '../types';
+import { isBlueprintReadyHealth } from '../state';
 
 
-function healthTone(status: string): string {
-  if (status === 'READY') return 'ready';
+function healthTone(item: BlueprintAssetListItem): string {
+  const status = String(item.health.status || 'MISSING');
+  if (isBlueprintReadyHealth(item.health)) return 'ready';
   if (status === 'STALE' || status === 'MIGRATION_REQUIRED') return 'warning';
   if (status === 'INVALID') return 'danger';
   return 'missing';
@@ -15,6 +21,7 @@ export function renderBlueprintAssetList(
   query: string,
   loading: boolean,
   page: BlueprintPage | null = null,
+  summary: BlueprintAssetReadinessSummary | null = null,
 ): string {
   const rows = items.length
     ? items.map((item) => {
@@ -29,7 +36,7 @@ export function renderBlueprintAssetList(
             <strong>${escapeHtml(item.asset)}</strong>
             <small>${escapeHtml(item.health.reasonCode || 'Interpretation Contract v1')}</small>
           </span>
-          <span class="blueprint-status ${healthTone(status)}">${escapeHtml(status)}</span>
+          <span class="blueprint-status ${healthTone(item)}">${escapeHtml(status)}</span>
         </button>
       `;
     }).join('')
@@ -42,6 +49,11 @@ export function renderBlueprintAssetList(
           <h2>选择资产</h2>
         </div>
         <button class="button ghost" type="button" data-blueprint-action="refresh-assets" ${loading ? 'disabled' : ''}>刷新</button>
+      </div>
+      <div class="blueprint-readiness-summary" aria-live="polite">
+        <span>权威 Evidence</span>
+        <strong>READY ${summary?.ready ?? 0} / ${summary?.total ?? 0}</strong>
+        <small>FRESH + releaseAuthority + current v3 Interpretation</small>
       </div>
       <form class="blueprint-asset-search" data-blueprint-form="asset-search">
         <label for="blueprint-asset-query">按资产名筛选</label>

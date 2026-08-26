@@ -47,6 +47,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Read package version
+        id: package_version
+        run: |
+          $packageVersion = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          if ($packageVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "VERSION is not SemVer: $packageVersion"
+          }
+          "version=$packageVersion" >> $env:GITHUB_OUTPUT
+
       - name: Build the Windows portable assets
         run: >-
           npm run package:windows --
@@ -55,7 +64,7 @@ jobs:
       - name: Clean-extract smoke test with bundled Python
         run: >-
           python scripts/smoke_test_windows_portable.py
-          --archive "$env:RUNNER_TEMP\portable\BlueprintToCode-v0.3.1-windows-x64-portable.zip"
+          --archive "$env:RUNNER_TEMP\portable\BlueprintToCode-v${{ steps.package_version.outputs.version }}-windows-x64-portable.zip"
 
       - name: Assert the tracked checkout stayed clean
         run: |
@@ -70,9 +79,9 @@ jobs:
       - name: Upload the verified portable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: BlueprintToCode-v0.3.1-windows-x64-portable
+          name: BlueprintToCode-v${{ steps.package_version.outputs.version }}-windows-x64-portable
           if-no-files-found: error
           retention-days: 7
           path: |
-            ${{ runner.temp }}\portable\BlueprintToCode-v0.3.1-windows-x64-portable.zip
-            ${{ runner.temp }}\portable\BlueprintToCode-v0.3.1-windows-x64-portable.zip.sha256
+            ${{ runner.temp }}\portable\BlueprintToCode-v${{ steps.package_version.outputs.version }}-windows-x64-portable.zip
+            ${{ runner.temp }}\portable\BlueprintToCode-v${{ steps.package_version.outputs.version }}-windows-x64-portable.zip.sha256

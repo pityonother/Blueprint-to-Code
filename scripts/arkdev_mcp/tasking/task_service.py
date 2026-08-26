@@ -93,7 +93,12 @@ class TaskService:
         forbidden_changes: Sequence[str],
         graph_ref: str = "",
         supporting_assets: Sequence[str] = (),
+        task_id: str | None = None,
     ) -> dict[str, object]:
+        reserved_task_id = ""
+        if task_id is not None:
+            reserved_task_id = str(task_id)
+            self.store.task_opaque_id(reserved_task_id)
         normalized_goal = " ".join(str(goal).split())
         if mode not in TASK_MODES or not 1 <= len(normalized_goal) <= 1000:
             raise McpExecutionError(
@@ -178,7 +183,7 @@ class TaskService:
             supporting_context.append(self._asset_projection(authority, read_only=True))
 
         timestamp = self.clock()
-        task_id = f"task://{self._new_opaque_id()}"
+        task_id = reserved_task_id or f"task://{self._new_opaque_id()}"
         context: dict[str, object] = {
             "schema": TASK_CONTEXT_SCHEMA,
             "taskId": task_id,

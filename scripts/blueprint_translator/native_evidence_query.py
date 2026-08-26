@@ -453,12 +453,15 @@ class NativeEvidenceQueryService:
                 rows = self._connection.execute(
                     "SELECT functions.*, edges.call_edge_id, edges.caller_evidence_id, "
                     "edges.callee_evidence_id, edges.status AS edge_status, "
-                    "edges.confidence AS edge_confidence "
+                    "edges.confidence AS edge_confidence, "
+                    "callers.payload_json AS caller_payload_json "
                     "FROM native_call_edges AS edges "
-                    "JOIN native_functions AS functions "
+                    "JOIN native_functions AS callers "
+                    "ON callers.evidence_id = edges.caller_evidence_id "
+                    "LEFT JOIN native_functions AS functions "
                     "ON functions.evidence_id = edges.callee_evidence_id "
                     "WHERE edges.caller_evidence_id = ? "
-                    "ORDER BY functions.qualified_name",
+                    "ORDER BY COALESCE(functions.qualified_name, edges.callee_evidence_id)",
                     (current,),
                 ).fetchall()
                 next_key = "callee_evidence_id"
@@ -467,7 +470,12 @@ class NativeEvidenceQueryService:
                 if related_id in seen:
                     continue
                 seen.add(related_id)
-                item = self._function_summary(row)
+                has_function_detail = row["evidence_id"] is not None
+                item = (
+                    self._function_summary(row)
+                    if has_function_detail
+                    else self._function_reference(row)
+                )
                 item["relation"] = {
                     "direction": direction,
                     "from": current,
@@ -477,7 +485,8 @@ class NativeEvidenceQueryService:
                     "depth": hops + 1,
                 }
                 results.append(item)
-                queue.append((related_id, hops + 1))
+                if has_function_detail:
+                    queue.append((related_id, hops + 1))
         return results, [], {"id": evidence_id, "depth": depth}
 
     def _field_accesses(
@@ -643,6 +652,40 @@ class NativeEvidenceQueryService:
             "status": str(row["status"]),
             "confidence": str(row["confidence"]),
             "source": str(row["source"]),
+        }
+
+    @staticmethod
+    def _function_reference(row: sqlite3.Row) -> dict[str, object]:
+        evidence_id = str(row["callee_evidence_id"])
+        caller_payload = _payload(row["caller_payload_json"])
+        identity: Mapping[str, object] = {}
+        called_functions = caller_payload.get("calledFunctions")
+        if isinstance(called_functions, Sequence) and not isinstance(
+            called_functions,
+            (str, bytes, bytearray),
+        ):
+            for candidate in called_functions:
+                if not isinstance(candidate, Mapping):
+                    continue
+                if str(candidate.get("evidenceId") or "") == evidence_id:
+                    identity = candidate
+                    break
+        qualified_name = str(identity.get("qualifiedName") or "")
+        owner = str(identity.get("owner") or "")
+        if not owner and "::" in qualified_name:
+            owner = qualified_name.rsplit("::", 1)[0]
+        return {
+            "kind": "function-reference",
+            "evidenceId": evidence_id,
+            "name": str(identity.get("name") or ""),
+            "qualifiedName": qualified_name,
+            "owner": owner,
+            "rva": str(identity.get("rva") or evidence_id.rsplit("/", 1)[-1]),
+            "signature": str(identity.get("signature") or ""),
+            "status": str(row["edge_status"]),
+            "confidence": str(row["edge_confidence"]),
+            "source": "CALL_TARGET_REFERENCE",
+            "availability": "IDENTITY_ONLY",
         }
 
     def _function_detail(

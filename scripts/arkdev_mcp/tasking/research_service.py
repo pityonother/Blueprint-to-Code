@@ -373,6 +373,21 @@ class ResearchService:
             refs = [str(ref) for ref in item.get("evidenceRefs", [])]
             if (
                 str(item.get("status") or "").upper() != "CONFIRMED"
+                or (
+                    str(item.get("kind") or "") == "CLASS_DEFAULT"
+                    and (
+                        item.get("valueUsable") is not True
+                        or (
+                            "resolvedObjectIdentityComplete" in item
+                            and item.get("resolvedObjectIdentityComplete") is not True
+                        )
+                        or (
+                            "resolvedObjectFieldIdentityComplete" in item
+                            and item.get("resolvedObjectFieldIdentityComplete")
+                            is not True
+                        )
+                    )
+                )
                 or not refs
                 or any(
                     not ref.startswith("bp://") or f"@{revision}/" not in ref

@@ -1,5 +1,9 @@
 import { escapeHtml } from '../../shared/html';
-import { isBlueprintStale, type BlueprintWorkspaceState } from '../state';
+import {
+  isBlueprintReadyHealth,
+  isBlueprintStale,
+  type BlueprintWorkspaceState,
+} from '../state';
 
 
 export function renderBlueprintAssetHealth(state: BlueprintWorkspaceState): string {
@@ -16,6 +20,7 @@ export function renderBlueprintAssetHealth(state: BlueprintWorkspaceState): stri
   const evidence = health.evidence;
   const interpretation = health.interpretation;
   const stale = isBlueprintStale(state);
+  const ready = isBlueprintReadyHealth(health);
   return `
     <section class="panel blueprint-health">
       ${stale ? `<div class="blueprint-stale-banner" role="alert">
@@ -28,7 +33,7 @@ export function renderBlueprintAssetHealth(state: BlueprintWorkspaceState): stri
           <h2>${escapeHtml(state.selectedAsset)}</h2>
           <code>${escapeHtml(health.asset?.objectPath || 'Object Path 未公开')}</code>
         </div>
-        <span class="blueprint-status ${status === 'READY' ? 'ready' : status === 'INVALID' ? 'danger' : 'warning'}">${escapeHtml(status)}</span>
+        <span class="blueprint-status ${ready ? 'ready' : status === 'INVALID' ? 'danger' : 'warning'}">${escapeHtml(status)}</span>
       </div>
       <dl class="blueprint-identity-grid">
         <div><dt>Evidence revision</dt><dd>${escapeHtml(evidence?.revisionId || '—')}</dd></div>

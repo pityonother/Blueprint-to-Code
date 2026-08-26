@@ -16,7 +16,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from blueprint_translator.context_pack import estimate_tokens  # noqa: E402
 from blueprint_translator.evidence_query import EvidenceQueryService  # noqa: E402
 from blueprint_translator.evidence_schema import ensure_evidence_schema  # noqa: E402
-from blueprint_translator.evidence_writer import write_evidence_store_from_capture  # noqa: E402
+from blueprint_translator.evidence_writer import (  # noqa: E402
+    write_evidence_store_from_capture,
+    write_evidence_store_from_payload,
+)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -31,6 +34,8 @@ def _pin(
     category: str,
     *,
     default: str = "",
+    default_object: str = "",
+    persistent_guid: str = "",
     links: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     return {
@@ -41,8 +46,8 @@ def _pin(
         "subcategory": "",
         "pin_type": {"PinCategory": category, "ContainerType": "None"},
         "default": default,
-        "default_object": "",
-        "persistent_guid": "",
+        "default_object": default_object,
+        "persistent_guid": persistent_guid,
         "linked_to_raw": "",
         "links": links or [],
         "source": "uasset_exported_pin_object",
@@ -53,6 +58,9 @@ def _pin(
             "status": "resolved_pin",
             "link_count": len(links or []),
             "native_pin_id_authority": "EXACT",
+            "persistent_guid_method": (
+                "exact_struct_value" if persistent_guid else "UNAVAILABLE"
+            ),
         },
     }
 
@@ -212,7 +220,16 @@ class EvidenceQueryContractTests(unittest.TestCase):
                 "Entry",
                 "K2Node_FunctionEntry",
                 event="TimingEntry",
-                pins=[_pin("P_ENTRY_THEN", "then", "EGPD_Output", "exec", links=[entry_to_branch])],
+                pins=[
+                    _pin(
+                        "P_ENTRY_THEN",
+                        "then",
+                        "EGPD_Output",
+                        "exec",
+                        persistent_guid="A" * 32,
+                        links=[entry_to_branch],
+                    )
+                ],
             ),
             _node(
                 1002,
@@ -793,6 +810,40 @@ class EvidenceQueryContractTests(unittest.TestCase):
             self.assertEqual(len(bundle["pins"]), bundle["bundleCoverage"]["pins"]["returned"])
             self.assertEqual(len(bundle["edges"]), bundle["bundleCoverage"]["edges"]["available"])
             self.assertEqual(len(bundle["edges"]), bundle["bundleCoverage"]["edges"]["returned"])
+            for edge in bundle["edges"]:
+                self.assertTrue(edge["sourceNativePinId"])
+                self.assertTrue(edge["targetNativePinId"])
+
+        entry_pin_ref = self._ref_for(
+            "P_ENTRY_THEN",
+            kind="pin",
+            name="then",
+        )
+        entry_pin = self.service.query(
+            {
+                "operation": "entity",
+                "selector": {"ref": entry_pin_ref},
+                "budgetTokens": 1200,
+            }
+        )["items"][0]
+        self.assertEqual(entry_pin["persistentGuid"], "A" * 32)
+
+        entry_edge = next(
+            edge
+            for bundle in result["items"]
+            for edge in bundle["edges"]
+            if edge["sourceNativePinId"] == "P_ENTRY_THEN"
+        )
+        edge_ref = str(entry_edge["ref"])
+        edge = self.service.query(
+            {
+                "operation": "entity",
+                "selector": {"ref": edge_ref},
+                "budgetTokens": 1200,
+            }
+        )["items"][0]
+        self.assertEqual(edge["sourceNativePinId"], "P_ENTRY_THEN")
+        self.assertEqual(edge["targetNativePinId"], "P_BRANCH_EXEC")
 
     def test_trace_follows_only_the_requested_edge_kind_and_direction(self):
         entry_ref = self._ref_for("TimingEntry", kind="node", name="Entry")
@@ -1105,7 +1156,13 @@ class EvidenceQueryContractTests(unittest.TestCase):
             }
         )["items"][0]
         self.assertEqual(observation["status"], "NOT_RECOVERED")
+        self.assertEqual(
+            observation["resolutionStatus"],
+            "cross_graph_or_missing_node",
+        )
         self.assertEqual(observation["rawEvidence"]["raw_marker"], "must-round-trip")
+        self.assertEqual(observation["sourceNativePinId"], "P_INCOMPLETE")
+        self.assertEqual(observation["targetNativePinId"], "")
 
         pin_ref = self._ref_for("P_INCOMPLETE", kind="pin", name="ReturnValue")
         pin = self.service.query(
@@ -1197,6 +1254,624 @@ class EvidenceQueryContractTests(unittest.TestCase):
             self.fail("connection pagination did not terminate")
         self.assertEqual(len(pin_refs), 30)
         self.assertEqual(len(pin_refs), len(set(pin_refs)))
+
+
+class RuntimeSignalEvidenceQueryTests(unittest.TestCase):
+    def _open_service(
+        self,
+        nodes: list[dict[str, object]],
+        *,
+        links: list[dict[str, object]] | None = None,
+    ) -> EvidenceQueryService:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database_path = Path(temporary.name) / "runtime-signals.sqlite"
+        graph_payload = {
+            "metadata": {
+                "asset_name": "RuntimeSignalFixture",
+                "graph_name": "GiveKillExperience",
+                "graph_type": "Function",
+                "uasset_export_index": 8,
+                "uasset_read_status": "complete",
+                "confidence": "high",
+            },
+            "nodes": nodes,
+            "links": links or [],
+        }
+        payload = {
+            "asset_name": "RuntimeSignalFixture",
+            "asset_path": "/Game/Test/RuntimeSignalFixture.RuntimeSignalFixture",
+            "graphs": [
+                {
+                    "graph": "GiveKillExperience",
+                    "graph_type": "Function",
+                    "export_index": 8,
+                    "status": "complete",
+                    "confidence": "high",
+                    "payload": graph_payload,
+                }
+            ],
+        }
+        write_evidence_store_from_payload(
+            str(payload["asset_path"]),
+            None,
+            payload,
+            database_path,
+        )
+        service = EvidenceQueryService.open(database_path)
+        self.addCleanup(service.close)
+        return service
+
+    def test_runtime_signals_exposes_exact_unlinked_global_event_name(self):
+        service = self._open_service(
+            [
+                _node(
+                    14,
+                    "CallGlobalLevelEvent_0",
+                    "K2Node_CallFunction",
+                    function="CallGlobalLevelEvent",
+                    pins=[
+                        _pin(
+                            "38B7494A47883CA9D5F4E1988DC4875B",
+                            "EventName",
+                            "EGPD_Input",
+                            "name",
+                            default="Ice Queen is Killed",
+                        )
+                    ],
+                )
+            ]
+        )
+
+        result = service.query(
+            {"operation": "runtime-signals", "budgetTokens": 1200}
+        )
+
+        self.assertEqual(result["operation"], "runtime-signals")
+        self.assertEqual(len(result["items"]), 1)
+        signal = result["items"][0]
+        self.assertEqual(signal["kind"], "runtimeSignal")
+        self.assertEqual(signal["signalKind"], "global_level_event_emit")
+        self.assertEqual(signal["status"], "CONFIRMED")
+        self.assertEqual(signal["eventName"], "Ice Queen is Killed")
+        self.assertEqual(signal["valueSource"], "UNLINKED_PIN_DEFAULT")
+        self.assertEqual(signal["pinIdentityAuthority"], "EXACT")
+        self.assertEqual(
+            signal["evidenceRefs"],
+            [signal["nodeRef"], signal["valuePinRef"]],
+        )
+        self.assertEqual(result["coverage"]["byStatus"]["CONFIRMED"], 1)
+
+    def test_runtime_signals_does_not_upgrade_a_linked_event_pin_default(self):
+        producer = _node(
+            13,
+            "EventNameSource",
+            "K2Node_VariableGet",
+            variable="RuntimeEventName",
+            pins=[
+                _pin(
+                    "EVENT_NAME_OUTPUT",
+                    "RuntimeEventName",
+                    "EGPD_Output",
+                    "name",
+                )
+            ],
+        )
+        call = _node(
+            14,
+            "CallGlobalLevelEvent_0",
+            "K2Node_CallFunction",
+            function="CallGlobalLevelEvent",
+            pins=[
+                _pin(
+                    "EVENT_NAME_INPUT",
+                    "EventName",
+                    "EGPD_Input",
+                    "name",
+                    default="Stale Editor Default",
+                )
+            ],
+        )
+        link = _edge(
+            "EventNameSource",
+            "EVENT_NAME_OUTPUT",
+            "RuntimeEventName",
+            "CallGlobalLevelEvent_0",
+            "EVENT_NAME_INPUT",
+            "data",
+        )
+        producer["pins"][0]["links"] = [link]
+        service = self._open_service([producer, call], links=[link])
+
+        result = service.query(
+            {"operation": "runtime-signals", "budgetTokens": 1200}
+        )
+
+        self.assertEqual(len(result["items"]), 1)
+        gap = result["items"][0]
+        self.assertEqual(gap["kind"], "runtimeSignalGap")
+        self.assertEqual(gap["signalKind"], "global_level_event_emit")
+        self.assertEqual(gap["status"], "NOT_RECOVERED")
+        self.assertEqual(gap["reasonCode"], "DYNAMIC_EVENT_NAME_NOT_RESOLVED")
+        self.assertNotIn("eventName", gap)
+        self.assertEqual(result["coverage"]["notRecovered"], 1)
+
+    def test_runtime_signals_reports_missing_spawn_class_identity(self):
+        service = self._open_service(
+            [
+                _node(
+                    15,
+                    "K2Node_SpawnActorFromClass_16",
+                    "K2Node_SpawnActorFromClass",
+                    pins=[
+                        _pin(
+                            "MISPARSED_CLASS_PIN",
+                            "bHidden",
+                            "EGPD_Input",
+                            "class",
+                            default="Ragnarok_WP_C",
+                        )
+                    ],
+                )
+            ]
+        )
+
+        result = service.query(
+            {"operation": "runtime-signals", "budgetTokens": 1200}
+        )
+
+        self.assertEqual(len(result["items"]), 1)
+        gap = result["items"][0]
+        self.assertEqual(gap["kind"], "runtimeSignalGap")
+        self.assertEqual(gap["signalKind"], "spawn_actor")
+        self.assertEqual(gap["status"], "NOT_RECOVERED")
+        self.assertEqual(
+            gap["reasonCode"], "SPAWN_CLASS_PIN_IDENTITY_UNAVAILABLE"
+        )
+        self.assertEqual(result["coverage"]["notRecovered"], 1)
+
+
+class RuntimeRouteEvidenceQueryTests(unittest.TestCase):
+    EVENT_NAME = "Ice Queen is Killed"
+    CRATE_CLASS = (
+        "/Game/Mods/Ragnarok/Loot/SupplyCrate_IceQueen."
+        "SupplyCrate_IceQueen_C"
+    )
+
+    def _open_service(
+        self,
+        nodes: list[dict[str, object]],
+    ) -> EvidenceQueryService:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database_path = Path(temporary.name) / "runtime-routes.sqlite"
+        payload = {
+            "asset_name": "RagnarokRouteFixture",
+            "asset_path": "/Game/Test/RagnarokRouteFixture.RagnarokRouteFixture",
+            "graphs": [
+                {
+                    "graph": "EventGraph",
+                    "graph_type": "EventGraph",
+                    "export_index": 12,
+                    "status": "complete",
+                    "confidence": "high",
+                    "payload": {
+                        "metadata": {
+                            "asset_name": "RagnarokRouteFixture",
+                            "graph_name": "EventGraph",
+                            "graph_type": "EventGraph",
+                            "uasset_export_index": 12,
+                            "uasset_read_status": "complete",
+                            "confidence": "high",
+                        },
+                        "nodes": nodes,
+                    },
+                }
+            ],
+        }
+        write_evidence_store_from_payload(
+            str(payload["asset_path"]),
+            None,
+            payload,
+            database_path,
+        )
+        service = EvidenceQueryService.open(database_path)
+        self.addCleanup(service.close)
+        return service
+
+    def _connected_route_nodes(self, *, exact_class_pin: bool = True):
+        event_to_spawn = {
+            "target_node": "K2Node_SpawnActorFromClass_0",
+            "target_pin_id": "SPAWN_EXECUTE",
+            "target_pin_id_authority": "EXACT",
+            "source": "uasset_exported_pin_linked_to",
+            "confidence": "high",
+            "resolution_status": "resolved_pin",
+            "kind": "exec",
+        }
+        event_node = _node(
+            20,
+            "K2Node_CustomEvent_0",
+            "K2Node_CustomEvent",
+            event=self.EVENT_NAME,
+            pins=[
+                _pin(
+                    "EVENT_THEN",
+                    "then",
+                    "EGPD_Output",
+                    "exec",
+                    links=[event_to_spawn],
+                )
+            ],
+        )
+        spawn_pins = [
+            _pin("SPAWN_EXECUTE", "execute", "EGPD_Input", "exec")
+        ]
+        if exact_class_pin:
+            spawn_pins.append(
+                _pin(
+                    "SPAWN_CLASS",
+                    "Class",
+                    "EGPD_Input",
+                    "class",
+                    default_object=self.CRATE_CLASS,
+                )
+            )
+        else:
+            spawn_pins.append(
+                _pin(
+                    "MISPARSED_CLASS",
+                    "bHidden",
+                    "EGPD_Input",
+                    "class",
+                    default_object="Ragnarok_WP_C",
+                )
+            )
+        spawn_node = _node(
+            21,
+            "K2Node_SpawnActorFromClass_0",
+            "K2Node_SpawnActorFromClass",
+            pins=spawn_pins,
+        )
+        return [event_node, spawn_node]
+
+    def test_runtime_routes_confirms_custom_event_to_spawn_over_exact_exec_edges(self):
+        service = self._open_service(self._connected_route_nodes())
+
+        result = service.query(
+            {
+                "operation": "runtime-routes",
+                "eventName": self.EVENT_NAME,
+                "budgetTokens": 2000,
+            }
+        )
+
+        self.assertEqual(result["operation"], "runtime-routes")
+        self.assertEqual(result["match"]["status"], "MATCHED")
+        self.assertEqual(result["match"]["receiverNodes"], 1)
+        self.assertEqual(result["match"]["confirmedReceiverNodes"], 1)
+        self.assertEqual(result["match"]["confirmedRoutes"], 1)
+        self.assertEqual(len(result["items"]), 1)
+        route = result["items"][0]
+        self.assertEqual(route["kind"], "runtimeRoute")
+        self.assertEqual(route["status"], "CONFIRMED")
+        self.assertEqual(route["routeKind"], "global_event_receiver_to_spawn")
+        self.assertEqual(route["eventName"], self.EVENT_NAME)
+        self.assertEqual(route["actorClass"], self.CRATE_CLASS)
+        self.assertEqual(route["pathAuthority"], "EXACT_NORMALIZED_EXEC_EDGES")
+        self.assertEqual(len(route["execPath"]["edgeRefs"]), 1)
+        self.assertEqual(
+            route["evidenceRefs"],
+            [
+                route["receiverNodeRef"],
+                *route["execPath"]["edgeRefs"],
+                route["spawnNodeRef"],
+                route["classPinRef"],
+            ],
+        )
+
+    def test_runtime_routes_keeps_spawn_class_identity_failure_as_a_gap(self):
+        service = self._open_service(
+            self._connected_route_nodes(exact_class_pin=False)
+        )
+
+        result = service.query(
+            {
+                "operation": "runtime-routes",
+                "eventName": self.EVENT_NAME,
+                "budgetTokens": 1600,
+            }
+        )
+
+        self.assertEqual(
+            result["match"]["status"], "RECEIVER_FOUND_ROUTE_INCOMPLETE"
+        )
+        self.assertEqual(len(result["items"]), 1)
+        gap = result["items"][0]
+        self.assertEqual(gap["kind"], "runtimeRouteGap")
+        self.assertEqual(gap["status"], "NOT_RECOVERED")
+        self.assertEqual(
+            gap["reasonCode"], "SPAWN_CLASS_PIN_IDENTITY_UNAVAILABLE"
+        )
+
+    def test_runtime_routes_reports_receiver_not_indexed_for_missing_custom_event(self):
+        service = self._open_service(
+            [
+                _node(
+                    20,
+                    "K2Node_CustomEvent_0",
+                    "K2Node_CustomEvent",
+                    event="Another Event",
+                )
+            ]
+        )
+
+        result = service.query(
+            {
+                "operation": "runtime-routes",
+                "eventName": self.EVENT_NAME,
+                "budgetTokens": 1200,
+            }
+        )
+
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(
+            result["items"][0]["reasonCode"],
+            "GLOBAL_EVENT_RECEIVER_NOT_INDEXED",
+        )
+        self.assertEqual(
+            result["match"]["status"], "GLOBAL_EVENT_RECEIVER_NOT_INDEXED"
+        )
+        self.assertEqual(result["match"]["receiverNodes"], 0)
+        self.assertEqual(result["match"]["confirmedReceiverNodes"], 0)
+        self.assertEqual(result["coverage"]["notRecovered"], 1)
+        self.assertNotIn("eventAbsentGlobally", result["match"])
+
+
+class LootRewardEvidenceQueryTests(unittest.TestCase):
+    ITEM = (
+        "/Game/Genesis/Dinos/SpaceWhale/PrimalItemArmor_SpaceWhaleSaddle_Tek."
+        "PrimalItemArmor_SpaceWhaleSaddle_Tek_C"
+    )
+
+    def _open_service(self, class_default_value: object) -> EvidenceQueryService:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database_path = Path(temporary.name) / "loot-rewards.sqlite"
+        payload = {
+            "asset_name": "LootFixture",
+            "asset_path": "/Game/Test/LootFixture.LootFixture",
+            "graphs": [],
+            "class_defaults": {
+                "variables": {
+                    "ItemSets": {
+                        "value": class_default_value,
+                        "type": "ArrayProperty",
+                        "source": "uasset_cdo_property_tag",
+                        "confidence": "high",
+                    }
+                }
+            },
+        }
+        write_evidence_store_from_payload(
+            str(payload["asset_path"]),
+            None,
+            payload,
+            database_path,
+        )
+        service = EvidenceQueryService.open(database_path)
+        self.addCleanup(service.close)
+        return service
+
+    def test_loot_rewards_classifies_finished_item_without_calling_tek_an_unlock(self):
+        service = self._open_service(
+            [
+                {
+                    "ItemSetName": "Genesis Loot Crate Base",
+                    "SetWeight": 1.0,
+                    "ItemEntries": [
+                        {
+                            "ItemEntryName": "Epic",
+                            "Items": [self.ITEM],
+                            "EntryWeight": 1.0,
+                            "ChanceToActuallyGiveItem": 1.0,
+                            "ChanceToBeBlueprintOverride": 0.0,
+                            "bForceBlueprint": False,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        result = service.query(
+            {
+                "operation": "loot-rewards",
+                "itemQuery": "PrimalItemArmor_SpaceWhaleSaddle_Tek",
+                "budgetTokens": 1600,
+            }
+        )
+
+        self.assertEqual(result["operation"], "loot-rewards")
+        self.assertEqual(result["match"]["status"], "MATCHED")
+        self.assertEqual(len(result["items"]), 1)
+        reward = result["items"][0]
+        self.assertEqual(reward["kind"], "lootRewardEntry")
+        self.assertEqual(reward["status"], "CONFIRMED")
+        self.assertEqual(reward["itemClass"], self.ITEM)
+        self.assertEqual(reward["rewardType"], "PHYSICAL_ITEM_ONLY")
+        self.assertEqual(reward["finishedItemChanceConditional"], 1.0)
+        self.assertEqual(reward["physicalBlueprintChanceConditional"], 0.0)
+        self.assertEqual(reward["tekgramUnlock"]["status"], "NOT_EVIDENCED")
+        self.assertNotIn("overallDropChance", reward)
+        self.assertEqual(
+            reward["entrySelection"]["probabilityStatus"], "NOT_COMPUTED"
+        )
+
+    def test_loot_rewards_keeps_blueprint_chance_conditional_on_entry_selection(self):
+        service = self._open_service(
+            {
+                "ItemEntries": [
+                    {
+                        "ItemEntryName": "Missions - never BP - with quality",
+                        "Items": [self.ITEM],
+                        "EntryWeight": 1.0,
+                        "ChanceToActuallyGiveItem": 1.0,
+                        "ChanceToBeBlueprintOverride": 0.0,
+                        "bForceBlueprint": False,
+                    },
+                    {
+                        "ItemEntryName": "Missions - with BP - with quality",
+                        "Items": [self.ITEM],
+                        "EntryWeight": 0.033,
+                        "ChanceToActuallyGiveItem": 1.0,
+                        "ChanceToBeBlueprintOverride": 0.75,
+                        "bForceBlueprint": False,
+                    },
+                ]
+            }
+        )
+
+        result = service.query(
+            {
+                "operation": "loot-rewards",
+                "itemQuery": self.ITEM,
+                "budgetTokens": 2400,
+            }
+        )
+
+        self.assertEqual(len(result["items"]), 2)
+        blueprint_branch = next(
+            item
+            for item in result["items"]
+            if item["entryName"] == "Missions - with BP - with quality"
+        )
+        self.assertEqual(
+            blueprint_branch["rewardType"], "ITEM_OR_PHYSICAL_BLUEPRINT"
+        )
+        self.assertEqual(
+            blueprint_branch["physicalBlueprintChanceConditional"], 0.75
+        )
+        self.assertEqual(
+            blueprint_branch["probabilityScope"],
+            "CONDITIONAL_ON_ENTRY_SELECTION_AND_ITEM_GRANT",
+        )
+        self.assertEqual(blueprint_branch["entrySelection"]["weight"], 0.033)
+        self.assertNotIn("overallDropChance", blueprint_branch)
+
+    def test_loot_rewards_reports_a_scoped_negative_without_claiming_global_absence(self):
+        service = self._open_service(
+            [{"ItemEntries": [{"Items": ["/Game/Test/AnotherItem_C"]}]}]
+        )
+
+        result = service.query(
+            {
+                "operation": "loot-rewards",
+                "itemQuery": "SpaceWhaleSaddle",
+                "budgetTokens": 1200,
+            }
+        )
+
+        self.assertEqual(result["items"], [])
+        self.assertEqual(
+            result["match"]["status"], "NOT_FOUND_IN_RECOVERED_DEFAULTS"
+        )
+        self.assertEqual(result["match"]["searchedDefaults"], 1)
+        self.assertEqual(result["match"]["unreadableDefaults"], 0)
+        self.assertNotIn("globalAbsence", result["match"])
+
+
+class AssetFieldEvidenceQueryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.database_path = Path(self._temporary.name) / "asset-fields.sqlite"
+        payload = {
+            "asset_name": "DataAssetFixture",
+            "asset_path": "/Game/Test/DataAssetFixture.DataAssetFixture",
+            "graphs": [],
+            "asset_fields": {
+                "loaded": True,
+                "instance_object": "DataAssetFixture",
+                "business_fact_count": 3,
+                "variables": {
+                    f"SharedField{index}": {
+                        "value": (
+                            {
+                                "data_table": "/Game/Test/Skills.Skills",
+                                "row_name": "RootSkill",
+                            }
+                            if index == 0
+                            else index
+                        ),
+                        "type": "StructProperty" if index == 0 else "IntProperty",
+                        "source": "uasset_asset_instance",
+                        "confidence": "high",
+                        "owner_kind": "asset",
+                        "confirmed_value_usable": True,
+                    }
+                    for index in range(3)
+                },
+                "gaps": [],
+            },
+        }
+        write_evidence_store_from_payload(
+            str(payload["asset_path"]),
+            None,
+            payload,
+            self.database_path,
+        )
+        self.service = EvidenceQueryService.open(self.database_path)
+        self.addCleanup(self.service.close)
+
+    def test_overview_and_entity_expose_instance_fields_separately(self):
+        overview = self.service.query(
+            {"operation": "overview", "budgetTokens": 1200}
+        )
+        search = self.service.query(
+            {
+                "operation": "search",
+                "query": "RootSkill",
+                "kinds": ["asset_field"],
+                "pageSize": 10,
+                "budgetTokens": 1600,
+            }
+        )
+        entity = self.service.query(
+            {
+                "operation": "entity",
+                "selector": {"ref": search["items"][0]["ref"]},
+                "budgetTokens": 1600,
+            }
+        )
+
+        self.assertEqual(overview["summary"]["assetFieldCount"], 3)
+        self.assertEqual(overview["summary"]["defaultCount"], 0)
+        self.assertEqual(search["items"][0]["kind"], "asset_field")
+        self.assertEqual(entity["items"][0]["kind"], "asset_field")
+        self.assertEqual(entity["items"][0]["ownerKind"], "asset")
+        self.assertEqual(entity["items"][0]["value"]["row_name"], "RootSkill")
+
+    def test_asset_field_search_cursor_has_no_gaps_or_duplicates(self):
+        refs: list[str] = []
+        cursor: str | None = None
+        while True:
+            request: dict[str, object] = {
+                "operation": "search",
+                "query": "SharedField",
+                "kinds": ["asset_field"],
+                "pageSize": 1,
+                "budgetTokens": 1200,
+            }
+            if cursor:
+                request["cursor"] = cursor
+            result = self.service.query(request)
+            refs.extend(str(item["ref"]) for item in result["items"])
+            cursor = result["page"]["nextCursor"]
+            if cursor is None:
+                break
+
+        self.assertEqual(len(refs), 3)
+        self.assertEqual(len(set(refs)), 3)
 
 
 class EvidenceSearchIndexScaleTests(unittest.TestCase):
