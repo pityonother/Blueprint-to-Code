@@ -73,6 +73,12 @@ match it.
 - Production `QUERY_SNAPSHOT` cache invalidation for the exact
   `context_packs`, `answer_plans`, `materialized_neighborhoods`, and
   `query_snapshots` cache tables, with external markers and crash recovery.
+- Selective production `ROLE_ENTITY` and ontology-owned `DOMAIN_ENTITY`
+  materializers, plus an exact one-file-at-a-time backend for all six domain
+  projections.
+- A computed fixed-11 production narrow-gate runner, full candidate reseal, and
+  content-addressed atomic shadow publication receipt with independent
+  post-switch verification.
 
 ### Knowledge base changes
 
@@ -81,9 +87,15 @@ match it.
   base binding.
 - Incremental update planning now binds the scan, writer lock, delta receipt,
   base snapshot, and publication decision to one verified scope.
+- Incremental candidates now receive a new immutable build identity, sealed
+  quality report, exact previous-Snapshot lineage, and a final live-source
+  recheck immediately before current-pointer CAS.
 - Whole-cache equal-digest receipts are now accepted only under the strict
   `QUERY_SNAPSHOT` contract; the real Scarecrow replay produced a base-bound v3
   inspection with `baseBindingVerified=true`.
+- Role invalidation now carries a content-addressed percentile-closure proof;
+  projection downstream IDs have a fixed reverse-checked name mapping and no
+  longer authorize a whole projection-directory rebuild.
 - GitHub-facing status documentation now separates current `main` behavior from
   dated GPT Pro handoff/audit records.
 
@@ -94,6 +106,11 @@ match it.
   current base snapshot.
 - Query cache invalidation preserves worker-owned row scope through cache-first
   commit, recovered `RUNNING` replay, and terminal receipt validation.
+- Domain rebuilds preserve manual and other producer rows; projection publish
+  rejects reparse/cross-volume paths and atomically replaces only its queued
+  artifact.
+- Incremental publication failures now preserve the distinction between a
+  verified `NOT_REPLACED` pointer and an `UNCERTAIN` post-attempt state.
 - Documentation no longer presents the 2026-07-27 `58/75` snapshot or a
   machine-specific Capture count as current.
 
@@ -102,9 +119,9 @@ match it.
 - Documented retention and validation rules for temporary KB builds,
   immutable snapshots, Registry generations, Git LFS objects, worktrees, and
   legacy Capture artifacts.
-- Recorded the real prepublication queue result
-  (`SUCCEEDED=4`, `BLOCKED_GAP=8`, `FAILED=0`); Role, Domain, and Projection
-  remain deliberately unavailable and no publication occurred.
+- Recorded a production-shaped 12/12 backend result separately from the live
+  input audit. The live candidate is non-selective (14 additions and 10
+  changes), so no incremental publication occurred.
 
 ## [0.2.0] - 2026-07-27
 

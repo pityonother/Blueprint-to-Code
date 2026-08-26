@@ -19,6 +19,9 @@ from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
 from blueprint_translator.kb_vnext.native_ingest import (  # noqa: E402
     NativeEvidenceSet,
 )
+from blueprint_translator.kb_vnext.roles import (  # noqa: E402
+    materialize_discovery_roles,
+)
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CACHE_SCHEMA_SQL,
     FULL_CORE_SCHEMA_SQL,
@@ -1236,6 +1239,24 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         "verify_base_bound_add_only_blueprint_delta_scope",
         verify_delta_scope,
     )
+
+    monkeypatch.setattr(
+        update,
+        "compute_additive_role_dependency_scope",
+        lambda *args, **kwargs: (
+            (1,),
+            {
+                "schema": "ark-kb-additive-role-dependency-scope/v1",
+                "classifierVersion": "fixture-role/v1",
+                "sourceRevisionId": 2,
+                "triggerSourceRevisionIds": [2],
+                "changedEntityIds": [1],
+                "roleEntityIds": [1],
+                "transitions": [],
+                "proof": "role-scope://fixture",
+            },
+        ),
+    )
     strict_scope_calls: list[
         tuple[
             tuple[int, ...],
@@ -1255,6 +1276,8 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
         entity_ids: tuple[int, ...],
         fact_ids: tuple[int, ...],
         actual_write_tables: tuple[str, ...],
+        role_entity_ids: tuple[int, ...],
+        role_scope_proof: dict[str, object],
     ) -> update.InvalidationPlan:
         strict_scope_calls.append(
             (
@@ -1270,6 +1293,8 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
             entity_ids=entity_ids,
             fact_ids=fact_ids,
             actual_write_tables=actual_write_tables,
+            role_entity_ids=role_entity_ids,
+            role_scope_proof=role_scope_proof,
         )
 
     monkeypatch.setattr(
@@ -1380,6 +1405,207 @@ def test_default_additive_pipeline_returns_real_fact_receipt_and_blocks_gaps(
     assert result["staging"]["sourceVerifiedUnchanged"] is True
     assert not workspace.temporary_root.exists()
     assert (paths.output / "current.json").read_bytes() == pointer_bytes
+
+
+def _write_role_discovery_fixture(path: Path) -> None:
+    discovery = sqlite3.connect(path)
+    try:
+        discovery.executescript(
+            """
+            CREATE TABLE assets(
+                object_path TEXT PRIMARY KEY,
+                asset_class_path TEXT NOT NULL,
+                generated_class_path TEXT NOT NULL,
+                parent_class_path TEXT NOT NULL,
+                native_parent_class_path TEXT NOT NULL,
+                identity_status TEXT NOT NULL,
+                identity_confidence TEXT NOT NULL,
+                is_blueprint INTEGER,
+                is_data_asset INTEGER,
+                is_data_table INTEGER,
+                is_function_library INTEGER,
+                is_blueprint_interface INTEGER,
+                is_map INTEGER,
+                capture_exists INTEGER,
+                evidence_freshness TEXT NOT NULL,
+                parse_status TEXT NOT NULL,
+                descendant_count INTEGER NOT NULL,
+                referencer_count INTEGER NOT NULL,
+                component_reuse_count INTEGER NOT NULL,
+                cross_domain_reference_count INTEGER NOT NULL,
+                registry_usage_count INTEGER NOT NULL,
+                query_hit_count INTEGER,
+                query_hit_status TEXT NOT NULL,
+                existing_report_count INTEGER,
+                existing_report_status TEXT NOT NULL,
+                graph_count INTEGER NOT NULL,
+                default_property_count INTEGER NOT NULL
+            );
+            INSERT INTO assets VALUES (
+                '/Game/Test/Added.Added', '/Script/Engine.Blueprint',
+                '/Game/Test/Added.Added_C', '/Script/Test.Fixture',
+                '/Script/Test.Fixture', 'CONFIRMED', 'HIGH',
+                1, 0, 0, 0, 0, 0, 1, 'FRESH', 'CONFIRMED',
+                0, 1, 0, 0, 0, NULL, 'NOT_MEASURED',
+                NULL, 'NOT_MEASURED', 1, 2
+            );
+            """
+        )
+        discovery.commit()
+    finally:
+        discovery.close()
+
+
+def test_production_shaped_additive_backends_drain_exact_12_of_12(
+    tmp_path: Path,
+) -> None:
+    workspace = _production_workspace(tmp_path)
+    _bind_production_staged_baseline(workspace)
+    discovery_path = tmp_path / "Discovery.sqlite"
+    _write_role_discovery_fixture(discovery_path)
+    workspace.discovery_path = discovery_path
+    workspace.candidate_build_id = "20260731T000000-candidate123"
+    workspace.candidate_source_fingerprint = "a" * 64
+    workspace.candidate_generated_at = "2026-07-31T00:00:00+00:00"
+    ontology = update.load_ontology(update.PROJECT_ROOT / "ontology")
+
+    discovery = sqlite3.connect(discovery_path)
+    core = sqlite3.connect(workspace.core_path)
+    core.execute("PRAGMA foreign_keys=ON")
+    try:
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                2, 'blueprint_evidence', 'bp://asset@revision',
+                'blueprint-sha', 'fixture', 'v2',
+                '2026-07-31T00:00:00+00:00', 'FRESH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                3, 'ontology', ?, 'ontology-sha', ?, 'v1',
+                '2026-07-31T00:00:00+00:00', 'FRESH'
+            )
+            """,
+            (f"ontology://{ontology.version}", ontology.version),
+        )
+        fact_rows = (
+            (1, "Rate", 7, "fact://fixture/rate"),
+            (2, "RequiredEngramPoints", 0, "fact://fixture/engram-points"),
+        )
+        core.executemany(
+            """
+            INSERT INTO facts(
+                fact_id, subject_entity_id, fact_type, fact_name,
+                scope_kind, declared_on_entity_id, value_kind,
+                value_integer, status, confidence, ontology_version,
+                current, canonical_fact_key
+            ) VALUES (
+                ?, 1, 'DECLARED_DEFAULT', ?, 'DECLARED', 1,
+                'INTEGER', ?, 'CONFIRMED', 'HIGH', ?, 1, ?
+            )
+            """,
+            [
+                (fact_id, name, value, ontology.version, key)
+                for fact_id, name, value, key in fact_rows
+            ],
+        )
+        core.executemany(
+            "INSERT INTO fact_evidence VALUES (?, 2, ?, 'DEFAULT_VALUE_ACTUAL')",
+            (
+                (1, "bp://asset@revision/default/Rate"),
+                (2, "bp://asset@revision/default/RequiredEngramPoints"),
+            ),
+        )
+        materialize_discovery_roles(
+            discovery,
+            core,
+            source_revision_id=1,
+        )
+        role_revision_id = (
+            update.materialize_incremental_role_classifier_revision(
+                core,
+                generated_at="2026-07-31T00:00:00+00:00",
+            )
+        )
+        role_ids, role_proof = update.compute_additive_role_dependency_scope(
+            discovery,
+            core,
+            changed_entity_ids=(1,),
+            source_revision_id=role_revision_id,
+            trigger_source_revision_ids=(2,),
+        )
+        assert role_ids == (1,)
+        core.execute(
+            """
+            INSERT INTO invalidation_dependencies VALUES (
+                2, 'ROLE_ENTITY', 1, 'ADDITIVE_ROLE_INPUT'
+            )
+            """
+        )
+        plan = update.InvalidationPlan(
+            event_kind="ASSET",
+            upstream_revision_id=None,
+            downstream={
+                "FACT": (1, 2),
+                "EFFECTIVE_ENTITY": (1,),
+                "ROLE_ENTITY": role_ids,
+                "DOMAIN_ENTITY": (1,),
+                "PROJECTION": tuple(range(1, 7)),
+                "QUERY_SNAPSHOT": (2,),
+            },
+            reasons={
+                "FACT": "ADDED_BLUEPRINT_FACT_EVIDENCE",
+                "EFFECTIVE_ENTITY": "ADDED_DECLARED_DEFAULT_OR_PARENT",
+                "ROLE_ENTITY": "ADDITIVE_ROLE_INPUT",
+                "DOMAIN_ENTITY": "ADDITIVE_DOMAIN_INPUT",
+                "PROJECTION": "ADDITIVE_FACT_PROJECTION",
+                "QUERY_SNAPSHOT": "ADDITIVE_QUERY_CACHE",
+            },
+            role_scope_proof=role_proof,
+        )
+        update.apply_invalidation_plan(
+            core,
+            plan,
+            created_at="2026-07-31T00:00:01+00:00",
+        )
+    finally:
+        core.close()
+        discovery.close()
+
+    report = update.drain_production_rebuilds(workspace, 12)
+
+    assert report.attempted == 12
+    assert report.succeeded == 12
+    assert report.blocked_gap == 0
+    assert report.failed == 0
+    assert report.remaining_pending == 0
+    assert report.remaining_running == 0
+    assert report.drained is True
+    assert [outcome.task.downstream_kind for outcome in report.outcomes] == [
+        "FACT",
+        "FACT",
+        "EFFECTIVE_ENTITY",
+        "ROLE_ENTITY",
+        "DOMAIN_ENTITY",
+        *("PROJECTION" for _ in range(6)),
+        "QUERY_SNAPSHOT",
+    ]
+    core = sqlite3.connect(workspace.core_path)
+    try:
+        assert core.execute(
+            """
+            SELECT DISTINCT revision.source_kind
+            FROM knowledge_roles AS role
+            JOIN source_revisions AS revision
+              ON revision.revision_id=role.source_revision_id
+            WHERE role.entity_id=1
+            """
+        ).fetchall() == [("role_classifier",)]
+    finally:
+        core.close()
 
 
 def test_default_unchanged_manifest_is_cache_hit_without_write(
@@ -2101,6 +2327,112 @@ def test_self_attested_receipt_without_independent_binding_is_rejected(
     assert result["published"] is None
 
 
+@pytest.mark.parametrize(
+    ("error", "status", "published", "gap_code"),
+    [
+        (
+            update.IncrementalPublicationNotReplaced("fixture pre-switch"),
+            "not_replaced",
+            False,
+            "ATOMIC_PUBLICATION_NOT_REPLACED",
+        ),
+        (
+            update.IncrementalPublicationUncertain("fixture post-switch"),
+            "uncertain_after_switch",
+            None,
+            "PUBLISHER_OUTCOME_UNCERTAIN",
+        ),
+    ],
+)
+def test_incremental_publisher_outcome_state_is_not_collapsed(
+    tmp_path: Path,
+    error: Exception,
+    status: str,
+    published: bool | None,
+    gap_code: str,
+) -> None:
+    previous = _manifest(_revision("old"))
+    current = _manifest(_revision("new"))
+    phases: list[str] = []
+    hooks = _success_hooks(tmp_path, previous, current, phases)
+
+    def publish(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        raise error
+
+    guarded = update.UpdateHooks(
+        load_previous_manifest=hooks.load_previous_manifest,
+        scan_manifest=hooks.scan_manifest,
+        check_capability=hooks.check_capability,
+        stage_snapshot=hooks.stage_snapshot,
+        plan_changes=hooks.plan_changes,
+        ingest_changes=hooks.ingest_changes,
+        drain_worker=hooks.drain_worker,
+        run_narrow_gates=hooks.run_narrow_gates,
+        publish_atomic=publish,
+        verify_publication=hooks.verify_publication,
+    )
+
+    result = update.run_incremental_update(_paths(tmp_path), hooks=guarded)
+
+    assert result["status"] == status
+    assert result["published"] is published
+    assert result["gapCodes"] == [gap_code]
+
+
+def test_not_replaced_result_exposes_bounded_orphan_reconciliation(
+    tmp_path: Path,
+) -> None:
+    previous = _manifest(_revision("old"))
+    current = _manifest(_revision("new"))
+    phases: list[str] = []
+    hooks = _success_hooks(tmp_path, previous, current, phases)
+    error = update.IncrementalPublicationNotReplaced(
+        "fixture pre-switch orphan",
+        residual_identifier=(
+            "snapshots/20260728T020304-0123456789ab"
+        ),
+        orphan_inventory=(
+            "snapshots/20260728T020304-0123456789ab/core.sqlite",
+            "snapshots/20260728T020304-0123456789ab/manifest.json",
+        ),
+        orphan_policy="PRESERVE_FOR_MANUAL_RECONCILIATION",
+    )
+
+    guarded = update.UpdateHooks(
+        load_previous_manifest=hooks.load_previous_manifest,
+        scan_manifest=hooks.scan_manifest,
+        check_capability=hooks.check_capability,
+        stage_snapshot=hooks.stage_snapshot,
+        plan_changes=hooks.plan_changes,
+        ingest_changes=hooks.ingest_changes,
+        drain_worker=hooks.drain_worker,
+        run_narrow_gates=hooks.run_narrow_gates,
+        publish_atomic=lambda *args, **kwargs: (_ for _ in ()).throw(error),
+        verify_publication=hooks.verify_publication,
+    )
+
+    result = update.run_incremental_update(_paths(tmp_path), hooks=guarded)
+
+    assert result["status"] == "not_replaced"
+    assert result["published"] is False
+    assert result["publicationResidualIdentifier"] == (
+        "snapshots/20260728T020304-0123456789ab"
+    )
+    assert result["orphanInventory"] == list(error.orphan_inventory)
+    assert result["orphanPolicy"] == error.orphan_policy
+
+
+def test_default_hooks_use_production_gates_and_shadow_publisher() -> None:
+    hooks = update.default_hooks()
+
+    assert hooks.run_narrow_gates is update.run_production_narrow_gate_checks
+    assert hooks.publish_atomic is update.publish_production_incremental_shadow
+    assert hooks.verify_publication is update.verify_current_publication
+    assert hooks.require_locked_update_baseline is True
+    assert hooks.blueprint_source_provider is update.materialize_blueprint_defaults
+
+
 def test_unknown_ingest_receipt_schema_cannot_self_attest(
     tmp_path: Path,
 ) -> None:
@@ -2308,6 +2640,70 @@ def test_zero_worker_report_cannot_self_attest_queue_drain(
     assert result["gapCodes"] == ["REBUILD_QUEUE_NOT_DRAINED"]
     assert result["published"] is False
     assert phases == ["stage", "plan", "ingest"]
+
+
+def test_shadow_publication_receipt_rejects_rehashed_pointer_mismatch() -> None:
+    manifest = _manifest(
+        *(
+            _semantic(key, f"fixture-{key}")
+            for key in sorted(update.SNAPSHOT_SEMANTIC_INPUT_KEYS)
+        )
+    )
+    source_sha256 = update.semantic_inputs_sha256(
+        update.candidate_semantic_inputs(manifest)
+    )
+    build_id = update.snapshot_build_id(
+        manifest.generated_at,
+        source_sha256,
+    )
+    body: dict[str, object] = {
+        "schema": "ark-kb-incremental-shadow-publication-receipt/v1",
+        "evidenceClass": "UNSIGNED_LOCAL_WRITE_FACT",
+        "status": "REPLACED",
+        "buildId": build_id,
+        "sourceSha256": source_sha256,
+        "sourceManifestFingerprint": manifest.fingerprint,
+        "previousBuildId": "20260727T000000-aaaaaaaaaaaa",
+        "previousManifestSha256": "1" * 64,
+        "narrowGateReportSha256": "2" * 64,
+        "pointerCAS": {
+            "operation": "INCREMENTAL_SHADOW_PUBLICATION",
+            "beforeBuildId": "20260727T000000-aaaaaaaaaaaa",
+            "afterBuildId": build_id,
+            "beforePointerSha256": "3" * 64,
+            "afterPointerSha256": "4" * 64,
+            "pointerUpdated": True,
+            "independentlyVerified": True,
+            "recoveredAfterFailure": False,
+        },
+        "atomicSourceManifestBound": True,
+        "published": True,
+        "productionAuthority": False,
+        "cutoverEligible": False,
+        "mode": "shadow",
+        "defaultQuerySource": "legacy",
+    }
+
+    def seal(value: dict[str, object]) -> dict[str, object]:
+        proof = hashlib.sha256(
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return {**value, "proof": f"publication-proof://{proof}"}
+
+    assert update._safe_publication(seal(body), manifest)["buildId"] == build_id
+    tampered = json.loads(json.dumps(body))
+    tampered["pointerCAS"]["afterBuildId"] = "attacker-build"
+    with pytest.raises(
+        update.UpdateBlocked,
+        match="invalid local shadow receipt",
+    ):
+        update._safe_publication(seal(tampered), manifest)
 
 
 def test_source_diff_and_plan_output_cannot_leak_injected_host_paths(

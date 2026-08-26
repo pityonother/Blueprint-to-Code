@@ -9,8 +9,10 @@ import tempfile
 import threading
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -21,6 +23,9 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from blueprint_translator.kb_vnext import snapshot as snapshot_module  # noqa: E402
 from blueprint_translator.kb_vnext import benchmark as benchmark_module  # noqa: E402
+from blueprint_translator.kb_vnext.blueprint_ingest import (  # noqa: E402
+    BlueprintIngestResult,
+)
 from blueprint_translator.kb_vnext.projections import (  # noqa: E402
     DOMAIN_PROJECTIONS,
     PROJECTION_SCHEMA_SQL,
@@ -30,6 +35,29 @@ from blueprint_translator.kb_vnext.projections import (  # noqa: E402
 from blueprint_translator.kb_vnext.quality_contract import (  # noqa: E402
     QUALITY_GATE_CONTRACT,
 )
+from blueprint_translator.kb_vnext.roles import (  # noqa: E402
+    materialize_discovery_roles,
+)
+from blueprint_translator.kb_vnext.incremental_publisher import (  # noqa: E402
+    IncrementalPublicationNotReplaced,
+    IncrementalPublicationUncertain,
+    database_truth_digest,
+    publish_incremental_shadow_snapshot,
+    reseal_incremental_snapshot_candidate,
+    seal_incremental_narrow_gate_report,
+    verify_incremental_shadow_publication,
+)
+from blueprint_translator.kb_vnext.narrow_gates import (  # noqa: E402
+    NARROW_GATE_CHECK_IDS,
+    NarrowGateObservation,
+    UpdateBaseline as NarrowGateUpdateBaseline,
+    build_narrow_gate_diagnostic_report,
+)
+from blueprint_translator.kb_vnext.narrow_gate_runner import (  # noqa: E402
+    ProductionNarrowGateError,
+    ProductionNarrowGateInputs,
+    run_production_narrow_gates,
+)
 from blueprint_translator.kb_vnext.schema_capabilities import (  # noqa: E402
     CORE_SCHEMA_VERSION,
 )
@@ -38,12 +66,14 @@ from blueprint_translator.kb_vnext.source_manifest import (  # noqa: E402
     SourceRevision,
     source_id,
     source_manifest_binding,
+    source_manifest_from_binding,
 )
 from blueprint_translator.kb_vnext.storage import (  # noqa: E402
     CACHE_SCHEMA_VERSION,
     CATALOG_SCHEMA_VERSION,
     SEARCH_SCHEMA_VERSION,
 )
+from scripts import update_ark_kb_vnext as update_module  # noqa: E402
 
 
 DATABASE_NAMES = (
@@ -421,6 +451,372 @@ def _promote_snapshot(
     )
 
 
+def _sealed_incremental_publication_fixture(
+    root: Path,
+) -> tuple[
+    Path,
+    dict[str, object],
+    snapshot_module.CurrentPointerBaseline,
+    NarrowGateUpdateBaseline,
+    SourceManifest,
+    str,
+    str,
+]:
+    base_id = _fixture_build_id("01:02:03")
+    base_staging, base_manifest = _staging(root, base_id)
+    _promote_snapshot(
+        staging=base_staging,
+        output_dir=root,
+        manifest=base_manifest,
+    )
+    expected_pointer = snapshot_module.read_current_pointer_baseline(root)
+    base_manifest_sha256 = hashlib.sha256(
+        (root / "snapshots" / base_id / "manifest.json").read_bytes()
+    ).hexdigest()
+    candidate_id = _fixture_build_id("02:03:04")
+    candidate_staging, candidate_manifest = _staging(root, candidate_id)
+    reserved = (
+        root / ".incremental-staging" / ("a" * 32) / "snapshot"
+    )
+    reserved.parent.mkdir(parents=True)
+    candidate_staging.rename(reserved)
+    candidate_manifest["previousSnapshot"] = {
+        "buildId": base_id,
+        "manifestSha256": base_manifest_sha256,
+    }
+    candidate_source_manifest = source_manifest_from_binding(
+        candidate_manifest["incrementalUpdate"]
+    )
+    baseline = NarrowGateUpdateBaseline(
+        base_build_id=base_id,
+        base_pointer_sha256=expected_pointer.pointer_sha256,
+        base_manifest_sha256=base_manifest_sha256,
+        base_source_manifest_fingerprint=source_manifest_from_binding(
+            base_manifest["incrementalUpdate"]
+        ).fingerprint,
+        candidate_source_manifest_fingerprint=(
+            candidate_source_manifest.fingerprint
+        ),
+        source_diff_sha256="d" * 64,
+        delta_receipt_sha256="e" * 64,
+    )
+    report = build_narrow_gate_diagnostic_report(
+        update_baseline=baseline,
+        observations=tuple(
+            NarrowGateObservation(
+                gate_id=gate_id,
+                observation_count=index,
+                evidence_sha256=hashlib.sha256(
+                    gate_id.encode("utf-8")
+                ).hexdigest(),
+            )
+            for index, gate_id in enumerate(
+                NARROW_GATE_CHECK_IDS,
+                start=1,
+            )
+        ),
+    )
+    report_bytes = json.dumps(
+        report,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    candidate_manifest = seal_incremental_narrow_gate_report(
+        staging=reserved,
+        manifest=candidate_manifest,
+        report_bytes=report_bytes,
+        report_sha256=report_sha256,
+        update_baseline=baseline,
+    )
+    return (
+        reserved,
+        candidate_manifest,
+        expected_pointer,
+        baseline,
+        candidate_source_manifest,
+        base_id,
+        candidate_id,
+    )
+
+
+def _write_default_integration_discovery(path: Path) -> None:
+    with closing(sqlite3.connect(path)) as discovery:
+        discovery.executescript(
+            """
+            CREATE TABLE assets(
+                object_path TEXT PRIMARY KEY,
+                asset_class_path TEXT NOT NULL,
+                generated_class_path TEXT NOT NULL,
+                parent_class_path TEXT NOT NULL,
+                native_parent_class_path TEXT NOT NULL,
+                identity_status TEXT NOT NULL,
+                identity_confidence TEXT NOT NULL,
+                is_blueprint INTEGER,
+                is_data_asset INTEGER,
+                is_data_table INTEGER,
+                is_function_library INTEGER,
+                is_blueprint_interface INTEGER,
+                is_map INTEGER,
+                capture_exists INTEGER,
+                evidence_freshness TEXT NOT NULL,
+                parse_status TEXT NOT NULL,
+                descendant_count INTEGER NOT NULL,
+                referencer_count INTEGER NOT NULL,
+                component_reuse_count INTEGER NOT NULL,
+                cross_domain_reference_count INTEGER NOT NULL,
+                registry_usage_count INTEGER NOT NULL,
+                query_hit_count INTEGER,
+                query_hit_status TEXT NOT NULL,
+                existing_report_count INTEGER,
+                existing_report_status TEXT NOT NULL,
+                graph_count INTEGER NOT NULL,
+                default_property_count INTEGER NOT NULL
+            );
+            INSERT INTO assets VALUES (
+                '/Game/Test/Added.Added', '/Script/Engine.Blueprint',
+                '/Game/Test/Added.Added_C', '/Script/Test.Fixture',
+                '/Script/Test.Fixture', 'CONFIRMED', 'HIGH',
+                1, 0, 0, 0, 0, 0, 1, 'FRESH', 'CONFIRMED',
+                0, 1, 0, 0, 0, NULL, 'NOT_MEASURED',
+                NULL, 'NOT_MEASURED', 1, 2
+            );
+            """
+        )
+        discovery.commit()
+
+
+def _write_default_integration_evidence(
+    capture_root: Path,
+) -> SourceRevision:
+    evidence_root = capture_root / "Added" / "evidence"
+    evidence_root.mkdir(parents=True)
+    evidence_path = evidence_root / "evidence.sqlite"
+    with closing(sqlite3.connect(evidence_path)) as evidence:
+        evidence.execute(
+            """
+            CREATE TABLE asset_revisions(
+                revision_id TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                asset_name TEXT NOT NULL,
+                object_path TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                parser_version TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                uasset_path TEXT NOT NULL
+            )
+            """
+        )
+        evidence.execute(
+            """
+            INSERT INTO asset_revisions VALUES (
+                'revision-added', 'fixture-asset', 'Added',
+                '/Game/Test/Added.Added', ?, 'fixture-parser',
+                'fixture-schema', '2026-07-28T02:03:04+00:00',
+                'Added.uasset'
+            )
+            """,
+            ("c" * 64,),
+        )
+        evidence.commit()
+    manifest_path = evidence_root / "manifest.json"
+    manifest_path.write_bytes(b'{"bundle":"fixture"}\n')
+    aggregate = hashlib.sha256()
+    for path in (evidence_path, manifest_path):
+        aggregate.update(path.name.encode("utf-8"))
+        aggregate.update(b"\0")
+        aggregate.update(path.read_bytes())
+        aggregate.update(b"\n")
+    uri = "capture://Added"
+    return SourceRevision(
+        source_id=source_id("BLUEPRINT_EVIDENCE", uri),
+        source_kind="BLUEPRINT_EVIDENCE",
+        source_uri=uri,
+        fingerprint=aggregate.hexdigest(),
+        size_bytes=evidence_path.stat().st_size,
+        entity_uri="/Game/Test/Added.Added",
+        revision_label="revision-added",
+    )
+
+
+def _seed_default_integration_base(
+    staging: Path,
+    manifest: dict[str, object],
+    discovery_path: Path,
+) -> None:
+    ontology = update_module.load_ontology(update_module.PROJECT_ROOT / "ontology")
+    with closing(sqlite3.connect(staging / "core.sqlite")) as core:
+        core.execute("PRAGMA foreign_keys=ON")
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                1, 'discovery', 'discovery://fixture', 'discovery-sha',
+                'fixture', 'v1', '2026-07-28T01:02:03+00:00', 'FRESH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO source_revisions VALUES (
+                2, 'ontology', ?, 'ontology-sha', ?, 'v1',
+                '2026-07-28T01:02:03+00:00', 'FRESH'
+            )
+            """,
+            (f"ontology://{ontology.version}", ontology.version),
+        )
+        core.execute(
+            """
+            INSERT INTO entities(
+                entity_id, canonical_uri, entity_kind,
+                status, confidence
+            ) VALUES (
+                1, '/Game/Test/Added.Added', 'BLUEPRINT_ASSET',
+                'CONFIRMED', 'HIGH'
+            )
+            """
+        )
+        core.execute(
+            """
+            INSERT INTO classes(
+                class_id, class_path, class_name, module_or_package,
+                class_kind, is_native, source_revision_id,
+                status, confidence
+            ) VALUES (
+                1, '/Script/Test.Fixture', 'Fixture', 'Test',
+                'NATIVE', 1, 1, 'IDENTIFIED', 'HIGH'
+            )
+            """
+        )
+        core.execute("INSERT INTO class_closure VALUES (1, 1, 0, 'SELF')")
+        core.execute(
+            """
+            INSERT INTO asset_class_assignments VALUES (
+                1, 1, 'GENERATED_CLASS', 'fixture://class',
+                'EXTRACTED', 'HIGH', 1
+            )
+            """
+        )
+        with closing(sqlite3.connect(discovery_path)) as discovery:
+            materialize_discovery_roles(
+                discovery,
+                core,
+                source_revision_id=1,
+            )
+        benchmark_module.materialize_benchmark_queries(core)
+        core.commit()
+    with closing(sqlite3.connect(staging / "search.sqlite")) as search:
+        search.execute(
+            """
+            INSERT INTO entity_search_meta VALUES (
+                1, '/Game/Test/Added.Added', 'BLUEPRINT_ASSET',
+                '', '', 'CONFIRMED'
+            )
+            """
+        )
+        search.execute(
+            """
+            INSERT INTO entities_fts VALUES (
+                1, '/Game/Test/Added.Added', '', '', ''
+            )
+            """
+        )
+        search.commit()
+    databases = manifest["databases"]
+    assert isinstance(databases, dict)
+    databases["core.sqlite"] = snapshot_module.database_metrics(
+        staging / "core.sqlite"
+    )
+    databases["search.sqlite"] = snapshot_module.database_metrics(
+        staging / "search.sqlite"
+    )
+
+
+def _default_integration_source_provider(
+    discovery: sqlite3.Connection,
+    core: sqlite3.Connection,
+    *,
+    capture_root: Path,
+    ontology: object,
+    source_revisions: tuple[SourceRevision, ...],
+    frozen_evidence_root: bool,
+) -> BlueprintIngestResult:
+    del discovery, capture_root, ontology
+    assert frozen_evidence_root is True
+    assert len(source_revisions) == 1
+    revision_id = 3
+    core.execute(
+        """
+        INSERT INTO source_revisions VALUES (
+            ?, 'blueprint_evidence', 'bp://fixture-asset@revision-added',
+            ?, 'fixture-parser', 'fixture-schema',
+            '2026-07-28T02:03:04+00:00', 'FRESH'
+        )
+        """,
+        (revision_id, "c" * 64),
+    )
+    facts = (
+        (1, "Rate", 7, "fact://fixture/rate"),
+        (2, "RequiredEngramPoints", 0, "fact://fixture/engram-points"),
+    )
+    core.executemany(
+        """
+        INSERT INTO facts(
+            fact_id, subject_entity_id, fact_type, fact_name,
+            scope_kind, declared_on_entity_id, value_kind,
+            value_integer, status, confidence, ontology_version,
+            current, canonical_fact_key
+        ) VALUES (
+            ?, 1, 'DECLARED_DEFAULT', ?, 'DECLARED', 1,
+            'INTEGER', ?, 'CONFIRMED', 'HIGH', ?, 1, ?
+        )
+        """,
+        [
+            (fact_id, name, value, ONTOLOGY_VERSION, key)
+            for fact_id, name, value, key in facts
+        ],
+    )
+    core.executemany(
+        """
+        INSERT INTO fact_evidence VALUES (
+            ?, ?, ?, 'DEFAULT_VALUE_ACTUAL'
+        )
+        """,
+        (
+            (
+                1,
+                revision_id,
+                "bp://fixture-asset@revision-added/default/Rate",
+            ),
+            (
+                2,
+                revision_id,
+                "bp://fixture-asset@revision-added/default/RequiredEngramPoints",
+            ),
+        ),
+    )
+    core.commit()
+    return BlueprintIngestResult(
+        counts={
+            "freshAssets": 1,
+            "declaredFacts": 2,
+            "factEvidence": 2,
+        },
+        covered_properties=frozenset(
+            {
+                ("/Game/Test/Added.Added", "Rate"),
+                ("/Game/Test/Added.Added", "RequiredEngramPoints"),
+            }
+        ),
+        freshness_gap_assets=frozenset(),
+        untrusted_assets=frozenset(),
+        fact_ids=frozenset({1, 2}),
+        entity_ids=frozenset({1}),
+    )
+
+
 def _attach_query_diagnostics(
     staging: Path,
     manifest: dict[str, object],
@@ -532,6 +928,855 @@ def _attach_query_diagnostics(
 
 
 class ImmutableSnapshotPublicationTests(unittest.TestCase):
+    def test_database_truth_digest_never_creates_a_missing_database(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "missing.sqlite"
+
+            with self.assertRaisesRegex(ValueError, "missing or unsafe"):
+                database_truth_digest(missing)
+
+            self.assertFalse(missing.exists())
+
+    def test_default_hooks_run_complete_isolated_additive_lifecycle(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture_root = Path(temp_dir)
+            root = fixture_root / "vnext"
+            root.mkdir()
+            discovery_path = fixture_root / "Discovery.sqlite"
+            _write_default_integration_discovery(discovery_path)
+            base_id = _fixture_build_id("01:02:03")
+            base_staging, base_manifest = _staging(root, base_id)
+            _seed_default_integration_base(
+                base_staging,
+                base_manifest,
+                discovery_path,
+            )
+            _promote_snapshot(
+                staging=base_staging,
+                output_dir=root,
+                manifest=base_manifest,
+            )
+            capture_root = fixture_root / "captures"
+            added_revision = _write_default_integration_evidence(
+                capture_root
+            )
+            base_sources = source_manifest_from_binding(
+                base_manifest["incrementalUpdate"]
+            )
+            candidate_entries = tuple(
+                replace(entry, fingerprint="a" * 64)
+                if entry.source_uri == "semantic-input://captures"
+                else entry
+                for entry in base_sources.entries
+            ) + (added_revision,)
+            candidate_sources = SourceManifest(
+                entries=candidate_entries,
+                generated_at="2026-07-28T02:03:04+00:00",
+            )
+            paths = update_module.UpdatePaths(
+                discovery_database=discovery_path,
+                capture_root=capture_root,
+                native_root=fixture_root / "native",
+                runtime_root=fixture_root / "runtime",
+                legacy_kb_root=fixture_root / "legacy",
+                map_evidence_catalog=fixture_root / "map.json",
+                output=root,
+            )
+            old_snapshot = root / "snapshots" / base_id
+
+            def inventory(snapshot: Path) -> dict[str, str]:
+                return {
+                    path.relative_to(snapshot).as_posix(): hashlib.sha256(
+                        path.read_bytes()
+                    ).hexdigest()
+                    for path in sorted(snapshot.rglob("*"))
+                    if path.is_file()
+                }
+
+            old_inventory = inventory(old_snapshot)
+            pointer_before = (root / "current.json").read_bytes()
+            scan_count = 0
+
+            def fixture_scanner(
+                observed_paths: update_module.UpdatePaths,
+            ) -> SourceManifest:
+                nonlocal scan_count
+                self.assertEqual(observed_paths.output, root.resolve())
+                scan_count += 1
+                return candidate_sources
+
+            with patch.object(
+                update_module,
+                "scan_source_manifest",
+                fixture_scanner,
+            ):
+                hooks = replace(
+                    update_module.default_hooks(),
+                    blueprint_source_provider=(
+                        _default_integration_source_provider
+                    ),
+                )
+                result = update_module.run_incremental_update(
+                    paths,
+                    hooks=hooks,
+                )
+
+            self.assertEqual(result["status"], "published", result)
+            self.assertTrue(result["published"])
+            self.assertEqual(result["worker"]["attempted"], 12)
+            self.assertEqual(result["worker"]["succeeded"], 12)
+            self.assertEqual(result["worker"]["failed"], 0)
+            self.assertEqual(result["worker"]["blocked_gap"], 0)
+            self.assertEqual(result["worker"]["remaining_pending"], 0)
+            self.assertEqual(result["worker"]["remaining_running"], 0)
+            self.assertEqual(result["narrowGates"]["total"], 11)
+            self.assertEqual(result["narrowGates"]["failed"], 0)
+            self.assertGreaterEqual(scan_count, 4)
+
+            publication = result["publication"]
+            new_id = str(publication["buildId"])
+            self.assertEqual(
+                set(publication),
+                {
+                    "schema",
+                    "evidenceClass",
+                    "status",
+                    "buildId",
+                    "sourceSha256",
+                    "sourceManifestFingerprint",
+                    "previousBuildId",
+                    "previousManifestSha256",
+                    "narrowGateReportSha256",
+                    "pointerCAS",
+                    "atomicSourceManifestBound",
+                    "published",
+                    "productionAuthority",
+                    "cutoverEligible",
+                    "mode",
+                    "defaultQuerySource",
+                    "proof",
+                },
+            )
+            self.assertEqual(
+                publication["schema"],
+                "ark-kb-incremental-shadow-publication-receipt/v1",
+            )
+            self.assertEqual(
+                publication["evidenceClass"],
+                "UNSIGNED_LOCAL_WRITE_FACT",
+            )
+            self.assertEqual(publication["status"], "REPLACED")
+            self.assertEqual(publication["previousBuildId"], base_id)
+            self.assertEqual(
+                publication["previousManifestSha256"],
+                hashlib.sha256(
+                    (old_snapshot / "manifest.json").read_bytes()
+                ).hexdigest(),
+            )
+            self.assertEqual(
+                publication["sourceManifestFingerprint"],
+                candidate_sources.fingerprint,
+            )
+            self.assertTrue(publication["atomicSourceManifestBound"])
+            pointer_after = (root / "current.json").read_bytes()
+            self.assertNotEqual(pointer_after, pointer_before)
+            self.assertEqual(
+                hashlib.sha256(pointer_before).hexdigest(),
+                publication["pointerCAS"]["beforePointerSha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256(pointer_after).hexdigest(),
+                publication["pointerCAS"]["afterPointerSha256"],
+            )
+            self.assertTrue(publication["pointerCAS"]["pointerUpdated"])
+            self.assertEqual(
+                sorted(path.name for path in (root / "snapshots").iterdir()),
+                sorted((base_id, new_id)),
+            )
+            self.assertEqual(inventory(old_snapshot), old_inventory)
+            with closing(
+                sqlite3.connect(old_snapshot / "core.sqlite")
+            ) as old_core:
+                self.assertEqual(
+                    old_core.execute(
+                        "SELECT COUNT(*) FROM facts"
+                    ).fetchone(),
+                    (0,),
+                )
+
+            new_snapshot = root / "snapshots" / new_id
+            new_manifest_bytes = (new_snapshot / "manifest.json").read_bytes()
+            new_manifest = json.loads(new_manifest_bytes)
+            self.assertEqual(
+                publication["sourceSha256"],
+                new_manifest["source"]["sha256"],
+            )
+            self.assertEqual(len(new_manifest["databases"]), 10)
+            for relative, metrics in new_manifest["databases"].items():
+                artifact = new_snapshot / relative
+                self.assertTrue(artifact.is_file())
+                self.assertEqual(
+                    hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                    metrics["sha256"],
+                )
+            report_path = (
+                new_snapshot
+                / new_manifest["incrementalPublication"][
+                    "narrowGateReportUri"
+                ]
+            )
+            self.assertEqual(
+                hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                publication["narrowGateReportSha256"],
+            )
+            publication_body = dict(publication)
+            proof = publication_body.pop("proof")
+            self.assertEqual(
+                proof,
+                "publication-proof://"
+                + hashlib.sha256(
+                    json.dumps(
+                        publication_body,
+                        allow_nan=False,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest(),
+            )
+            self.assertTrue(
+                update_module.verify_current_publication(
+                    paths,
+                    new_id,
+                    candidate_sources,
+                )
+            )
+            staging_root = root / ".incremental-staging"
+            self.assertTrue(
+                not staging_root.exists() or not any(staging_root.iterdir())
+            )
+            self.assertFalse(any(root.rglob("quarantine")))
+            self.assertFalse(publication["productionAuthority"])
+            self.assertFalse(publication["cutoverEligible"])
+            self.assertEqual(publication["mode"], "shadow")
+            self.assertEqual(publication["defaultQuerySource"], "legacy")
+
+    def test_incremental_publisher_distinguishes_pre_and_post_switch_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            staging = (
+                root
+                / ".incremental-staging"
+                / ("c" * 32)
+                / "snapshot"
+            )
+            staging.mkdir(parents=True)
+            (root / "snapshots").mkdir()
+            pointer_bytes = json.dumps(
+                {
+                    "buildId": "base-fixture",
+                    "snapshotRelativePath": "snapshots/base-fixture",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            (root / "current.json").write_bytes(pointer_bytes)
+            expected_pointer = snapshot_module.read_current_pointer_baseline(root)
+            baseline = NarrowGateUpdateBaseline(
+                base_build_id="base-fixture",
+                base_pointer_sha256=expected_pointer.pointer_sha256,
+                base_manifest_sha256="2" * 64,
+                base_source_manifest_fingerprint="3" * 64,
+                candidate_source_manifest_fingerprint="4" * 64,
+                source_diff_sha256="5" * 64,
+                delta_receipt_sha256="6" * 64,
+            )
+            source_manifest = SourceManifest(
+                entries=(),
+                generated_at="2026-07-28T02:03:04+00:00",
+            )
+
+            for mutate_pointer, expected_error in (
+                (False, IncrementalPublicationNotReplaced),
+                (True, IncrementalPublicationUncertain),
+            ):
+                (root / "current.json").write_bytes(pointer_bytes)
+
+                def fail_after_boundary(**kwargs: object) -> dict[str, object]:
+                    del kwargs
+                    if mutate_pointer:
+                        (root / "current.json").write_bytes(b"{}")
+                    raise RuntimeError("fixture crash")
+
+                with (
+                    patch(
+                        "blueprint_translator.kb_vnext.incremental_publisher."
+                        "_validate_incremental_binding"
+                    ),
+                    patch(
+                        "blueprint_translator.kb_vnext.incremental_publisher."
+                        "_validate_staged_snapshot_for_promotion"
+                    ),
+                    patch(
+                        "blueprint_translator.kb_vnext.incremental_publisher."
+                        "_promote_snapshot",
+                        side_effect=fail_after_boundary,
+                    ),
+                ):
+                    with self.assertRaises(expected_error):
+                        publish_incremental_shadow_snapshot(
+                            staging=staging,
+                            output_dir=root,
+                            manifest={"buildId": "candidate-fixture"},
+                            expected_current_pointer=expected_pointer,
+                            expected_current_manifest_sha256="2" * 64,
+                            expected_update_baseline=baseline,
+                            expected_candidate_source_manifest=(
+                                source_manifest
+                            ),
+                        )
+                if not mutate_pointer:
+                    self.assertEqual(
+                        (root / "current.json").read_bytes(),
+                        pointer_bytes,
+                    )
+
+    def test_pre_cas_callback_failure_reports_preserved_orphan_inventory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            (
+                reserved,
+                manifest,
+                expected_pointer,
+                baseline,
+                source_manifest,
+                base_id,
+                candidate_id,
+            ) = _sealed_incremental_publication_fixture(root)
+            shared_before = {
+                path.name: path.read_bytes()
+                for path in (root / "manifests").iterdir()
+            }
+
+            def fail_before_cas() -> None:
+                raise RuntimeError("fixture callback failure")
+
+            with self.assertRaises(
+                IncrementalPublicationNotReplaced
+            ) as caught:
+                publish_incremental_shadow_snapshot(
+                    staging=reserved,
+                    output_dir=root,
+                    manifest=manifest,
+                    expected_current_pointer=expected_pointer,
+                    expected_current_manifest_sha256=(
+                        baseline.base_manifest_sha256
+                    ),
+                    expected_update_baseline=baseline,
+                    expected_candidate_source_manifest=source_manifest,
+                    before_pointer_cas=fail_before_cas,
+                )
+
+            orphan = root / "snapshots" / candidate_id
+            expected_inventory = tuple(
+                sorted(
+                    path.relative_to(root).as_posix()
+                    for path in orphan.rglob("*")
+                    if path.is_file() or path.is_symlink()
+                )
+            )
+            self.assertEqual(
+                snapshot_module.read_current_pointer_baseline(root).build_id,
+                base_id,
+            )
+            self.assertFalse(reserved.exists())
+            self.assertTrue((orphan / "manifest.json").is_file())
+            self.assertEqual(
+                caught.exception.residual_identifier,
+                f"snapshots/{candidate_id}",
+            )
+            self.assertEqual(
+                caught.exception.orphan_inventory,
+                expected_inventory,
+            )
+            self.assertEqual(
+                caught.exception.orphan_policy,
+                "PRESERVE_FOR_MANUAL_RECONCILIATION",
+            )
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "manifests").iterdir()
+                },
+                shared_before,
+            )
+
+    def test_pre_cas_pointer_conflict_never_overwrites_observed_pointer(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            (
+                reserved,
+                manifest,
+                expected_pointer,
+                baseline,
+                source_manifest,
+                base_id,
+                candidate_id,
+            ) = _sealed_incremental_publication_fixture(root)
+            concurrent_pointer = (
+                json.dumps(
+                    {
+                        "buildId": base_id,
+                        "snapshotRelativePath": f"snapshots/{base_id}",
+                    },
+                    indent=4,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+
+            def create_pointer_conflict() -> None:
+                (root / "current.json").write_bytes(concurrent_pointer)
+
+            with self.assertRaises(
+                IncrementalPublicationNotReplaced
+            ) as caught:
+                publish_incremental_shadow_snapshot(
+                    staging=reserved,
+                    output_dir=root,
+                    manifest=manifest,
+                    expected_current_pointer=expected_pointer,
+                    expected_current_manifest_sha256=(
+                        baseline.base_manifest_sha256
+                    ),
+                    expected_update_baseline=baseline,
+                    expected_candidate_source_manifest=source_manifest,
+                    before_pointer_cas=create_pointer_conflict,
+                )
+
+            self.assertEqual(
+                (root / "current.json").read_bytes(), concurrent_pointer
+            )
+            self.assertEqual(
+                caught.exception.residual_identifier,
+                f"snapshots/{candidate_id}",
+            )
+            self.assertTrue(
+                (root / "snapshots" / candidate_id / "manifest.json").is_file()
+            )
+
+    def test_production_narrow_runner_computes_fixed_11_from_candidate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            build_id = _fixture_build_id("02:03:04")
+            created, manifest = _staging(root, build_id)
+            temporary_root = root / ".incremental-staging" / ("b" * 32)
+            staging = temporary_root / "snapshot"
+            temporary_root.mkdir(parents=True, exist_ok=True)
+            created.rename(staging)
+            core_path = staging / "core.sqlite"
+            with closing(sqlite3.connect(core_path)) as core:
+                core.execute(
+                    """
+                    INSERT INTO source_revisions VALUES (
+                        1, 'discovery', 'discovery://fixture', ?,
+                        'fixture/v1', 'fixture/v1', ?, 'FRESH'
+                    )
+                    """,
+                    ("a" * 64, manifest["generatedAt"]),
+                )
+                core.execute(
+                    """
+                    INSERT INTO entities(
+                        entity_id, canonical_uri, entity_kind, status,
+                        confidence, display_name, internal_name
+                    ) VALUES (
+                        1, '/Game/Test/Added.Added', 'BLUEPRINT_ASSET',
+                        'CONFIRMED', 'HIGH', 'Added', 'Added'
+                    )
+                    """
+                )
+                core.commit()
+            with closing(sqlite3.connect(staging / "search.sqlite")) as search:
+                search.execute(
+                    "INSERT INTO entity_search_meta VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        1,
+                        "/Game/Test/Added.Added",
+                        "BLUEPRINT_ASSET",
+                        "Added",
+                        "Added",
+                        "CONFIRMED",
+                    ),
+                )
+                search.execute(
+                    "INSERT INTO entities_fts VALUES (?, ?, ?, ?, '')",
+                    (1, "/Game/Test/Added.Added", "Added", "Added"),
+                )
+                search.commit()
+            with closing(sqlite3.connect(staging / "cache.sqlite")) as cache:
+                cache.execute(
+                    "INSERT OR REPLACE INTO metadata VALUES ('disposable', 'true')"
+                )
+                cache.commit()
+            manifest["databases"]["core.sqlite"] = (
+                snapshot_module.database_metrics(core_path)
+            )
+            manifest["databases"]["search.sqlite"] = (
+                snapshot_module.database_metrics(staging / "search.sqlite")
+            )
+            manifest["databases"]["cache.sqlite"] = (
+                snapshot_module.database_metrics(staging / "cache.sqlite")
+            )
+            snapshot_module._write_json(staging / "manifest.json", manifest)
+            base_snapshot = root / "base-fixture"
+            base_snapshot.mkdir()
+            shutil.copy2(staging / "search.sqlite", base_snapshot / "search.sqlite")
+            candidate_source_manifest = source_manifest_from_binding(
+                manifest["incrementalUpdate"]
+            )
+            fake_baseline = SimpleNamespace(
+                base_build_id="base-fixture",
+                base_pointer_sha256="1" * 64,
+                base_manifest_sha256="2" * 64,
+                base_source_manifest_fingerprint="3" * 64,
+                candidate_source_manifest_fingerprint=(
+                    candidate_source_manifest.fingerprint
+                ),
+                source_diff_sha256="4" * 64,
+                candidate_source_manifest=candidate_source_manifest,
+                current_snapshot=SimpleNamespace(snapshot_dir=base_snapshot),
+            )
+            manifest["previousSnapshot"] = {
+                "buildId": fake_baseline.base_build_id,
+                "manifestSha256": fake_baseline.base_manifest_sha256,
+            }
+            inspection = SimpleNamespace(
+                payload=lambda: {
+                    "status": "FOUNDATION_VERIFIED",
+                    "baseBindingVerified": True,
+                    "blockedGapCount": 0,
+                }
+            )
+            worker = {
+                "attempted": 12,
+                "succeeded": 12,
+                "failed": 0,
+                "blocked_gap": 0,
+                "remaining_pending": 0,
+                "remaining_running": 0,
+                "drained": True,
+                "outcomes": tuple(
+                    {
+                        "status": "SUCCEEDED",
+                        "proof": f"rebuild-proof://{index:064x}",
+                    }
+                    for index in range(1, 13)
+                ),
+            }
+
+            with (
+                patch(
+                    "blueprint_translator.kb_vnext.narrow_gate_runner."
+                    "validate_final_source_manifest"
+                ),
+                patch(
+                    "blueprint_translator.kb_vnext.narrow_gate_runner."
+                    "inspect_base_bound_prepublication_delta_receipt",
+                    return_value=inspection,
+                ),
+                patch(
+                    "blueprint_translator.kb_vnext.narrow_gate_runner."
+                    "validate_update_baseline_identity"
+                ),
+            ):
+                inputs = ProductionNarrowGateInputs(
+                    baseline=fake_baseline,
+                    staged_snapshot=SimpleNamespace(
+                        snapshot_dir=staging,
+                        temporary_root=temporary_root,
+                    ),
+                    frozen_input=object(),
+                    candidate_source_manifest=(
+                        candidate_source_manifest
+                    ),
+                    candidate_manifest=manifest,
+                    delta_receipt_bytes=b"fixture",
+                    delta_receipt_sha256="5" * 64,
+                    worker_report=worker,
+                    changed_source_revision_ids=(1,),
+                    affected_entity_ids=(1,),
+                )
+                result = run_production_narrow_gates(inputs)
+                with self.assertRaisesRegex(
+                    ProductionNarrowGateError,
+                    "attempted must be a nonnegative integer",
+                ):
+                    run_production_narrow_gates(
+                        replace(
+                            inputs,
+                            worker_report={
+                                **worker,
+                                "attempted": True,
+                                "succeeded": True,
+                            },
+                        )
+                    )
+
+            self.assertEqual(len(result.observations), 11)
+            self.assertEqual(
+                tuple(value.gate_id for value in result.observations),
+                NARROW_GATE_CHECK_IDS,
+            )
+            self.assertEqual(
+                result.report["summary"],
+                {"total": 11, "passed": 11, "failed": 0},
+            )
+            self.assertEqual(
+                hashlib.sha256(result.report_bytes).hexdigest(),
+                result.report_sha256,
+            )
+
+    def test_incremental_shadow_publisher_seals_report_and_cas_swaps(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            base_id = _fixture_build_id("01:02:03")
+            base_staging, base_manifest = _staging(root, base_id)
+            _promote_snapshot(
+                staging=base_staging,
+                output_dir=root,
+                manifest=base_manifest,
+            )
+            expected_pointer = snapshot_module.read_current_pointer_baseline(root)
+            base_manifest_sha256 = hashlib.sha256(
+                (root / "snapshots" / base_id / "manifest.json").read_bytes()
+            ).hexdigest()
+
+            candidate_id = _fixture_build_id("02:03:04")
+            candidate_staging, candidate_manifest = _staging(root, candidate_id)
+            reserved = (
+                root
+                / ".incremental-staging"
+                / ("a" * 32)
+                / "snapshot"
+            )
+            reserved.parent.mkdir(parents=True)
+            candidate_staging.rename(reserved)
+            candidate_manifest["previousSnapshot"] = {
+                "buildId": base_id,
+                "manifestSha256": base_manifest_sha256,
+            }
+            candidate_source_manifest = source_manifest_from_binding(
+                candidate_manifest["incrementalUpdate"]
+            )
+            baseline = NarrowGateUpdateBaseline(
+                base_build_id=base_id,
+                base_pointer_sha256=expected_pointer.pointer_sha256,
+                base_manifest_sha256=base_manifest_sha256,
+                base_source_manifest_fingerprint=(
+                    source_manifest_from_binding(
+                        base_manifest["incrementalUpdate"]
+                    ).fingerprint
+                ),
+                candidate_source_manifest_fingerprint=(
+                    candidate_source_manifest.fingerprint
+                ),
+                source_diff_sha256="d" * 64,
+                delta_receipt_sha256="e" * 64,
+            )
+            report = build_narrow_gate_diagnostic_report(
+                update_baseline=baseline,
+                observations=tuple(
+                    NarrowGateObservation(
+                        gate_id=gate_id,
+                        observation_count=index,
+                        evidence_sha256=hashlib.sha256(
+                            gate_id.encode("utf-8")
+                        ).hexdigest(),
+                    )
+                    for index, gate_id in enumerate(
+                        NARROW_GATE_CHECK_IDS,
+                        start=1,
+                    )
+                ),
+            )
+            report_bytes = json.dumps(
+                report,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+            candidate_manifest = seal_incremental_narrow_gate_report(
+                staging=reserved,
+                manifest=candidate_manifest,
+                report_bytes=report_bytes,
+                report_sha256=report_sha256,
+                update_baseline=baseline,
+            )
+            observed_before_cas: list[str | None] = []
+
+            def observe_source_revalidation_boundary() -> None:
+                observed_before_cas.append(
+                    snapshot_module.read_current_pointer_baseline(
+                        root
+                    ).build_id
+                )
+
+            receipt = publish_incremental_shadow_snapshot(
+                staging=reserved,
+                output_dir=root,
+                manifest=candidate_manifest,
+                expected_current_pointer=expected_pointer,
+                expected_current_manifest_sha256=base_manifest_sha256,
+                expected_update_baseline=baseline,
+                expected_candidate_source_manifest=(
+                    candidate_source_manifest
+                ),
+                before_pointer_cas=observe_source_revalidation_boundary,
+            )
+
+            self.assertEqual(receipt["status"], "REPLACED")
+            self.assertTrue(receipt["published"])
+            self.assertFalse(receipt["productionAuthority"])
+            self.assertFalse(receipt["cutoverEligible"])
+            self.assertEqual(receipt["mode"], "shadow")
+            self.assertEqual(receipt["defaultQuerySource"], "legacy")
+            self.assertEqual(observed_before_cas, [base_id])
+            self.assertEqual(
+                receipt["pointerCAS"],
+                {
+                    "operation": "INCREMENTAL_SHADOW_PUBLICATION",
+                    "beforeBuildId": base_id,
+                    "afterBuildId": candidate_id,
+                    "beforePointerSha256": (
+                        expected_pointer.pointer_sha256
+                    ),
+                    "afterPointerSha256": (
+                        snapshot_module.read_current_pointer_baseline(
+                            root
+                        ).pointer_sha256
+                    ),
+                    "pointerUpdated": True,
+                    "independentlyVerified": True,
+                    "recoveredAfterFailure": False,
+                },
+            )
+            self.assertTrue(receipt["proof"].startswith("publication-proof://"))
+            self.assertTrue(
+                verify_incremental_shadow_publication(
+                    output_dir=root,
+                    build_id=candidate_id,
+                    expected_update_baseline=baseline,
+                    expected_candidate_source_manifest=(
+                        candidate_source_manifest
+                    ),
+                )
+            )
+
+    def test_incremental_reseal_rebinds_every_database_to_new_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "vnext"
+            root.mkdir()
+            base_id = _fixture_build_id("01:02:03")
+            staging, base_manifest = _staging(root, base_id)
+            generated_at = "2026-07-28T02:03:04+00:00"
+            candidate_source_manifest = SourceManifest(
+                entries=source_manifest_from_binding(
+                    base_manifest["incrementalUpdate"]
+                ).entries,
+                generated_at=generated_at,
+            )
+            candidate_id = snapshot_module.snapshot_build_id(
+                generated_at,
+                snapshot_module.semantic_inputs_sha256(SOURCE_INPUTS),
+            )
+            quality_report = json.loads(
+                (staging / "reports" / "quality_gates.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            quality_report["buildId"] = candidate_id
+            base_manifest_sha256 = hashlib.sha256(
+                json.dumps(
+                    base_manifest,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+
+            with patch(
+                "blueprint_translator.kb_vnext.incremental_publisher."
+                "_evaluate_staged_quality_gates",
+                return_value=quality_report,
+            ):
+                resealed = reseal_incremental_snapshot_candidate(
+                    staging=staging,
+                    base_manifest=base_manifest,
+                    base_manifest_sha256=base_manifest_sha256,
+                    candidate_source_manifest=candidate_source_manifest,
+                    project_root=PROJECT_ROOT,
+                    discovery_database=staging / "catalog.sqlite",
+                )
+
+            self.assertEqual(resealed.manifest["buildId"], candidate_id)
+            self.assertEqual(
+                resealed.manifest["previousSnapshot"],
+                {
+                    "buildId": base_id,
+                    "manifestSha256": base_manifest_sha256,
+                },
+            )
+            self.assertEqual(resealed.manifest["cutover"]["mode"], "shadow")
+            self.assertEqual(
+                resealed.manifest["cutover"]["defaultQuerySource"],
+                "legacy",
+            )
+            self.assertEqual(
+                set(resealed.identity_only_databases),
+                {"catalog.sqlite", "search.sqlite"},
+            )
+            for relative_name in (
+                *DATABASE_NAMES,
+                *(
+                    f"domain_exports/{name}.sqlite"
+                    for name in DOMAIN_PROJECTIONS
+                ),
+            ):
+                with closing(sqlite3.connect(staging / relative_name)) as db:
+                    metadata = dict(db.execute("SELECT key, value FROM metadata"))
+                self.assertEqual(metadata["snapshot_build_id"], candidate_id)
+                self.assertEqual(
+                    metadata["snapshot_source_fingerprint"],
+                    resealed.manifest["source"]["sha256"],
+                )
+            snapshot_module._validate_staged_snapshot_for_promotion(
+                staging=staging,
+                manifest=resealed.manifest,
+            )
+
     def test_query_diagnostic_byte_tamper_blocks_pointer_swap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "vnext"

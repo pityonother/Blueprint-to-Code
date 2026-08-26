@@ -515,6 +515,51 @@ def _reproof_backend_receipt(
     return receipt
 
 
+@pytest.mark.parametrize(
+    ("field", "attacked_value"),
+    (
+        ("sourceRevisionId", 8),
+        ("triggerSourceRevisionIds", [8]),
+        ("changedEntityIds", [8]),
+        ("roleEntityIds", [1, 8]),
+        ("dependencyProof", "role-scope://" + "b" * 64),
+    ),
+)
+def test_role_terminal_scope_is_bound_to_exact_dependency_proof(
+    field: str,
+    attacked_value: object,
+) -> None:
+    dependency_proof = {
+        "sourceRevisionId": 7,
+        "triggerSourceRevisionIds": [2],
+        "changedEntityIds": [1],
+        "roleEntityIds": [1],
+        "proof": "role-scope://" + "a" * 64,
+    }
+    row_scope = {
+        "mode": "PROVEN_PERCENTILE_CLOSURE",
+        "targetId": 1,
+        "sourceRevisionId": 7,
+        "triggerSourceRevisionIds": [2],
+        "changedEntityIds": [1],
+        "roleEntityIds": [1],
+        "dependencyProof": "role-scope://" + "a" * 64,
+    }
+    attacked = {**row_scope, field: attacked_value}
+
+    with pytest.raises(AddOnlyDeltaBlockedGap) as caught:
+        incremental_delta_module._validate_backend_row_scope(
+            attacked,
+            kind="ROLE_ENTITY",
+            target_id=1,
+            event_id="event-fixture",
+            strict_derived_scope=True,
+            role_scope_proof=dependency_proof,
+        )
+
+    assert caught.value.gap_code == "BACKEND_TERMINAL_OUTCOME_UNPROVEN"
+
+
 def _explicit_whole_cache_backend_receipt(
     receipt: dict[str, object],
 ) -> dict[str, object]:

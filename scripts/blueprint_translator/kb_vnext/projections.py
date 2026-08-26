@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 from collections import defaultdict
@@ -944,6 +945,246 @@ def _review_projection(
         )
     status = "FIXTURE_EXACT" if not failures else "REVIEW_MISMATCH"
     return status, matched, failures
+
+
+def build_domain_projection(
+    *,
+    core: sqlite3.Connection,
+    projection_name: str,
+    output_path: Path,
+    generated_at: str,
+    ontology_version: str,
+    review_path: Path | None = None,
+    snapshot_build_id: str = "",
+    snapshot_source_fingerprint: str = "",
+) -> dict[str, object]:
+    """Build exactly one complete projection without touching its siblings.
+
+    The caller owns the Core transaction and must supply a fresh same-volume
+    staging path.  This primitive never replaces a published projection.
+    """
+
+    if projection_name not in DOMAIN_PROJECTIONS:
+        raise ValueError(f"unknown domain projection: {projection_name}")
+    if bool(snapshot_build_id) != bool(snapshot_source_fingerprint):
+        raise ValueError("projection snapshot identity requires build and source")
+    expected_name = f"{projection_name}.sqlite"
+    if output_path.name != expected_name:
+        raise ValueError(f"projection output must be named {expected_name}")
+    if not output_path.parent.is_dir() or output_path.parent.is_symlink():
+        raise ValueError("projection staging parent must be a real directory")
+    if output_path.exists() or output_path.is_symlink():
+        raise FileExistsError("projection staging output already exists")
+
+    review_version, review_config, review_config_sha256 = (
+        load_projection_review_contract(review_path)
+    )
+    revision_identities = _revision_identities(core)
+    fact_types = DOMAIN_PROJECTIONS[projection_name]
+    rows = _fact_rows(core, fact_types, ontology_version)
+    fact_ids = {int(row["fact_id"]) for row in rows}
+    evidence_by_fact = _fresh_evidence(core, fact_types, fact_ids)
+    lineage_by_fact = _promoted_lineage(core, fact_types, fact_ids)
+    all_revision_identities = [
+        revision_identities[evidence[0]]
+        for values in evidence_by_fact.values()
+        for evidence in values
+    ]
+    revision_set_hash = _revision_hash(all_revision_identities)
+    completeness_by_fact = _projection_completeness(
+        projection_name=projection_name,
+        fact_ids=fact_ids,
+        lineage_by_fact=lineage_by_fact,
+    )
+    review_status, matched_reviews, review_failures = _review_projection(
+        projection_name=projection_name,
+        rows=rows,
+        evidence_by_fact=evidence_by_fact,
+        review_version=review_version,
+        reviews=review_config.get(projection_name, ()),
+    )
+    content_digest = _projection_content_digest(
+        rows=rows,
+        evidence_by_fact=evidence_by_fact,
+        lineage_by_fact=lineage_by_fact,
+        completeness_by_fact=completeness_by_fact,
+        review_rows=matched_reviews,
+    )
+
+    projection = sqlite3.connect(output_path)
+    try:
+        projection.executescript(PROJECTION_SCHEMA_SQL)
+        metadata_rows = [
+            ("schema_version", PROJECTION_SCHEMA_VERSION),
+            ("projection_name", projection_name),
+            ("projection_version", "v2"),
+            ("source_revision_set_hash", revision_set_hash),
+            ("ontology_version", ontology_version),
+            ("built_at", generated_at),
+            ("truth_source", "core.sqlite"),
+            ("review_version", review_version),
+            ("review_status", review_status),
+            ("review_config_sha256", review_config_sha256),
+            ("content_digest", content_digest),
+        ]
+        if snapshot_build_id:
+            metadata_rows.extend(
+                [
+                    ("snapshot_build_id", snapshot_build_id),
+                    (
+                        "snapshot_source_fingerprint",
+                        snapshot_source_fingerprint,
+                    ),
+                ]
+            )
+        projection.executemany("INSERT INTO metadata VALUES (?, ?)", metadata_rows)
+        for row in rows:
+            fact_id = int(row["fact_id"])
+            evidence = evidence_by_fact[fact_id]
+            revisions = [revision_identities[value[0]] for value in evidence]
+            projection.execute(
+                """
+                INSERT INTO projection_rows(
+                    fact_id, entity_id, canonical_uri, fact_type,
+                    fact_name, scope_kind, value_kind, value_text,
+                    value_number, value_integer, value_json, unit,
+                    status, confidence, ontology_version,
+                    completeness_status, evidence_count,
+                    source_revision_set_hash
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    *tuple(row),
+                    completeness_by_fact[fact_id],
+                    len(evidence),
+                    _revision_hash(revisions),
+                ),
+            )
+        projection.executemany(
+            """
+            INSERT INTO projection_evidence(
+                fact_id, source_revision_id, evidence_uri,
+                evidence_role, freshness_status
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (fact_id, *evidence)
+                for fact_id, values in evidence_by_fact.items()
+                for evidence in values
+            ],
+        )
+        projection.executemany(
+            """
+            INSERT INTO projection_lineage(
+                decision_key, fact_id, source_fact_id,
+                legacy_lineage_id, adapter_id, adapter_version,
+                rule_id, source_mode, reason_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                lineage
+                for values in lineage_by_fact.values()
+                for lineage in values
+            ],
+        )
+        projection.executemany(
+            """
+            INSERT INTO projection_reviews(
+                review_id, fact_id, review_status,
+                evidence_uri, review_version
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            matched_reviews,
+        )
+        projection.execute("ANALYZE main")
+        projection.commit()
+        integrity = str(projection.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_key_violations = len(
+            list(projection.execute("PRAGMA foreign_key_check"))
+        )
+        table_counts = {
+            table: int(
+                projection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            )
+            for table in (
+                "metadata",
+                "projection_evidence",
+                "projection_lineage",
+                "projection_reviews",
+                "projection_rows",
+            )
+        }
+    finally:
+        projection.close()
+
+    with output_path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+    validation_status = (
+        "VALID"
+        if integrity == "ok"
+        and foreign_key_violations == 0
+        and all(
+            value in {"COMPLETE", "PARTIAL"}
+            for value in completeness_by_fact.values()
+        )
+        else "INVALID"
+    )
+    if validation_status != "VALID":
+        raise RuntimeError(f"invalid {projection_name} projection staging file")
+    core.execute(
+        "DELETE FROM projection_runs WHERE projection_name=?",
+        (projection_name,),
+    )
+    core.execute(
+        """
+        INSERT INTO projection_runs(
+            projection_name, projection_version,
+            source_revision_set_hash, ontology_version, built_at,
+            row_count, validation_status
+        ) VALUES (?, 'v2', ?, ?, ?, ?, ?)
+        """,
+        (
+            projection_name,
+            revision_set_hash,
+            ontology_version,
+            generated_at,
+            len(rows),
+            validation_status,
+        ),
+    )
+    return {
+        "path": output_path.name,
+        "schemaVersion": PROJECTION_SCHEMA_VERSION,
+        "projectionVersion": "v2",
+        "bytes": output_path.stat().st_size,
+        "sha256": _sha256_file(output_path),
+        "foreignKeyViolations": foreign_key_violations,
+        "tableCounts": table_counts,
+        "rows": len(rows),
+        "evidenceRows": table_counts["projection_evidence"],
+        "lineageRows": table_counts["projection_lineage"],
+        "integrity": integrity,
+        "sourceRevisionSetHash": revision_set_hash,
+        "contentDigest": content_digest,
+        "ontologyVersion": ontology_version,
+        "validationStatus": validation_status,
+        "reviewVersion": review_version,
+        "reviewConfigSha256": review_config_sha256,
+        "reviewStatus": review_status,
+        "reviewedRows": len({value[1] for value in matched_reviews}),
+        "reviewFailures": review_failures,
+        "completeRows": sum(
+            value == "COMPLETE" for value in completeness_by_fact.values()
+        ),
+        "partialRows": sum(
+            value == "PARTIAL" for value in completeness_by_fact.values()
+        ),
+        "unspecifiedRows": sum(
+            value == "UNSPECIFIED" for value in completeness_by_fact.values()
+        ),
+    }
 
 
 def build_domain_projections(

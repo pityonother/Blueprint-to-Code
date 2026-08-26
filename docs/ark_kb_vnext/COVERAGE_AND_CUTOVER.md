@@ -177,7 +177,7 @@ whole-tree staging、单资产 quarantine、live rescan、v3 base-bound receipt
 诊断不会越界或误绑旧 base，但所有 authority flag 仍为 false，不能替代签名
 production authorization、narrow gates 或 publisher。
 
-真实 Scarecrow prepublication 回放得到：
+历史 Scarecrow prepublication 回放得到：
 
 ```text
 SUCCEEDED=4
@@ -189,21 +189,27 @@ published=false
 e4Scenario2Complete=false
 ```
 
-成功任务是 `FACT × 2`、`EFFECTIVE_ENTITY × 1` 和
-`QUERY_SNAPSHOT × 1`；剩余任务仅为 `ROLE_ENTITY × 1`、
+当时成功任务是 `FACT × 2`、`EFFECTIVE_ENTITY × 1` 和
+`QUERY_SNAPSHOT × 1`；当时缺少 `ROLE_ENTITY × 1`、
 `DOMAIN_ENTITY × 1`、`PROJECTION × 6`。v3 receipt 的独立 raw SHA-256 为
 `6c56aa85ff43349ac20b64fae93058e51ad645d27660099c87758ca62c5e94b3`。
-因此 `REBUILD_QUEUE_NOT_DRAINED` 仍然阻止 narrow gates 和 publisher。
+该历史 receipt 不代表当前 backend 能力。
 
-current Snapshot 仍有 234 个 Blueprint Evidence；live captures 为 235，
-Scarecrow 是唯一未发布新增。只读 Source Diff 精确为 Scarecrow
-`BLUEPRINT_EVIDENCE added=1, changed=0, deleted=0`，同步仅有
-`captures aggregate changed=1`；没有 semantic producer、Discovery、
-Ontology、Gold、Native 或其他 semantic input drift。没有增量 Snapshot，
-current pointer 未改变。
+本工作包已实现 selective Role、ontology-owned Domain 与六个 exact single-file
+Projection backend。production-shaped 12-task 场景得到
+`SUCCEEDED=12 / BLOCKED_GAP=0 / FAILED=0`，且 pending/running 均为 0。
+这是 fixture/test 证据，不是 E4 真实运行事实。
 
-因此“单资产增量摄取到原子发布”和计划要求的 12 个生产场景仍未闭合；
-不能把 4 个成功的 prepublication tasks 描述成完整增量发布。
+后续 Work Package B 已把固定 11-check production runner 接到最终 candidate，
+并实现完整 reseal、质量报告密封、同卷 immutable rename、exact pointer CAS、
+切换前 live Source Manifest 复核与切换后独立回读。隔离 fixture 的 11/11 报告和
+临时 Snapshot pointer swap 只证明工程合同；报告与 publication receipt 均明确
+`productionAuthority=false`，不能升级为真实 E4、burn-in 或 cutover 证据。
+
+2026-07-31 live 只读复核得到 14 个新增和 10 个变更，并包含非选择性 semantic
+输入变化；capability check 以 `NON_SELECTIVE_CHANGE_FULL_REBUILD_REQUIRED`
+在 staging 前阻断。没有增量 Snapshot，current pointer 未改变，Snapshot 数量
+仍为 3。不能把 production-shaped 12/12 描述成真实发布或 E4 完成。
 
 ## 切换规则
 
@@ -233,9 +239,9 @@ attestation，才允许生成：
 4. query protocol compliance `98.46%` 和 wrong-answer rate `2.31%`
    未达到 fail-closed 门槛；expected-gap match 已通过 `95.74%`。
 
-Role/Domain/Projection backend、narrow gates 和 publisher 仍是工程能力
-边界，但当前 sealed 质量报告中的 native、projection、storage、performance、
-expected-gap 和 stale-leak 门已经通过。密封 benchmark P95 为 `3.786ms`；
+Role/Domain/Projection backend、narrow gates 和 shadow publisher 已有工程实现，
+但当前 live 输入未满足选择性发布前提。当前 sealed 质量报告中的 native、
+projection、storage、performance、expected-gap 和 stale-leak 门已经通过。密封 benchmark P95 为 `3.786ms`；
 三次独立完整复测 P95 为 `4.857 / 4.104 / 4.935ms`，均低于固定
 `<250ms` 门槛。
 
