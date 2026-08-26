@@ -406,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     checks: dict[str, bool | str] = {name: False for name in CHECK_ORDER}
+    fixture_checks: dict[str, bool | str] | None = None
     try:
         checks["DEPENDENCY_INSTALLED"] = (
             importlib.metadata.version("mcp") == "2.0.0"
@@ -421,6 +422,14 @@ def main(argv: list[str] | None = None) -> int:
             checks["SERVER_IMPORTABLE"] = False
 
     if checks["SERVER_IMPORTABLE"]:
+        if options.editor_fixture_state_file is not None:
+            fixture_checks = asyncio.run(
+                _stdio_checks(
+                    capture_root=options.capture_root,
+                    fixture_asset=options.fixture_asset,
+                    editor_state_file=options.editor_fixture_state_file,
+                )
+            )
         checks.update(
             asyncio.run(
                 _stdio_checks(
@@ -440,13 +449,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name}={_render(checks[name])}")
 
     if options.editor_fixture_state_file is not None:
-        fixture_checks = asyncio.run(
-            _stdio_checks(
-                capture_root=options.capture_root,
-                fixture_asset=options.fixture_asset,
-                editor_state_file=options.editor_fixture_state_file,
-            )
-        )
+        if fixture_checks is None:
+            fixture_checks = {name: False for name in CHECK_ORDER}
         for name in EDITOR_CHECKS:
             print(f"FIXTURE_{name}={_render(fixture_checks[name])}")
 

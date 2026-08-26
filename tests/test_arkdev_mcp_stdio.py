@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -21,6 +24,7 @@ from arkdev_mcp.contracts import TOOL_NAMES  # noqa: E402
 from blueprint_translator.interpretation_publication import (  # noqa: E402
     publish_interpretation,
 )
+import diagnose_arkdev_mcp  # noqa: E402
 from interpretation_fixture import publish_interpretation_fixture  # noqa: E402
 
 
@@ -216,6 +220,62 @@ class ArkdevMcpStdioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             checks["FIXTURE_EDITOR_EVIDENCE_BINDING_AVAILABLE"], "true"
         )
+
+    def test_diagnostic_checks_explicit_fixture_before_live_state(self) -> None:
+        live_state = Path(self._temporary.name) / "live-editor-state.json"
+        fixture_state = Path(self._temporary.name) / "fixture-editor-state.json"
+        checked_states: list[Path] = []
+
+        async def fake_stdio_checks(
+            *,
+            capture_root: Path,
+            fixture_asset: str,
+            editor_state_file: Path,
+        ) -> dict[str, bool | str]:
+            self.assertEqual(capture_root, self.capture_root)
+            self.assertEqual(fixture_asset, "InterpretationFixture")
+            checked_states.append(editor_state_file)
+            return {name: True for name in diagnose_arkdev_mcp.CHECK_ORDER}
+
+        with (
+            patch.object(
+                diagnose_arkdev_mcp.importlib.metadata,
+                "version",
+                return_value="2.0.0",
+            ),
+            patch.object(diagnose_arkdev_mcp.importlib, "import_module"),
+            patch.object(
+                diagnose_arkdev_mcp,
+                "_stdio_checks",
+                new=fake_stdio_checks,
+            ),
+            patch.object(
+                diagnose_arkdev_mcp,
+                "_config_render_ok",
+                return_value=True,
+            ),
+            patch.object(
+                diagnose_arkdev_mcp,
+                "_codex_checks",
+                return_value=(False, "SKIPPED_WITH_REASON:cli_unavailable"),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            exit_code = diagnose_arkdev_mcp.main(
+                [
+                    "--capture-root",
+                    str(self.capture_root),
+                    "--fixture-asset",
+                    "InterpretationFixture",
+                    "--editor-state-file",
+                    str(live_state),
+                    "--editor-fixture-state-file",
+                    str(fixture_state),
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(checked_states, [fixture_state, live_state])
 
 
 if __name__ == "__main__":
